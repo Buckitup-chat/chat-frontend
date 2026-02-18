@@ -1,0 +1,5 @@
+[[redirects]]
+  from = "/api/*"
+  to = "http://buckitup.xyz:4403/:splat"
+  status = 200
+  force = true
