@@ -130,7 +130,7 @@ export default defineConfig(({ command }) => {
 			// 	allow: ['..']
 			// },
 		},
-		base: isBuild ? '/frontend' : '/',
+		base: isBuild ? '/' : '/',
 		build: {
 			outDir: "../priv/static/frontend", // emit assets to priv/static/frontend
 			emptyOutDir: true,
