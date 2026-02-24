@@ -1,5 +1,4 @@
 [[redirects]]
-  from = "/api/*"
-  to = "http://buckitup.xyz:4403/:splat"
+  from = "/*"
+  to = "/index.html"
   status = 200
-  force = true
