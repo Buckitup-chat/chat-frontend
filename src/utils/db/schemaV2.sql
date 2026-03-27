@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS user_storage (
 );
 
 
-CREATE INDEX idx_user_storage_latest 
+CREATE INDEX IF NOT EXISTS idx_user_storage_latest 
 ON user_storage (user_hash, uuid, version DESC);
 
 CREATE OR REPLACE VIEW user_storage_latest AS

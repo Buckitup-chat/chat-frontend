@@ -16,6 +16,25 @@
 			</div>
 		</div>
 
+		<div class="_contacts_list mb-2" v-if="$user.pqUserCards">
+			<h6>PQ Test</h6>
+
+			<div class="_search" v-if="$user.pqUserCards.length > 5">
+				<div class="_input_search">
+					<div class="_icon_search"></div>
+					<input class="" type="text" v-model="search" autocomplete="off" placeholder="Search..." />
+					<div class="_icon_times" v-if="search" @click="search = null"></div>
+				</div>
+			</div>
+
+			<div class="_list">
+				<div class="_contact" @click="select(account)" v-for="account in pqUserCards"
+					:class="{ _selected: account.publicKey === selected?.publicKey, _connected: account.publicKey === $user.account?.publicKey }">
+					<Account_Item :account="account" />
+				</div>
+			</div>
+		</div>
+
 		<div class="d-flex w-100" v-if="selected">
 			<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center w-100"
 				v-if="selected.publicKey === $user.account?.publicKey" @click="logout()">
@@ -43,6 +62,10 @@
 <style lang="scss" scoped>
 @import '@/scss/variables.scss';
 @import '@/scss/breakpoints.scss';
+
+h6 {
+	text-align: center;
+}
 
 ._contacts_list {
 	max-height: 30rem; // calc(100vh - 3rem);
@@ -105,11 +128,15 @@ const $route = inject('$route');
 const $swalModal = inject('$swalModal');
 const $isProd = inject('$isProd');
 const $encryptionManager = inject('$encryptionManager');
+const $encryptionManagerPQ = inject('$encryptionManagerPQ');
 const selected = ref();
 const search = ref();
 
 onMounted(async () => {
 	$user.vaults = await $encryptionManager.getVaults();
+
+	$user.pqUserCards = await $encryptionManagerPQ.getLocalUserCards();
+
 	selected.value = $user.account;
 
 	if (!$user.account && $user.vaults.length) {
@@ -191,7 +218,7 @@ const signin = async () => {
 			});
 		}
 
-		await $encryptionManager.connectToChatVault(nextUser.vaultId);
+		await $encryptionManager.connectToVault(nextUser.vaultId);
 
 		if (swalInstance) swalInstance.close();
 
@@ -200,7 +227,7 @@ const signin = async () => {
 			return;
 		}
 
-		await $user.fromVaultFormat(await $encryptionManager.getChatData());
+		await $user.fromVaultFormat(await $encryptionManager.getData());
 
 		await $user.openStorage({
 			accountInfo: {

@@ -54,7 +54,8 @@
 
 		<div class="px-3 w-100 mb-3">
 			<button class="btn btn-outline-light w-100" @click="setMode('create')">
-				Create new account</button>
+				Create new account
+			</button>
 		</div>
 
 		<div class="px-3 w-100 mb-3">
@@ -237,10 +238,6 @@ const mode = ref();
 const isPlatformAuthSupported = ref(false)
 
 onMounted(async () => {
-	// console.log('is supported', PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())
-
-	console.log('user account', $user.account)
-
 	isPlatformAuthSupported.value = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
 
 	await updateData();
@@ -282,11 +279,12 @@ const connectVaultLocalApp = async () => {
 	let currentUser = vaults.find((u) => u.current);
 	if (!currentUser) currentUser = vaults[0];
 
-	await $encryptionManager.connectToChatVault(currentUser.vaultId);
+	await $encryptionManager.connectToVault(currentUser.vaultId);
 
 	if (!$encryptionManager.isAuth) return;
 
-	const vault = await $encryptionManager.getChatData();
+	const vault = await $encryptionManager.getData();
+
 	const privateKeyB64 = $enigma.stringToBase64($enigma.hexToUint8Array(vault.privateKey.slice(2)));
 	const publicKeyB64 = $enigma.stringToBase64($enigma.getPublicKeyFromPrivateKey(vault.privateKey.slice(2)));
 

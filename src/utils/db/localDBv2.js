@@ -5,7 +5,7 @@ import schemaSQL from "./schemaV2.sql?raw";
 import { api } from "../../api/client";
 import { useOnlineStatus } from "../../composables/useOnlineStatus";
 
-class LocalDB {
+class LocalDBv2 {
   constructor() {
     this.isOnline = navigator.onLine;
     this.isLocalStash = false;
@@ -38,6 +38,7 @@ class LocalDB {
       await this.initSyncEngine();
 
       const pending = await this.getPendingChanges();
+
       this.isLocalStash = pending.length > 0;
 
       this.syncEngine.stream.subscribe(() => {
@@ -61,9 +62,9 @@ class LocalDB {
 
     this.syncEngine = await this.db.electric.syncShapeToTable({
       shape: {
-        url: "https://buckitup.xyz/electric/v1/user",
+        url: new URL(`/api/user_card`, window.location.origin).toString(),
         params: {
-          table: "user_cards_synced",
+          table: "user",
         },
       },
       table: "user_cards_synced",
@@ -202,4 +203,4 @@ class LocalDB {
   }
 }
 
-export const localDB = new LocalDB();
+export const localDB = new LocalDBv2();

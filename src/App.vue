@@ -1,6 +1,4 @@
 <template>
-
-
 	<div class="wrapper" v-if="$user.account">
 		<Suspense>
 			<PGLiteProvider>
@@ -132,7 +130,10 @@ const $socket = inject('$socket');
 const $mitt = inject('$mitt');
 const $user = inject('$user');
 const $breakpoint = inject('$breakpoint');
+
 const $encryptionManager = inject('$encryptionManager');
+const $encryptionManagerPQ = inject('$encryptionManagerPQ');
+
 const $web3 = inject('$web3');
 const $swal = inject('$swal');
 const $loader = inject('$loader');
@@ -179,5 +180,9 @@ onMounted(async () => {
 	}, 1000);
 
 	$user.vaults = await $encryptionManager.getVaults();
+
+	const pqCards = await $encryptionManagerPQ.getLocalUserCards();
+
+	console.log('local cards', pqCards)
 });
 </script>

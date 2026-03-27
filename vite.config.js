@@ -157,6 +157,16 @@ export default defineConfig(({ command }) => {
 		//port: 5999, // Default port (change if needed)
 		//open: true, // Automatically open in the default browser
 		// },
+		server: {
+			proxy: {
+				'/api': {
+					target: 'https://buckitup.xyz/electric/v1',
+					changeOrigin: true,
+					rewrite: (path) => path.replace(/^\/api/, ''),
+					secure: false,
+				},
+			},
+		},
 	}
 });
 
