@@ -160,7 +160,7 @@ export default defineConfig(({ command }) => {
 		server: {
 			proxy: {
 				'/api': {
-					target: 'https://buckitup.xyz/electric/v1',
+					target: 'http://127.0.0.1:4444/electric/v1',
 					changeOrigin: true,
 					rewrite: (path) => path.replace(/^\/api/, ''),
 					secure: false,

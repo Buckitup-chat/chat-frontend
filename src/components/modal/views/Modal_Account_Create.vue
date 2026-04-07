@@ -17,6 +17,8 @@ import { ref, onMounted, inject } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
 
 const $user = inject('$user');
+const $userPQ = inject('$userPQ');
+
 const $mitt = inject('$mitt');
 
 const $router = inject('$router');
@@ -34,28 +36,30 @@ const updateAccount = (c) => {
 
 const create = async () => {
 	try {
-		await $encryptionManager.createVault({
-			keyOptions: {
-				username: account.value.name,
-				displayName: account.value.name,
-			},
-			address: account.value.address,
-			publicKey: account.value.publicKey,
-			avatar: account.value.avatar,
-			notes: account.value.notes,
-		});
+		// await $encryptionManager.createVault({
+		// 	keyOptions: {
+		// 		username: account.value.name,
+		// 		displayName: account.value.name,
+		// 	},
+		// 	address: account.value.address,
+		// 	publicKey: account.value.publicKey,
+		// 	avatar: account.value.avatar,
+		// 	notes: account.value.notes,
+		// });
 
-		$user.account = await $user.generateAccount(account.value.privateKey);
+		// $user.account = await $user.generateAccount(account.value.privateKey);
 
-		await $encryptionManager.setData($user.toVaultFormat());
+		// await $encryptionManager.setData($user.toVaultFormat());
 
-		await $user.openStorage({
-			accountInfo: {
-				name: account.value.name,
-				notes: account.value.notes,
-				avatar: account.value.avatar,
-			},
-		});
+		// await $user.openStorage({
+		// 	accountInfo: {
+		// 		name: account.value.name,
+		// 		notes: account.value.notes,
+		// 		avatar: account.value.avatar,
+		// 	},
+		// });
+
+		$userPQ.registerNewUser({ name: account.value.name, notes: account.value.notes, avatar: account.value.avatar })
 
 		$mitt.emit('account::created');
 		$mitt.emit('modal::close');

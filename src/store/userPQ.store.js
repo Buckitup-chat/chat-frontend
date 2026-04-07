@@ -1,11 +1,13 @@
 import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
-import { EncryptionManagerPQ } from '@/crypto/EncryptionManagerPQ';
-import { localDB } from '@/db/localDB';
+import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
+import { localDB } from '@/utils/db/localDBv2';
 
-export const useUserPQStore = defineStore('user', () => {
+export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
   const isInitialized = ref(false);
+
+  const pqUserCards = ref([]);
 
   const currentUser = ref(null);
   const myLocalUsers = ref([]);
@@ -32,15 +34,16 @@ export const useUserPQStore = defineStore('user', () => {
     console.log(`[userStore] Initialized | Local users: ${myLocalUsers.value.length}`);
   };
 
-  const registerNewUser = async (name = "Anonymous") => {
+  const registerNewUser = async ({ name = "Anonymous", notes, avatar }) => {
     await initialize();
 
-    const newIdentity = await em.value.createNewUser(name);
+    const newIdentity = await em.value.createUserVault({ name, notes, avatar });
 
     currentUser.value = newIdentity;
+
     await refreshAllData();
 
-    await appInitializer.initializeAfterLogin();
+    // await appInitializer.initializeAfterLogin();
 
     return newIdentity;
   };
@@ -52,7 +55,7 @@ export const useUserPQStore = defineStore('user', () => {
 
     currentUser.value = identity;
 
-    await appInitializer.initializeAfterLogin();
+    // await appInitializer.initializeAfterLogin();
 
     await refreshAllData();
 
@@ -109,11 +112,17 @@ export const useUserPQStore = defineStore('user', () => {
   };
 
   watch(isAuthenticated, (authenticated) => {
+    console.log('is auth', isAuthenticated)
+
     if (authenticated) {
       refreshAllData();
     } else {
       currentUser.value = null;
     }
+  });
+
+  watch(currentUser, (user) => {
+    console.log('user', user)
   });
 
   return {
@@ -122,6 +131,8 @@ export const useUserPQStore = defineStore('user', () => {
     currentUser: currentUserFull,
     myLocalUsers,
     allNetworkUsers,
+
+    pqUserCards,
 
     initialize,
     registerNewUser,

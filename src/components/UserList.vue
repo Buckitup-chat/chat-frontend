@@ -6,9 +6,9 @@ import { useLiveQuery } from '@electric-sql/pglite-vue'
 
 const filter = ref('')
 
-const dbUsers = useLiveQuery(`SELECT * from users ORDER BY name ASC;`) //WHERE name LIKE $1;, //[filter.value ? `%${filter.value}%` : '%'])
+const dbUsers = useLiveQuery(`SELECT * from user_cards ORDER BY name ASC;`) //WHERE name LIKE $1;, //[filter.value ? `%${filter.value}%` : '%'])
 
-const dbUsersLocal = useLiveQuery(`SELECT * from users_local;`)
+const dbUsersLocal = useLiveQuery(`SELECT * from user_cards_local;`)
 
 const users: any = computed(() => dbUsers?.rows ?? [])
 

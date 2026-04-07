@@ -1,7 +1,7 @@
 import { PGliteWorker } from "@electric-sql/pglite/worker";
 import { electricSync } from "@electric-sql/pglite-sync";
 import { live } from "@electric-sql/pglite/live";
-import schemaSQL from "./schemaV2.sql?raw";
+import schemaSQL from "./schemaV3.sql?raw";
 import { api } from "../../api/client";
 import { useOnlineStatus } from "../../composables/useOnlineStatus";
 
@@ -60,22 +60,26 @@ class LocalDBv2 {
   async initSyncEngine() {
     const { setOffline } = useOnlineStatus();
 
-    this.syncEngine = await this.db.electric.syncShapeToTable({
-      shape: {
-        url: new URL(`/api/user_card`, window.location.origin).toString(),
-        params: {
-          table: "user",
-        },
-      },
-      table: "user_cards_synced",
-      primaryKey: ["user_hash"],
-      shapeKey: "user_cards_public",
-      onError: (error) => {
-        console.error("Shape sync error:", error);
+    fetch('http://localhost:4444/electric/v1/user_card?offset=-1').then(response => {
+      console.log('response', response.body)
+    })
 
-        setOffline();
-      },
-    });
+    // this.syncEngine = await this.db.electric.syncShapeToTable({
+    //   shape: {
+    //     url: new URL(`http://localhost:4444/electric/v1/user_card`, window.location.origin).toString(),
+    //     params: {
+    //       table: "user_cards",
+    //     },
+    //   },
+    //   table: "user_cards_synced",
+    //   primaryKey: ["user_hash"],
+    //   shapeKey: "user_cards_public",
+    //   onError: (error) => {
+    //     console.error("Shape sync error:", error);
+
+    //     setOffline();
+    //   },
+    // });
   }
 
   async getUsers() {

@@ -1,5 +1,5 @@
 <template>
-	<div class="wrapper" v-if="$user.account">
+	<div class="wrapper" v-if="$userPQ.currentUser">
 		<Suspense>
 			<PGLiteProvider>
 				<Menu class="_menu" :class="{ _opened: $menuOpened }" />
@@ -17,7 +17,7 @@
 		</Suspense>
 	</div>
 
-	<div v-if="!$user.account" class="_login">
+	<div v-if="!$userPQ.currentUser" class="_login">
 		<router-view v-slot="{ Component, route }">
 			<component :is="Component" :key="route.path" />
 		</router-view>
@@ -129,6 +129,7 @@ import { useRoute, useRouter } from 'vue-router';
 const $socket = inject('$socket');
 const $mitt = inject('$mitt');
 const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $breakpoint = inject('$breakpoint');
 
 const $encryptionManager = inject('$encryptionManager');

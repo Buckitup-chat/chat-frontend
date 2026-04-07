@@ -77,7 +77,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
   // Vaults Management
 
-  async createNewUser(name = "PQ Anonymous") {
+  async createUserVault({ name, notes, avatar }) {
     const userVault = await connect({
       storageType: 'idb',
       addNewVault: true,
@@ -96,12 +96,13 @@ export class EncryptionManagerPQ extends EventTarget {
 
     const identity = {
       user_hash: userHash,
-      vaultId: vault.id,
+      vaultId: userVault.id,
       name,
       sign_pkey: bytesToHex(publicKey),
 
       userStorage: {
-        avatar: null
+        avatar,
+        notes
       }
     };
 
@@ -144,6 +145,11 @@ export class EncryptionManagerPQ extends EventTarget {
     });
 
     this.#signSkey = await this.#currentVault.get('sign_skey');
+
+    if (this.#signSkey && typeof this.#signSkey === 'object' && !ArrayBuffer.isView(this.#signSkey)) {
+      const values = Object.values(this.#signSkey).map(v => Number(v));
+      this.#signSkey = new Uint8Array(values);
+    }
 
     if (!(this.#signSkey instanceof Uint8Array)) {
       this.#signSkey = null;

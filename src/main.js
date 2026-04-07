@@ -8,6 +8,7 @@ import './scss/app.scss';
 
 import { web3Store } from './store/web3.store.js';
 import { userStore } from './store/user.store.js';
+import { userPQStore } from './store/userPQ.store';
 import { createPinia } from 'pinia';
 import $socket from './libs/socket';
 import $mitt from './libs/emitter';
@@ -61,6 +62,9 @@ app.provide('$web3', web3Store());
 
 app.config.globalProperties.$user = userStore();
 app.provide('$user', userStore());
+
+app.config.globalProperties.$userPQ = userPQStore();
+app.provide('$userPQ', userPQStore());
 
 app.config.globalProperties.$loader = useLoader();
 app.provide('$loader', useLoader());

@@ -1,6 +1,6 @@
 <template>
 	<div>
-		<div class="_contacts_list mb-2" v-if="$user.vaults.length">
+		<!-- <div class="_contacts_list mb-2" v-if="$user.vaults.length">
 			<div class="_search" v-if="$user.vaults.length > 5">
 				<div class="_input_search">
 					<div class="_icon_search"></div>
@@ -14,12 +14,12 @@
 					<Account_Item :account="account" />
 				</div>
 			</div>
-		</div>
+		</div> -->
 
-		<div class="_contacts_list mb-2" v-if="$user.pqUserCards">
+		<div class="_contacts_list mb-2" v-if="$userPQ.pqUserCards">
 			<h6>PQ Test</h6>
 
-			<div class="_search" v-if="$user.pqUserCards.length > 5">
+			<div class="_search" v-if="$userPQ.pqUserCards.length > 5">
 				<div class="_input_search">
 					<div class="_icon_search"></div>
 					<input class="" type="text" v-model="search" autocomplete="off" placeholder="Search..." />
@@ -28,9 +28,9 @@
 			</div>
 
 			<div class="_list">
-				<div class="_contact" @click="select(account)" v-for="account in pqUserCards"
-					:class="{ _selected: account.publicKey === selected?.publicKey, _connected: account.publicKey === $user.account?.publicKey }">
-					<Account_Item :account="account" />
+				<div class="_contact" @click="selectPQ(account)" v-for="account in $userPQ.pqUserCards"
+					:class="{ _selected: account.user_hash === selected?.user_hash, _connected: account.user_hash === $user.account?.user_hash }">
+					<Account_Item_PQ :account="account" />
 				</div>
 			</div>
 		</div>
@@ -41,9 +41,10 @@
 				<i class="_icon_signout bg-white me-2"></i> Logout
 			</button>
 
-			<!--button type="button" class="btn btn-dark d-flex justify-content-center align-items-center w-100" v-if="selected.publicKey !== $user.account?.publicKey" @click="signin()">
+			<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center w-100"
+				v-if="selected.publicKey !== $user.account?.publicKey" @click="signin()">
 				<i class="_icon_signin bg-white me-2"></i> Sign in
-			</button-->
+			</button>
 
 			<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center ms-1"
 				@click="$mitt.emit('modal::open', { id: 'account_backup' })"
@@ -117,11 +118,14 @@ h6 {
 <script setup>
 import { computed, inject, ref, onMounted, nextTick } from 'vue';
 import Account_Item from '@/components/Account_Item.vue';
+import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 
 const $mitt = inject('$mitt');
 const $loader = inject('$loader');
 const $web3 = inject('$web3');
 const $user = inject('$user');
+const $userPQ = inject('$userPQ');
+
 const $swal = inject('$swal');
 const $router = inject('$router');
 const $route = inject('$route');
@@ -135,9 +139,11 @@ const search = ref();
 onMounted(async () => {
 	$user.vaults = await $encryptionManager.getVaults();
 
-	$user.pqUserCards = await $encryptionManagerPQ.getLocalUserCards();
+	$userPQ.pqUserCards = await $encryptionManagerPQ.getLocalUserCards();
 
-	selected.value = $user.account;
+	selected.value = $userPQ.currentUser;
+
+	console.log('pq user vaults', $userPQ.pqUserCards)
 
 	if (!$user.account && $user.vaults.length) {
 		let currentUser = $user.vaults.find((u) => u.current);
@@ -151,6 +157,12 @@ const select = (account) => {
 	reset();
 	selected.value = account;
 	signin();
+};
+
+const selectPQ = (account) => {
+	reset();
+	selected.value = account;
+	signinPQ();
 };
 
 const reset = () => {
@@ -238,6 +250,69 @@ const signin = async () => {
 		});
 
 		await $user.checkMetaWallet();
+
+		nextTick(() => {
+			try {
+				$router.replace({ name: 'account_info' });
+			} catch (error) {
+				console.log('signin', error);
+			}
+		});
+
+		$mitt.emit('modal::close');
+	} catch (error) {
+		console.error('signin', error);
+	}
+	$loader.hide();
+};
+
+const signinPQ = async () => {
+	$loader.show();
+
+	let swalInstance;
+
+	try {
+		const nextUser = JSON.parse(JSON.stringify(selected.value));
+		await $user.logout();
+
+		console.log('next user', nextUser)
+
+		reset();
+
+		if ($route.name !== 'login') {
+			$router.push({ name: 'login' });
+			$mitt.emit('modal::close');
+		}
+
+		if ($isProd) {
+			swalInstance = $swal.fire({
+				icon: 'info',
+				title: 'Authenticate with PassKey',
+				footer: 'Please confirn PassKey on your device when it prompts',
+				timer: 3000,
+			});
+		}
+
+		await $userPQ.login(nextUser.user_hash);
+
+		if (swalInstance) swalInstance.close();
+
+		if (!$encryptionManagerPQ.isAuth) {
+			$loader.hide();
+			return;
+		}
+
+		// await $user.fromVaultFormat(await $encryptionManager.getData());
+
+		// await $user.openStorage({
+		// 	accountInfo: {
+		// 		name: nextUser.name,
+		// 		notes: nextUser.notes,
+		// 		avatar: nextUser.avatar,
+		// 	},
+		// });
+
+		// await $user.checkMetaWallet();
 
 		nextTick(() => {
 			try {
