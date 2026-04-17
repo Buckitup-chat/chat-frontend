@@ -5,6 +5,6 @@
 
 [[redirects]]
   from = "/api/*"
-  to = "https://buckitup.xyz/electric/v1/:splat"
+  to = "/.netlify/functions/proxy"
   status = 200
   force = true
