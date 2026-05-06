@@ -1,6 +1,9 @@
 import { ml_dsa87 } from "@noble/post-quantum/ml-dsa.js";
+import { sha3_512 } from "@noble/hashes/sha3";
+import { bytesToHex } from "@noble/hashes/utils";
 
-const encodeBase64 = (bytes: Uint8Array, padded = false): string => {
+const encodeBase64 = (bytes: Uint8Array | null | undefined, padded = false): string => {
+  if (!bytes) return "";
   let binary = "";
   bytes.forEach((b) => (binary += String.fromCharCode(b)));
   const result = btoa(binary);
@@ -8,8 +11,12 @@ const encodeBase64 = (bytes: Uint8Array, padded = false): string => {
 };
 
 const encodeField = (key: string, value: unknown): string => {
-  if (key.endsWith("_cert") || key.endsWith("_pkey") || key.endsWith("_b64")) {
+  if (value === null) return "null";
+  if (key.endsWith("_cert") || key.endsWith("_pkey")) {
     return encodeBase64(value as Uint8Array, true);
+  }
+  if (key.endsWith("_b64")) {
+    return typeof value === 'string' ? value : encodeBase64(value as Uint8Array, true);
   }
   if (key.endsWith("_hash")) {
     return value as string;
@@ -113,6 +120,29 @@ export const api = {
         },
       },
       sign_skey: userData.sign_skey,
+    };
+  },
+
+  createStorageMutation: (
+    userHash: string,
+    uuid: string,
+    valueB64: string | null,
+    hashB64: string | null,
+    version: number,
+    ownerTimestamp: number,
+    signSkey: Uint8Array,
+    isDelete = false,
+  ) => {
+    return {
+      type: isDelete ? "update" : "insert",
+      modified: {
+        user_hash: userHash,
+        uuid,
+        value_b64: valueB64,
+      },
+      syncMetadata: {
+        relation: "user_storage",
+      },
     };
   },
 };

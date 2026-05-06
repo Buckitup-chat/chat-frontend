@@ -8,9 +8,6 @@ export const userPQStore = defineStore('userPQ', () => {
   const isInitialized = ref(false);
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
-  // TODO: REFACTOR - Remove pqUserCards; it's a duplicate of myLocalUsers
-  // This was added during initial PQ work but myLocalUsers already exists
-  // Search usages: Account_Selector.vue, App.vue (commented), Menu_Backup.vue (commented)
   const pqUserCards = ref([]);
 
   const currentUser = ref(null);
@@ -31,8 +28,6 @@ export const userPQStore = defineStore('userPQ', () => {
 
     em.value = EncryptionManagerPQ.getInstance();
     await em.value.initialize();
-
-    await localDB.init();
 
     myLocalUsers.value = await em.value.getLocalUserCards();
 
@@ -168,7 +163,6 @@ export const userPQStore = defineStore('userPQ', () => {
     allNetworkUsers,
     isOnline,
 
-    // TODO: REFACTOR - Remove pqUserCards from return (duplicate of myLocalUsers)
     pqUserCards,
 
     initialize,

@@ -221,22 +221,19 @@
 </style>
 
 <script setup>
-// TODO: REFACTOR - Phase 4: Remove $user and $encryptionManager (Web3)
 import Account_Selector from '@/components/Account_Selector.vue';
 import { inject, ref, onMounted, onUnmounted, computed, nextTick } from 'vue';
 import * as $enigma from '@/libs/enigma';
 
 const $mitt = inject('$mitt');
-// TODO: PHASE 4 - Remove $user (Web3 store)
-const $user = inject('$user'); // TODO: PHASE 4 - Delete after migration
+const $user = inject('$user');
 const $userPQ = inject('$userPQ');
 // const $swal = inject('$swal');
 const $route = inject('$route');
 // const $loader = inject('$loader');
 // const $isProd = inject('$isProd');
 // const $router = inject('$router');
-// TODO: PHASE 4 - Remove $encryptionManager (Web3 encryption)
-const $encryptionManager = inject('$encryptionManager'); // TODO: PHASE 4 - Delete after migration
+const $encryptionManager = inject('$encryptionManager');
 
 const mode = ref();
 const isPlatformAuthSupported = ref(false)
@@ -260,8 +257,6 @@ onUnmounted(async () => {
 	$mitt.off('account::created', updateData);
 });
 
-// TODO: PHASE 4 - Delete this function after PQ migration
-// Web3 feature - not needed in PQ architecture
 const updateData = async () => {
 	$user.vaults = await $encryptionManager.getVaults();
 };

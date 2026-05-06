@@ -15,9 +15,9 @@
         <div class="_pubk" v-if="shortCode">[{{ shortCode }}]</div>
       </div>
 
-      <div class="_notes" v-if="acc.userStorage?.notes">
+      <div class="_notes" v-if="acc.userStorage.notes">
         <span v-if="acc.highlightedNotes" v-html="acc.highlightedNotes"></span>
-        <span v-else>{{ acc.userStorage?.notes }}</span>
+        <span v-else>{{ acc.userStorage.notes }}</span>
       </div>
     </div>
   </div>

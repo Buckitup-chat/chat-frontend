@@ -103,7 +103,8 @@ async function updateAccount(acc) {
 	await $userPQ.updateCurrentUserProfile({
 		name: acc.name,
 		notes: acc.notes,
-		avatar: acc.avatar
+		avatar: acc.avatar,
+		avatarUuid: acc.avatarUuid
 	});
 }
 

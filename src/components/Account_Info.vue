@@ -3,12 +3,12 @@
 		<div class="_avatar">
 			<div class="_wrap">
 				<div class="_img_wrap">
-					<Avatar :name="account.user_hash || account.name || 'User'" variant="bauhaus" v-if="!account.avatar" />
-					<img :src="mediaUrl(account.avatar)" v-if="account.avatar" />
+					<Avatar :name="account.user_hash || account.name || 'User'" variant="bauhaus" v-if="!avatarDataUrl && !account.avatar" />
+					<img :src="avatarDataUrl || account.avatar" v-if="avatarDataUrl || account.avatar" />
 				</div>
 
 				<a href="#" class="btn btn-dark rounded-pill p-2" @click.prevent="$refs.avatarImageInput.click()">
-					<i class="bg-white" :class="[account.avatar ? '_icon_edit' : '_icon_plus']"></i>
+					<i class="bg-white" :class="[avatarDataUrl || account.avatar ? '_icon_edit' : '_icon_plus']"></i>
 				</a>
 				<input class="_hidden" ref="avatarImageInput" type="file" :accept="ALLOWED_IMAGE_TYPES.join(',')"
 					@change="handleImage($event)" />
@@ -81,18 +81,14 @@
 </style>
 
 <script setup>
-// TODO: PQ - This component already works with PQ user data
-// Future: Could be refactored to use $userPQ directly instead of props
-
 import { ref, onMounted, watch, inject } from 'vue';
 import imageResize from '@/utils/imageResize';
 import errorMessage from '@/utils/errorMessage';
 import Avatar from 'vue-boring-avatars';
-import { mediaUrl } from '@/utils/mediaUrl';
-import { uploadToIPFS } from '@/api/ipfs';
 
 const $swal = inject('$swal');
 const $loader = inject('$loader');
+const $em = inject('$encryptionManagerPQ');
 
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const maxNameLength = 30;
@@ -100,6 +96,8 @@ const maxNotesLength = 300;
 
 const emit = defineEmits(['update']);
 const account = ref();
+const avatarDataUrl = ref(null);
+const avatarUuid = ref(null);
 
 const { accountIn } = defineProps({
 	accountIn: { type: Object },
@@ -108,34 +106,36 @@ const { accountIn } = defineProps({
 onMounted(async () => {
 	account.value = JSON.parse(JSON.stringify(accountIn));
 
-	// watch(
-	// 	() => account.value?.name,
-	// 	(newVal) => {
-	// 		if (newVal && newVal.length > maxNameLength) account.value.name = newVal.slice(0, maxNameLength);
-	// 		emit('update', account.value);
-	// 	},
-	// );
-	// watch(
-	// 	() => account.value?.notes,
-	// 	(newVal) => {
-	// 		if (newVal && newVal.length > maxNotesLength) account.value.notes = newVal.slice(0, maxNotesLength);
-	// 		emit('update', account.value);
-	// 	},
-	// );
-	// watch(
-	// 	() => account.value?.avatar,
-	// 	() => {
-	// 		emit('update', account.value);
-	// 	},
-	// );
+	if (accountIn?.avatarUuid) {
+		await loadAvatarFromStorage(accountIn.avatarUuid);
+	}
+
 	watch(
 		() => accountIn,
-		(newVal) => {
-			if (newVal) account.value = JSON.parse(JSON.stringify(accountIn));
+		async (newVal) => {
+			if (newVal) {
+				account.value = JSON.parse(JSON.stringify(accountIn));
+				if (accountIn?.avatarUuid && accountIn.avatarUuid !== avatarUuid.value) {
+					await loadAvatarFromStorage(accountIn.avatarUuid);
+				}
+			}
 		},
 		{ deep: true },
 	);
 });
+
+async function loadAvatarFromStorage(uuid) {
+	if (!uuid || !$em) return;
+	try {
+		const blob = await $em.loadAvatar(uuid);
+		if (blob) {
+			avatarDataUrl.value = URL.createObjectURL(blob);
+			avatarUuid.value = uuid;
+		}
+	} catch (error) {
+		console.error('Failed to load avatar:', error);
+	}
+}
 
 const saveChanges = () => {
 	if (account.value.name && account.value.name.length > maxNameLength) {
@@ -162,8 +162,12 @@ const handleImage = async (event) => {
 			var image = new Image();
 			image.onload = async function () {
 				const { dataUrl, blobFile } = imageResize(image, 300, 0.8);
-				if (dataUrl) {
-					account.value.avatar = await uploadToIPFS(blobFile);
+				if (dataUrl && blobFile) {
+					const uuid = await $em.encryptAndStoreAvatar(blobFile);
+					avatarUuid.value = uuid;
+					avatarDataUrl.value = dataUrl;
+					account.value.avatar = dataUrl;
+					account.value.avatarUuid = uuid;
 					emit('update', account.value);
 				}
 				$loader.hide();
