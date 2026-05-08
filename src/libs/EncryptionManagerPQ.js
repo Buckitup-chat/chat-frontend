@@ -39,6 +39,8 @@ export class EncryptionManagerPQ extends EventTarget {
   #signSkey = null;
   #cryptSkey = null;
   #cryptPubKey = null;
+  #contactSkey = null;
+  #evmSkey = null;
 
   constructor() {
     super();
@@ -85,7 +87,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
   // Vaults Management
 
-  async createUserVault({ name, notes, avatar }) {
+  async createUserVault({ name, notes, avatar, avatarDataUrl }) {
     const userVault = await connect({
       storageType: 'idb',
       addNewVault: true,
@@ -101,6 +103,8 @@ export class EncryptionManagerPQ extends EventTarget {
     const contactPrivKey = secp.utils.randomPrivateKey();
     const contactPubKey = secp.getPublicKey(contactPrivKey, true);
 
+    const evmPrivKey = secp.utils.randomPrivateKey();
+
     const userHash = 'u_' + bytesToHex(sha3_512(signPubKey));
 
     const cryptPubKeyB64 = arrayToBase64(cryptPubKey);
@@ -111,6 +115,8 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await userVault.set(`sign_skey`, signSkey);
     await userVault.set(`crypt_skey`, cryptSkey);
+    await userVault.set(`evm_skey`, bytesToHex(evmPrivKey));
+    await userVault.set(`contact_skey`, bytesToHex(contactPrivKey));
 
     const identity = {
       user_hash: userHash,
@@ -122,10 +128,7 @@ export class EncryptionManagerPQ extends EventTarget {
       contact_pkey: contactPubKeyB64,
       contact_cert: contactCert,
 
-      userStorage: {
-        avatar,
-        notes
-      }
+      userStorage: {}
     };
 
     this.#localUserCards.push(identity);
@@ -145,8 +148,17 @@ export class EncryptionManagerPQ extends EventTarget {
     });
 
     await this.login(userHash);
+    
+    let avatarUuid = null;
+    if (avatar instanceof Blob || avatar instanceof File) {
+      avatarUuid = await this.encryptAndStoreAvatar(avatar);
+    } else if (typeof avatar === 'string') {
+      avatarUuid = avatar;
+    }
+    
+    await this.updateUserStorage({ name, notes, avatarUuid, avatarDataUrl });
 
-    return identity;
+    return this.#localUserCards.find(i => i.user_hash === userHash);
   }
 
   async #connectToUserVault(vaultId) {
@@ -180,6 +192,8 @@ export class EncryptionManagerPQ extends EventTarget {
 
     this.#signSkey = await this.#currentVault.get('sign_skey');
     this.#cryptSkey = await this.#currentVault.get('crypt_skey');
+    this.#evmSkey = await this.#currentVault.get('evm_skey');
+    this.#contactSkey = await this.#currentVault.get('contact_skey');
 
     this.#signSkey = this.#normalizeKey(this.#signSkey);
     this.#cryptSkey = this.#normalizeKey(this.#cryptSkey);
@@ -213,6 +227,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#cryptSkey.fill(0);
       this.#cryptSkey = null;
     }
+    this.#evmSkey = null;
     this.#cryptPubKey = null;
     this.#currentUserHash = null;
     this.#currentVault = null;
@@ -281,13 +296,105 @@ export class EncryptionManagerPQ extends EventTarget {
     return ml_dsa87.sign(msg, this.#signSkey);
   }
 
+  async signContactChallenge(challenge) {
+    if (!this.#contactSkey) {
+      throw new Error('Contact private key not loaded');
+    }
+
+    let msg = typeof challenge === 'string'
+      ? hexToBytes(challenge)
+      : challenge;
+      
+    const hash = sha256(msg);
+    const signature = await secp.signAsync(hash, this.#contactSkey);
+    return bytesToHex(signature.toCompactRawBytes());
+  }
+
+  async getEvmSkey() {
+    return this.#evmSkey;
+  }
+
+  async exportVaultKeys() {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+
+    return {
+      sign_skey: arrayToBase64(this.#signSkey),
+      crypt_skey: arrayToBase64(this.#cryptSkey),
+      evm_skey: this.#evmSkey,
+      sign_pkey: this.#localUserCards.find(u => u.user_hash === this.#currentUserHash).sign_pkey,
+      crypt_pkey: this.#localUserCards.find(u => u.user_hash === this.#currentUserHash).crypt_pkey
+    };
+  }
+
+  async importVaultKeys(keys, identity) {
+    if (!keys.evm_skey) {
+      throw new Error('EVM key missing from backup. Cannot safely restore account.');
+    }
+
+    const userVault = await connect({
+      storageType: 'idb',
+      addNewVault: true,
+      keyOptions: { ...VAULT_KEY_OPTIONS, username: identity.name, displayName: identity.name }
+    });
+
+    const signSkey = new Uint8Array(atob(keys.sign_skey).split('').map(c => c.charCodeAt(0)));
+    const cryptSkey = new Uint8Array(atob(keys.crypt_skey).split('').map(c => c.charCodeAt(0)));
+
+    await userVault.set(`sign_skey`, signSkey);
+    await userVault.set(`crypt_skey`, cryptSkey);
+    await userVault.set(`evm_skey`, keys.evm_skey);
+
+    identity.vaultId = userVault.id;
+    this.#localUserCards.push(identity);
+    await this.#saveLocalUserCards();
+
+    await localDB.upsertUserLocal({
+      user_hash: identity.user_hash,
+      sign_pkey: identity.sign_pkey,
+      crypt_pkey: identity.crypt_pkey,
+      crypt_cert: identity.crypt_cert,
+      contact_pkey: identity.contact_pkey,
+      contact_cert: identity.contact_cert,
+      name: identity.name,
+      deleted_flag: false,
+      owner_timestamp: Date.now(),
+    });
+
+    await this.login(identity.user_hash);
+  }
+
   // Update User Storage
 
-  async updateUserStorage({ name, notes, avatar }) {
+  async updateUserStorage({ name, notes, avatarUuid, avatarDataUrl }) {
     if (!this.#currentUserHash) {
       throw new Error('No user is currently logged in');
     }
+    if (!this.#cryptSkey) {
+      throw new Error('Crypt key not loaded');
+    }
 
+    // 1. Encrypt profile and save to DB
+    const profileJson = JSON.stringify({ name, notes, avatarUuid });
+    const profileData = new TextEncoder().encode(profileJson);
+    
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encryptedData = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv },
+      await this.#deriveKeyFromCryptSkey(),
+      profileData
+    );
+
+    const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
+    const combined = arrayToBase64(ivData);
+
+    await localDB.upsertUserStorage({
+      userHash: this.#currentUserHash,
+      uuid: 'profile',
+      valueB64: combined,
+      hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
+    });
+
+    // 2. Update local cards
     const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
     if (idx === -1) {
       throw new Error('User not found in local cards');
@@ -298,10 +405,11 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards[idx] = {
       ...current,
       name: name !== undefined ? name : current.name,
+      avatar: avatarDataUrl !== undefined ? avatarDataUrl : current.avatar,
       userStorage: {
         ...current.userStorage,
         notes: notes !== undefined ? notes : current.userStorage?.notes,
-        avatar: avatar !== undefined ? avatar : current.userStorage?.avatar
+        avatarUuid: avatarUuid !== undefined ? avatarUuid : current.userStorage?.avatarUuid
       }
     };
 
@@ -319,6 +427,87 @@ export class EncryptionManagerPQ extends EventTarget {
     });
 
     return updated;
+  }
+
+  async loadUserProfile() {
+    if (!this.#currentUserHash) throw new Error('No user is currently logged in');
+    if (!this.#cryptSkey) return null;
+
+    const storage = await localDB.getUserStorage(this.#currentUserHash, 'profile');
+    if (!storage || !storage.value_b64) return null;
+
+    const binary = atob(storage.value_b64);
+    const combined = Uint8Array.from(binary, c => c.charCodeAt(0));
+
+    const iv = combined.slice(0, 12);
+    const encryptedData = combined.slice(12);
+
+    try {
+      const decryptedData = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv },
+        await this.#deriveKeyFromCryptSkey(),
+        encryptedData
+      );
+      return JSON.parse(new TextDecoder().decode(decryptedData));
+    } catch (e) {
+      console.error('Failed to decrypt profile:', e);
+      return null;
+    }
+  }
+
+  // Contacts Encryption
+
+  async updateContacts(contactsArray) {
+    if (!this.#currentUserHash) throw new Error('No user is currently logged in');
+    if (!this.#cryptSkey) throw new Error('Crypt key not loaded');
+
+    const contactsJson = JSON.stringify(contactsArray);
+    const contactsData = new TextEncoder().encode(contactsJson);
+    
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encryptedData = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv },
+      await this.#deriveKeyFromCryptSkey(),
+      contactsData
+    );
+
+    const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
+    const combined = arrayToBase64(ivData);
+
+    await localDB.upsertUserStorage({
+      userHash: this.#currentUserHash,
+      uuid: 'contacts',
+      valueB64: combined,
+      hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
+    });
+
+    return true;
+  }
+
+  async loadContacts() {
+    if (!this.#currentUserHash) throw new Error('No user is currently logged in');
+    if (!this.#cryptSkey) return [];
+
+    const storage = await localDB.getUserStorage(this.#currentUserHash, 'contacts');
+    if (!storage || !storage.value_b64) return [];
+
+    const binary = atob(storage.value_b64);
+    const combined = Uint8Array.from(binary, c => c.charCodeAt(0));
+
+    const iv = combined.slice(0, 12);
+    const encryptedData = combined.slice(12);
+
+    try {
+      const decryptedData = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv },
+        await this.#deriveKeyFromCryptSkey(),
+        encryptedData
+      );
+      return JSON.parse(new TextDecoder().decode(decryptedData));
+    } catch (e) {
+      console.error('Failed to decrypt contacts:', e);
+      return [];
+    }
   }
 
   // Avatar Encryption

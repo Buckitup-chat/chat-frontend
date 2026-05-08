@@ -66,15 +66,15 @@ import { ref, onMounted, watch, inject, computed, nextTick, onUnmounted } from '
 import Account_Item from '@/components/Account_Item.vue';
 import dayjs from 'dayjs';
 
-const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $web3 = inject('$web3');
 const $mitt = inject('$mitt');
 const $enigma = inject('$enigma');
 const search = ref();
 
 const { selected, excluded, metaRequired } = defineProps({
-	selected: { type: Array, default: [] },
-	excluded: { type: Array, default: [] },
+	selected: { type: Array, default: () => [] },
+	excluded: { type: Array, default: () => [] },
 	metaRequired: { type: Boolean },
 });
 
@@ -85,44 +85,34 @@ const isSelected = (address) => {
 };
 
 const hasContacts = computed(() => {
-	return $user.contacts.filter((contact) => !contact.hidden).length > 0;
+	return $userPQ.contacts.filter((contact) => !contact.hidden).length > 0;
 });
 
 const select = (address) => {
-	if (metaRequired && !$user.contacts.find((c) => c.address === address && c.metaPublicKey)) return;
 	emit('select', address);
 };
 
 const filteredList = computed(() => {
 	let list, searchTerm;
 	if (!search.value) {
-		list = $user.contacts;
+		list = $userPQ.contacts;
 	} else {
 		searchTerm = search.value.toLowerCase();
-		list = $user.contacts.filter((c) => [c.name, c.notes].some((value) => value.toLowerCase().includes(searchTerm)));
+		list = $userPQ.contacts.filter((c) => [c.name, c.notes].some((value) => value && value.toLowerCase().includes(searchTerm)));
 	}
 
 	// Exclude contacts in the `excluded` list
 	if (excluded?.length) {
-		list = list.filter((item) => !excluded.includes(item.address)); // exclude from excluded)
+		list = list.filter((item) => !excluded.includes(item.user_hash)); // exclude from excluded)
 	}
 
 	//  Exclude hidden contacts
 	list = list.filter((contact) => !contact.hidden);
 
-	// Sort: Put contacts with `metaPublicKey` first
-	if (metaRequired) {
-		list.sort((a, b) => {
-			if (a.metaPublicKey && !b.metaPublicKey) return -1; // a goes first
-			if (!a.metaPublicKey && b.metaPublicKey) return 1; // b goes first
-			return 0; // Keep original order otherwise
-		});
-	}
-
 	const l = list.map((c) => ({
 		...c,
 		highlightedName: highlightText(c.name, searchTerm),
-		highlightedAddress: highlightText(c.address, searchTerm),
+		highlightedAddress: highlightText(c.user_hash, searchTerm),
 		highlightedNotes: highlightText(c.notes, searchTerm),
 	}));
 
@@ -130,36 +120,14 @@ const filteredList = computed(() => {
 });
 
 function highlightText(text, searchTerm) {
-	if (!searchTerm) return text;
+	if (!searchTerm || !text) return text;
 	const regex = new RegExp(`(${searchTerm})`, 'gi');
 	return text.replace(regex, `<span class="_highlight_search_text">$1</span>`); // Wrap matched text with <mark>
 }
 
 onMounted(async () => {
 	filteredList.value;
-	if (metaRequired) checkContacts();
 });
 
 onUnmounted(async () => {});
-
-const checkContacts = async () => {
-	try {
-		const contactsWithoutWetaWallet = $user.contacts.filter((c) => !c.metaPublicKey).map((c) => c.address);
-		if (!contactsWithoutWetaWallet.length) return;
-
-		const metaPublicKeys = await $web3.registryContract.getPulicKeys(contactsWithoutWetaWallet);
-		for (let i = 0; i < contactsWithoutWetaWallet.length; i++) {
-			const metaPublicKey = metaPublicKeys[i];
-
-			if (metaPublicKey && metaPublicKey.length > 2) {
-				const contact = $user.contacts.find((c) => c.address === contactsWithoutWetaWallet[i]);
-				if (contact) {
-					$user.contactsMap[contact.publicKey].metaPublicKey = metaPublicKey;
-				}
-			}
-		}
-	} catch (error) {
-		console.error(error);
-	}
-};
 </script>

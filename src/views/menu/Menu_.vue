@@ -26,6 +26,11 @@
 					<div>Contacts</div>
 				</div>
 
+				<!-- <div class="_menu_btn order-1" :class="{ _active: menu === 'users' }" @click="menu = 'users'">
+					<i class="_icon_contacts" :class="{ _active: menu === 'users' }"></i>
+					<div>Users</div>
+				</div> -->
+
 				<div class="_menu_btn order-1" :class="{ _active: menu === 'account' }" @click="menu = 'account'">
 					<i class="_icon_profile" :class="{ _active: menu === 'account' }"></i>
 					<div>Account</div>
@@ -332,6 +337,10 @@ const menuRegistry = {
 		component: 'Menu_Contacts',
 		subName: 'My Contacts',
 	},
+	users: {
+		component: 'Menu_Users',
+		subName: 'Network Users',
+	},
 	rooms: {
 		component: 'Menu_Rooms',
 		subName: 'Rooms',
@@ -386,6 +395,7 @@ watch(
 	(newVal) => {
 		if (newVal) {
 			if ($route.name.includes('contact')) menu.value = 'contacts';
+			if ($route.name === 'users') menu.value = 'users';
 			if ($route.name.includes('room')) menu.value = 'rooms';
 			if ($route.name.includes('chat')) menu.value = 'chats';
 			if ($route.name.includes('account') || $route.name.includes('backup')) menu.value = 'account';

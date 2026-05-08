@@ -224,12 +224,12 @@ import { cipher, decryptWithPrivateKey } from 'eth-crypto';
 import copyToClipboard from '@/utils/copyToClipboard';
 import { Wallet } from 'ethers';
 import axios from 'axios';
-import Account_Item from '@/components/Account_Item.vue';
+import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 import errorMessage from '@/utils/errorMessage';
 import Transactions from '@/views/account/Transactions.vue';
 
 const $timestamp = inject('$timestamp');
-const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $web3 = inject('$web3');
 const $swal = inject('$swal');
 const $loader = inject('$loader');
@@ -245,7 +245,19 @@ const { backup, share, idx } = defineProps({
 	idx: { type: Number, required: true },
 });
 
+const message = ref();
+const privateKey = ref();
+const stealthAddr = ref();
+const address = ref();
+const evmSkey = ref();
+const evmAddress = ref();
+
 onMounted(async () => {
+	evmSkey.value = await $userPQ.getEvmPrivateKey();
+	if (evmSkey.value) {
+		const w = new Wallet(evmSkey.value);
+		evmAddress.value = w.address;
+	}
 	init();
 });
 
@@ -257,21 +269,14 @@ watch(
 	{ deep: true },
 );
 
-const message = ref();
-const privateKey = ref();
-const stealthAddr = ref();
-const address = ref();
-
 const contact = computed(() => {
-	let contact;
+	let contact = null;
 	try {
-		contact = $user.contacts.find((c) => c.address.toLowerCase() === address.value.toLowerCase());
-	} catch (error) {}
-
-	try {
-		if (!contact && stealthAddr.value) {
+		if (address.value || stealthAddr.value) {
 			contact = {
-				address: stealthAddr.value,
+				user_hash: address.value || stealthAddr.value,
+				name: 'Unknown',
+				notes: address.value || stealthAddr.value
 			};
 		}
 	} catch (error) {}
@@ -279,12 +284,13 @@ const contact = computed(() => {
 });
 
 const init = async () => {
+	if (!evmSkey.value) return;
 	privateKey.value = null;
 	shareDelay.value = share.delay;
 	message.value = null;
-	stealthAddr.value = $web3.bukitupClient.getStealthAddressFromEphemeral($user.account.metaPrivateKey, share.ephemeralPubKey);
+	stealthAddr.value = $web3.bukitupClient.getStealthAddressFromEphemeral(evmSkey.value, share.ephemeralPubKey);
 	if (stealthAddr.value.toLowerCase() === share.stealthAddress.toLowerCase()) {
-		privateKey.value = $web3.bukitupClient.generateStealthPrivateKey($user.account.metaPrivateKey, share.ephemeralPubKey);
+		privateKey.value = $web3.bukitupClient.generateStealthPrivateKey(evmSkey.value, share.ephemeralPubKey);
 		try {
 			message.value = await decryptWithPrivateKey(privateKey.value.slice(2), cipher.parse(share.messageEncrypted.slice(2)));
 		} catch (error) {
@@ -292,7 +298,7 @@ const init = async () => {
 		}
 	}
 	if (isOwner.value && share.addressEncrypted) {
-		address.value = await decryptWithPrivateKey($user.account.metaPrivateKey.slice(2), cipher.parse(share.addressEncrypted.slice(2)));
+		address.value = await decryptWithPrivateKey(evmSkey.value.slice(2), cipher.parse(share.addressEncrypted.slice(2)));
 	}
 };
 
@@ -312,11 +318,11 @@ const isRocoverable = computed(() => {
 });
 
 const isOwner = computed(() => {
-	return backup.wallet.toLowerCase() == $user.account?.address?.toLowerCase();
+	return backup.wallet.toLowerCase() == evmAddress.value?.toLowerCase();
 });
 
 const isTrusted = computed(() => {
-	return share.stealthAddress?.toLowerCase() === stealthAddr.value;
+	return share.stealthAddress?.toLowerCase() === stealthAddr.value?.toLowerCase();
 });
 
 const timeLeft = computed(() => {
@@ -325,9 +331,9 @@ const timeLeft = computed(() => {
 });
 
 const updateShareDisabled = async () => {
-	if (!$user.checkOnline()) return;
+	if (!$userPQ.isOnline) return;
 
-	if (!isOwner.value) return;
+	if (!isOwner.value || !evmSkey.value) return;
 	if (
 		!(await $swalModal.value.open({
 			id: 'confirm',
@@ -361,10 +367,10 @@ const updateShareDisabled = async () => {
 			disabled: share.disabled ? 0 : 1,
 			expire,
 		};
-		const signature = await $web3.signTypedData($user.account.privateKey, domain, types, message);
+		const signature = await $web3.signTypedData(evmSkey.value, domain, types, message);
 
 		await axios.post(API_URL + '/dispatch/updateShareDisabled', {
-			wallet: $user.account.address,
+			wallet: evmAddress.value,
 			chainId: $web3.mainChainId,
 			tag: backup.tag,
 			idx: share.idx,
@@ -392,9 +398,9 @@ const updateShareDisabled = async () => {
 };
 
 const updateShareDelay = async () => {
-	if (!$user.checkOnline()) return;
+	if (!$userPQ.isOnline) return;
 
-	if (!isOwner.value) return;
+	if (!isOwner.value || !evmSkey.value) return;
 	const newDelay = await $swalModal.value.open({
 		id: 'update_backup_share_delay',
 		currentDelay: share.delay,
@@ -426,10 +432,10 @@ const updateShareDelay = async () => {
 			delay: newDelay,
 			expire,
 		};
-		const signature = await $web3.signTypedData($user.account.privateKey, domain, types, message);
+		const signature = await $web3.signTypedData(evmSkey.value, domain, types, message);
 
 		await axios.post(API_URL + '/dispatch/updateShareDelay', {
-			wallet: $user.account.address,
+			wallet: evmAddress.value,
 			chainId: $web3.mainChainId,
 			tag: backup.tag,
 			idx: share.idx,
@@ -457,7 +463,7 @@ const updateShareDelay = async () => {
 };
 
 const requestRecover = async () => {
-	if (!$user.checkOnline()) return;
+	if (!$userPQ.isOnline) return;
 
 	if (
 		!(await $swalModal.value.open({

@@ -3,12 +3,7 @@
 		<template #header><div class="fw-bold fs-5 py-1">Restore from shares</div> </template>
 		<template #content>
 			<div class="_full_width_block">
-				<!-- TODO: PQ Backups - commented out Web3 features -->
-				<!-- <RestoreFromShares @restore="setSecret" @account="setAccount" :key="updateKey" /> -->
-				<div class="alert alert-info text-center">
-					<h5>Coming Soon</h5>
-					<p class="mb-0">Restore functionality for PQ accounts is under development.</p>
-				</div>
+				<RestoreFromShares @restore="setSecret" @account="setAccount" :key="updateKey" />
 			</div>
 		</template>
 	</FullContentBlock>
@@ -25,31 +20,26 @@
 <script setup>
 import { ref, inject } from 'vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
-// TODO: PQ Backups - commented out Web3 features
-// import RestoreFromShares from '@/views/backup/RestoreFromShares.vue';
+import RestoreFromShares from './RestoreFromShares.vue';
 
 const secretText = ref();
-// TODO: PQ Backups - commented out Web3 features
-// const $user = inject('$user');
 const $userPQ = inject('$userPQ');
-// const $swal = inject('$swal');
-// const $router = inject('$router');
+const $swal = inject('$swal');
+const $router = inject('$router');
 const updateKey = ref(0);
 
-// TODO: PQ Backups - commented out Web3 features
-// const setSecret = async (s) => {
-// 	secretText.value = s;
-// };
+const setSecret = async (s) => {
+	secretText.value = s;
+};
 
-// TODO: PQ Backups - commented out Web3 features
-// const setAccount = async () => {
-// 	updateKey.value++;
-// 	secretText.value = null;
-// 	$swal.fire({
-// 		icon: 'success',
-// 		title: 'Account restored',
-// 		timer: 5000,
-// 	});
-// 	$router.replace({ name: 'account_info' });
-// };
+const setAccount = async () => {
+	updateKey.value++;
+	secretText.value = null;
+	$swal.fire({
+		icon: 'success',
+		title: 'Account restored',
+		timer: 5000,
+	});
+	$router.replace({ name: 'account_info' });
+};
 </script>

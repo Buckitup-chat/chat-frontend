@@ -13,6 +13,8 @@ dist-ssr
 *.local
 .recovered_files
 .old_frontend
+.history
+session-*
 
 ssl
 

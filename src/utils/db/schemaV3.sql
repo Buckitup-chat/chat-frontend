@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS user_storage_local (
     version       BIGINT NOT NULL DEFAULT 0,
     value_b64     TEXT,
     hash_b64      TEXT,
-    operation     TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+    operation     TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'delete', 'upsert')),
     changed_at    TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (user_hash, uuid)
 );

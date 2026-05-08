@@ -134,13 +134,14 @@
 </style>
 
 <script setup>
-import { ref, inject, watch, onMounted, onUnmounted } from 'vue';
+import { ref, inject, onMounted, onUnmounted } from 'vue';
 import Transactions from '@/views/account/Transactions.vue';
 import axios from 'axios';
 import errorMessage from '@/utils/errorMessage';
+import { deriveEvmAccount } from '@/utils/deriveEvmAccount';
 
 const $mitt = inject('$mitt');
-const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $timestamp = inject('$timestamp');
 const $web3 = inject('$web3');
 const $swal = inject('$swal');
@@ -151,9 +152,16 @@ const steps = [1, 2, 3, 4];
 const step = ref(1);
 const agree = ref();
 const processingTx = ref();
+const evmAddress = ref();
 
 onMounted(async () => {
-	if (!$socket.connected && $user.isOnline) $socket.connect();
+	const evmSkey = await $userPQ.getEvmPrivateKey();
+	if (evmSkey) {
+		const account = await deriveEvmAccount(evmSkey);
+		evmAddress.value = account.address;
+	}
+
+	if (!$socket.connected && $userPQ.isOnline) $socket.connect();
 	$socket.on('DISPATCH', dispatchListener);
 	$socket.on('WALLET_UPDATE', walletUpdateListener);
 });
@@ -165,21 +173,15 @@ onUnmounted(async () => {
 });
 
 const dispatchListener = async (tx) => {
-	if ($user.account?.address?.toLowerCase() === tx.wallet.toLowerCase() && tx.method === 'registerWithSign') {
+	if (evmAddress.value?.toLowerCase() === tx.wallet.toLowerCase() && tx.method === 'registerWithSign') {
 		processingTx.value = tx;
 	}
 };
 
 const walletUpdateListener = async (wallet) => {
-	if ($user.account?.address?.toLowerCase() === wallet.toLowerCase()) {
-		$user.checkMetaWallet();
-	}
-};
-
-watch(
-	() => $user.registeredMetaWallet,
-	(newVal) => {
-		if (newVal) {
+	if (evmAddress.value?.toLowerCase() === wallet.toLowerCase()) {
+		const metaKey = await $web3.registryContract.metaPublicKeys(evmAddress.value);
+		if (metaKey && metaKey !== '0x' + '0'.repeat(64)) {
 			closeModal();
 			$swal.fire({
 				icon: 'success',
@@ -187,13 +189,25 @@ watch(
 				timer: 5000,
 			});
 		}
-	},
-);
+	}
+};
 
 const register = async () => {
-	if (!$user.checkOnline()) return;
 	try {
 		$loader.show();
+
+		const evmSkey = await $userPQ.getEvmPrivateKey();
+		if (!evmSkey) {
+			$loader.hide();
+			$swal.fire({
+				icon: 'error',
+				title: 'No EVM key found',
+				text: 'Create an account first',
+				timer: 5000,
+			});
+			return;
+		}
+		const evmAccount = await deriveEvmAccount(evmSkey);
 
 		const expire = $timestamp.value + 300000;
 		const domain = {
@@ -210,16 +224,16 @@ const register = async () => {
 			],
 		};
 		const message = {
-			owner: $user.account.address,
-			metaPublicKey: $user.account.metaPublicKey,
+			owner: evmAccount.address,
+			metaPublicKey: evmAccount.metaPublicKey,
 			expire,
 		};
-		const signature = await $web3.signTypedData($user.account.privateKey, domain, types, message);
+		const signature = await $web3.signTypedData(evmAccount.privateKey, domain, types, message);
 
 		await axios.post(API_URL + '/dispatch/register', {
-			owner: $user.account.address,
+			owner: evmAccount.address,
 			chainId: $web3.mainChainId,
-			metaPublicKey: $user.account.metaPublicKey,
+			metaPublicKey: evmAccount.metaPublicKey,
 			expire: expire,
 			signature: signature,
 		});

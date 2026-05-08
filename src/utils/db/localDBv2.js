@@ -26,6 +26,8 @@ class LocalDBv2 {
   }
 
   async init() {
+    if (this.db) return this.db;
+
     console.log("→ Starting DB initialization");
 
     try {
@@ -178,7 +180,7 @@ class LocalDBv2 {
         contact_pkey = EXCLUDED.contact_pkey,
         contact_cert = EXCLUDED.contact_cert,
         name       = EXCLUDED.name,
-        operation  = 'update',
+        operation  = CASE WHEN user_cards_local.operation = 'insert' THEN 'insert' ELSE 'update' END,
         changed_at = NOW()
       `,
       [user_hash, sign_pkey, crypt_pkey, crypt_cert, contact_pkey, contact_cert, name || ""]
@@ -216,7 +218,14 @@ class LocalDBv2 {
     }
 
     const mutations = changes.map((row) => {
-      if (!row.sign_pkey || !row.contact_pkey || !row.crypt_pkey) return null;
+      if (!row.sign_pkey || !row.contact_pkey || !row.crypt_pkey) {
+        console.warn(`[localDB] Skipping mutation for ${row.user_hash} due to missing keys:`, {
+          hasSign: !!row.sign_pkey,
+          hasContact: !!row.contact_pkey,
+          hasCrypt: !!row.crypt_pkey
+        });
+        return null;
+      }
       const m = api.createUserCard(row.name || 'User', {
         user_hash: row.user_hash,
         sign_pkey: this.#base64ToArray(row.sign_pkey),
@@ -312,12 +321,12 @@ class LocalDBv2 {
     await this.db.query(
       `
       INSERT INTO user_storage_local (user_hash, uuid, value_b64, hash_b64, version, operation)
-      VALUES ($1, $2, $3, $4, $5, 'upsert')
+      VALUES ($1, $2, $3, $4, $5, 'insert')
       ON CONFLICT (user_hash, uuid) DO UPDATE SET
         value_b64 = EXCLUDED.value_b64,
         hash_b64 = EXCLUDED.hash_b64,
         version = EXCLUDED.version,
-        operation = 'upsert',
+        operation = CASE WHEN user_storage_local.operation = 'insert' THEN 'insert' ELSE 'update' END,
         changed_at = NOW()
       `,
       [userHash, uuid, valueB64, hashB64, version]
@@ -348,11 +357,13 @@ class LocalDBv2 {
     if (changes.length === 0) { this.isLocalStorageStash = false; return; }
 
     const mutations = changes.map(row => {
-      if (row.operation === 'upsert') {
-        return api.createStorageMutation(
+      if (row.operation === 'insert' || row.operation === 'update') {
+        const m = api.createStorageMutation(
           row.user_hash, row.uuid, row.value_b64, row.hash_b64,
           row.version, Math.floor(Date.now() / 1000), signSkey
         );
+        if (row.operation === 'update') m.type = 'update';
+        return m;
       }
       return null;
     }).filter(Boolean);

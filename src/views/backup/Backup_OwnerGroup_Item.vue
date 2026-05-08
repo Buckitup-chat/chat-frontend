@@ -2,7 +2,7 @@
 	<div class="">
 		<div class="d-flex align-items-center justify-content-between mb-2">
 			<div class="">
-				<Account_Item v-if="contact" :account="contact" />
+				<Account_Item_PQ v-if="contact" :account="contact" />
 			</div>
 
 			<div class="d-flex align-items-center" v-if="item.backups.length > 1">
@@ -25,10 +25,10 @@
 
 <script setup>
 import BackupShareItem from './Backup_Share_Item.vue';
-import Account_Item from '@/components/Account_Item.vue';
+import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 import { inject, computed } from 'vue';
 
-const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $breakpoint = inject('$breakpoint');
 
 const { item } = defineProps({
@@ -36,21 +36,17 @@ const { item } = defineProps({
 });
 
 const contact = computed(() => {
-	let contact;
-	try {
-		contact = $user.contacts.find((c) => c.address.toLowerCase() === item.wallet.toLowerCase());
-	} catch (error) {}
+	let contact = null;
 
-	try {
-		if (!contact) {
-			contact = {
-				address: item.wallet,
-				name: 'Unknown',
-				notes: 'Not in contacts',
-				publicKey: item.wallet,
-			};
-		}
-	} catch (error) {}
+	// In PQ architecture, we don't sync EVM addresses in contacts yet.
+	// So we display a placeholder with the EVM address for now.
+	if (!contact) {
+		contact = {
+			user_hash: item.wallet,
+			name: 'Unknown',
+			notes: item.wallet
+		};
+	}
 	return contact;
 });
 </script>

@@ -14,6 +14,20 @@ export const userPQStore = defineStore('userPQ', () => {
   const myLocalUsers = ref([]);
   const allNetworkUsers = ref([]);
 
+  const contactsMap = ref({});
+  const contacts = computed(() => {
+    return Object.values(contactsMap.value).map(contact => {
+      // Merge with network info if available
+      const networkUser = allNetworkUsers.value.find(u => u.user_hash === contact.user_hash);
+      return {
+        ...networkUser,
+        ...contact, // Local overrides take precedence (like custom name/notes)
+        address: contact.user_hash, // Aliases for backward compatibility in views
+        publicKey: contact.user_hash,
+      };
+    });
+  });
+
   const isAuthenticated = computed(() => em.value?.isAuth ?? false);
 
   const currentUserHash = computed(() => em.value?.currentUserHash ?? null);
@@ -26,6 +40,8 @@ export const userPQStore = defineStore('userPQ', () => {
   const initialize = async () => {
     if (isInitialized.value) return;
 
+    await localDB.init();
+
     em.value = EncryptionManagerPQ.getInstance();
     await em.value.initialize();
 
@@ -36,10 +52,10 @@ export const userPQStore = defineStore('userPQ', () => {
     console.log(`[userStore] Initialized | Local users: ${myLocalUsers.value.length}`);
   };
 
-  const registerNewUser = async ({ name = "Anonymous", notes, avatar }) => {
+  const registerNewUser = async ({ name = "Anonymous", notes, avatar, avatarDataUrl }) => {
     await initialize();
 
-    const newIdentity = await em.value.createUserVault({ name, notes, avatar });
+    const newIdentity = await em.value.createUserVault({ name, notes, avatar, avatarDataUrl });
 
     currentUser.value = newIdentity;
 
@@ -53,7 +69,29 @@ export const userPQStore = defineStore('userPQ', () => {
   const login = async (userHash) => {
     await initialize();
 
-    const identity = await em.value.login(userHash);
+    let identity = await em.value.login(userHash);
+    
+    const profile = await em.value.loadUserProfile();
+    if (profile) {
+      identity = {
+        ...identity,
+        name: profile.name || identity.name,
+        userStorage: {
+          ...identity.userStorage,
+          notes: profile.notes,
+          avatarUuid: profile.avatarUuid
+        }
+      };
+    }
+
+    const loadedContacts = await em.value.loadContacts();
+    const map = {};
+    if (Array.isArray(loadedContacts)) {
+      loadedContacts.forEach(c => {
+        if (c.user_hash) map[c.user_hash] = c;
+      });
+    }
+    contactsMap.value = map;
 
     currentUser.value = identity;
 
@@ -104,31 +142,71 @@ export const userPQStore = defineStore('userPQ', () => {
     return true;
   };
 
-  const updateCurrentUserProfile = async ({ name, notes, avatar }) => {
+  const updateCurrentUserProfile = async ({ name, notes, avatarUuid, avatarDataUrl }) => {
     if (!em.value || !currentUserHash.value) return false;
 
-    await em.value.updateUserStorage({ name, notes, avatar });
+    await em.value.updateUserStorage({ name, notes, avatarUuid, avatarDataUrl });
 
     if (currentUser.value) {
       if (name !== undefined) currentUser.value.name = name;
+      if (avatarDataUrl !== undefined) currentUser.value.avatar = avatarDataUrl;
       if (!currentUser.value.userStorage) {
         currentUser.value.userStorage = {};
       }
       if (notes !== undefined) currentUser.value.userStorage.notes = notes;
-      if (avatar !== undefined) currentUser.value.userStorage.avatar = avatar;
+      if (avatarUuid !== undefined) currentUser.value.userStorage.avatarUuid = avatarUuid;
     }
 
     await localDB.upsertUserLocal({
       user_hash: currentUserHash.value,
       name: currentUser.value?.name,
       sign_pkey: currentUser.value?.sign_pkey,
-      crypt_pkey: null,
-      crypt_cert: null,
-      contact_pkey: null,
-      contact_cert: null
+      crypt_pkey: currentUser.value?.crypt_pkey,
+      crypt_cert: currentUser.value?.crypt_cert,
+      contact_pkey: currentUser.value?.contact_pkey,
+      contact_cert: currentUser.value?.contact_cert
     });
 
     await refreshMyLocalUsers();
+    return true;
+  };
+
+  const saveContact = async (userHash, contactData) => {
+    if (!em.value || !currentUserHash.value) return false;
+    
+    // Maintain backward compatibility fields if they are missing
+    contactsMap.value[userHash] = {
+      ...contactsMap.value[userHash],
+      ...contactData,
+      user_hash: userHash
+    };
+
+    const contactsArray = Object.values(contactsMap.value).map(c => ({
+      user_hash: c.user_hash,
+      name: c.name,
+      notes: c.notes,
+      hidden: c.hidden
+    }));
+
+    await em.value.updateContacts(contactsArray);
+    return true;
+  };
+
+  const deleteContact = async (userHash) => {
+    if (!em.value || !currentUserHash.value) return false;
+    
+    if (contactsMap.value[userHash]) {
+      delete contactsMap.value[userHash];
+      
+      const contactsArray = Object.values(contactsMap.value).map(c => ({
+        user_hash: c.user_hash,
+        name: c.name,
+        notes: c.notes,
+        hidden: c.hidden
+      }));
+      
+      await em.value.updateContacts(contactsArray);
+    }
     return true;
   };
 
@@ -139,6 +217,39 @@ export const userPQStore = defineStore('userPQ', () => {
 
   const getMyUserByHash = (userHash) => {
     return myLocalUsers.value.find(u => u.user_hash === userHash);
+  };
+
+  const getEvmPrivateKey = async () => {
+    if (!em.value) return null;
+    return await em.value.getEvmSkey();
+  };
+
+  const getEvmMetaKeys = async () => {
+    const skey = await getEvmPrivateKey();
+    if (!skey) return null;
+    return {
+      privateKey: skey
+    };
+  };
+
+  const exportBackup = async () => {
+    if (!em.value) return null;
+    const keys = await em.value.exportVaultKeys();
+    return {
+      version: 1,
+      identity: currentUser.value,
+      keys
+    };
+  };
+
+  const importBackup = async (backupData) => {
+    if (isAuthenticated.value) {
+      await logout();
+    }
+    await initialize();
+    const { identity, keys } = backupData;
+    await em.value.importVaultKeys(keys, identity);
+    await refreshAllData();
   };
 
   watch(isAuthenticated, (authenticated) => {
@@ -155,6 +266,11 @@ export const userPQStore = defineStore('userPQ', () => {
     console.log('user', user)
   });
 
+  const signContactChallenge = async (challenge) => {
+    if (!em.value) return null;
+    return await em.value.signContactChallenge(challenge);
+  };
+
   return {
     isAuthenticated,
     currentUserHash,
@@ -164,6 +280,11 @@ export const userPQStore = defineStore('userPQ', () => {
     isOnline,
 
     pqUserCards,
+
+    contacts,
+    contactsMap,
+    saveContact,
+    deleteContact,
 
     initialize,
     registerNewUser,
@@ -177,6 +298,12 @@ export const userPQStore = defineStore('userPQ', () => {
 
     getUserByHash,
     getMyUserByHash,
+
+    getEvmPrivateKey,
+    getEvmMetaKeys,
+    exportBackup,
+    importBackup,
+    signContactChallenge,
 
     setEncryptionManager: (manager) => {
       em.value = manager;
