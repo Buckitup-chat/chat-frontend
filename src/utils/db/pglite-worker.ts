@@ -3,6 +3,6 @@ import { worker } from "@electric-sql/pglite/worker";
 
 worker({
   async init() {
-    return new PGlite("idb://electric-sync-data-v3");
+    return new PGlite("idb://electric-sync-data-v4");
   },
 });
