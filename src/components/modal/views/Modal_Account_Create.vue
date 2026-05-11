@@ -1,7 +1,7 @@
 <template>
 	<!-- Header -->
 	<div class="p-2">
-		<Account_Info :account-in="account" @update="updateAccount" class="mb-3" v-if="account" />
+		<Account_Info :account-in="account" @update="updateAccount" @avatar-draft="account.draftAvatar = $event" class="mb-3" v-if="account" />
 		<div class="row justify-content-center gx-2 mt-3">
 			<div class="col-lg-12 col-xl-10">
 				<button type="button" class="btn btn-dark w-100" @click="create()" :disabled="creating">
@@ -28,6 +28,7 @@ const account = ref({
 	name: '',
 	notes: '',
 	avatar: null,
+	draftAvatar: null,
 	user_hash: null,
 	sign_pkey: null
 });
@@ -69,7 +70,8 @@ const create = async () => {
 		await $userPQ.registerNewUser({
 			name: account.value.name || 'Anonymous',
 			notes: account.value.notes,
-			avatar: account.value.avatar
+			avatar: account.value.draftAvatar,
+			avatarDataUrl: account.value.avatar
 		});
 
 		$mitt.emit('account::created');

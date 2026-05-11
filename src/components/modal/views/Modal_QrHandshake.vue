@@ -171,17 +171,18 @@ import { ref, inject, onMounted, onBeforeUnmount, computed } from 'vue';
 import QrScanner from 'qr-scanner';
 import QRCode from 'qrcode';
 import Account_Item from '@/components/Account_Item.vue';
-import { toUtf8Bytes, randomBytes, encodeBase64, concat, computeAddress, decodeBase64, encodeBase58 } from 'ethers';
+import { randomBytes } from '@noble/post-quantum/utils.js';
+import * as secp from '@noble/secp256k1';
+import { sha256 } from '@noble/hashes/sha256';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 
-import dayjs from 'dayjs';
-
-const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $mitt = inject('$mitt');
 const $router = inject('$router');
 const $swal = inject('$swal');
-const $enigma = inject('$enigma');
 const $loader = inject('$loader');
 const $menuOpened = inject('$menuOpened');
+
 const hasCamera = ref();
 const contact = ref(null);
 const qrCode = ref(null);
@@ -195,30 +196,27 @@ const showCamera = ref();
 const countdown = ref();
 
 const options = {
-	staticString: 'BKP',
 	scanningColor: '#000',
 	detectedColor: '#8e2b77',
 	verifiedColor: '#611e52',
 };
+
 const state = ref({
-	challenge: null,
-	signature: null,
-	verified: 0,
+	step: 1, // 1: QR1(A), 2: QR2(B), 3: QR3(A), 4: Done(B)
+	myNonce: null,
+	mySigPeerNonce: null,
+	mySigHashNonce: null,
+	peerHash: null,
+	peerEccPub: null,
+	peerNonce: null,
 	completed: false,
-	contactChallenge: null,
-	contactAddress: null,
-	contactPublicKey: null,
-	contactName: null,
-	contactVerified: 0,
 });
 
 const { inputData } = defineProps({ inputData: { type: Object } });
 
 onMounted(async () => {
 	try {
-		// Get all media devices
 		const devices = await navigator.mediaDevices.enumerateDevices();
-		// Check if there is at least one video input (camera)
 		hasCamera.value = devices.some((device) => device.kind === 'videoinput');
 	} catch (error) {
 		console.error('Error checking camera availability:', error);
@@ -233,23 +231,23 @@ onMounted(async () => {
 			calculateScanRegion: (video) => {
 				const width = video.videoWidth;
 				const height = video.videoHeight;
-				const scanSize = 0.95; // 100% of video size
+				const scanSize = 0.95;
 				return {
-					x: (width * (1 - scanSize)) / 2, // Center horizontally
-					y: (height * (1 - scanSize)) / 2, // Center vertically
-					width: width * scanSize, // 80% width
-					height: height * scanSize, // 80% height
+					x: (width * (1 - scanSize)) / 2,
+					y: (height * (1 - scanSize)) / 2,
+					width: width * scanSize,
+					height: height * scanSize,
 				};
 			},
 		});
 
-		if (inputData.startScan) toggleScanner();
+		if (inputData?.startScan) toggleScanner();
 	}
 });
 
 onBeforeUnmount(() => {
 	if (countdownInterval) clearInterval(countdownInterval);
-	if (stopScanTimeout) clearTimeout(countdownInterval);
+	if (stopScanTimeout) clearTimeout(stopScanTimeout);
 	try {
 		qrScanner.value.dispose();
 	} catch (error) {}
@@ -275,7 +273,6 @@ async function toggleScanner() {
 		$loader.hide();
 		showCamera.value = true;
 
-		// Start countdown interval
 		countdown.value = 1;
 		countdownInterval = setInterval(() => {
 			countdown.value -= 1;
@@ -284,7 +281,7 @@ async function toggleScanner() {
 				showCamera.value = false;
 				scanning.value = true;
 
-				generateChallenge();
+				state.value.myNonce = bytesToHex(randomBytes(16));
 				showQr.value = true;
 				updateQr();
 			}
@@ -301,96 +298,130 @@ function startAutoStopCountdown(delay = 1000) {
 	stopScanTimeout = setTimeout(() => stopScan(), delay);
 }
 
-const readQr = (msg) => {
+const readQr = async (msg) => {
 	try {
-		// Extract the fixed parts based on known lengths
-		console.log('msg', msg);
-		const verified = parseInt(msg[0]); // First character (1 char)
-		const challenge = msg.slice(1, 21); // Next 18 characters (2nd to 19th char)
-		const signature = msg.length > 21 ? msg.slice(21, 109) : null; // 19th to 107th char (if present)
-		const displayNameEnc = msg.length > 109 ? msg.slice(109) : null;
-		if (challenge) {
-			const decodedChallengeBytes = decodeBase64(challenge);
+		if (!msg.startsWith('PQ1:')) return;
+		const parts = msg.split(':');
+		const type = parts[1];
 
-			const contactChallengeDec = new TextDecoder().decode(decodedChallengeBytes);
+		const myHash = $userPQ.currentUserHash;
+		const myEccPubBytes = atob($userPQ.currentUser.contact_pkey);
+		const myEccPub = bytesToHex(Uint8Array.from(myEccPubBytes, c => c.charCodeAt(0)));
 
-			console.log('contactChallengeDec', contactChallengeDec);
-			if (challenge && contactChallengeDec.startsWith(options.staticString)) {
-				if (stopScanTimeout) startAutoStopCountdown();
+		if (type === 'A') {
+			if (state.value.step >= 2) return;
+			state.value.peerHash = parts[2];
+			state.value.peerEccPub = parts[3];
+			state.value.peerNonce = parts[4];
+			
+			state.value.mySigPeerNonce = await $userPQ.signContactChallenge(state.value.peerNonce);
+			const hashPlusNonce = sha256(new TextEncoder().encode(myHash + state.value.peerNonce));
+			state.value.mySigHashNonce = await $userPQ.signContactChallenge(bytesToHex(hashPlusNonce));
+			
+			state.value.step = 2;
+			if ('vibrate' in navigator) navigator.vibrate([50]);
+			updateQr();
+		} else if (type === 'B') {
+			if (state.value.step >= 3) return;
+			const peerHash = parts[2];
+			const peerEccPub = parts[3];
+			const peerNonce = parts[4];
+			const peerSigNonce = parts[5];
+			const peerSigHashNonce = parts[6];
 
-				if (state.value.contactChallenge !== challenge) {
-					if (state.value.contactChallenge) {
-						reset();
-					}
-					state.value.contactChallenge = challenge;
-				}
-				if (signature) {
-					const decodedNameBytes = decodeBase64(displayNameEnc);
-					const displayName = new TextDecoder().decode(decodedNameBytes);
-					const publicKeyCompact = $enigma.recoverPublicKey(state.value.challenge + displayName, signature);
-					const publicKey = '0x' + $enigma.convertPublicKeyToHex(publicKeyCompact);
-					state.value.contactAddress = computeAddress(publicKey);
-					state.value.contactPublicKey = publicKey;
-					state.value.contactName = displayName;
-					state.value.verified = 1;
-					state.value.contactVerified = verified;
-				}
+			state.value.peerHash = peerHash;
+			state.value.peerEccPub = peerEccPub;
+			state.value.peerNonce = peerNonce;
+			
+			const isValid1 = secp.verify(hexToBytes(peerSigNonce), sha256(hexToBytes(state.value.myNonce)), hexToBytes(peerEccPub));
+			const expectedHashPlusNonce = sha256(new TextEncoder().encode(peerHash + state.value.myNonce));
+			const isValid2 = secp.verify(hexToBytes(peerSigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(peerEccPub));
+			
+			if (isValid1 && isValid2) {
+				state.value.mySigPeerNonce = await $userPQ.signContactChallenge(peerNonce);
+				const hashPlusNonce = sha256(new TextEncoder().encode(myHash + peerNonce));
+				state.value.mySigHashNonce = await $userPQ.signContactChallenge(bytesToHex(hashPlusNonce));
+				
+				state.value.step = 3;
+				state.value.completed = true;
+				finishHandshake();
 				updateQr();
+			} else {
+				console.warn("Invalid signature from peer (B)");
+			}
+		} else if (type === 'C') {
+			if (state.value.step !== 2) return;
+			const peerSigNonce = parts[2];
+			const peerSigHashNonce = parts[3];
+			
+			const isValid1 = secp.verify(hexToBytes(peerSigNonce), sha256(hexToBytes(state.value.myNonce)), hexToBytes(state.value.peerEccPub));
+			const expectedHashPlusNonce = sha256(new TextEncoder().encode(state.value.peerHash + state.value.myNonce));
+			const isValid2 = secp.verify(hexToBytes(peerSigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(state.value.peerEccPub));
+			
+			if (isValid1 && isValid2) {
+				state.value.step = 4;
+				state.value.completed = true;
+				finishHandshake();
+				updateQr();
+			} else {
+				console.warn("Invalid signature from peer (C)");
 			}
 		}
 	} catch (error) {
-		console.error('Init Scanning error:', error);
+		console.error('readQr error:', error);
 	}
 };
 
 const updateQr = async () => {
-	if (qrCode.value && state.value.challenge) {
+	if (qrCode.value && state.value.myNonce) {
+		const myHash = $userPQ.currentUserHash;
+		const myEccPubBytes = atob($userPQ.currentUser.contact_pkey);
+		const myEccPub = bytesToHex(Uint8Array.from(myEccPubBytes, c => c.charCodeAt(0)));
+		
+		let msg = '';
 		let color = options.scanningColor;
-		if (state.value.contactChallenge && !state.value.signature) {
-			state.value.signature = $enigma.signChallenge(new TextEncoder().encode(state.value.contactChallenge + $user.accountInfo.name), $user.account.privateKeyB64);
-			if ('vibrate' in navigator) navigator.vibrate([50]);
+
+		if (state.value.step === 1) {
+			msg = `PQ1:A:${myHash}:${myEccPub}:${state.value.myNonce}`;
+		} else if (state.value.step === 2) {
+			msg = `PQ1:B:${myHash}:${myEccPub}:${state.value.myNonce}:${state.value.mySigPeerNonce}:${state.value.mySigHashNonce}`;
+			color = options.detectedColor;
+		} else if (state.value.step === 3 || state.value.step === 4) {
+			msg = `PQ1:C:${state.value.mySigPeerNonce}:${state.value.mySigHashNonce}`;
+			color = options.verifiedColor;
 		}
 
-		const displayName = state.value.signature ? encodeBase64(new TextEncoder().encode($user.accountInfo.name)) : '';
-		const msg = `${state.value.verified}${state.value.challenge}${state.value.signature || ''}${displayName}`;
-
-		if (state.value.signature) color = options.detectedColor;
-		if (state.value.verified && state.value.contactVerified) color = options.verifiedColor;
-
 		QRCode.toCanvas(qrCode.value, msg, {
-			errorCorrectionLevel: 'M',
+			errorCorrectionLevel: 'L',
 			height: 360,
 			width: 360,
 			quality: 1,
 			margin: 0,
 			color: { dark: color },
 		});
-
-		if (state.value.verified && state.value.contactVerified && !state.value.completed) {
-			state.value.completed = true;
-
-			contact.value = {
-				address: state.value.contactAddress,
-				publicKey: state.value.contactPublicKey,
-				name: state.value.contactName,
-			};
-
-			if ('vibrate' in navigator) navigator.vibrate([500, 100, 500, 100, 500]);
-
-			startAutoStopCountdown();
-		}
 	}
 };
 
-const generateChallenge = () => {
-	const staticBytes = toUtf8Bytes(options.staticString); // Convert 'buckitup' to bytes
-	const random = randomBytes(10); // Generate 16 random bytes
-	state.value.challenge = encodeBase64(concat([staticBytes, random]));
-	console.log('contactChallengeDec', state.value.challenge.length, encodeBase58(concat([staticBytes, random])).length);
+const finishHandshake = () => {
+	if ('vibrate' in navigator) navigator.vibrate([500, 100, 500, 100, 500]);
+	
+	// Lookup user in network
+	const networkUser = $userPQ.allNetworkUsers.find(u => u.user_hash === state.value.peerHash);
+	
+	contact.value = {
+		address: state.value.peerHash,
+		publicKey: state.value.peerHash,
+		name: networkUser ? networkUser.name : 'Unknown User',
+		user_hash: state.value.peerHash,
+		contact_pkey: state.value.peerEccPub
+	};
+
+	startAutoStopCountdown();
 };
 
 const isInContacts = computed(() => {
-	return $user.contacts.find((e) => e.address.toLowerCase() === contact.value.address.toLowerCase());
+	if (!contact.value) return false;
+	return !!$userPQ.contactsMap[contact.value.user_hash];
 });
 
 function closeModal() {
@@ -399,7 +430,7 @@ function closeModal() {
 
 const addContact = async () => {
 	try {
-		if ($user.account.address === contact.value.address) {
+		if ($userPQ.currentUserHash === contact.value.user_hash) {
 			$swal.fire({
 				icon: 'warning',
 				title: 'It`s your own account',
@@ -414,14 +445,18 @@ const addContact = async () => {
 				title: 'Contact already in your list',
 				timer: 15000,
 			});
-			contact.value = isInContacts.value;
+			contact.value = $userPQ.contactsMap[contact.value.user_hash];
 			manual.value = false;
 			$router.push({ name: 'contact', params: { address: contact.value.address } });
 			closeModal();
 			return;
 		}
 
-		$user.contactsMap[contact.value.publicKey] = contact.value;
+		await $userPQ.saveContact(contact.value.user_hash, {
+			name: contact.value.name,
+			notes: '',
+			hidden: false
+		});
 
 		$swal.fire({
 			icon: 'success',
@@ -447,37 +482,38 @@ const setManually = async () => {
 
 const publicKey = ref();
 const addManually = async () => {
-	let address;
-	try {
-		address = computeAddress(publicKey.value.trim());
-	} catch (error) {}
-	if (!address) {
+	const userHash = publicKey.value?.trim();
+	if (!userHash || !userHash.startsWith('u_')) {
 		$swal.fire({
 			icon: 'warning',
-			title: 'Invalid public key',
+			title: 'Invalid user hash',
 			timer: 15000,
 		});
 		publicKey.value = null;
 		return;
 	}
 
+	const networkUser = $userPQ.allNetworkUsers.find(u => u.user_hash === userHash);
+
 	contact.value = {
-		publicKey: publicKey.value.trim(),
-		address,
+		publicKey: userHash,
+		address: userHash,
+		user_hash: userHash,
+		name: networkUser ? networkUser.name : 'Unknown User'
 	};
 	manual.value = false;
 	addContact();
 };
 
 const reset = () => {
-	state.value.verified = 0;
-	state.value.completed = 0;
-	state.value.signature = null;
-	state.value.contactChallenge = null;
-	state.value.contactAddress = null;
-	state.value.contactPublicKey = null;
-	state.value.contactName = null;
-	state.value.contactVerified = 0;
+	state.value.step = 1;
+	state.value.completed = false;
+	state.value.myNonce = null;
+	state.value.mySigPeerNonce = null;
+	state.value.mySigHashNonce = null;
+	state.value.peerHash = null;
+	state.value.peerEccPub = null;
+	state.value.peerNonce = null;
 };
 
 const stopScan = async () => {
@@ -492,9 +528,7 @@ const stopScan = async () => {
 
 const wait = (delay = 500) => {
 	return new Promise((resolve) =>
-		setTimeout(() => {
-			resolve();
-		}, delay),
+		setTimeout(() => resolve(), delay)
 	);
 };
 </script>

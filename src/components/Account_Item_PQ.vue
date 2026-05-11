@@ -2,8 +2,7 @@
   <div class="_account">
     <div class="_avatar">
       <Avatar :name="acc.user_hash" variant="bauhaus" v-if="acc.user_hash && !acc?.avatar" />
-
-      <!-- <img :src="mediaUrl(acc.avatar, defaultAvatar)" @error="(event) => (event.target.src = defaultAvatar)" /> -->
+      <img :src="acc.avatar" v-if="acc?.avatar" @error="(event) => (event.target.src = defaultAvatar)" />
     </div>
     <div class="_info">
       <div class="d-flex">
@@ -15,9 +14,9 @@
         <div class="_pubk" v-if="shortCode">[{{ shortCode }}]</div>
       </div>
 
-      <div class="_notes" v-if="acc.userStorage?.notes">
+      <div class="_notes" v-if="acc.userStorage.notes">
         <span v-if="acc.highlightedNotes" v-html="acc.highlightedNotes"></span>
-        <span v-else>{{ acc.userStorage?.notes }}</span>
+        <span v-else>{{ acc.userStorage.notes }}</span>
       </div>
     </div>
   </div>

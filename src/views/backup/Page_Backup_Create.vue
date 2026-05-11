@@ -1,11 +1,11 @@
 <template>
-	<FullContentBlock v-if="$user.account">
+	<FullContentBlock v-if="$userPQ.isAuthenticated">
 		<template #header> <div class="fw-bold fs-5 py-1">New backup</div> </template>
 		<template #content>
 			<div class="_full_width_block">
 				<Account_Activate_Reminder />
 
-				<template v-if="$user.registeredMetaWallet">
+				<template v-if="registeredMetaWallet">
 					<template v-if="processingTx?.status !== 'PROCESSING'">
 						<div class="_divider mb-3">
 							Backup info
@@ -204,8 +204,9 @@ import Transactions from '@/views/account/Transactions.vue';
 import { uploadToIPFS } from '../../api/ipfs';
 import { Wallet, isAddress } from 'ethers';
 import Offline_Reminder from '../../components/Offline_Reminder.vue';
+import { deriveEvmAccount } from '@/utils/deriveEvmAccount';
 
-const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $timestamp = inject('$timestamp');
 const $web3 = inject('$web3');
 const $swal = inject('$swal');
@@ -215,6 +216,9 @@ const $loader = inject('$loader');
 const $modal = inject('$modal');
 const $swalModal = inject('$swalModal');
 const $router = inject('$router');
+
+const evmAccount = ref(null);
+const registeredMetaWallet = ref(false);
 
 const maxTagLength = 30;
 const maxSecretLength = 500;
@@ -282,18 +286,9 @@ watch(
 	},
 );
 
-const backupAccount = () => {
-	if (!$user.account) return;
-	const backup = {
-		account: {
-			address: $user.account.address,
-			publicKey: $user.account.publicKey,
-			privateKey: $user.account.privateKey,
-			name: $user.accountInfo.name,
-			notes: $user.accountInfo.notes,
-			avatar: $user.accountInfo.avatar,
-		},
-	};
+const backupAccount = async () => {
+	if (!$userPQ.isAuthenticated) return;
+	const backup = await $userPQ.exportBackup();
 	comment.value = 'My Account Backup';
 	secret.value = JSON.stringify(backup);
 };
@@ -321,7 +316,7 @@ const checkWallets = async () => {
 			continue;
 		}
 
-		if (!wallet.metaPublicKey && $user.isOnline) {
+		if (!wallet.metaPublicKey && $userPQ.isOnline) {
 			try {
 				const metaPublicKey = await $web3.registryContract.metaPublicKeys(wallet.address);
 				if (!metaPublicKey || metaPublicKey.length <= 2) {
@@ -374,11 +369,24 @@ const addPartiesManually = () => {
 };
 
 onMounted(async () => {
-	await $user.checkMetaWallet();
-	generateTag();
-	backupAccount();
+	if ($userPQ.isAuthenticated) {
+		const evmSkey = await $userPQ.getEvmPrivateKey();
+		if (evmSkey) {
+			evmAccount.value = await deriveEvmAccount(evmSkey);
 
-	if (!$socket.connected && $user.isOnline) $socket.connect();
+			try {
+				const metaKey = await $web3.registryContract.metaPublicKeys(evmAccount.value.address);
+				registeredMetaWallet.value = metaKey && metaKey !== '0x' + '0'.repeat(64);
+			} catch (e) {
+				registeredMetaWallet.value = false;
+			}
+		}
+	}
+
+	generateTag();
+	await backupAccount();
+
+	if (!$socket.connected && $userPQ.isOnline) $socket.connect();
 	$socket.on('DISPATCH', dispatchListener);
 	$socket.on('BACKUP_UPDATE', backupUpdateListener);
 	$mitt.on('contacts::selected', applyPartiesFromContacts);
@@ -448,7 +456,14 @@ const reset = () => {
 };
 
 const backup = async () => {
-	if (!$user.checkOnline()) return;
+	if (!$userPQ.isOnline) {
+		$swal.fire({
+			icon: 'warning',
+			title: 'You are offline',
+			text: 'Please check your internet connection',
+		});
+		return;
+	}
 	await checkWallets();
 	if (isInvalid.value) return;
 
@@ -464,10 +479,10 @@ const backup = async () => {
 	try {
 		$loader.show();
 
-		let commentEncrypted = await encryptWithPublicKey($user.account.metaPublicKey.slice(2), comment.value || '');
+		let commentEncrypted = await encryptWithPublicKey(evmAccount.value.metaPublicKey.slice(2), comment.value || '');
 
 		const backup = {
-			owner: $user.account.address,
+			owner: evmAccount.value.address,
 			disabled: 0,
 			treshold: treshold.value,
 			commentEncrypted: '0x' + cipher.stringify(commentEncrypted),
@@ -480,7 +495,7 @@ const backup = async () => {
 			stealthPublicKeys.push(SA.publicKey);
 
 			const messageEncrypted = await encryptWithPublicKey(SA.publicKey.slice(2), wallet.message || '');
-			const addressEncrypted = await encryptWithPublicKey($user.account.metaPublicKey.slice(2), wallet.address);
+			const addressEncrypted = await encryptWithPublicKey(evmAccount.value.metaPublicKey.slice(2), wallet.address);
 
 			const delay = advanced.value ? wallet.delay || 0 : commonDelay.value;
 
@@ -499,11 +514,11 @@ const backup = async () => {
 
 		try {
 			const d = JSON.parse(secret.value);
-			if (d.account && d.account.publicKey === $user.account.publicKey) {
+			if (d.identity && d.identity.user_hash === $userPQ.currentUser?.user_hash) {
 				const offchainBkp = {
-					contacts: $user.contacts || [],
+					contacts: $userPQ.contacts || [],
 				};
-				let offchainBkpEncrypted = await encryptWithPublicKey($user.account.publicKey.slice(2), JSON.stringify(offchainBkp));
+				let offchainBkpEncrypted = await encryptWithPublicKey(evmAccount.value.publicKey.slice(2), JSON.stringify(offchainBkp));
 				const cid = await uploadToIPFS(cipher.stringify(offchainBkpEncrypted));
 				d.offchain = cid;
 				secret.value = JSON.stringify(d);
@@ -514,7 +529,7 @@ const backup = async () => {
 
 		const shares = await $web3.bukitupClient.generateSharesEncrypted(secret.value, stealthPublicKeys.length, treshold.value, stealthPublicKeys);
 
-		const sessionSig = await $web3.getSessionSigs(new Wallet($user.account.privateKey));
+		const sessionSig = await $web3.getSessionSigs(new Wallet(evmAccount.value.privateKey));
 		if (!sessionSig) {
 			return $loader.hide();
 		}
@@ -564,10 +579,10 @@ const backup = async () => {
 			backup,
 			expire,
 		};
-		const signature = await $web3.signTypedData($user.account.privateKey, domain, types, message);
+		const signature = await $web3.signTypedData(evmAccount.value.privateKey, domain, types, message);
 
 		await axios.post(API_URL + '/dispatch/addBackup', {
-			wallet: $user.account.address,
+			wallet: evmAccount.value.address,
 			chainId: $web3.mainChainId,
 			tag: tag.value,
 			backup,

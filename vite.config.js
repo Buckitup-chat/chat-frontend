@@ -68,11 +68,12 @@ export default defineConfig(({ command }) => {
 		],
 		define: {
 			//sodium,
-			API_URL: JSON.stringify(production ? 'https://buckitupss.appdev.pp.ua/api' : 'http://localhost:3950/api'),
+			ELECTRIC_API_URL: JSON.stringify(isBuild ? 'https://buckitup.xyz/electric/v1' : 'http://localhost:5173/api'),
+			API_URL: JSON.stringify('https://buckitup.xyz'),
 			CONNECTOR_URL: JSON.stringify(productionApi ? 'wss://buckitupss.appdev.pp.ua/connector' : 'ws://localhost:3953'),
 			IS_PRODUCTION: production,
 			IS_PRODUCTION_API: productionApi,
-			API_SURL: JSON.stringify(productionApi ? 'https://buckitupss.appdev.pp.ua' : 'http://localhost:3950'), //http://192.168.100.28:3900 https://d1ca-2a01-c844-251d-5100-fa2f-930b-157d-3af1.ngrok-free.app
+			API_SURL: JSON.stringify(productionApi ? 'https://buckitup.xyz' : 'http://localhost:3950'), //http://192.168.100.28:3900 https://d1ca-2a01-c844-251d-5100-fa2f-930b-157d-3af1.ngrok-free.app
 
 			API_SPATH: JSON.stringify('/api'),
 			TM_BOT: JSON.stringify(productionApi ? 'BuckitUpDemoBot' : 'BuckitUpLocalBot'),

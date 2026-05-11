@@ -5,7 +5,17 @@
 		</template>
 		<template #content>
 			<div class="_full_width_block">
-				<Account_Info :account-in="accountIn" ref="accountInfo" @update="updateAccount" />
+				<Account_Info :account-in="accountIn" ref="accountInfo" @update="handleUpdate"
+					@avatar-draft="handleAvatarDraft" />
+
+				<div class="mt-3 text-center">
+					<Transition name="slide-fade">
+						<button v-if="hasChanges" :disabled="!hasChanges" class="btn btn-primary rounded-pill w-100 fw-bold"
+							@click="saveProfile">
+							Save Changes
+						</button>
+					</Transition>
+				</div>
 
 				<div class="d-flex justify-content-center align-items-center mt-4 mb-3">
 					<!-- TODO: PQ - account_dxos_invite modal needs PQ implementation (Coming Soon) -->
@@ -27,20 +37,6 @@
 					<button type="button" class="btn btn-dark rounded-pill _action_btn" @click="deleteAccount()">
 						<i class="_icon_delete bg-white"></i>
 					</button>
-				</div>
-
-				<div class="mt-4 p-3 bg-light rounded">
-					<div class="small text-muted mb-2">User Hash</div>
-					<div class="text-break" style="word-break: break-all; font-size: 0.8rem;">
-						{{ accountIn.user_hash }}
-					</div>
-				</div>
-
-				<div class="mt-3 p-3 bg-light rounded">
-					<div class="small text-muted mb-2">Sign Public Key</div>
-					<div class="text-break" style="word-break: break-all; font-size: 0.7rem;">
-						{{ accountIn.sign_pkey }}
-					</div>
 				</div>
 			</div>
 		</template>
@@ -71,13 +67,26 @@
 		width: 1.5rem;
 	}
 }
+
+.slide-fade-enter-active {
+	transition: all 0.4s ease-out;
+}
+
+.slide-fade-leave-active {
+	transition: all 0.3s cubic-bezier(1, 0.5, 0.8, 1);
+}
+
+.slide-fade-enter-from,
+.slide-fade-leave-to {
+	opacity: 0;
+}
 </style>
 
 <script setup>
 // TODO: PQ - This page is already adapted for PQ user data
 // Future: Add contact management, settings, etc.
 
-import { inject, computed } from 'vue';
+import { inject, computed, ref } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import copyToClipboard from '@/utils/copyToClipboard';
@@ -86,6 +95,11 @@ const $userPQ = inject('$userPQ');
 const $swalModal = inject('$swalModal');
 const $router = inject('$router');
 const $mitt = inject('$mitt');
+const $em = inject('$encryptionManagerPQ');
+
+const accountInfoRef = ref(null);
+const draftAccount = ref(null);
+const draftAvatarBlob = ref(null);
 
 const accountIn = computed(() => {
 	const u = $userPQ.currentUser;
@@ -93,17 +107,44 @@ const accountIn = computed(() => {
 	return {
 		user_hash: u.user_hash,
 		name: u.name,
-		avatar: u.userStorage?.avatar,
+		avatarUuid: u.userStorage?.avatarUuid,
 		notes: u.userStorage?.notes,
 		sign_pkey: u.sign_pkey
 	};
 });
 
-async function updateAccount(acc) {
+function handleUpdate(acc) {
+	draftAccount.value = acc;
+}
+
+function handleAvatarDraft(blob) {
+	draftAvatarBlob.value = blob;
+}
+
+const hasChanges = computed(() => {
+	if (!accountIn.value || !draftAccount.value) return false;
+	const acc = draftAccount.value;
+	return acc.name !== accountIn.value.name ||
+		acc.notes !== accountIn.value.notes ||
+		acc.avatarUuid !== accountIn.value.avatarUuid ||
+		draftAvatarBlob.value !== null;
+});
+
+async function saveProfile() {
+	if (!hasChanges.value) return;
+
+	let uuid = draftAccount.value.avatarUuid;
+
+	if (draftAvatarBlob.value) {
+		uuid = await $em.encryptAndStoreAvatar(draftAvatarBlob.value);
+		draftAvatarBlob.value = null;
+	}
+
 	await $userPQ.updateCurrentUserProfile({
-		name: acc.name,
-		notes: acc.notes,
-		avatar: acc.avatar
+		name: draftAccount.value.name,
+		notes: draftAccount.value.notes,
+		avatarUuid: uuid,
+		avatarDataUrl: draftAccount.value.avatar
 	});
 }
 

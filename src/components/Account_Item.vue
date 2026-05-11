@@ -1,8 +1,9 @@
 <template>
 	<div class="_account">
 		<div class="_avatar">
-			<Avatar :name="acc.address" variant="bauhaus" v-if="acc.address && !acc?.avatar" />
-			<img v-if="acc?.avatar" :src="mediaUrl(acc.avatar, defaultAvatar)" @error="(event) => (event.target.src = defaultAvatar)" />
+			<Avatar :name="acc.user_hash" variant="bauhaus" v-if="acc.user_hash && !acc?.avatar" />
+			<img v-if="acc?.avatar" :src="mediaUrl(acc.avatar, defaultAvatar)"
+				@error="(event) => (event.target.src = defaultAvatar)" />
 		</div>
 		<div class="_info">
 			<div class="d-flex">
@@ -28,6 +29,7 @@
 ._account {
 	display: flex;
 	align-items: center;
+
 	._avatar {
 		display: flex;
 		align-items: center;
@@ -38,6 +40,7 @@
 		overflow: hidden;
 		margin-right: 0.6rem;
 		flex-shrink: 0; // Prevents shrinking when text overflows
+
 		img,
 		svg {
 			height: 100%;
@@ -46,9 +49,11 @@
 			object-fit: cover;
 		}
 	}
+
 	._info {
 		flex-grow: 1; // Allows it to expand within the container
 		min-width: 0; // Ensures text truncation works
+
 		._name {
 			font-weight: 500;
 			font-size: 0.9rem;
@@ -58,12 +63,14 @@
 			max-width: 100%; // Ensures truncation works properly
 			display: block; // Ensures proper alignment
 		}
+
 		._pubk {
 			font-weight: 400;
 			font-size: 0.9rem;
 			color: $grey_dark;
 			margin-left: 0.4rem;
 		}
+
 		._notes {
 			color: $grey_dark2;
 			font-size: 0.85rem;

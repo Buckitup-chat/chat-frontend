@@ -25,6 +25,7 @@
 					</button>
 
 					<button
+						v-if="isContact"
 						type="button"
 						class="btn btn-dark rounded-pill _action_btn"
 						@click="toggleHidden()"
@@ -32,6 +33,16 @@
 					>
 						<i class="_icon_eye_cross bg-white" v-if="!contact.hidden"></i>
 						<i class="_icon_eye bg-white" v-else></i>
+					</button>
+
+					<button
+						v-else
+						type="button"
+						class="btn btn-dark rounded-pill _action_btn"
+						@click="addToContacts()"
+						v-tooltip="'Add to contacts'"
+					>
+						<i class="_icon_plus bg-white"></i>
 					</button>
 				</div>
 			</div>
@@ -69,7 +80,7 @@ import FullContentBlock from '@/components/FullContentBlock.vue';
 import errorMessage from '@/utils/errorMessage';
 import dayjs from 'dayjs';
 
-const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $swal = inject('$swal');
 const $route = inject('$route');
 const $router = inject('$router');
@@ -84,19 +95,41 @@ onMounted(async () => {
 });
 
 const goToChat = async () => {
-	window.location.href = `https://buckitup.xyz/chat/${contact.value.publicKey}`;
+	window.location.href = `https://buckitup.xyz/chat/${contact.value.user_hash}`;
 };
 
 const contact = computed(() => {
-	return $user.contacts.find((e) => e.address === $route.params.address);
+	let c = $userPQ.contacts.find((e) => e.user_hash === $route.params.address);
+	if (!c) {
+		c = $userPQ.getUserByHash($route.params.address);
+	}
+	return c;
 });
 
+const isContact = computed(() => {
+	return !!$userPQ.contacts.find((e) => e.user_hash === $route.params.address);
+});
+
+const addToContacts = async () => {
+	await $userPQ.saveContact(contact.value.user_hash, {
+		name: contact.value.name || '',
+		notes: '',
+		hidden: false
+	});
+	$swal.fire({
+		icon: 'success',
+		title: 'Added to contacts',
+		timer: 2000,
+		showConfirmButton: false,
+	});
+};
+
 const listedContacts = computed(() => {
-	return $user.contacts.filter((contact) => !contact.hidden);
+	return $userPQ.contacts.filter((contact) => !contact.hidden);
 });
 
 async function updateContact(updatedContact) {
-	$user.contactsMap[contact.value.publicKey] = updatedContact;
+	await $userPQ.saveContact(contact.value.user_hash, updatedContact);
 }
 
 const toggleHidden = async () => {
@@ -106,11 +139,14 @@ const toggleHidden = async () => {
 		hide = true;
 	}
 
-	$user.contactsMap[contact.value.publicKey].hidden = !contact.value.hidden;
+	await $userPQ.saveContact(contact.value.user_hash, {
+		...contact.value,
+		hidden: !contact.value.hidden
+	});
 
 	if (hide) {
 		if (listedContacts.value.length) {
-			$router.push({ name: 'contact', params: { address: listedContacts.value[0].address } });
+			$router.push({ name: 'contact', params: { address: listedContacts.value[0].user_hash } });
 		} else {
 			if (window.history.length > 1) {
 				$router.go(-1); // ✅ Go back if history exists

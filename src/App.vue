@@ -118,9 +118,6 @@
 </style>
 
 <script setup>
-// TODO: REFACTOR - Phase 1: Remove $user injection after user.store.js deletion
-// TODO: REFACTOR - Phase 1: Standardize on inject() pattern, remove provide() duplicates
-
 import Loader from './components/Loader.vue';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';
@@ -131,8 +128,7 @@ import { useRoute, useRouter } from 'vue-router';
 
 const $socket = inject('$socket');
 const $mitt = inject('$mitt');
-// TODO: REFACTOR - Remove $user (Web3 store) - Phase 4
-const $user = inject('$user'); // TODO: PHASE 4 - Delete after migration
+const $user = inject('$user');
 const $userPQ = inject('$userPQ');
 const $breakpoint = inject('$breakpoint');
 
@@ -173,12 +169,10 @@ watch(
 );
 
 	onMounted(async () => {
-		// TODO: REFACTOR - Remove $user references (Web3 store) - Phase 4
 		// console.log('mount start')
 
 		// $user.setEncryptionManager($encryptionManager);
 
-		// TODO: REFACTOR - Use $userPQ.isOnline instead of $user.isOnline
 		window.addEventListener('online', () => ($user.isOnline = navigator.onLine));
 		window.addEventListener('offline', () => ($user.isOnline = navigator.onLine));
 		setTimeout(function tick() {
@@ -189,8 +183,8 @@ watch(
 		// Initialize PQ user store
 		await $userPQ.initialize();
 
-		// $user.vaults = await $encryptionManager.getVaults(); // TODO: Remove - Web3 feature
+		// $user.vaults = await $encryptionManager.getVaults();
 
-		// console.log('local cards', $userPQ.myLocalUsers) // TODO: REFACTOR - was pqUserCards
+		// console.log('local cards', $userPQ.pqUserCards)
 	});
 </script>

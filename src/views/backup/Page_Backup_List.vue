@@ -13,7 +13,7 @@
 				<div class="d-flex">
 					<button class="btn btn-dark ms-1 rounded-pill d-flex align-items-center flex-fill py-2" @click="search()">
 						<i class="_icon_search bg-white"></i>
-						<span class="d-none d-sm-block ms-2">Search</span>
+						<span class="d-none d-sm-block ms-2">{{ data.query.s ? 'Search' : 'Scan' }}</span>
 					</button>
 
 					<button class="btn btn-dark ms-1 rounded-pill" @click="getList()">
@@ -29,8 +29,7 @@
 			<div class="d-flex align-items-center justify-content-between w-100 pe-3">
 				<div class="fw-bold fs-5 py-1">My backups</div>
 				<div class="d-flex align-items-center">
-					<!-- TODO: PQ Backups - commented out Web3 features -->
-					<!-- <TopBarReuseTemplate v-if="$user.registeredMetaWallet && $breakpoint.gte('lg')" /> -->
+					<TopBarReuseTemplate v-if="$userPQ.isAuthenticated && $breakpoint.gte('lg')" />
 					<button class="btn btn-dark rounded-pill ms-1 d-flex align-items-center justify-content-center py-2"
 						@click="$router.push({ name: 'backup_create' })">
 						<i class="_icon_plus bg-white"></i>
@@ -39,47 +38,35 @@
 				</div>
 			</div>
 		</template>
-		<!-- TODO: PQ Backups - commented out Web3 features -->
-		<!-- <template #headerbottom v-if="$user.registeredMetaWallet && $breakpoint.lt('lg')"> -->
-		<!-- 	<TopBarReuseTemplate class="mt-2 pe-3" /> -->
-		<!-- </template> -->
+		<template #headerbottom v-if="$userPQ.isAuthenticated && $breakpoint.lt('lg')">
+			<TopBarReuseTemplate class="mt-2 pe-3" />
+		</template>
 
 		<template #content>
 			<div class="_full_width_block">
-				<!-- TODO: PQ Backups - commented out Web3 features -->
-				<!-- <Account_Activate_Reminder /> -->
+				<Account_Activate_Reminder />
 				<Offline_Reminder />
-				<div class="_full_width_block">
-					<!-- TODO: PQ Backups - commented out Web3 features -->
-					<!-- <RestoreFromShares @restore="setSecret" @account="setAccount" :key="updateKey" /> -->
-					<div class="alert alert-info text-center">
-						<h5>Coming Soon</h5>
-						<p class="mb-0">Restore functionality for PQ accounts is under development.</p>
-					</div>
-				</div>
-				<!-- TODO: PQ Backups - commented out Web3 features -->
-				<!-- <template v-if="$user.registeredMetaWallet"> -->
-				<div v-if="data.fetched">
-					<div v-if="!data.items.length" class="mt-3">
-						<div class="text-center fs-2 mb-3">No backups found</div>
+				<template v-if="$userPQ.isAuthenticated">
+					<div v-if="data.fetched">
+						<div v-if="!data.items.length" class="mt-3">
+							<div class="text-center fs-2 mb-3">No backups found</div>
 
-						<div class="row justify-content-center gx-2 mb-2" v-if="!data.searched">
-							<div class="col-lg-12 col-xl-10">
-								<button type="button" class="btn btn-dark w-100" @click="$router.push({ name: 'backup_create' })"
-									:disabled="false">Create backup</button>
+							<div class="row justify-content-center gx-2 mb-2" v-if="!data.searched">
+								<div class="col-lg-12 col-xl-10">
+									<button type="button" class="btn btn-dark w-100" @click="$router.push({ name: 'backup_create' })"
+										:disabled="false">Create backup</button>
+								</div>
 							</div>
 						</div>
+						<div class="_data_block mb-3" v-for="(backup, $index) in data.items"
+								:key="backup.id + backup.fetchTimestamp">
+								<BackupItem :backup="backup" />
+						</div>
 					</div>
-					<!-- TODO: PQ Backups - commented out Web3 features -->
-					<!-- <div class="_data_block mb-3" v-for="(backup, $index) in data.items"
-							:key="backup.id + backup.fetchTimestamp">
-							<BackupItem :backup="backup" />
-						</div> -->
-				</div>
 
-				<Paginate :page-count="parseInt(data.totalPages)" :click-handler="setPage"
-					:force-page="parseInt(data.query.page)"> </Paginate>
-				<!-- </template> -->
+					<Paginate :page-count="parseInt(data.totalPages)" :click-handler="setPage"
+						:force-page="parseInt(data.query.page)"> </Paginate>
+				</template>
 			</div>
 		</template>
 	</FullContentBlock>
@@ -105,28 +92,22 @@
 
 <script setup>
 import FullContentBlock from '@/components/FullContentBlock.vue';
-// TODO: PQ Backups - commented out Web3 features
-// import Account_Activate_Reminder from '@/components/Account_Activate_Reminder.vue';
 import { createReusableTemplate } from '@vueuse/core';
 import Offline_Reminder from '../../components/Offline_Reminder.vue';
-
-// TODO: PQ Backups - commented out Web3 features
-// import BackupItem from './Backup_Item.vue';
+import Account_Activate_Reminder from '@/components/Account_Activate_Reminder.vue';
+import BackupItem from './Backup_Item.vue';
 import Paginate from '@/components/Paginate.vue';
-import { ref, onMounted, inject, onUnmounted, watch, provide } from 'vue';
-// import axios from 'axios';
+import { ref, onMounted, inject, onUnmounted, watch } from 'vue';
+import axios from 'axios';
 
 const $router = inject('$router');
-// TODO: PQ Backups - commented out Web3 features
-// const $web3 = inject('$web3');
+const $web3 = inject('$web3');
 const $userPQ = inject('$userPQ');
-// const $socket = inject('$socket');
-// const $loader = inject('$loader');
-// const $swal = inject('$swal');
+const $socket = inject('$socket');
+const $loader = inject('$loader');
+const $swal = inject('$swal');
 
-const [TopBarTemplate] = createReusableTemplate();
-// TODO: PQ Backups - commented out Web3 features
-// const [TopBarTemplate, TopBarReuseTemplate] = createReusableTemplate();
+const [TopBarTemplate, TopBarReuseTemplate] = createReusableTemplate();
 
 const dataDefault = {
 	query: { sort: 'desc', page: 1, limit: 5, s: '' },
@@ -141,72 +122,68 @@ const dataDefault = {
 const data = ref(JSON.parse(JSON.stringify(dataDefault)));
 
 onMounted(async () => {
-	// TODO: PQ Backups - commented out Web3 features
-	// if (!$socket.connected && $userPQ.isOnline) await $socket.connect();
-	// $socket.on('BACKUP_UPDATE', backupUpdateListener);
-	// $socket.on('DISPATCH', dispatchListener);
+	if (!$socket.connected && $userPQ.isOnline) await $socket.connect();
+	$socket.on('BACKUP_UPDATE', backupUpdateListener);
+	$socket.on('DISPATCH', dispatchListener);
 	data.value = JSON.parse(JSON.stringify(dataDefault));
-	// await $user.checkMetaWallet();
-	// getList();
+	getList();
 });
 
-// onUnmounted(async () => {
-// 	$socket.off('BACKUP_UPDATE', backupUpdateListener);
-// 	$socket.off('DISPATCH', dispatchListener);
-// 	if ($socket.connected) $socket.disconnect();
-// });
+onUnmounted(async () => {
+	$socket.off('BACKUP_UPDATE', backupUpdateListener);
+	$socket.off('DISPATCH', dispatchListener);
+	if ($socket.connected) $socket.disconnect();
+});
 
-// TODO: PQ Backups - commented out Web3 features
-// const backupUpdateListener = async (backupUpdateData) => {
-// 	try {
-// 		const idx = data.value.items.findIndex((b) => b.tag === backupUpdateData.backup.tag);
-// 		if (idx > -1) {
-// 			data.value.items[idx] = backupUpdateData.backup;
+const backupUpdateListener = async (backupUpdateData) => {
+	try {
+		const idx = data.value.items.findIndex((b) => b.tag === backupUpdateData.backup.tag);
+		if (idx > -1) {
+			data.value.items[idx] = backupUpdateData.backup;
 
-// 			if (backupUpdateData.action === 'updateBackupDisabled') {
-// 				$swal.fire({
-// 					icon: 'success',
-// 					title: 'Backup updated',
-// 					timer: 5000,
-// 				});
-// 			}
-// 			if (backupUpdateData.action === 'updateShareDelay') {
-// 				$swal.fire({
-// 					icon: 'success',
-// 					title: 'Delay updated',
-// 					timer: 5000,
-// 				});
-// 			}
-// 			if (backupUpdateData.action === 'updateShareDisabled') {
-// 				$swal.fire({
-// 					icon: 'success',
-// 					title: 'Share updated',
-// 					timer: 5000,
-// 				});
-// 			}
-// 		}
-// 	} catch (error) {
-// 		console.error(error);
-// 	}
-// };
+			if (backupUpdateData.action === 'updateBackupDisabled') {
+				$swal.fire({
+					icon: 'success',
+					title: 'Backup updated',
+					timer: 5000,
+				});
+			}
+			if (backupUpdateData.action === 'updateShareDelay') {
+				$swal.fire({
+					icon: 'success',
+					title: 'Delay updated',
+					timer: 5000,
+				});
+			}
+			if (backupUpdateData.action === 'updateShareDisabled') {
+				$swal.fire({
+					icon: 'success',
+					title: 'Share updated',
+					timer: 5000,
+				});
+			}
+		}
+	} catch (error) {
+		console.error(error);
+	}
+};
 
-// const dispatchListener = async (tx) => {
-// 	const idx = data.value.items.findIndex((i) => i.tag === tx.methodData.tag);
-// 	if (idx > -1 && tx.status === 'PROCESSING') {
-// 		data.value.items[idx].processingTx = tx;
-// 		data.value.items[idx].fetchTimestamp++;
-// 	}
-// };
+const dispatchListener = async (tx) => {
+	const idx = data.value.items.findIndex((i) => i.tag === tx.methodData.tag);
+	if (idx > -1 && tx.status === 'PROCESSING') {
+		data.value.items[idx].processingTx = tx;
+		data.value.items[idx].fetchTimestamp++;
+	}
+};
 
-// TODO: PQ Backups - commented out Web3 features
-// watch(
-// 	() => $user.registeredMetaWallet,
-// 	async (newVal) => {
-// 		if (newVal) {
-// 			getList();
-// 		}
-// 	},
-// );
+watch(
+	() => $userPQ.isAuthenticated,
+	async (newVal) => {
+		if (newVal) {
+			getList();
+		}
+	},
+);
 
 const resetSearch = async () => {
 	data.value.query.s = null;
@@ -214,56 +191,46 @@ const resetSearch = async () => {
 	data.value.items = [];
 	data.value.totalPages = 0;
 	data.value.totalResults = 0;
-	// TODO: PQ Backups - commented out Web3 features
-	// getList();
+	getList();
 };
 
 const search = async () => {
-	// TODO: PQ Backups - commented out Web3 features
-	// if (!data.value.query.s) return;
-	// getList();
+	if (!data.value.query.s) return;
+	getList();
 };
 
 function setPage(page) {
 	data.value.query.page = page;
-	// TODO: PQ Backups - commented out Web3 features
-	// getList();
+	getList();
 }
 
-// TODO: PQ Backups - commented out Web3 features
-// async function getList() {
-// 	$loader.show();
-// 	data.value.fetching = true;
-// 	try {
-// 		const res = (
-// 			await axios.get(API_URL + '/backup/getList', {
-// 				params: {
-// 					...data.value.query,
-// 					wallet: $user.account?.address,
-// 					chainId: $web3.mainChainId,
-// 				},
-// 			})
-// 		).data;
-// 		data.value.items = res.results;
-// 		data.value.totalPages = res.totalPages;
-// 		data.value.totalResults = res.totalResults;
-// 	} catch (error) {
-// 		console.error(error);
-// 		//$swal.fire({
-// 		//	icon: 'error',
-// 		//	title: 'Fetch error',
-// 		//	footer: error.toString(),
-// 		//	timer: 30000,
-// 		//});
-// 	}
-// 	$loader.hide();
-// 	data.value.fetched = true;
-// 	data.value.fetching = false;
-// 	if (data.value.query.s) data.value.searched = true;
-// }
-
 async function getList() {
-	// TODO: PQ Backups - stub function
+	if (!$userPQ.isAuthenticated) return;
+	$loader.show();
+	data.value.fetching = true;
+	try {
+		const evmSkey = await $userPQ.getEvmPrivateKey();
+		if (!evmSkey) throw new Error('No EVM key');
+		const wallet = new $web3.ethers.Wallet(evmSkey);
+
+		const res = (
+			await axios.get(API_URL + '/backup/getList', {
+				params: {
+					...data.value.query,
+					wallet: wallet.address,
+					chainId: $web3.mainChainId,
+				},
+			})
+		).data;
+		data.value.items = res.results;
+		data.value.totalPages = res.totalPages;
+		data.value.totalResults = res.totalResults;
+	} catch (error) {
+		console.error(error);
+	}
+	$loader.hide();
 	data.value.fetched = true;
+	data.value.fetching = false;
+	if (data.value.query.s) data.value.searched = true;
 }
 </script>

@@ -3,8 +3,11 @@
 
 	<div class="_warning">
 		<i class="_icon_warning bg-warning mb-2"></i>
-		<div class="fw-bold mb-2">Verify before sharing your Public Key</div>
-		<div class="text-secondary">Sharing public keys over unsecured channels may expose you to risks. Always verify the recipient authenticity.</div>
+		<div class="fw-bold mb-2">Verify before sharing your User Hash</div>
+		<div class="text-secondary">
+			Sharing public keys over unsecured channels may expose you to risks. Always verify the
+			recipient authenticity.
+		</div>
 	</div>
 
 	<div class="d-flex justify-content-center mt-3">
@@ -22,18 +25,14 @@ import { inject } from 'vue';
 import copyToClipboard from '@/utils/copyToClipboard';
 
 const $mitt = inject('$mitt');
-const $user = inject('$user');
-
-const { data } = defineProps({
-	data: { type: Object, required: true },
-});
+const $userPQ = inject('$userPQ');
 
 function cancel() {
 	$mitt.emit('swal::close', false);
 }
 
 function copy() {
-	copyToClipboard($user.account.publicKey);
+	copyToClipboard($userPQ.currentUserHash);
 	$mitt.emit('swal::close', 'ok');
 }
 </script>

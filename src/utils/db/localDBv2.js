@@ -11,8 +11,10 @@ class LocalDBv2 {
   constructor() {
     this.isOnline = navigator.onLine;
     this.isLocalStash = false;
+    this.isLocalStorageStash = false;
     this.db = null;
     this.syncEngine = null;
+    this.storageSyncEngine = null;
   }
 
   setAuthProvider(getSignSkey) {
@@ -24,6 +26,8 @@ class LocalDBv2 {
   }
 
   async init() {
+    if (this.db) return this.db;
+
     console.log("→ Starting DB initialization");
 
     try {
@@ -62,6 +66,25 @@ class LocalDBv2 {
         }
       });
 
+      await this.initStorageSyncEngine();
+
+      const storagePending = await this.getPendingStorageChanges();
+      this.isLocalStorageStash = storagePending.length > 0;
+
+      if (this.storageSyncEngine) {
+        this.storageSyncEngine.stream.subscribe(() => {
+          console.debug("user_storage_synced shape updated");
+
+          if (this.isLocalStorageStash) {
+            setTimeout(() => {
+              if (this.#getSignSkey) {
+                this.sendPendingStorageChanges(this.#getSignSkey());
+              }
+            }, 1200);
+          }
+        });
+      }
+
       console.log("→ DB initialized");
     } catch (err) {
       console.error("DB init failed:", err);
@@ -78,7 +101,7 @@ class LocalDBv2 {
       const { setOffline } = useOnlineStatus();
       this.syncEngine = await this.db.electric.syncShapeToTable({
         shape: {
-          url: new URL(`/api/user_card`, window.location.origin).toString(),
+          url: `${ELECTRIC_API_URL}/user_card`,
           params: {
             table: "user_cards",
           },
@@ -98,6 +121,20 @@ class LocalDBv2 {
         throw e;
       }
     }
+  }
+
+  async initStorageSyncEngine() {
+    if (this.storageSyncEngine) return;
+    try {
+      this.storageSyncEngine = await this.db.electric.syncShapeToTable({
+        shape: {
+          url: `${ELECTRIC_API_URL}/user_storage`,
+          params: { table: "user_storage" }
+        },
+        table: "user_storage_synced", primaryKey: ["user_hash", "uuid"], shapeKey: "user_storage_public",
+        onError: (e) => console.error('Storage sync error:', e),
+      });
+    } catch (e) { console.log('Storage sync init:', e.message); }
   }
 
   async getUsers() {
@@ -146,7 +183,7 @@ class LocalDBv2 {
         contact_pkey = EXCLUDED.contact_pkey,
         contact_cert = EXCLUDED.contact_cert,
         name       = EXCLUDED.name,
-        operation  = 'update',
+        operation  = CASE WHEN user_cards_local.operation = 'insert' THEN 'insert' ELSE 'update' END,
         changed_at = NOW()
       `,
       [user_hash, sign_pkey, crypt_pkey, crypt_cert, contact_pkey, contact_cert, name || ""]
@@ -172,9 +209,8 @@ class LocalDBv2 {
 
   async sendPendingChanges(signSkey) {
     if (!navigator.onLine || !this.isLocalStash) return;
-
     if (!signSkey) {
-      console.warn('sign_skey required for sending pending changes');
+      console.warn('sign_skey required');
       return;
     }
 
@@ -185,52 +221,34 @@ class LocalDBv2 {
     }
 
     const mutations = changes.map((row) => {
-      if (row.operation === "insert") {
-        const { mutation } = api.createUserCard(row.name, {
-          user_hash: row.user_hash,
-          sign_pkey: this.#base64ToArray(row.sign_pkey),
-          contact_pkey: this.#base64ToArray(row.contact_pkey),
-          contact_cert: this.#base64ToArray(row.contact_cert),
-          crypt_pkey: this.#base64ToArray(row.crypt_pkey),
-          crypt_cert: this.#base64ToArray(row.crypt_cert),
-          sign_skey: signSkey,
+      if (!row.sign_pkey || !row.contact_pkey || !row.crypt_pkey) {
+        console.warn(`[localDB] Skipping mutation for ${row.user_hash} due to missing keys:`, {
+          hasSign: !!row.sign_pkey,
+          hasContact: !!row.contact_pkey,
+          hasCrypt: !!row.crypt_pkey
         });
-        return mutation;
+        return null;
       }
-
-      if (row.operation === "update") {
-        const ownerTimestamp = Math.floor(Date.now() / 1000);
-        const { mutation } = api.createUserCard(row.name, {
-          user_hash: row.user_hash,
-          sign_pkey: this.#base64ToArray(row.sign_pkey),
-          contact_pkey: this.#base64ToArray(row.contact_pkey),
-          contact_cert: this.#base64ToArray(row.contact_cert),
-          crypt_pkey: this.#base64ToArray(row.crypt_pkey),
-          crypt_cert: this.#base64ToArray(row.crypt_cert),
-          sign_skey: signSkey,
-        });
-        mutation.type = "update";
-        return mutation;
-      }
-
-      return null;
+      const m = api.createUserCard(row.name || 'User', {
+        user_hash: row.user_hash,
+        sign_pkey: this.#base64ToArray(row.sign_pkey),
+        contact_pkey: this.#base64ToArray(row.contact_pkey),
+        contact_cert: this.#base64ToArray(row.contact_cert),
+        crypt_pkey: this.#base64ToArray(row.crypt_pkey),
+        crypt_cert: this.#base64ToArray(row.crypt_cert),
+        sign_skey: signSkey,
+      });
+      if (row.operation === 'update') m.mutation.type = 'update';
+      return m.mutation;
     }).filter(Boolean);
 
     try {
       const resp = await api.ingestWithAuth(mutations, signSkey);
-      const responseText = await resp.text();
-      console.log('>>> Mutations sent:', JSON.stringify(mutations, null, 2));
-      console.log('>>> Ingest response status:', resp.status);
-      console.log('>>> Ingest response body:', responseText);
-      if (!resp.ok) {
-        console.warn('Ingest failed:', resp.status, responseText);
-        return;
-      }
-
-      console.log(`→ Sent ${changes.length} local user changes`);
-    } catch (err) {
-      console.warn("→ Sync of local users failed, will retry later", err);
-    }
+      const txt = await resp.text();
+      console.log('User mutations:', mutations.length, resp.status, txt);
+      if (!resp.ok) { console.warn('Failed:', txt); return; }
+      console.log(`Sent ${changes.length} user changes`);
+    } catch (e) { console.warn('Sync failed:', e); }
   }
 
   #base64ToArray(base64) {
@@ -239,11 +257,132 @@ class LocalDBv2 {
     return Uint8Array.from(binary, c => c.charCodeAt(0));
   }
 
+  // ========== User Storage Methods ==========
+
+  async getUserStorage(userHash, uuid) {
+    if (!this.db) return null;
+    const { rows } = await this.db.query(
+      `SELECT * FROM user_storage_latest WHERE user_hash = $1 AND uuid = $2`,
+      [userHash, uuid]
+    );
+    return rows[0] || null;
+  }
+
+  async getAllUserStorages(userHash) {
+    if (!this.db) return [];
+    const { rows } = await this.db.query(
+      `SELECT * FROM user_storage_latest WHERE user_hash = $1 ORDER BY updated_at DESC`,
+      [userHash]
+    );
+    return rows;
+  }
+
+  async upsertUserStorage({ userHash, uuid, valueB64, hashB64 = null }) {
+    if (!this.db) {
+      console.error('DB not initialized');
+      return;
+    }
+
+    console.log('Inserting user_storage:', { userHash, uuid, valueB64: valueB64?.slice(0, 20) + '...' });
+
+    try {
+      const latest = await this.getUserStorage(userHash, uuid);
+      const newVersion = latest ? Number(latest.version) + 1 : 0;
+      console.log('New version:', newVersion);
+
+      await this.db.query(
+        `INSERT INTO user_storage_synced (user_hash, uuid, version, value_b64, hash_b64, deleted_flag) VALUES ($1, $2, $3, $4, $5, FALSE)`,
+        [userHash, uuid, newVersion, valueB64, hashB64]
+      );
+      console.log('Insert successful');
+
+      await this.upsertStorageLocal({ userHash, uuid, valueB64, hashB64, version: newVersion });
+    } catch (error) {
+      console.error('Storage insert failed:', error);
+    }
+  }
+
+  async deleteUserStorage(userHash, uuid) {
+    if (!this.db) return;
+    await this.db.query(
+      `DELETE FROM user_storage_synced WHERE user_hash = $1 AND uuid = $2`,
+      [userHash, uuid]
+    );
+    await this.markStorageForDeletion(userHash, uuid);
+  }
+
+  // ========== Pending Storage Changes ==========
+
+  async getPendingStorageChanges() {
+    if (!this.db) return [];
+    const { rows } = await this.db.query(`SELECT * FROM user_storage_local`);
+    return rows;
+  }
+
+  async upsertStorageLocal({ userHash, uuid, valueB64, hashB64 = null, version = 0 }) {
+    if (!this.db) return;
+    await this.db.query(
+      `
+      INSERT INTO user_storage_local (user_hash, uuid, value_b64, hash_b64, version, operation)
+      VALUES ($1, $2, $3, $4, $5, 'insert')
+      ON CONFLICT (user_hash, uuid) DO UPDATE SET
+        value_b64 = EXCLUDED.value_b64,
+        hash_b64 = EXCLUDED.hash_b64,
+        version = EXCLUDED.version,
+        operation = CASE WHEN user_storage_local.operation = 'insert' THEN 'insert' ELSE 'update' END,
+        changed_at = NOW()
+      `,
+      [userHash, uuid, valueB64, hashB64, version]
+    );
+    this.isLocalStorageStash = true;
+  }
+
+  async markStorageForDeletion(userHash, uuid) {
+    if (!this.db) return;
+    await this.db.query(
+      `
+      INSERT INTO user_storage_local (user_hash, uuid, operation)
+      VALUES ($1, $2, 'delete')
+      ON CONFLICT (user_hash, uuid) DO UPDATE SET
+        operation = 'delete',
+        changed_at = NOW()
+      `,
+      [userHash, uuid]
+    );
+    this.isLocalStorageStash = true;
+  }
+
+  async sendPendingStorageChanges(signSkey) {
+    if (!navigator.onLine || !this.isLocalStorageStash) return;
+    if (!signSkey) { console.warn('sign_skey required'); return; }
+
+    const changes = await this.getPendingStorageChanges();
+    if (changes.length === 0) { this.isLocalStorageStash = false; return; }
+
+    const mutations = changes.map(row => {
+      if (row.operation === 'insert' || row.operation === 'update') {
+        const m = api.createStorageMutation(
+          row.user_hash, row.uuid, row.value_b64, row.hash_b64,
+          row.version, Math.floor(Date.now() / 1000), signSkey
+        );
+        if (row.operation === 'update') m.type = 'update';
+        return m;
+      }
+      return null;
+    }).filter(Boolean);
+
+    try {
+      const resp = await api.ingestWithAuth(mutations, signSkey);
+      const txt = await resp.text();
+      console.log('Storage mutations:', mutations.length, resp.status, txt);
+      if (!resp.ok) { console.warn('Failed:', txt); return; }
+      console.log(`Sent ${changes.length} storage changes`);
+    } catch (e) { console.warn('Sync failed:', e); }
+  }
+
   async debugLocalState() {
     const users = await this.getUsers();
-
     const pending = await this.getPendingChanges();
-
     console.table({ syncedAndLocalView: users, pendingChanges: pending });
   }
 }

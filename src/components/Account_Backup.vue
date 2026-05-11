@@ -21,7 +21,7 @@
 				<div class="d-flex justify-content-between align-items-center">
 					<div class="fw-bold fs-5">Gnosis blockchain</div>
 
-					<div class="_icon_wifi" :class="[$user.isOnline ? 'bg-success' : 'bg-danger']"></div>
+					<div class="_icon_wifi" :class="[$userPQ.isOnline ? 'bg-success' : 'bg-danger']"></div>
 				</div>
 
 				<div class="text-secondary">Secure your key parts with additional security features on the decentralised network.</div>
@@ -93,7 +93,7 @@
 import { inject, ref, watch, computed } from 'vue';
 
 const $enigma = inject('$enigma');
-const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $swal = inject('$swal');
 const $router = inject('$router');
 const $mitt = inject('$mitt');
@@ -130,7 +130,14 @@ watch(
 );
 
 const createShare = () => {
-	if (!$user.checkOnline()) return;
+	if (!$userPQ.isOnline) {
+		$swal.fire({
+			icon: 'warning',
+			title: 'You are offline',
+			text: 'Please check your internet connection',
+		});
+		return;
+	}
 	$mitt.emit('modal::close');
 	$router.push({ name: 'backup_create' });
 };
@@ -139,14 +146,17 @@ const backup = async () => {
 	dirty.value = true;
 	if (passwordErrors.value.length) return;
 
-	const backup = {
-		account: {
-			publicKey: $user.account.publicKey,
-			privateKey: $user.account.privateKey,
-		},
-		accountInfo: $user.accountInfo,
-		contacts: $user.contacts,
-	};
+	const backup = await $userPQ.exportBackup();
+	if (!backup) {
+		$swal.fire({
+			icon: 'error',
+			title: 'Backup error',
+			text: 'Unable to export backup data',
+			timer: 5000,
+		});
+		return;
+	}
+
 	const jsonString = JSON.stringify(backup, null, 2);
 
 	let backupString;
@@ -162,7 +172,7 @@ const backup = async () => {
 	const url = URL.createObjectURL(blob);
 	const a = document.createElement('a');
 	a.href = url;
-	a.download = generateBackupName($user.accountInfo.name);
+	a.download = generateBackupName($userPQ.currentUser?.name || 'account');
 	document.body.appendChild(a);
 	a.click();
 	document.body.removeChild(a);

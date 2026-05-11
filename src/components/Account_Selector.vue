@@ -1,10 +1,25 @@
 <template>
 	<div>
-		<!-- TODO: REFACTOR - Change $userPQ.pqUserCards to $userPQ.myLocalUsers -->
-		<div class="_contacts_list mb-2" v-if="$userPQ.myLocalUsers">
+		<!-- <div class="_contacts_list mb-2" v-if="$user.vaults.length">
+			<div class="_search" v-if="$user.vaults.length > 5">
+				<div class="_input_search">
+					<div class="_icon_search"></div>
+					<input class="" type="text" v-model="search" autocomplete="off" placeholder="Search..." />
+					<div class="_icon_times" v-if="search" @click="search = null"></div>
+				</div>
+			</div>
+			<div class="_list">
+				<div class="_contact" @click="select(account)" v-for="account in filteredList"
+					:class="{ _selected: account.publicKey === selected?.publicKey, _connected: account.publicKey === $user.account?.publicKey }">
+					<Account_Item :account="account" />
+				</div>
+			</div>
+		</div> -->
+
+		<div class="_contacts_list mb-2" v-if="$userPQ.pqUserCards">
 			<h6>Select Account</h6>
 
-			<div class="_search" v-if="$userPQ.myLocalUsers.length > 5">
+			<div class="_search" v-if="$userPQ.pqUserCards.length > 5">
 				<div class="_input_search">
 					<div class="_icon_search"></div>
 					<input class="" type="text" v-model="search" autocomplete="off" placeholder="Search..." />
@@ -13,8 +28,7 @@
 			</div>
 
 			<div class="_list">
-				<!-- TODO: REFACTOR - pqUserCards -> myLocalUsers -->
-				<div class="_contact" @click="selectPQ(account)" v-for="account in $userPQ.myLocalUsers"
+				<div class="_contact" @click="selectPQ(account)" v-for="account in $userPQ.pqUserCards"
 					:class="{ _selected: account.user_hash === selected?.user_hash, _connected: account.user_hash === $userPQ.currentUser?.user_hash }">
 					<Account_Item_PQ :account="account" />
 				</div>
@@ -125,15 +139,13 @@ const search = ref();
 onMounted(async () => {
 	console.log('account selector mounted')
 
-	// $user.vaults = await $encryptionManager.getVaults(); // TODO: PHASE 4 - Remove Web3
+	// $user.vaults = await $encryptionManager.getVaults();
 
-	// TODO: REFACTOR - Store already has myLocalUsers, no need to re-fetch
-	// $userPQ.pqUserCards = await $encryptionManagerPQ.getLocalUserCards();
-	// Use: $userPQ.myLocalUsers instead (already populated by store)
+	$userPQ.pqUserCards = await $encryptionManagerPQ.getLocalUserCards();
 
 	selected.value = $userPQ.currentUser;
 
-	console.log('pq user vaults', $userPQ.myLocalUsers) // TODO: REFACTOR - was pqUserCards
+	console.log('pq user vaults', $userPQ.pqUserCards)
 
 	// if (!$user.account && $user.vaults.length) {
 	// 	let currentUser = $user.vaults.find((u) => u.current);

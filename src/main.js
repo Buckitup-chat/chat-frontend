@@ -2,15 +2,12 @@ import { createApp } from 'vue';
 
 import App from './App.vue';
 
-// 
+//
 import 'bootstrap';
 import './scss/app.scss';
 
-// TODO: PHASE 4 - Remove Web3 stores after migration complete
-// TODO: REFACTOR - Use Pinia plugin for consistent DI instead of globalProperties
-// @see https://pinia.vuejs.org/core-concepts/plugin.html
-import { web3Store } from './store/web3.store.js'; // TODO: PHASE 4 - Delete after PQ migration
-import { userStore } from './store/user.store.js'; // TODO: PHASE 4 - Delete after PQ migration
+import { web3Store } from './store/web3.store.js';
+import { userStore } from './store/user.store.js';
 import { userPQStore } from './store/userPQ.store';
 import { createPinia } from 'pinia';
 import $socket from './libs/socket';
@@ -59,15 +56,10 @@ app.config.globalProperties.$location = window.location;
 
 app.provide('$socket', $socket);
 
-// TODO: REFACTOR - Create Pinia plugin to handle store injection consistently
-// Remove mixed usage of globalProperties and provide/inject
-// @see https://pinia.vuejs.org/core-concepts/plugin.html#automatically-adding-state
-
-// web3Store - TODO: PHASE 4 - Remove after PQ migration
+// web3Store
 app.config.globalProperties.$web3 = web3Store();
 app.provide('$web3', web3Store());
 
-// userStore (Web3) - TODO: PHASE 4 - Delete file after PQ migration
 app.config.globalProperties.$user = userStore();
 app.provide('$user', userStore());
 

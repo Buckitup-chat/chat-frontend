@@ -58,14 +58,12 @@
 import { ref, inject } from 'vue';
 import errorMessage from '@/utils/errorMessage';
 
-const $web3 = inject('$web3');
 const $swal = inject('$swal');
-const $user = inject('$user');
+const $userPQ = inject('$userPQ');
 const $mitt = inject('$mitt');
 const $enigma = inject('$enigma');
 const $router = inject('$router');
 const $swalModal = inject('$swalModal');
-const $encryptionManager = inject('$encryptionManager');
 
 const fileString = ref();
 const requestDecrypt = ref();
@@ -121,59 +119,35 @@ const decrypt = async () => {
 
 const applyBackup = async (data) => {
 	try {
-		const account = await $user.generateAccount(data.account.privateKey);
-		const accountInfo = data.accountInfo;
+		if (!data.identity || !data.keys) {
+			$swal.fire({
+				icon: 'error',
+				title: 'Invalid backup format',
+				text: 'This backup file is not compatible with the current version',
+				timer: 10000,
+			});
+			return;
+		}
 
-		const idx = $user.vaults.findIndex((a) => a.publicKey === account.publicKey);
-		if (idx > -1) {
+		const existing = $userPQ.myLocalUsers?.find(u => u.user_hash === data.identity.user_hash);
+		if (existing) {
 			const confirmed = await $swalModal.value.open({
 				id: 'confirm',
 				title: 'Account restore',
-				content: `
-                    Account <strong>${accountInfo.name}</strong> already present on this device.
-                    <br> Are you sure you want to replace it with one from backup?
-                    `,
+				content: `Account <strong>${data.identity.name}</strong> already exists. Replace it?`,
 			});
 			if (!confirmed) {
 				fileInput.value = null;
 				fileInputKey.value++;
 				return;
 			}
-
-			await $encryptionManager.removeVault($user.vaults[idx].vaultId);
-
-			$user.vaults = await $encryptionManager.getVaults();
 		}
 
-		await $encryptionManager.createVault({
-			keyOptions: {
-				username: accountInfo.name,
-				displayName: accountInfo.name,
-			},
-			address: account.address,
-			publicKey: account.publicKey,
-			avatar: accountInfo.avatar,
-			notes: accountInfo.notes,
-		});
-
-		$user.account = account;
-
-		await $user.openStorage({
-			accountInfo: {
-				name: accountInfo.name,
-				notes: accountInfo.notes,
-				avatar: accountInfo.avatar,
-			},
-		});
-
-		if (data.contacts && data.contacts.length) {
-			//await $user.initializeContacts(data.contacts);
-		}
+		await $userPQ.importBackup({ identity: data.identity, keys: data.keys });
 
 		$mitt.emit('account::created');
-
-		$router.replace({ name: 'account_info' });
 		$mitt.emit('modal::close');
+		$router.replace({ name: 'account_info' });
 	} catch (error) {
 		$swal.fire({
 			icon: 'error',

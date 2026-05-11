@@ -1,6 +1,6 @@
 <template>
-	<div v-if="true">
-		<div class="alert alert-info">
+	<div v-if="showReminder">
+		<div>
 			<div class="_divider">
 				Activate Your Profile
 				<InfoTooltip class="align-self-center ms-2" :content="'Register meta address'" />
@@ -13,13 +13,29 @@
 					<button type="button" class="btn btn-dark w-100"
 						@click="$mitt.emit('modal::open', { id: 'account_activate' })">Activate</button>
 				</div>
-				<div class="text-secondary text-center mb-3">Web3 account activation is under development for PQ accounts.</div>
 			</div>
 		</div>
 	</div>
 </template>
 
 <script setup>
-import { inject } from 'vue';
+import { ref, inject, onMounted } from 'vue';
+import { deriveEvmAccount } from '@/utils/deriveEvmAccount';
+import { web3Store } from '@/store/web3.store';
+
 const $mitt = inject('$mitt');
+const $userPQ = inject('$userPQ');
+
+const showReminder = ref(true);
+
+onMounted(async () => {
+	const evmSkey = await $userPQ.getEvmPrivateKey();
+	if (evmSkey) {
+		const account = await deriveEvmAccount(evmSkey);
+		const metaPublicKey = await web3Store().registryContract.metaPublicKeys(account.address);
+		if (metaPublicKey && metaPublicKey.length > 2) {
+			showReminder.value = false;
+		}
+	}
+});
 </script>
