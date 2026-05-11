@@ -101,7 +101,7 @@ class LocalDBv2 {
       const { setOffline } = useOnlineStatus();
       this.syncEngine = await this.db.electric.syncShapeToTable({
         shape: {
-          url: new URL(`/api/user_card`, window.location.origin).toString(),
+          url: `${ELECTRIC_API_URL}/user_card`,
           params: {
             table: "user_cards",
           },
@@ -127,7 +127,10 @@ class LocalDBv2 {
     if (this.storageSyncEngine) return;
     try {
       this.storageSyncEngine = await this.db.electric.syncShapeToTable({
-        shape: { url: new URL(`/api/user_storage`, window.location.origin).toString(), params: { table: "user_storage" } },
+        shape: {
+          url: `${ELECTRIC_API_URL}/user_storage`,
+          params: { table: "user_storage" }
+        },
         table: "user_storage_synced", primaryKey: ["user_hash", "uuid"], shapeKey: "user_storage_public",
         onError: (e) => console.error('Storage sync error:', e),
       });

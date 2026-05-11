@@ -68,6 +68,7 @@ export default defineConfig(({ command }) => {
 		],
 		define: {
 			//sodium,
+			ELECTRIC_API_URL: JSON.stringify(isBuild ? 'https://buckitup.xyz/electric/v1' : 'http://localhost:5173/api'),
 			API_URL: JSON.stringify('https://buckitup.xyz'),
 			CONNECTOR_URL: JSON.stringify(productionApi ? 'wss://buckitupss.appdev.pp.ua/connector' : 'ws://localhost:3953'),
 			IS_PRODUCTION: production,

@@ -8,8 +8,13 @@
 				<Account_Info :account-in="accountIn" ref="accountInfo" @update="handleUpdate"
 					@avatar-draft="handleAvatarDraft" />
 
-				<div v-if="hasChanges" class="mt-3 text-center">
-					<button class="btn btn-primary rounded-pill w-100 fw-bold" @click="saveProfile">Save Changes</button>
+				<div class="mt-3 text-center">
+					<Transition name="slide-fade">
+						<button v-if="hasChanges" :disabled="!hasChanges" class="btn btn-primary rounded-pill w-100 fw-bold"
+							@click="saveProfile">
+							Save Changes
+						</button>
+					</Transition>
 				</div>
 
 				<div class="d-flex justify-content-center align-items-center mt-4 mb-3">
@@ -33,20 +38,6 @@
 						<i class="_icon_delete bg-white"></i>
 					</button>
 				</div>
-
-				<!-- <div class="mt-4 p-3 bg-light rounded">
-					<div class="small text-muted mb-2">User Hash</div>
-					<div class="text-break" style="word-break: break-all; font-size: 0.8rem;">
-						{{ accountIn.user_hash }}
-					</div>
-				</div>
-
-				<div class="mt-3 p-3 bg-light rounded">
-					<div class="small text-muted mb-2">Sign Public Key</div>
-					<div class="text-break" style="word-break: break-all; font-size: 0.7rem;">
-						{{ accountIn.sign_pkey }}
-					</div>
-				</div> -->
 			</div>
 		</template>
 	</FullContentBlock>
@@ -75,6 +66,19 @@
 		height: 1.5rem;
 		width: 1.5rem;
 	}
+}
+
+.slide-fade-enter-active {
+	transition: all 0.4s ease-out;
+}
+
+.slide-fade-leave-active {
+	transition: all 0.3s cubic-bezier(1, 0.5, 0.8, 1);
+}
+
+.slide-fade-enter-from,
+.slide-fade-leave-to {
+	opacity: 0;
 }
 </style>
 

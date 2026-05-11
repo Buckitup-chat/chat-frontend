@@ -54,6 +54,7 @@ export class EncryptionManagerPQ extends EventTarget {
     EncryptionManagerPQ.instance = this;
 
     localDB.setAuthProvider(() => this.#signSkey);
+
     this.#loadLocalUserCards()
   }
 
@@ -148,14 +149,14 @@ export class EncryptionManagerPQ extends EventTarget {
     });
 
     await this.login(userHash);
-    
+
     let avatarUuid = null;
     if (avatar instanceof Blob || avatar instanceof File) {
       avatarUuid = await this.encryptAndStoreAvatar(avatar);
     } else if (typeof avatar === 'string') {
       avatarUuid = avatar;
     }
-    
+
     await this.updateUserStorage({ name, notes, avatarUuid, avatarDataUrl });
 
     return this.#localUserCards.find(i => i.user_hash === userHash);
@@ -304,7 +305,7 @@ export class EncryptionManagerPQ extends EventTarget {
     let msg = typeof challenge === 'string'
       ? hexToBytes(challenge)
       : challenge;
-      
+
     const hash = sha256(msg);
     const signature = await secp.signAsync(hash, this.#contactSkey);
     return bytesToHex(signature.toCompactRawBytes());
@@ -376,7 +377,7 @@ export class EncryptionManagerPQ extends EventTarget {
     // 1. Encrypt profile and save to DB
     const profileJson = JSON.stringify({ name, notes, avatarUuid });
     const profileData = new TextEncoder().encode(profileJson);
-    
+
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const encryptedData = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv },
@@ -463,8 +464,9 @@ export class EncryptionManagerPQ extends EventTarget {
 
     const contactsJson = JSON.stringify(contactsArray);
     const contactsData = new TextEncoder().encode(contactsJson);
-    
+
     const iv = crypto.getRandomValues(new Uint8Array(12));
+
     const encryptedData = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv },
       await this.#deriveKeyFromCryptSkey(),
@@ -529,6 +531,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const imageData = new Uint8Array(arrayBuffer);
 
     const iv = crypto.getRandomValues(new Uint8Array(12));
+
     const encryptedData = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv },
       await this.#deriveKeyFromCryptSkey(),

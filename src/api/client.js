@@ -2,7 +2,7 @@ import { ml_dsa87 } from "@noble/post-quantum/ml-dsa.js";
 import { sha3_512 } from "@noble/hashes/sha3";
 import { bytesToHex } from "@noble/hashes/utils";
 
-const encodeBase64 = (bytes: Uint8Array | null | undefined, padded = false): string => {
+const encodeBase64 = (bytes, padded = false) => {
   if (!bytes) return "";
   let binary = "";
   bytes.forEach((b) => (binary += String.fromCharCode(b)));
@@ -10,16 +10,16 @@ const encodeBase64 = (bytes: Uint8Array | null | undefined, padded = false): str
   return padded ? result : result.replace(/=+$/, "");
 };
 
-const encodeField = (key: string, value: unknown): string => {
+const encodeField = (key, value) => {
   if (value === null) return "null";
   if (key.endsWith("_cert") || key.endsWith("_pkey")) {
-    return encodeBase64(value as Uint8Array, true);
+    return encodeBase64(value, true);
   }
   if (key.endsWith("_b64")) {
-    return typeof value === 'string' ? value : encodeBase64(value as Uint8Array, true);
+    return typeof value === 'string' ? value : encodeBase64(value, true);
   }
   if (key.endsWith("_hash")) {
-    return value as string;
+    return value;
   }
   if (value === true) return "true";
   if (value === false) return "false";
@@ -29,7 +29,7 @@ const encodeField = (key: string, value: unknown): string => {
   return String(value);
 };
 
-const buildSignatureData = (fields: Record<string, unknown>): string => {
+const buildSignatureData = (fields) => {
   return Object.keys(fields)
     .sort()
     .map((key) => encodeField(key, fields[key]))
@@ -37,20 +37,20 @@ const buildSignatureData = (fields: Record<string, unknown>): string => {
 };
 
 export const api = {
-  ingest: (mutations: any[]) => {
-    return fetch(`/api/ingest`, {
+  ingest: (mutations) => {
+    return fetch(`${ELECTRIC_API_URL}/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mutations }),
     });
   },
 
-  ingestWithAuth: async (mutations: any[], signSkey: Uint8Array): Promise<Response> => {
+  ingestWithAuth: async (mutations, signSkey) => {
     const challengeResp = await api.getChallenge();
     const challengeSig = ml_dsa87.sign(new TextEncoder().encode(challengeResp.challenge), signSkey);
     const signature = encodeBase64(challengeSig);
 
-    return fetch(`/api/ingest`, {
+    return fetch(`${ELECTRIC_API_URL}/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -63,29 +63,21 @@ export const api = {
     });
   },
 
-  getChallenge: async (): Promise<{ challenge: string; challenge_id: string }> => {
-    const resp = await fetch(`/api/challenge`, {
+  getChallenge: async () => {
+    const resp = await fetch(`${ELECTRIC_API_URL}/challenge`, {
       headers: { accept: "application/json" },
     });
     return resp.json();
   },
 
   createUserCard: (
-    name: string,
-    userData: {
-      user_hash: string;
-      sign_pkey: Uint8Array;
-      contact_pkey: Uint8Array;
-      contact_cert: Uint8Array;
-      crypt_pkey: Uint8Array;
-      crypt_cert: Uint8Array;
-      sign_skey: Uint8Array;
-    },
+    name,
+    userData,
   ) => {
     const ownerTimestamp = Math.floor(Date.now() / 1000);
     const deletedFlag = false;
 
-    const signatureFields: Record<string, unknown> = {
+    const signatureFields = {
       contact_cert: userData.contact_cert,
       contact_pkey: userData.contact_pkey,
       crypt_cert: userData.crypt_cert,
@@ -124,13 +116,13 @@ export const api = {
   },
 
   createStorageMutation: (
-    userHash: string,
-    uuid: string,
-    valueB64: string | null,
-    hashB64: string | null,
-    version: number,
-    ownerTimestamp: number,
-    signSkey: Uint8Array,
+    userHash,
+    uuid,
+    valueB64,
+    hashB64,
+    version,
+    ownerTimestamp,
+    signSkey,
     isDelete = false,
   ) => {
     return {
