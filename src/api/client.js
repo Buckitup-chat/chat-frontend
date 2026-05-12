@@ -73,6 +73,7 @@ export const api = {
   createUserCard: (
     name,
     userData,
+    mutationType = 'insert',
   ) => {
     const ownerTimestamp = Math.floor(Date.now() / 1000);
     const deletedFlag = false;
@@ -94,7 +95,7 @@ export const api = {
 
     return {
       mutation: {
-        type: "insert",
+        type: mutationType,
         modified: {
           user_hash: userData.user_hash,
           sign_pkey: encodeBase64(userData.sign_pkey, true),
@@ -124,13 +125,44 @@ export const api = {
     ownerTimestamp,
     signSkey,
     isDelete = false,
+    deletedFlag = false,
+    parentSignHash = null,
+    signHash = null,
+    existingSignB64 = null,
+    mutationType = null,
   ) => {
+    const ts = ownerTimestamp || Math.floor(Date.now() / 1000);
+    const del = isDelete || deletedFlag;
+
+    const signatureFields = {
+      deleted_flag: del,
+      owner_timestamp: ts,
+      parent_sign_hash: parentSignHash,
+      sign_hash: signHash,
+      user_hash: userHash,
+      uuid: uuid,
+      value_b64: valueB64,
+    };
+
+    const signatureData = buildSignatureData(signatureFields);
+    let finalSignB64 = existingSignB64;
+    
+    if (!finalSignB64 && signSkey) {
+        const signBytes = ml_dsa87.sign(new TextEncoder().encode(signatureData), signSkey);
+        finalSignB64 = encodeBase64(signBytes, true);
+    }
+
     return {
-      type: isDelete ? "update" : "insert",
+      type: mutationType || (isDelete ? "update" : "insert"),
       modified: {
         user_hash: userHash,
         uuid,
         value_b64: valueB64,
+        deleted_flag: del,
+        owner_timestamp: ts,
+        parent_sign_hash: parentSignHash,
+        sign_hash: signHash,
+        sign_b64: finalSignB64
       },
       syncMetadata: {
         relation: "user_storage",

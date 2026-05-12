@@ -167,15 +167,18 @@ class LocalDBv2 {
       contact_pkey,
       contact_cert,
       name,
+      deleted_flag = false,
+      owner_timestamp,
+      sign_b64
     } = userData;
 
     await this.db.query(
       `
       INSERT INTO user_cards_local (
         user_hash, sign_pkey, crypt_pkey, crypt_cert,
-        contact_pkey, contact_cert, name, operation
+        contact_pkey, contact_cert, name, deleted_flag, owner_timestamp, sign_b64, operation
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 'insert')
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN EXISTS (SELECT 1 FROM user_cards_synced WHERE user_hash = $1) THEN 'update' ELSE 'insert' END)
       ON CONFLICT (user_hash) DO UPDATE SET
         sign_pkey     = EXCLUDED.sign_pkey,
         crypt_pkey    = EXCLUDED.crypt_pkey,
@@ -183,10 +186,13 @@ class LocalDBv2 {
         contact_pkey = EXCLUDED.contact_pkey,
         contact_cert = EXCLUDED.contact_cert,
         name       = EXCLUDED.name,
-        operation  = CASE WHEN user_cards_local.operation = 'insert' THEN 'insert' ELSE 'update' END,
+        deleted_flag = EXCLUDED.deleted_flag,
+        owner_timestamp = EXCLUDED.owner_timestamp,
+        sign_b64   = EXCLUDED.sign_b64,
+        operation  = CASE WHEN EXISTS (SELECT 1 FROM user_cards_synced WHERE user_hash = $1) THEN 'update' ELSE 'insert' END,
         changed_at = NOW()
       `,
-      [user_hash, sign_pkey, crypt_pkey, crypt_cert, contact_pkey, contact_cert, name || ""]
+      [user_hash, sign_pkey, crypt_pkey, crypt_cert, contact_pkey, contact_cert, name || "", deleted_flag, owner_timestamp, sign_b64]
     );
 
     this.isLocalStash = true;
@@ -237,8 +243,7 @@ class LocalDBv2 {
         crypt_pkey: this.#base64ToArray(row.crypt_pkey),
         crypt_cert: this.#base64ToArray(row.crypt_cert),
         sign_skey: signSkey,
-      });
-      if (row.operation === 'update') m.mutation.type = 'update';
+      }, row.operation);
       return m.mutation;
     }).filter(Boolean);
 
@@ -277,7 +282,7 @@ class LocalDBv2 {
     return rows;
   }
 
-  async upsertUserStorage({ userHash, uuid, valueB64, hashB64 = null }) {
+  async upsertUserStorage({ userHash, uuid, valueB64, hashB64 = null, deletedFlag = false, parentSignHash = null, signHash = null, ownerTimestamp = null, signB64 = null }) {
     if (!this.db) {
       console.error('DB not initialized');
       return;
@@ -291,12 +296,12 @@ class LocalDBv2 {
       console.log('New version:', newVersion);
 
       await this.db.query(
-        `INSERT INTO user_storage_synced (user_hash, uuid, version, value_b64, hash_b64, deleted_flag) VALUES ($1, $2, $3, $4, $5, FALSE)`,
-        [userHash, uuid, newVersion, valueB64, hashB64]
+        `INSERT INTO user_storage_synced (user_hash, uuid, version, value_b64, hash_b64, deleted_flag, parent_sign_hash, sign_hash, owner_timestamp, sign_b64) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [userHash, uuid, newVersion, valueB64, hashB64, deletedFlag, parentSignHash, signHash, ownerTimestamp, signB64]
       );
       console.log('Insert successful');
 
-      await this.upsertStorageLocal({ userHash, uuid, valueB64, hashB64, version: newVersion });
+      await this.upsertStorageLocal({ userHash, uuid, valueB64, hashB64, version: newVersion, deletedFlag, parentSignHash, signHash, ownerTimestamp, signB64 });
     } catch (error) {
       console.error('Storage insert failed:', error);
     }
@@ -319,20 +324,25 @@ class LocalDBv2 {
     return rows;
   }
 
-  async upsertStorageLocal({ userHash, uuid, valueB64, hashB64 = null, version = 0 }) {
+  async upsertStorageLocal({ userHash, uuid, valueB64, hashB64 = null, version = 0, deletedFlag = false, parentSignHash = null, signHash = null, ownerTimestamp = null, signB64 = null }) {
     if (!this.db) return;
     await this.db.query(
       `
-      INSERT INTO user_storage_local (user_hash, uuid, value_b64, hash_b64, version, operation)
-      VALUES ($1, $2, $3, $4, $5, 'insert')
+      INSERT INTO user_storage_local (user_hash, uuid, value_b64, hash_b64, version, deleted_flag, parent_sign_hash, sign_hash, owner_timestamp, sign_b64, operation)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN EXISTS (SELECT 1 FROM user_storage_synced WHERE user_hash = $1 AND uuid = $2) THEN 'update' ELSE 'insert' END)
       ON CONFLICT (user_hash, uuid) DO UPDATE SET
         value_b64 = EXCLUDED.value_b64,
         hash_b64 = EXCLUDED.hash_b64,
         version = EXCLUDED.version,
-        operation = CASE WHEN user_storage_local.operation = 'insert' THEN 'insert' ELSE 'update' END,
+        deleted_flag = EXCLUDED.deleted_flag,
+        parent_sign_hash = EXCLUDED.parent_sign_hash,
+        sign_hash = EXCLUDED.sign_hash,
+        owner_timestamp = EXCLUDED.owner_timestamp,
+        sign_b64 = EXCLUDED.sign_b64,
+        operation = CASE WHEN EXISTS (SELECT 1 FROM user_storage_synced WHERE user_hash = $1 AND uuid = $2) THEN 'update' ELSE 'insert' END,
         changed_at = NOW()
       `,
-      [userHash, uuid, valueB64, hashB64, version]
+      [userHash, uuid, valueB64, hashB64, version, deletedFlag, parentSignHash, signHash, ownerTimestamp, signB64]
     );
     this.isLocalStorageStash = true;
   }
@@ -360,13 +370,15 @@ class LocalDBv2 {
     if (changes.length === 0) { this.isLocalStorageStash = false; return; }
 
     const mutations = changes.map(row => {
-      if (row.operation === 'insert' || row.operation === 'update') {
-        const m = api.createStorageMutation(
+      if (row.operation === 'insert' || row.operation === 'update' || row.operation === 'delete') {
+        const mutationType = row.operation === 'delete' ? 'update' : row.operation;
+        return api.createStorageMutation(
           row.user_hash, row.uuid, row.value_b64, row.hash_b64,
-          row.version, Math.floor(Date.now() / 1000), signSkey
+          row.version, row.owner_timestamp || Math.floor(Date.now() / 1000), signSkey,
+          row.operation === 'delete', row.deleted_flag || (row.operation === 'delete'),
+          row.parent_sign_hash, row.sign_hash, row.sign_b64,
+          mutationType
         );
-        if (row.operation === 'update') m.type = 'update';
-        return m;
       }
       return null;
     }).filter(Boolean);

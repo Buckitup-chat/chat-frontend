@@ -11,7 +11,10 @@ CREATE TABLE IF NOT EXISTS user_cards_synced (
     crypt_cert     TEXT,                      
     contact_pkey   TEXT,                      
     contact_cert   TEXT,                      
-    name           TEXT NOT NULL DEFAULT '',  
+    name           TEXT NOT NULL DEFAULT '',
+    deleted_flag   BOOLEAN DEFAULT FALSE,
+    owner_timestamp BIGINT,
+    sign_b64       TEXT,
     updated_at     TIMESTAMPTZ DEFAULT NOW(),
     synced         BOOLEAN DEFAULT TRUE
 );
@@ -25,6 +28,9 @@ CREATE TABLE IF NOT EXISTS user_cards_local (
     contact_pkey   TEXT,
     contact_cert   TEXT,
     name           TEXT,
+    deleted_flag   BOOLEAN,
+    owner_timestamp BIGINT,
+    sign_b64       TEXT,
     operation      TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'delete')),
     changed_at     TIMESTAMPTZ DEFAULT NOW(),
     synced         BOOLEAN DEFAULT FALSE
@@ -40,6 +46,9 @@ SELECT
     COALESCE(l.contact_pkey,  s.contact_pkey)           AS contact_pkey,
     COALESCE(l.contact_cert,  s.contact_cert)           AS contact_cert,
     COALESCE(l.name,          s.name, '')               AS name,
+    COALESCE(l.deleted_flag,  s.deleted_flag, FALSE)    AS deleted_flag,
+    COALESCE(l.owner_timestamp, s.owner_timestamp)      AS owner_timestamp,
+    COALESCE(l.sign_b64,      s.sign_b64)               AS sign_b64,
     CASE 
         WHEN l.operation = 'delete' THEN FALSE
         ELSE COALESCE(l.synced, s.synced, FALSE)
@@ -60,6 +69,10 @@ CREATE TABLE IF NOT EXISTS user_storage_synced (
     value_b64     TEXT NOT NULL,               
     hash_b64      TEXT,                        
     deleted_flag  BOOLEAN DEFAULT FALSE,
+    parent_sign_hash TEXT,
+    sign_hash     TEXT,
+    owner_timestamp BIGINT,
+    sign_b64      TEXT,
     created_at    TIMESTAMPTZ DEFAULT NOW(),
     updated_at    TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (user_hash, uuid, version)
@@ -72,6 +85,11 @@ CREATE TABLE IF NOT EXISTS user_storage_local (
     version       BIGINT NOT NULL DEFAULT 0,
     value_b64     TEXT,
     hash_b64      TEXT,
+    deleted_flag  BOOLEAN,
+    parent_sign_hash TEXT,
+    sign_hash     TEXT,
+    owner_timestamp BIGINT,
+    sign_b64      TEXT,
     operation     TEXT NOT NULL CHECK (operation IN ('insert', 'update', 'delete', 'upsert')),
     changed_at    TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (user_hash, uuid)
@@ -85,6 +103,11 @@ SELECT DISTINCT ON (user_hash, uuid)
     COALESCE(l.version, s.version) as version,
     COALESCE(l.value_b64, s.value_b64) as value_b64,
     COALESCE(l.hash_b64, s.hash_b64) as hash_b64,
+    COALESCE(l.deleted_flag, s.deleted_flag) as deleted_flag,
+    COALESCE(l.parent_sign_hash, s.parent_sign_hash) as parent_sign_hash,
+    COALESCE(l.sign_hash, s.sign_hash) as sign_hash,
+    COALESCE(l.owner_timestamp, s.owner_timestamp) as owner_timestamp,
+    COALESCE(l.sign_b64, s.sign_b64) as sign_b64,
     COALESCE(s.updated_at, l.changed_at) as updated_at
 FROM user_storage_synced s
 FULL OUTER JOIN user_storage_local l ON s.user_hash = l.user_hash AND s.uuid = l.uuid
