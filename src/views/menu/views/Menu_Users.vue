@@ -24,7 +24,7 @@ const select = (address) => {
 const dbUsers = useLiveQuery(`SELECT count(*) as count from user_cards;`);
 
 const hasUsers = computed(() => {
-	return (dbUsers?.value?.rows?.[0]?.count ?? 0) > 0;
+	return (dbUsers?.rows?.value?.[0]?.count ?? 0) > 0;
 });
 
 onMounted(async () => {

@@ -1,63 +1,67 @@
 <script setup lang="ts">
-// import InternetIndicator from './InternetIndicator.vue'
+import Account_Item_PQ from '@/components/Account_Item_PQ.vue'
 import SyncStatus from './SyncStatus.vue'
 import { ref, computed } from 'vue'
 import { useLiveQuery } from '@electric-sql/pglite-vue'
 
-const filter = ref('')
+const emit = defineEmits<{ select: [address: string] }>()
 
-const dbUsers = useLiveQuery(`SELECT * from user_cards ORDER BY name ASC;`) //WHERE name LIKE $1;, //[filter.value ? `%${filter.value}%` : '%'])
+const { selected } = defineProps({
+  selected: { type: Array, default: () => [] },
+})
+
+const search = ref('')
+
+const dbUsers = useLiveQuery(`SELECT * from user_cards ORDER BY name ASC;`)
 
 const dbUsersLocal = useLiveQuery(`SELECT * from user_cards_local;`)
 
-const users: any = computed(() => dbUsers?.rows ?? [])
+const users: any = computed(() => dbUsers?.rows?.value ?? [])
 
-const usersLocal: any = computed(() => dbUsersLocal?.rows ?? [])
+const usersLocal: any = computed(() => dbUsersLocal?.rows?.value ?? [])
+
+const hasUsers = computed(() => users.value.length > 0)
+
+const isSelected = (address) => {
+  return selected.findIndex((a) => a === address) > -1
+}
+
+const select = (address) => {
+  emit('select', address)
+}
+
+const filtered = computed(() => {
+  let list = users.value
+  if (search.value) {
+    const term = search.value.toLowerCase()
+    list = list.filter((u) => u.name?.toLowerCase().includes(term))
+  }
+  return list
+})
 </script>
 
 <template>
-  <div class="p-6 max-w-2xl mx-auto">
-    <div class="flex align-center mb-6 w-full justify-between">
-      <SyncStatus :isSynced="usersLocal.value && usersLocal.value.length == 0" />
-    </div>
+  <div class="_users_list" :class="{ _has_users: hasUsers }">
+    <div v-if="hasUsers">
+      <div class="flex align-center mb-1 w-full" v-if="hasUsers">
+        <SyncStatus :isSynced="usersLocal.length == 0" />
+      </div>
 
-    <div class="_search mb-1">
-      <div class="_input_search">
-        <div class="_icon_search"></div>
-        <input class="" type="text" v-model="filter" autocomplete="off" placeholder="Search..." />
+      <div class="_search mb-1">
+        <div class="_input_search">
+          <div class="_icon_search"></div>
+          <input class="" type="text" v-model="search" autocomplete="off" placeholder="Search..." />
 
-        <div class="_icon_times" v-if="filter" @click="filter = ''"></div>
+          <div class="_icon_times" v-if="search" @click="search = ''"></div>
+        </div>
       </div>
     </div>
 
-    <ul v-if="users.value && users.value?.length > 0" class="_users_list">
-      <li v-for="user in users.value" :key="5" class="_users_list_item">
-        <div v-if="user.name.toLowerCase().includes(filter.toLowerCase())">
-          <div>
-            {{ user.name }}
-
-            <span class="_icon_check" v-if="user.synced">
-              &check;
-            </span>
-
-            <span class="_icon_wait" v-if="!user.synced">
-              &#x29D6;
-            </span>
-          </div>
-
-          <!-- <div class="text-xs text-gray-500 font-mono">{{ user.pub_key }}</div> -->
-        </div>
-
-      </li>
-    </ul>
-
-    <!-- <div class="flex gap-2 ">
-      <input v-model="name" placeholder="Name" class="border p-3 flex-1 rounded" />
-
-      <button @click="add" class="bg-green-600 text-white px-6 py-3 rounded font-semibold">
-        Add
-      </button>
-    </div> -->
+    <div class="_list">
+      <div class="_user" @click="select(user.user_hash)" v-for="user in filtered" :class="{ _selected: isSelected(user.user_hash) }">
+        <Account_Item_PQ :account="user" class="w-100" />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -69,9 +73,8 @@ const usersLocal: any = computed(() => dbUsersLocal?.rows ?? [])
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  list-style-type: none;
 
-  &._has_contacts {
+  &._has_users {
     flex-grow: 1;
     height: calc(100vh - 3rem);
   }
@@ -80,7 +83,7 @@ const usersLocal: any = computed(() => dbUsersLocal?.rows ?? [])
     flex-grow: 1;
     overflow-y: auto;
 
-    ._contact {
+    ._user {
       display: flex;
       align-items: center;
       padding: 0.5rem;

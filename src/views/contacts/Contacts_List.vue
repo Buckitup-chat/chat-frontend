@@ -10,7 +10,7 @@
 		</div>
 		<div class="_list">
 			<div class="_contact" @click="select(contact.address)" v-for="contact in filteredList" :class="{ _selected: isSelected(contact.address) }">
-				<Account_Item :account="contact" class="w-100" />
+				<Account_Item_PQ :account="contact" class="w-100" />
 				<div v-if="metaRequired && contact.metaPublicKey">
 					<div class="_icon_activated bg-success me-2"></div>
 				</div>
@@ -63,7 +63,7 @@
 
 <script setup>
 import { ref, onMounted, watch, inject, computed, nextTick, onUnmounted } from 'vue';
-import Account_Item from '@/components/Account_Item.vue';
+import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 import dayjs from 'dayjs';
 
 const $userPQ = inject('$userPQ');

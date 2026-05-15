@@ -1,6 +1,6 @@
 <template>
 	<div>
-		<UserList />
+		<UserList @select="(address) => emit('select', address)" :selected="selected" />
 	</div>
 </template>
 
@@ -8,4 +8,10 @@
 
 <script setup>
 import UserList from '../../components/UserList.vue';
+
+const { selected } = defineProps({
+	selected: { type: Array, default: () => [] },
+});
+
+const emit = defineEmits(['select']);
 </script>

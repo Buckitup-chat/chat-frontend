@@ -185,7 +185,8 @@ export const userPQStore = defineStore('userPQ', () => {
       user_hash: c.user_hash,
       name: c.name,
       notes: c.notes,
-      hidden: c.hidden
+      hidden: c.hidden,
+      contact_pkey: c.contact_pkey
     }));
 
     await em.value.updateContacts(contactsArray);

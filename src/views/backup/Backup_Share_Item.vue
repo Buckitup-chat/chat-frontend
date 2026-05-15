@@ -8,7 +8,7 @@
 					</a-->
 
 					<div class="" v-if="contact" :class="{ _disabled: share.disabled }">
-						<Account_Item :account="contact" />
+						<Account_Item_PQ :account="contact" />
 					</div>
 				</div>
 
