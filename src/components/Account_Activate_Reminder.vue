@@ -1,6 +1,6 @@
 <template>
 	<div v-if="showReminder">
-		<div>
+		<!-- <div>
 			<div class="_divider">
 				Activate Your Profile
 				<InfoTooltip class="align-self-center ms-2" :content="'Register meta address'" />
@@ -14,7 +14,7 @@
 						@click="$mitt.emit('modal::open', { id: 'account_activate' })">Activate</button>
 				</div>
 			</div>
-		</div>
+		</div> -->
 	</div>
 </template>
 

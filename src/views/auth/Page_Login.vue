@@ -41,11 +41,11 @@
 		v-if="!$userPQ.currentUser && isPlatformAuthSupported">
 		<div class="_icon_logo bg-white"></div>
 
-		<div class="px-3 w-100 mb-3" v-if="$userPQ.myLocalUsers?.length && mode !== 'existing'">
+		<!-- <div class="px-3 w-100 mb-3" v-if="$userPQ.myLocalUsers?.length && mode !== 'existing'">
 			<button class="btn btn-outline-light w-100" @click="setMode('existing')">Connect existing account</button>
-		</div>
+		</div> -->
 
-		<div class="_input_block mb-3 w-100" v-if="$userPQ.myLocalUsers?.length && mode === 'existing'">
+		<div class="_input_block mb-3 w-100" v-if="$userPQ.myLocalUsers?.length">
 			<div class="fs-4 text-center mb-2">Connect existing account</div>
 			<Account_Selector />
 		</div>

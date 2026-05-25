@@ -1,11 +1,10 @@
 <template>
-	<TopBarTemplate>
-		<div class="d-flex align-items-center justify-content-between">
+	<div>
+		<div class="d-flex align-items-center justify-content-between mb-3">
 			<div class="d-flex align-items-center w-100">
 				<div class="_search flex-grow-1">
 					<div class="_input_search ps-2">
 						<input class="" type="text" v-model="data.query.s" autocomplete="off" placeholder="find by backup tag..." />
-
 						<div class="_icon_times" v-if="data.query.s" @click="resetSearch()"></div>
 					</div>
 				</div>
@@ -22,60 +21,37 @@
 				</div>
 			</div>
 		</div>
-	</TopBarTemplate>
 
-	<FullContentBlock v-if="$userPQ.currentUser">
-		<template #header>
-			<div class="d-flex align-items-center justify-content-between w-100 pe-3">
-				<div class="fw-bold fs-5 py-1">My shares</div>
-				<div class="d-flex align-items-center">
-					<TopBarReuseTemplate v-if="$userPQ.isAuthenticated && $breakpoint.gte('lg')" />
-				</div>
-			</div>
-		</template>
-		<template #headerbottom v-if="$userPQ.isAuthenticated && $breakpoint.lt('lg')">
-			<TopBarReuseTemplate class="mt-2 pe-3" />
-		</template>
+        <Account_Activate_Reminder />
+        <Offline_Reminder />
+        <template v-if="$userPQ.isAuthenticated">
+            <div class="_divider" v-if="!data.searched">
+                Find your shares
+                <InfoTooltip class="align-self-center ms-2" :content="'Find your shares'" />
+            </div>
 
-		<template #content>
-			<div class="_full_width_block">
-				<Account_Activate_Reminder />
-				<Offline_Reminder />
-				<template v-if="$userPQ.isAuthenticated">
-					<div class="_divider" v-if="!data.searched">
-						Find your shares
-						<InfoTooltip class="align-self-center ms-2" :content="'Find your shares'" />
-					</div>
+            <div class="text-center fs-4 mb-3 text-secondary" v-if="!data.searched">
+                Scan all to find all shares created for your stealth addresses. Or search by backup tag, creator public key or wallet address
+            </div>
 
-					<div class="text-center fs-4 mb-3 text-secondary" v-if="!data.searched">
-						Scan all to find all shares created for your stealth addresses. Or search by backup tag, creator public key or wallet address
-					</div>
+            <div v-if="data.fetched">
+                <div v-if="!data.items.length">
+                    <div class="text-center fs-2 mb-1">No shares found</div>
+                </div>
+                <div class="_data_block mb-3" v-for="(item, $index) in data.items" :key="item.fetchTimestamp">
+                    <Backup_OwnerGroup_Item :item="item" />
+                </div>
+            </div>
 
-					<div v-if="data.fetched">
-						<div v-if="!data.items.length">
-							<div class="text-center fs-2 mb-1">No shares found</div>
-						</div>
-						<div class="_data_block mb-3" v-for="(item, $index) in data.items" :key="item.fetchTimestamp">
-							<Backup_OwnerGroup_Item :item="item" />
-						</div>
-					</div>
-
-					<Paginate :page-count="parseInt(data.totalPages)" :click-handler="setPage" :force-page="parseInt(1)">
-					</Paginate>
-				</template>
-			</div>
-		</template>
-	</FullContentBlock>
+            <Paginate :page-count="parseInt(data.totalPages)" :click-handler="setPage" :force-page="parseInt(1)">
+            </Paginate>
+        </template>
+	</div>
 </template>
 
 <style lang="scss" scoped>
 @import '@/scss/variables.scss';
 @import '@/scss/breakpoints.scss';
-
-._full_width_block {
-	//max-width: 40rem;
-	width: 100%;
-}
 
 ._search {
 	height: 2.2rem;
@@ -91,13 +67,9 @@ import Backup_OwnerGroup_Item from './Backup_OwnerGroup_Item.vue';
 import Paginate from '@/components/Paginate.vue';
 import { ref, onMounted, watch, inject, onUnmounted } from 'vue';
 import axios from 'axios';
-import FullContentBlock from '@/components/FullContentBlock.vue';
 import Account_Activate_Reminder from '@/components/Account_Activate_Reminder.vue';
 import { computeAddress } from 'ethers';
-import { createReusableTemplate } from '@vueuse/core';
 import Offline_Reminder from '../../components/Offline_Reminder.vue';
-
-const [TopBarTemplate, TopBarReuseTemplate] = createReusableTemplate();
 
 const $userPQ = inject('$userPQ');
 const $web3 = inject('$web3');

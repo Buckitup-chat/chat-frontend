@@ -17,25 +17,7 @@
 			<div class="_i_block">
 				<i class="_icon_backups" :class="{ _active: isExactActive }"></i>
 			</div>
-			<div>Backups</div>
-		</div>
-	</router-link>
-
-	<router-link :to="{ name: 'account_shares' }" custom v-slot="{ isExactActive, navigate }">
-		<div class="_sub_menu_btn" :class="{ _active: isExactActive }" @click="select(navigate)">
-			<div class="_i_block">
-				<i class="_icon_shares" :class="{ _active: isExactActive }"></i>
-			</div>
-			<div>Shares</div>
-		</div>
-	</router-link>
-
-	<router-link :to="{ name: 'backup_restore' }" custom v-slot="{ isExactActive, navigate }">
-		<div class="_sub_menu_btn" :class="{ _active: isExactActive }" @click="select(navigate)">
-			<div class="_i_block">
-				<i class="_icon_restore" :class="{ _active: isExactActive }"></i>
-			</div>
-			<div>Restore shares</div>
+			<div>Backup Center</div>
 		</div>
 	</router-link>
 

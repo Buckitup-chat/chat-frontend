@@ -1,37 +1,15 @@
 <template>
     <!-- TODO: PQ - Backup features need PQ implementation (Coming Soon) -->
-    <router-link :to="{ name: 'backup_list' }" custom v-slot="{ isActive, navigate }">
+    <router-link :to="{ name: 'account_backups' }" custom v-slot="{ isActive, navigate }">
         <div class="_sub_menu_btn" :class="{ '_active': isActive }" @click="select(navigate)">
             <div class="_i_block">
                 <i class="_icon_backups" :class="{ '_active': isActive }"></i>
             </div>                    
             <div>                        
-                My backups                       
+                Backup Center
             </div>
         </div>
     </router-link>
-
-    <router-link :to="{ name: 'backup_myshares' }" custom v-slot="{ isActive, navigate }">
-        <div class="_sub_menu_btn" :class="{ '_active': isActive }" @click="select(navigate)">
-            <div class="_i_block">
-                <i class="_icon_shares" :class="{ '_active': isActive }"></i>
-            </div>                    
-            <div>                        
-                My shares                       
-            </div>
-        </div>
-    </router-link>
-
-    <router-link :to="{ name: 'backup_restore' }" custom v-slot="{ isActive, navigate }">
-        <div class="_sub_menu_btn" :class="{ '_active': isActive }" @click="select(navigate)">
-            <div class="_i_block">
-                <i class="_icon_restore" :class="{ '_active': isActive }"></i>
-            </div>                    
-            <div>                        
-                Restore secret                        
-            </div>
-        </div>
-    </router-link>    
 </template>
 
 <style lang="scss" scoped>

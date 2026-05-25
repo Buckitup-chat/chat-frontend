@@ -40,11 +40,11 @@
 					<div class="fs-4">BE</div>
 				</div>
 
-				<div class="_menu_btn order-1" :class="{ _active: $route.path === '/storage-api-client' }"
+				<!-- <div class="_menu_btn order-1" :class="{ _active: $route.path === '/storage-api-client' }"
 					@click="$router.push('/storage-api-client')">
 					<i class="_icon_share" :class="{ _active: $route.path === '/storage-api-client' }"></i>
 					<div>storage</div>
-				</div>
+				</div> -->
 
 				<!--div class="_menu_btn order-1" :class="{ _active: menu === 'backup' }" @click="menu = 'backup'">
 					<i class="_icon_share" :class="{ _active: menu === 'backup' }"></i>
