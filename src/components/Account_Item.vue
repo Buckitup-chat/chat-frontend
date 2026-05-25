@@ -102,6 +102,9 @@ const acc = computed(() => {
 	return self ? { ...$user.account, ...$user.accountInfo } : account;
 });
 const shortCode = computed(() => {
-	if (acc.value.publicKey) return $enigma.shortCode($enigma.arrayToBase64($enigma.hexToUint8Array(acc.value.publicKey)));
+	if (!acc.value.publicKey) return null;
+	const hex = acc.value.publicKey.startsWith('0x') ? acc.value.publicKey.slice(2) : acc.value.publicKey;
+	if (!/^[0-9a-fA-F]+$/.test(hex)) return null;
+	return $enigma.shortCode($enigma.arrayToBase64($enigma.hexToUint8Array(acc.value.publicKey)));
 });
 </script>

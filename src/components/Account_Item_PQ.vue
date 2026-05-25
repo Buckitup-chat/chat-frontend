@@ -14,10 +14,10 @@
         <div class="_pubk" v-if="shortCode">[{{ shortCode }}]</div>
       </div>
 
-      <div class="_notes" v-if="acc.userStorage.notes">
-        <span v-if="acc.highlightedNotes" v-html="acc.highlightedNotes"></span>
-        <span v-else>{{ acc.userStorage.notes }}</span>
-      </div>
+        <div class="_notes" v-if="acc.notes">
+          <span v-if="acc.highlightedNotes" v-html="acc.highlightedNotes"></span>
+          <span v-else>{{ acc.notes }}</span>
+        </div>
     </div>
   </div>
 </template>
@@ -103,6 +103,6 @@ const acc = computed(() => {
 });
 
 const shortCode = computed(() => {
-  if (acc.value.publicKey) return $enigma.shortCode($enigma.arrayToBase64($enigma.hexToUint8Array(acc.value.user_hash)));
+  if (acc.value.user_hash) return acc.value.user_hash.slice(-5);
 });
 </script>

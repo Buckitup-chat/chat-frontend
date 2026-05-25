@@ -1,11 +1,10 @@
 <template>
-	<TopBarTemplate>
-		<div class="d-flex align-items-center justify-content-between">
+	<div>
+		<div class="d-flex align-items-center justify-content-between mb-3">
 			<div class="d-flex align-items-center w-100">
 				<div class="_search flex-grow-1">
 					<div class="_input_search ps-2">
 						<input class="" type="text" v-model="data.query.s" autocomplete="off" placeholder="find by backup tag..." />
-
 						<div class="_icon_times" v-if="data.query.s" @click="resetSearch()"></div>
 					</div>
 				</div>
@@ -19,67 +18,45 @@
 					<button class="btn btn-dark ms-1 rounded-pill" @click="getList()">
 						<i class="_icon_reload bg-white"></i>
 					</button>
-				</div>
-			</div>
-		</div>
-	</TopBarTemplate>
-
-	<FullContentBlock v-if="$userPQ.currentUser">
-		<template #header>
-			<div class="d-flex align-items-center justify-content-between w-100 pe-3">
-				<div class="fw-bold fs-5 py-1">My backups</div>
-				<div class="d-flex align-items-center">
-					<TopBarReuseTemplate v-if="$userPQ.isAuthenticated && $breakpoint.gte('lg')" />
-					<button class="btn btn-dark rounded-pill ms-1 d-flex align-items-center justify-content-center py-2"
+                    
+                    <button v-if="$userPQ.isAuthenticated" class="btn btn-dark rounded-pill ms-1 d-flex align-items-center justify-content-center py-2"
 						@click="$router.push({ name: 'backup_create' })">
 						<i class="_icon_plus bg-white"></i>
 						<span class="ms-2" v-if="$breakpoint.gte('sm')">Create</span>
 					</button>
 				</div>
 			</div>
-		</template>
-		<template #headerbottom v-if="$userPQ.isAuthenticated && $breakpoint.lt('lg')">
-			<TopBarReuseTemplate class="mt-2 pe-3" />
-		</template>
+		</div>
 
-		<template #content>
-			<div class="_full_width_block">
-				<Account_Activate_Reminder />
-				<Offline_Reminder />
-				<template v-if="$userPQ.isAuthenticated">
-					<div v-if="data.fetched">
-						<div v-if="!data.items.length" class="mt-3">
-							<div class="text-center fs-2 mb-3">No backups found</div>
+        <Account_Activate_Reminder />
+        <Offline_Reminder />
+        <template v-if="$userPQ.isAuthenticated">
+            <div v-if="data.fetched">
+                <div v-if="!data.items.length" class="mt-3">
+                    <div class="text-center fs-2 mb-3">No backups found</div>
 
-							<div class="row justify-content-center gx-2 mb-2" v-if="!data.searched">
-								<div class="col-lg-12 col-xl-10">
-									<button type="button" class="btn btn-dark w-100" @click="$router.push({ name: 'backup_create' })"
-										:disabled="false">Create backup</button>
-								</div>
-							</div>
-						</div>
-						<div class="_data_block mb-3" v-for="(backup, $index) in data.items"
-								:key="backup.id + backup.fetchTimestamp">
-								<BackupItem :backup="backup" />
-						</div>
-					</div>
+                    <div class="row justify-content-center gx-2 mb-2" v-if="!data.searched">
+                        <div class="col-lg-12 col-xl-10">
+                            <button type="button" class="btn btn-dark w-100" @click="$router.push({ name: 'backup_create' })"
+                                :disabled="false">Create backup</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="_data_block mb-3" v-for="(backup, $index) in data.items"
+                        :key="backup.id + backup.fetchTimestamp">
+                        <BackupItem :backup="backup" />
+                </div>
+            </div>
 
-					<Paginate :page-count="parseInt(data.totalPages)" :click-handler="setPage"
-						:force-page="parseInt(data.query.page)"> </Paginate>
-				</template>
-			</div>
-		</template>
-	</FullContentBlock>
+            <Paginate :page-count="parseInt(data.totalPages)" :click-handler="setPage"
+                :force-page="parseInt(data.query.page)"> </Paginate>
+        </template>
+	</div>
 </template>
 
 <style lang="scss" scoped>
 @import '@/scss/variables.scss';
 @import '@/scss/breakpoints.scss';
-
-._full_width_block {
-	//max-width: 40rem;
-	width: 100%;
-}
 
 ._search {
 	height: 2.2rem;
@@ -91,8 +68,6 @@
 </style>
 
 <script setup>
-import FullContentBlock from '@/components/FullContentBlock.vue';
-import { createReusableTemplate } from '@vueuse/core';
 import Offline_Reminder from '../../components/Offline_Reminder.vue';
 import Account_Activate_Reminder from '@/components/Account_Activate_Reminder.vue';
 import BackupItem from './Backup_Item.vue';
@@ -106,8 +81,7 @@ const $userPQ = inject('$userPQ');
 const $socket = inject('$socket');
 const $loader = inject('$loader');
 const $swal = inject('$swal');
-
-const [TopBarTemplate, TopBarReuseTemplate] = createReusableTemplate();
+const $breakpoint = inject('$breakpoint');
 
 const dataDefault = {
 	query: { sort: 'desc', page: 1, limit: 5, s: '' },

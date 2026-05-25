@@ -1,38 +1,45 @@
 import QRCode from 'qrcode';
-import { toUtf8Bytes, randomBytes, encodeBase58, concat, computeAddress, decodeBase58 } from 'ethers';
-import * as $enigma from './enigma';
 import QrScanner from 'qr-scanner';
+import { randomBytes } from '@noble/post-quantum/utils.js';
+import * as secp from '@noble/secp256k1';
+import { sha256 } from '@noble/hashes/sha256';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 
 export default class QRHandshakeManager extends EventTarget {
-	constructor(container, account, options) {
+	constructor(container, userPQ, options) {
 		super();
-		this.account = account;
+		this.userPQ = userPQ;
 		this.container = container;
 		this.options = options;
 		this.scanning = false;
-		this.state = {
-			challenge: null,
-			signature: null,
-			verified: 0,
-			completed: false,
-			contactChallenge: null,
-			contactAddress: null,
-			contactPublicKey: null,
-			contactName: null,
-			contactVerified: 0,
-		};
+		
+		this.state = this.getInitialState();
 
-		this.staticString = 'BKP';
 		this.qrCode = null;
 		this.qrScanner = null;
 		this.init();
+	}
+
+	getInitialState() {
+		return {
+			step: 1, // 1: QR1(A), 2: QR2(B), 3: QR3(C), 4: Done
+			myNonce: null,
+			mySigPeerNonce: null,
+			mySigHashNonce: null,
+			peerHash: null,
+			peerEccPub: null,
+			peerNonce: null,
+			completed: false,
+		};
 	}
 
 	async init() {
 		this.container.innerHTML = this.getTemplate();
 		this.qrCodeWrapper = this.container.querySelector('._qrh_wrapper');
 		this.qrCode = this.container.querySelector('#qrCode');
-		this.qrScanner = new QrScanner(this.container.querySelector('#qrScanner'), (result) => this.readQr(result.data), {
+		this.qrScannerEl = this.container.querySelector('#qrScanner');
+		
+		this.qrScanner = new QrScanner(this.qrScannerEl, (result) => this.readQr(result.data), {
 			returnDetailedScanResult: true,
 			preferredCamera: 'user',
 			highlightScanRegion: true,
@@ -40,12 +47,12 @@ export default class QRHandshakeManager extends EventTarget {
 			calculateScanRegion: (video) => {
 				const width = video.videoWidth;
 				const height = video.videoHeight;
-				const scanSize = 0.95; // 100% of video size
+				const scanSize = 0.95; // 95% of video size
 				return {
 					x: (width * (1 - scanSize)) / 2, // Center horizontally
 					y: (height * (1 - scanSize)) / 2, // Center vertically
-					width: width * scanSize, // 80% width
-					height: height * scanSize, // 80% height
+					width: width * scanSize,
+					height: height * scanSize,
 				};
 			},
 		});
@@ -63,59 +70,40 @@ export default class QRHandshakeManager extends EventTarget {
 				<video id="qrScanner"></video>
 			</div>
         </div>
-      	`; //
+      	`;
 	}
+
 	emitEvent(eventName, detail = {}) {
 		this.dispatchEvent(new CustomEvent(eventName, { detail }));
 	}
 
-	generateChallenge() {
-		const staticBytes = toUtf8Bytes(this.staticString); // Convert 'buckitup' to bytes
-		const random = randomBytes(10); // Generate 16 random bytes
-		this.state.challenge = encodeBase58(concat([staticBytes, random])); // .toString('base58')
-	}
-
 	async updateQr() {
-		if (this.qrCode && this.state.challenge) {
+		if (this.qrCode && this.state.myNonce) {
+			const myHash = this.userPQ.currentUserHash;
+			const myEccPubBytes = atob(this.userPQ.currentUser.contact_pkey);
+			const myEccPub = bytesToHex(Uint8Array.from(myEccPubBytes, c => c.charCodeAt(0)));
+			
+			let msg = '';
 			let color = this.options.scanningColor;
-			if (this.state.contactChallenge && !this.state.signature) {
-				this.state.signature = $enigma.signChallenge(this.state.contactChallenge + this.account.name, this.account.privateKeyB64);
-				if ('vibrate' in navigator) navigator.vibrate([50]);
+
+			if (this.state.step === 1) {
+				msg = `PQ1:A:${myHash}:${myEccPub}:${this.state.myNonce}`;
+			} else if (this.state.step === 2) {
+				msg = `PQ1:B:${myHash}:${myEccPub}:${this.state.myNonce}:${this.state.mySigPeerNonce}:${this.state.mySigHashNonce}`;
+				color = this.options.detectedColor;
+			} else if (this.state.step >= 3) {
+				msg = `PQ1:C:${this.state.mySigPeerNonce}:${this.state.mySigHashNonce}`;
+				color = this.options.verifiedColor;
 			}
 
-			const displayName = this.state.signature ? encodeBase58(new TextEncoder().encode(this.account.name)) : '';
-
-			const msg = `${this.state.verified}${this.state.challenge}${this.state.signature || ''}${displayName}`;
-
-			if (this.state.signature) color = this.options.detectedColor;
-			if (this.state.verified && this.state.contactVerified) color = this.options.verifiedColor;
-
 			QRCode.toCanvas(this.qrCode, msg, {
-				errorCorrectionLevel: 'M',
+				errorCorrectionLevel: 'L',
 				height: 360,
 				width: 360,
 				quality: 1,
 				margin: 0,
 				color: { dark: color },
 			});
-
-			if (this.state.verified && this.state.contactVerified && !this.state.completed) {
-				this.state.completed = true;
-				this.qrScanner.stop();
-
-				this.emitEvent('handshakeCompleted', {
-					address: this.state.contactAddress,
-					publicKey: this.state.contactPublicKey,
-					name: this.state.contactName,
-				});
-
-				if ('vibrate' in navigator) navigator.vibrate([500, 100, 500, 100, 500]);
-
-				//await this.wait(3000);
-				this.scanning = false;
-				//this.container.querySelector('#qrCodeWrapper').style.display = 'none';
-				this.emitEvent('scanning', this.scanning);
-			}
 		}
 	}
 
@@ -123,7 +111,8 @@ export default class QRHandshakeManager extends EventTarget {
 		if (this.qrScanner) {
 			this.qrScanner.stop();
 			this.scanning = false;
-			this.container.querySelector('#qrCodeWrapper').style.display = 'none';
+			const wrapper = this.container.querySelector('#qrCodeWrapper');
+			if (wrapper) wrapper.style.display = 'none';
 		}
 	}
 
@@ -131,13 +120,14 @@ export default class QRHandshakeManager extends EventTarget {
 		try {
 			if (this.scanning && this.qrScanner) {
 				this.qrScanner.stop();
-				//this.dispose();
 				this.scanning = false;
-				this.container.querySelector('#qrCodeWrapper').style.display = 'none';
+				const wrapper = this.container.querySelector('#qrCodeWrapper');
+				if (wrapper) wrapper.style.display = 'none';
 				this.emitEvent('scanning', this.scanning);
 				this.updateQr();
 				return;
 			}
+			
 			this.reset();
 			this.scanning = true;
 			this.emitEvent('scanning', this.scanning);
@@ -146,9 +136,9 @@ export default class QRHandshakeManager extends EventTarget {
 
 			await this.showCountdown(3);
 
-			this.generateChallenge();
-			this.container.querySelector('#qrCodeWrapper').style.height = 'unset';
-			//this.container.querySelector('#qrScannerWrap').style.opacity = 0;
+			this.state.myNonce = bytesToHex(randomBytes(16));
+			const wrapper = this.container.querySelector('#qrCodeWrapper');
+			if (wrapper) wrapper.style.height = 'unset';
 
 			this.updateQr();
 		} catch (error) {
@@ -164,71 +154,151 @@ export default class QRHandshakeManager extends EventTarget {
 		this.emitEvent('handshakeCountdown', 0);
 	}
 
-	readQr(msg) {
+	async readQr(msg) {
 		try {
-			// Extract the fixed parts based on known lengths
-			const verified = parseInt(msg[0]); // First character (1 char)
-			const challenge = msg.slice(1, 19); // Next 18 characters (2nd to 19th char)
-			const signature = msg.length > 19 ? msg.slice(19, 107) : null; // 19th to 107th char (if present)
-			const displayNameEnc = msg.length > 107 ? msg.slice(107) : null;
+			if (!msg.startsWith('PQ1:')) return;
+			const parts = msg.split(':');
+			const type = parts[1];
 
-			if (challenge) {
-				const decodedChallengeBytes = decodeBase58(challenge);
-				const contactChallengeDec = new TextDecoder().decode(decodedChallengeBytes);
+			const myHash = this.userPQ.currentUserHash;
+			const myEccPubBytes = atob(this.userPQ.currentUser.contact_pkey);
+			const myEccPub = bytesToHex(Uint8Array.from(myEccPubBytes, c => c.charCodeAt(0)));
 
-				if (challenge && contactChallengeDec.startsWith(this.staticString)) {
-					if (this.state.contactChallenge !== challenge) {
-						if (this.state.contactChallenge) {
-							this.reset();
-						}
-						this.state.contactChallenge = challenge;
-					}
+			if (type === 'A') {
+				if (this.state.step >= 2) return;
+				this.state.peerHash = parts[2];
+				this.state.peerEccPub = parts[3];
+				this.state.peerNonce = parts[4];
+				
+				// Generate signatures over raw bytes
+				const peerNonceBytes = hexToBytes(this.state.peerNonce);
+				this.state.mySigPeerNonce = await this.userPQ.signContactChallenge(peerNonceBytes);
+				
+				const hashBytes = new TextEncoder().encode(myHash);
+				const hashPlusNonce = new Uint8Array(hashBytes.length + peerNonceBytes.length);
+				hashPlusNonce.set(hashBytes);
+				hashPlusNonce.set(peerNonceBytes, hashBytes.length);
+				
+				this.state.mySigHashNonce = await this.userPQ.signContactChallenge(hashPlusNonce);
+				
+				this.state.step = 2;
+				if ('vibrate' in navigator) navigator.vibrate([50]);
+				this.updateQr();
 
-					if (signature) {
-						const decodedNameBytes = decodeBase58(displayNameEnc);
-						const displayName = new TextDecoder().decode(decodedNameBytes);
+			} else if (type === 'B') {
+				if (this.state.step >= 3) return;
+				const peerHash = parts[2];
+				const peerEccPub = parts[3];
+				const peerNonce = parts[4];
+				const peerSigNonce = parts[5];
+				const peerSigHashNonce = parts[6];
 
-						const publicKeyCompact = $enigma.recoverPublicKey(this.state.challenge + displayName, signature);
-						const publicKey = computePublicKey('0x' + $enigma.convertPublicKeyToHex(publicKeyCompact));
-
-						this.state.contactAddress = utils.computeAddress(publicKey);
-						this.state.contactPublicKey = publicKeyCompact;
-						this.state.contactName = displayName;
-						this.state.verified = 1;
-						this.state.contactVerified = verified;
-					}
+				this.state.peerHash = peerHash;
+				this.state.peerEccPub = peerEccPub;
+				this.state.peerNonce = peerNonce;
+				
+				// Verify Sig(myNonce)
+				const myNonceBytes = hexToBytes(this.state.myNonce);
+				const isValid1 = secp.verify(hexToBytes(peerSigNonce), sha256(myNonceBytes), hexToBytes(peerEccPub));
+				
+				// Verify Sig(peerHash + myNonce)
+				const peerHashBytes = new TextEncoder().encode(peerHash);
+				const expectedHashPlusNonce = new Uint8Array(peerHashBytes.length + myNonceBytes.length);
+				expectedHashPlusNonce.set(peerHashBytes);
+				expectedHashPlusNonce.set(myNonceBytes, peerHashBytes.length);
+				const isValid2 = secp.verify(hexToBytes(peerSigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(peerEccPub));
+				
+				if (isValid1 && isValid2) {
+					// Generate signatures over raw bytes
+					const peerNonceBytes = hexToBytes(peerNonce);
+					this.state.mySigPeerNonce = await this.userPQ.signContactChallenge(peerNonceBytes);
+					
+					const myHashBytes = new TextEncoder().encode(myHash);
+					const hashPlusNonce = new Uint8Array(myHashBytes.length + peerNonceBytes.length);
+					hashPlusNonce.set(myHashBytes);
+					hashPlusNonce.set(peerNonceBytes, myHashBytes.length);
+					
+					this.state.mySigHashNonce = await this.userPQ.signContactChallenge(hashPlusNonce);
+					
+					this.state.step = 3;
+					this.finishHandshake();
 					this.updateQr();
+				} else {
+					console.warn("Invalid signature from peer (B)");
+				}
+
+			} else if (type === 'C') {
+				if (this.state.step !== 2) return;
+				const peerSigNonce = parts[2];
+				const peerSigHashNonce = parts[3];
+				
+				// Verify Sig(myNonce)
+				const myNonceBytes = hexToBytes(this.state.myNonce);
+				const isValid1 = secp.verify(hexToBytes(peerSigNonce), sha256(myNonceBytes), hexToBytes(this.state.peerEccPub));
+				
+				// Verify Sig(peerHash + myNonce)
+				const peerHashBytes = new TextEncoder().encode(this.state.peerHash);
+				const expectedHashPlusNonce = new Uint8Array(peerHashBytes.length + myNonceBytes.length);
+				expectedHashPlusNonce.set(peerHashBytes);
+				expectedHashPlusNonce.set(myNonceBytes, peerHashBytes.length);
+				
+				const isValid2 = secp.verify(hexToBytes(peerSigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(this.state.peerEccPub));
+				
+				if (isValid1 && isValid2) {
+					this.state.step = 4;
+					this.finishHandshake();
+					this.updateQr();
+				} else {
+					console.warn("Invalid signature from peer (C)");
 				}
 			}
 		} catch (error) {
-			console.error('Init Scanning error:', error);
+			console.error('readQr error:', error);
 		}
+	}
+
+	finishHandshake() {
+		if (this.state.completed) return; // Prevent double trigger
+		this.state.completed = true;
+		
+		if ('vibrate' in navigator) navigator.vibrate([500, 100, 500, 100, 500]);
+		
+		this.qrScanner.stop();
+		
+		// Lookup user in network to get name if available
+		const networkUser = this.userPQ.allNetworkUsers.find(u => u.user_hash === this.state.peerHash);
+		const name = networkUser ? networkUser.name : 'Unknown User';
+
+		// Emit candidate details for UI to show
+		this.emitEvent('handshakeCompleted', {
+			user_hash: this.state.peerHash,
+			contact_pkey: btoa(String.fromCharCode(...hexToBytes(this.state.peerEccPub))), // Re-encode to base64
+			name: name
+		});
+		
+		this.scanning = false;
+		this.emitEvent('scanning', this.scanning);
 	}
 
 	dispose() {
 		try {
-			this.qrScanner.dispose();
+			if (this.qrScanner) {
+				this.qrScanner.dispose();
+			}
 		} catch (error) {
 			console.error(error);
 		}
 	}
 
 	reset() {
-		this.state.verified = 0;
-		this.state.completed = 0;
-		this.state.signature = null;
-		this.state.contactChallenge = null;
-		this.state.contactAddress = null;
-		this.state.contactPublicKey = null;
-		this.state.contactName = null;
-		this.state.contactVerified = 0;
+		this.state = this.getInitialState();
 	}
 
 	wait(delay = 500) {
 		return new Promise((resolve) =>
 			setTimeout(() => {
 				resolve();
-			}, delay),
+			}, delay)
 		);
 	}
 }

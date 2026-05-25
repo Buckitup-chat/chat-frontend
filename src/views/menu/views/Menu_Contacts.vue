@@ -1,5 +1,5 @@
 <template>
-	<div class="fs-5 text-center mb-2 mt-2" v-if="!hasContacts">Your contacts list is empty</div>
+	<!-- <div class="fs-5 text-center mb-2 mt-2" v-if="!hasContacts">Your contacts list is empty</div> -->
 
 	<Contacts_List @select="select" :selected="selected" />
 </template>

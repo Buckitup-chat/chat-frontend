@@ -10,7 +10,7 @@
 		</div>
 		<div class="_list">
 			<div class="_contact" @click="select(contact.address)" v-for="contact in filteredList" :class="{ _selected: isSelected(contact.address) }">
-				<Account_Item :account="contact" class="w-100" />
+				<Account_Item_PQ :account="contact" class="w-100" />
 			</div>
 		</div>
 	</div>
@@ -54,7 +54,7 @@
 
 <script setup>
 import { ref, computed } from 'vue';
-import Account_Item from '@/components/Account_Item.vue';
+import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 import { useLiveQuery } from '@electric-sql/pglite-vue';
 
 const search = ref('');
@@ -73,7 +73,7 @@ const isSelected = (address) => {
 const dbUsers = useLiveQuery(`SELECT * from user_cards ORDER BY name ASC;`);
 
 const users = computed(() => {
-	return (dbUsers?.value?.rows ?? []).map(u => ({
+	return (dbUsers?.rows?.value ?? []).map(u => ({
 		...u,
 		address: u.user_hash // Alias for Account_Item compatibility
 	}));

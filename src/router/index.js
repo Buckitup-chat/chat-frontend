@@ -40,12 +40,6 @@ const routes = [
 				component: () => import('../views/backup/Page_Backup_Create.vue'),
 				meta: { auth: true, name: 'Create', sub: true },
 			},
-			{
-				path: 'restore',
-				name: 'backup_restore',
-				component: () => import('../views/backup/Page_Backup_Restore.vue'),
-				meta: { auth: true, name: 'Restore', sub: true },
-			},
 		],
 	},
 	{
@@ -80,14 +74,8 @@ const routes = [
 			{
 				path: 'backups',
 				name: 'account_backups',
-				component: () => import('../views/backup/Page_Backup_List.vue'),
-				meta: { auth: true, name: 'My backups', sub: true },
-			},
-			{
-				path: 'shares',
-				name: 'account_shares',
-				component: () => import('../views/backup/Page_Backup_Shares.vue'),
-				meta: { auth: true, name: 'My backups', sub: true },
+				component: () => import('../views/backup/Page_Backup_Dashboard.vue'),
+				meta: { auth: true, name: 'Backup Center', sub: true },
 			},
 			{
 				path: 'admin',
