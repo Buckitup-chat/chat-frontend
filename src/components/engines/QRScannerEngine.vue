@@ -1,6 +1,6 @@
 <template>
   <div class="_qrh">
-    <div class="_qrh_wrapper" v-show="scanning" :class="{ _hidden: !scanning }">
+    <div class="_qrh_wrapper" v-show="scanning || state.completed" :class="{ _hidden: !scanning && !state.completed }">
       <div class="_qrh_container">
         <canvas ref="qrCodeRef"></canvas>
       </div>
@@ -112,22 +112,29 @@ const updateQr = () => {
 	}
 };
 
+let scanSessionId = 0;
+
 const stopScan = () => {
 	if (qrScanner) {
 		qrScanner.stop();
 		scanning.value = false;
+		state.completed = false;
+		scanSessionId++; // Invalidate any ongoing countdowns
 		emit('scanning', scanning.value);
 	}
 };
 
 const wait = (delay = 500) => new Promise((resolve) => setTimeout(resolve, delay));
 
-const showCountdown = async (seconds) => {
+const showCountdown = async (seconds, sessionId) => {
 	for (let i = seconds; i > 0; i--) {
+		if (scanSessionId !== sessionId || !scanning.value) return false;
 		emit('countdown', i);
 		await wait(1000);
 	}
+	if (scanSessionId !== sessionId || !scanning.value) return false;
 	emit('countdown', 0);
+	return true;
 };
 
 const toggleScanner = async () => {
@@ -138,12 +145,20 @@ const toggleScanner = async () => {
 		}
 		
 		Object.assign(state, getInitialState());
+		if (qrCodeRef.value) {
+			const ctx = qrCodeRef.value.getContext('2d');
+			ctx.clearRect(0, 0, qrCodeRef.value.width, qrCodeRef.value.height);
+		}
 		scanning.value = true;
+		scanSessionId++;
+		const currentSession = scanSessionId;
+		
 		emit('scanning', scanning.value);
 		await wait(100);
 		await qrScanner.start();
 
-		await showCountdown(3);
+		const completedCountdown = await showCountdown(3, currentSession);
+		if (!completedCountdown) return;
 
 		state.myNonce = bytesToHex(randomBytes(16));
 		updateQr();
