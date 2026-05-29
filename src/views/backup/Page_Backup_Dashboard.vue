@@ -19,6 +19,9 @@
 					<li class="nav-item">
 						<a class="nav-link _pointer" :class="{ active: activeTab === 'restore' }" @click="activeTab = 'restore'">Restore secret</a>
 					</li>
+					<li class="nav-item">
+						<a class="nav-link _pointer" :class="{ active: activeTab === 'derec' }" @click="activeTab = 'derec'">DeRec (Test)</a>
+					</li>
 				</ul>
 
 				<div class="tab-content">
@@ -33,6 +36,9 @@
 					</div>
 					<div v-if="activeTab === 'restore'">
 						<Page_Backup_Restore />
+					</div>
+					<div v-if="activeTab === 'derec'">
+						<Page_Backup_DeRec />
 					</div>
 				</div>
 			</div>
@@ -77,6 +83,7 @@ import Page_Backup_List from './Page_Backup_List.vue';
 import Page_Backup_Shares from './Page_Backup_Shares.vue';
 import Page_Backup_ExportLocal from './Page_Backup_ExportLocal.vue';
 import Page_Backup_Restore from './Page_Backup_Restore.vue';
+import Page_Backup_DeRec from './Page_Backup_DeRec.vue';
 
 const $userPQ = inject('$userPQ');
 const activeTab = ref('backups');
