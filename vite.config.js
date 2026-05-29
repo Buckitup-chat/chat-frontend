@@ -87,6 +87,7 @@ export default defineConfig(({ command }) => {
 			alias: {
 				'@': fileURLToPath(new URL('./src', import.meta.url)),
 				bootstrap: path.resolve(__dirname, 'node_modules/bootstrap'), // ✅ Fix Sass Import
+				'aes-js': path.resolve(__dirname, 'node_modules/aes-js/lib.commonjs/index.js'),
 				// '@noble/hashes/hmac': '@noble/hashes/hmac.js',
 				// '@noble/hashes/sha256': '@noble/hashes/sha256.js',
 				// '@noble/hashes/sha512': '@noble/hashes/sha512.js',

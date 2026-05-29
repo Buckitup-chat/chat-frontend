@@ -1,17 +1,12 @@
-<template>
-  <div class="_qrh">
-    <div class="_qrh_wrapper" v-show="scanning || state.completed" :class="{ _hidden: !scanning && !state.completed }">
-      <div class="_qrh_container">
-        <canvas ref="qrCodeRef"></canvas>
-      </div>
-    </div>
-    <div class="_qrh_scanner" :class="{ _hidden: !scanning }" id="qrScannerWrap">
-      <video ref="qrScannerRef"></video>
-    </div>
-  </div>
-</template>
+const fs = require('fs');
 
-<script setup>
+const path = 'src/components/engines/QRScannerEngine.vue';
+let content = fs.readFileSync(path, 'utf8');
+
+const scriptStart = content.indexOf('<script setup>');
+const scriptEnd = content.indexOf('</script>') + '</script>'.length;
+
+const newScript = `<script setup>
 import { ref, reactive, inject, onMounted, onBeforeUnmount } from 'vue';
 import QRCode from 'qrcode';
 import QrScanner from 'qr-scanner';
@@ -90,7 +85,7 @@ const updateQr = () => {
 		try {
 			const payloadBytes = qwbpConnection.getQRPayload();
 			const payloadBase64 = base64urlEncode(payloadBytes);
-			const msg = `QWBP:${payloadBase64}`;
+			const msg = \`QWBP:\${payloadBase64}\`;
 			
 			let color = props.options.scanningColor;
 			if (state.status === 'detected') color = props.options.detectedColor;
@@ -105,8 +100,7 @@ const updateQr = () => {
 				color: { dark: color },
 			});
 		} catch (error) {
-			// This happens if QWBP is not fully initialized yet
-			// console.error('Failed to generate QWBP QR code:', error);
+			console.error('Failed to generate QWBP QR code:', error);
 		}
 	}
 };
@@ -187,10 +181,7 @@ const toggleScanner = async () => {
 
 const setupDataChannelListener = () => {
 	qwbpConnection.onDataChannel((channel) => {
-		// Stop scanner visual processing
-		if (qrScanner) {
-			qrScanner.stop();
-		}
+		console.log('QWBP DataChannel opened! Role:', qwbpConnection.assignedRole);
 		
 		channel.onmessage = async (event) => {
 			try {
@@ -368,57 +359,7 @@ const finishHandshake = () => {
 
 defineExpose({ toggleScanner, stopScan });
 
-</script>
+</script>`;
 
-<style lang="scss">
-._qrh {
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	max-height: 100dvh;
-
-	._qrh_scanner {
-		width: min(100%, 360px);
-		aspect-ratio: 1;
-		border-radius: 1rem;
-		overflow: hidden;
-		position: relative;
-
-		&._hidden {
-			position: absolute;
-			top: -9999px;
-			height: 1px;
-			opacity: 0 !important;
-		}
-
-		video {
-			width: 100%;
-			height: 100%;
-			object-fit: cover;
-		}
-	}
-
-	._qrh_wrapper {
-		width: min(100%, 360px);
-		aspect-ratio: 1;
-		display: flex;
-		justify-content: center;
-		align-items: center;
-		margin-bottom: 0.75rem;
-
-		&._hidden {
-			height: 0px;
-			display: none;
-		}
-
-		._qrh_container {
-			width: 100%;
-			height: 100%;
-			canvas {
-				width: 100% !important;
-				height: 100% !important;
-			}
-		}
-	}
-}
-</style>
+content = content.substring(0, scriptStart) + newScript + content.substring(scriptEnd);
+fs.writeFileSync(path, content, 'utf8');
