@@ -34,7 +34,7 @@ const props = defineProps({
 	},
 });
 
-const emit = defineEmits(['scanning', 'countdown', 'completed']);
+const emit = defineEmits(['scanning', 'completed']);
 
 const qrCodeRef = ref(null);
 const qrScannerRef = ref(null);
@@ -44,14 +44,20 @@ let qwbpConnection = null;
 const scanning = ref(false);
 
 const getInitialState = () => ({
+	step: 1, // 1: QR1(A), 2: QR2(B), 3: QR3(C), 4: QR4(D), 5: Done
 	myNonce: null,
 	mySigPeerNonce: null,
 	mySigHashNonce: null,
+	myNeedCard: 0,
+	myWebrtcPayload: '',
+	
 	peerHash: null,
 	peerEccPub: null,
 	peerNonce: null,
+	peerNeedCard: 0,
+	
 	completed: false,
-	status: 'scanning' // scanning, detected, verified
+	status: 'scanning' // scanning, detected, verified, exchanging
 });
 
 const state = reactive(getInitialState());
@@ -86,39 +92,43 @@ onBeforeUnmount(() => {
 });
 
 const updateQr = () => {
-	if (qrCodeRef.value && qwbpConnection) {
-		try {
-			const payloadBytes = qwbpConnection.getQRPayload();
-			const payloadBase64 = base64urlEncode(payloadBytes);
-			const msg = `QWBP:${payloadBase64}`;
-			
-			let color = props.options.scanningColor;
-			if (state.status === 'detected') color = props.options.detectedColor;
-			if (state.status === 'verified') color = props.options.verifiedColor;
+	if (qrCodeRef.value && state.myNonce) {
+		const myHash = $userPQ.currentUserHash;
+		const myEccPubBytes = atob($userPQ.currentUser.contact_pkey);
+		const myEccPub = bytesToHex(Uint8Array.from(myEccPubBytes, c => c.charCodeAt(0)));
+		
+		let msg = '';
+		let color = props.options.scanningColor;
 
-			QRCode.toCanvas(qrCodeRef.value, msg, {
-				errorCorrectionLevel: 'L',
-				height: 360,
-				width: 360,
-				quality: 1,
-				margin: 0,
-				color: { dark: color },
-			});
-		} catch (error) {
-			// This happens if QWBP is not fully initialized yet
-			// console.error('Failed to generate QWBP QR code:', error);
+		if (state.step === 1) {
+			msg = `PQ1:A:${myHash}:${myEccPub}:${state.myNonce}`;
+		} else if (state.step === 2) {
+			msg = `PQ1:B:${myHash}:${myEccPub}:${state.myNonce}:${state.mySigPeerNonce}:${state.mySigHashNonce}:${state.myNeedCard}`;
+			color = props.options.detectedColor;
+		} else if (state.step === 3) {
+			msg = `PQ1:C:${state.mySigPeerNonce}:${state.mySigHashNonce}:${state.myNeedCard}:${state.myWebrtcPayload}`;
+			color = props.options.verifiedColor;
+		} else if (state.step >= 4) {
+			msg = `PQ1:D:${state.myWebrtcPayload}`;
+			color = props.options.verifiedColor;
 		}
+
+		QRCode.toCanvas(qrCodeRef.value, msg, {
+			errorCorrectionLevel: 'L',
+			height: 360,
+			width: 360,
+			quality: 1,
+			margin: 0,
+			color: { dark: color },
+		});
 	}
 };
-
-let scanSessionId = 0;
 
 const stopScan = () => {
 	if (qrScanner) {
 		qrScanner.stop();
 		scanning.value = false;
 		state.completed = false;
-		scanSessionId++; // Invalidate any ongoing countdowns
 		emit('scanning', scanning.value);
 	}
 	if (qwbpConnection) {
@@ -128,17 +138,6 @@ const stopScan = () => {
 };
 
 const wait = (delay = 500) => new Promise((resolve) => setTimeout(resolve, delay));
-
-const showCountdown = async (seconds, sessionId) => {
-	for (let i = seconds; i > 0; i--) {
-		if (scanSessionId !== sessionId || !scanning.value) return false;
-		emit('countdown', i);
-		await wait(1000);
-	}
-	if (scanSessionId !== sessionId || !scanning.value) return false;
-	emit('countdown', 0);
-	return true;
-};
 
 const toggleScanner = async () => {
 	try {
@@ -153,30 +152,16 @@ const toggleScanner = async () => {
 			ctx.clearRect(0, 0, qrCodeRef.value.width, qrCodeRef.value.height);
 		}
 		
-		// Initialize QWBP Connection
 		if (qwbpConnection) {
 			qwbpConnection.close();
+			qwbpConnection = null;
 		}
-		qwbpConnection = new QWBPConnection({
-			iceServers: [
-				{ urls: 'stun:stun.l.google.com:19302' },
-				{ urls: 'stun:stun1.l.google.com:19302' }
-			]
-		});
-		await qwbpConnection.initialize();
-
-		setupDataChannelListener();
 
 		scanning.value = true;
-		scanSessionId++;
-		const currentSession = scanSessionId;
-		
+
 		emit('scanning', scanning.value);
 		await wait(100);
 		await qrScanner.start();
-
-		const completedCountdown = await showCountdown(3, currentSession);
-		if (!completedCountdown) return;
 
 		state.myNonce = bytesToHex(randomBytes(16));
 		updateQr();
@@ -185,9 +170,38 @@ const toggleScanner = async () => {
 	}
 };
 
+const initWebrtcAndGetOffer = async () => {
+	qwbpConnection = new QWBPConnection({
+		iceServers: [
+			{ urls: 'stun:stun.l.google.com:19302' },
+			{ urls: 'stun:stun1.l.google.com:19302' }
+		]
+	});
+	setupDataChannelListener();
+	await qwbpConnection.initialize();
+	const payloadBytes = qwbpConnection.getQRPayload();
+	return base64urlEncode(payloadBytes);
+};
+
+const initWebrtcAndGetAnswer = async (peerPayloadBase64) => {
+	qwbpConnection = new QWBPConnection({
+		iceServers: [
+			{ urls: 'stun:stun.l.google.com:19302' },
+			{ urls: 'stun:stun1.l.google.com:19302' }
+		]
+	});
+	setupDataChannelListener();
+	await qwbpConnection.initialize();
+	const peerPayloadBytes = base64urlDecode(peerPayloadBase64);
+	await qwbpConnection.processScannedPayload(peerPayloadBytes);
+	const myPayloadBytes = qwbpConnection.getQRPayload();
+	return base64urlEncode(myPayloadBytes);
+};
+
 const setupDataChannelListener = () => {
 	qwbpConnection.onDataChannel((channel) => {
-		// Stop scanner visual processing
+		state.status = 'exchanging';
+		
 		if (qrScanner) {
 			qrScanner.stop();
 		}
@@ -195,146 +209,167 @@ const setupDataChannelListener = () => {
 		channel.onmessage = async (event) => {
 			try {
 				const msg = JSON.parse(event.data);
-				await handleDataChannelMessage(msg, channel);
+				if (msg.type === 'USER_CARD' && msg.card) {
+					// We received the card. Add to allNetworkUsers
+					const card = msg.card;
+					const exists = $userPQ.allNetworkUsers.some(u => u.user_hash === card.user_hash);
+					if (!exists) {
+						$userPQ.allNetworkUsers.push(card);
+					}
+					finishHandshake();
+				}
 			} catch (e) {
 				console.error('Error handling data channel message', e);
 			}
 		};
 
-		// If we are the offerer, we initiate the handshake
-		if (qwbpConnection.assignedRole === 'offerer') {
-			sendHandshakeA(channel);
-		}
-	});
-};
-
-const sendHandshakeA = (channel) => {
-	const myHash = $userPQ.currentUserHash;
-	const myEccPubBytes = atob($userPQ.currentUser.contact_pkey);
-	const myEccPub = bytesToHex(Uint8Array.from(myEccPubBytes, c => c.charCodeAt(0)));
-	
-	channel.send(JSON.stringify({
-		type: 'A',
-		hash: myHash,
-		eccPub: myEccPub,
-		nonce: state.myNonce
-	}));
-};
-
-const handleDataChannelMessage = async (msg, channel) => {
-	const myHash = $userPQ.currentUserHash;
-
-	if (msg.type === 'A') {
-		state.peerHash = msg.hash;
-		state.peerEccPub = msg.eccPub;
-		state.peerNonce = msg.nonce;
-		
-		// Generate signatures over raw bytes
-		const peerNonceBytes = hexToBytes(state.peerNonce);
-		state.mySigPeerNonce = await $userPQ.signContactChallenge(peerNonceBytes);
-		
-		const hashBytes = new TextEncoder().encode(myHash);
-		const hashPlusNonce = new Uint8Array(hashBytes.length + peerNonceBytes.length);
-		hashPlusNonce.set(hashBytes);
-		hashPlusNonce.set(peerNonceBytes, hashBytes.length);
-		
-		state.mySigHashNonce = await $userPQ.signContactChallenge(hashPlusNonce);
-		
-		const myEccPubBytes = atob($userPQ.currentUser.contact_pkey);
-		const myEccPub = bytesToHex(Uint8Array.from(myEccPubBytes, c => c.charCodeAt(0)));
-
+		// Send my card as soon as channel is open
 		channel.send(JSON.stringify({
-			type: 'B',
-			hash: myHash,
-			eccPub: myEccPub,
-			nonce: state.myNonce,
-			sigPeerNonce: bytesToHex(state.mySigPeerNonce),
-			sigHashNonce: bytesToHex(state.mySigHashNonce)
+			type: 'USER_CARD',
+			card: $userPQ.currentUser
 		}));
-
-	} else if (msg.type === 'B') {
-		state.peerHash = msg.hash;
-		state.peerEccPub = msg.eccPub;
-		state.peerNonce = msg.nonce;
-		
-		// Verify Sig(myNonce)
-		const myNonceBytes = hexToBytes(state.myNonce);
-		const isValid1 = secp.verify(hexToBytes(msg.sigPeerNonce), sha256(myNonceBytes), hexToBytes(state.peerEccPub));
-		
-		// Verify Sig(peerHash + myNonce)
-		const peerHashBytes = new TextEncoder().encode(state.peerHash);
-		const expectedHashPlusNonce = new Uint8Array(peerHashBytes.length + myNonceBytes.length);
-		expectedHashPlusNonce.set(peerHashBytes);
-		expectedHashPlusNonce.set(myNonceBytes, peerHashBytes.length);
-		const isValid2 = secp.verify(hexToBytes(msg.sigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(state.peerEccPub));
-		
-		if (isValid1 && isValid2) {
-			// Generate signatures over raw bytes
-			const peerNonceBytes = hexToBytes(state.peerNonce);
-			state.mySigPeerNonce = await $userPQ.signContactChallenge(peerNonceBytes);
-			
-			const myHashBytes = new TextEncoder().encode(myHash);
-			const hashPlusNonce = new Uint8Array(myHashBytes.length + peerNonceBytes.length);
-			hashPlusNonce.set(myHashBytes);
-			hashPlusNonce.set(peerNonceBytes, myHashBytes.length);
-			
-			state.mySigHashNonce = await $userPQ.signContactChallenge(hashPlusNonce);
-			
-			channel.send(JSON.stringify({
-				type: 'C',
-				sigPeerNonce: bytesToHex(state.mySigPeerNonce),
-				sigHashNonce: bytesToHex(state.mySigHashNonce)
-			}));
-
-			state.status = 'verified';
-			updateQr();
-			finishHandshake();
-		} else {
-			console.warn("Invalid signature from peer (B)");
-		}
-
-	} else if (msg.type === 'C') {
-		// Verify Sig(myNonce)
-		const myNonceBytes = hexToBytes(state.myNonce);
-		const isValid1 = secp.verify(hexToBytes(msg.sigPeerNonce), sha256(myNonceBytes), hexToBytes(state.peerEccPub));
-		
-		// Verify Sig(peerHash + myNonce)
-		const peerHashBytes = new TextEncoder().encode(state.peerHash);
-		const expectedHashPlusNonce = new Uint8Array(peerHashBytes.length + myNonceBytes.length);
-		expectedHashPlusNonce.set(peerHashBytes);
-		expectedHashPlusNonce.set(myNonceBytes, peerHashBytes.length);
-		
-		const isValid2 = secp.verify(hexToBytes(msg.sigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(state.peerEccPub));
-		
-		if (isValid1 && isValid2) {
-			state.status = 'verified';
-			updateQr();
-			finishHandshake();
-		} else {
-			console.warn("Invalid signature from peer (C)");
-		}
-	}
+	});
 };
 
 const readQr = async (msg) => {
 	try {
-		if (!msg.startsWith('QWBP:')) {
-			// Ignore non-QWBP QR codes to avoid conflicts
-			return;
-		}
-		
-		// Change status to detected once we see a valid prefix
-		if (state.status !== 'detected' && state.status !== 'verified') {
+		if (!msg.startsWith('PQ1:')) return;
+		const parts = msg.split(':');
+		const type = parts[1];
+
+		const myHash = $userPQ.currentUserHash;
+
+		if (type === 'A') {
+			if (state.step >= 2) return;
+			state.peerHash = parts[2];
+			state.peerEccPub = parts[3];
+			state.peerNonce = parts[4];
+			
+			// Check if we need their card
+			const knownUser = $userPQ.allNetworkUsers.find(u => u.user_hash === state.peerHash);
+			state.myNeedCard = knownUser ? 0 : 1;
+			
+			// Generate signatures over raw bytes
+			const peerNonceBytes = hexToBytes(state.peerNonce);
+			state.mySigPeerNonce = await $userPQ.signContactChallenge(peerNonceBytes);
+			
+			const hashBytes = new TextEncoder().encode(myHash);
+			const hashPlusNonce = new Uint8Array(hashBytes.length + peerNonceBytes.length);
+			hashPlusNonce.set(hashBytes);
+			hashPlusNonce.set(peerNonceBytes, hashBytes.length);
+			
+			state.mySigHashNonce = await $userPQ.signContactChallenge(hashPlusNonce);
+			
+			state.step = 2;
 			state.status = 'detected';
-			updateQr();
 			if ('vibrate' in navigator) navigator.vibrate([50]);
-		}
+			updateQr();
 
-		const base64Payload = msg.substring(5); // Remove 'QWBP:'
-		const payloadBytes = base64urlDecode(base64Payload);
+		} else if (type === 'B') {
+			if (state.step >= 3) return;
+			const peerHash = parts[2];
+			const peerEccPub = parts[3];
+			const peerNonce = parts[4];
+			const peerSigNonce = parts[5];
+			const peerSigHashNonce = parts[6];
+			state.peerNeedCard = parseInt(parts[7], 10) || 0;
 
-		if (qwbpConnection && qwbpConnection.connectionState !== 'connected') {
-			await qwbpConnection.processScannedPayload(payloadBytes);
+			state.peerHash = peerHash;
+			state.peerEccPub = peerEccPub;
+			state.peerNonce = peerNonce;
+			
+			// Check if we need their card
+			const knownUser = $userPQ.allNetworkUsers.find(u => u.user_hash === state.peerHash);
+			state.myNeedCard = knownUser ? 0 : 1;
+			
+			// Verify Sig(myNonce)
+			const myNonceBytes = hexToBytes(state.myNonce);
+			const isValid1 = secp.verify(hexToBytes(peerSigNonce), sha256(myNonceBytes), hexToBytes(peerEccPub));
+			
+			// Verify Sig(peerHash + myNonce)
+			const peerHashBytes = new TextEncoder().encode(peerHash);
+			const expectedHashPlusNonce = new Uint8Array(peerHashBytes.length + myNonceBytes.length);
+			expectedHashPlusNonce.set(peerHashBytes);
+			expectedHashPlusNonce.set(myNonceBytes, peerHashBytes.length);
+			const isValid2 = secp.verify(hexToBytes(peerSigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(peerEccPub));
+			
+			if (isValid1 && isValid2) {
+				// Generate signatures over raw bytes
+				const peerNonceBytes = hexToBytes(peerNonce);
+				state.mySigPeerNonce = await $userPQ.signContactChallenge(peerNonceBytes);
+				
+				const myHashBytes = new TextEncoder().encode(myHash);
+				const hashPlusNonce = new Uint8Array(myHashBytes.length + peerNonceBytes.length);
+				hashPlusNonce.set(myHashBytes);
+				hashPlusNonce.set(peerNonceBytes, myHashBytes.length);
+				
+				state.mySigHashNonce = await $userPQ.signContactChallenge(hashPlusNonce);
+				
+				// Init WebRTC Offer if needed
+				if (state.myNeedCard || state.peerNeedCard) {
+					state.myWebrtcPayload = await initWebrtcAndGetOffer();
+				}
+				
+				state.step = 3;
+				state.status = 'verified';
+				updateQr();
+				
+				// If we don't need WebRTC, we can finish early but still show C for the peer
+				if (!state.myNeedCard && !state.peerNeedCard) {
+					finishHandshake();
+				}
+			} else {
+				console.warn("Invalid signature from peer (B)");
+			}
+
+		} else if (type === 'C') {
+			if (state.step !== 2) return;
+			const peerSigNonce = parts[2];
+			const peerSigHashNonce = parts[3];
+			state.peerNeedCard = parseInt(parts[4], 10) || 0;
+			const peerWebrtcPayload = parts[5] || '';
+			
+			// Verify Sig(myNonce)
+			const myNonceBytes = hexToBytes(state.myNonce);
+			const isValid1 = secp.verify(hexToBytes(peerSigNonce), sha256(myNonceBytes), hexToBytes(state.peerEccPub));
+			
+			// Verify Sig(peerHash + myNonce)
+			const peerHashBytes = new TextEncoder().encode(state.peerHash);
+			const expectedHashPlusNonce = new Uint8Array(peerHashBytes.length + myNonceBytes.length);
+			expectedHashPlusNonce.set(peerHashBytes);
+			expectedHashPlusNonce.set(myNonceBytes, peerHashBytes.length);
+			
+			const isValid2 = secp.verify(hexToBytes(peerSigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(state.peerEccPub));
+			
+			if (isValid1 && isValid2) {
+				state.status = 'verified';
+				
+				if (peerWebrtcPayload) {
+					// Peer sent an offer, we generate answer
+					state.myWebrtcPayload = await initWebrtcAndGetAnswer(peerWebrtcPayload);
+					state.step = 4;
+					updateQr();
+					// We wait for WebRTC channel to open, which calls finishHandshake
+				} else {
+					// No WebRTC needed
+					state.step = 5;
+					updateQr();
+					finishHandshake();
+				}
+			} else {
+				console.warn("Invalid signature from peer (C)");
+			}
+		} else if (type === 'D') {
+			if (state.step !== 3) return;
+			const peerWebrtcPayload = parts[2];
+			if (peerWebrtcPayload && qwbpConnection) {
+				// Peer sent the Answer, process it
+				const peerPayloadBytes = base64urlDecode(peerWebrtcPayload);
+				await qwbpConnection.processScannedPayload(peerPayloadBytes);
+				state.step = 5;
+				updateQr();
+				// We wait for WebRTC channel to open, which calls finishHandshake
+			}
 		}
 	} catch (error) {
 		console.error('readQr error:', error);

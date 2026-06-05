@@ -1,46 +1,79 @@
 <template>
 	<FullContentBlock v-if="$userPQ.currentUser">
 		<template #header>
-			<div class="fw-bold fs-5 py-1">Backup Center</div>
+			<div class="fw-bold fs-5 py-1">Security & Recovery</div>
 		</template>
 		
 		<template #content>
 			<div class="_full_width_block">
-				<ul class="nav nav-tabs mb-3">
-					<li class="nav-item">
-						<a class="nav-link _pointer" :class="{ active: activeTab === 'backups' }" @click="activeTab = 'backups'">My backups</a>
-					</li>
-					<li class="nav-item">
-						<a class="nav-link _pointer" :class="{ active: activeTab === 'shares' }" @click="activeTab = 'shares'">My shares</a>
-					</li>
-					<li class="nav-item">
-						<a class="nav-link _pointer" :class="{ active: activeTab === 'export' }" @click="activeTab = 'export'">Export local</a>
-					</li>
-					<li class="nav-item">
-						<a class="nav-link _pointer" :class="{ active: activeTab === 'restore' }" @click="activeTab = 'restore'">Restore secret</a>
-					</li>
-					<li class="nav-item">
-						<a class="nav-link _pointer" :class="{ active: activeTab === 'derec' }" @click="activeTab = 'derec'">DeRec (Test)</a>
-					</li>
-				</ul>
+				<div class="text-secondary mb-4 text-center">
+					Choose a backup or recovery method for your account.
+				</div>
 
-				<div class="tab-content">
-					<div v-if="activeTab === 'backups'">
-						<Page_Backup_List />
-					</div>
-					<div v-if="activeTab === 'shares'">
-						<Page_Backup_Shares />
-					</div>
-					<div v-if="activeTab === 'export'">
-						<Page_Backup_ExportLocal />
-					</div>
-					<div v-if="activeTab === 'restore'">
-						<Page_Backup_Restore />
-					</div>
-					<div v-if="activeTab === 'derec'">
-						<Page_Backup_DeRec />
+				<!-- Local File -->
+				<div class="card mb-3 shadow-sm border-0">
+					<div class="card-body">
+						<div class="d-flex align-items-center mb-2">
+							<i class="_icon_backups bg-dark fs-3 me-3" style="width: 2rem; height: 2rem;"></i>
+							<h5 class="card-title mb-0 fw-bold">Local File</h5>
+						</div>
+						<p class="card-text text-secondary mb-3">
+							Save an encrypted backup file to your device.
+						</p>
+						<div class="d-flex gap-2">
+							<button class="btn btn-outline-dark flex-fill" @click="openModal('account_backup_local')">
+								+ Create Backup
+							</button>
+							<button class="btn btn-dark flex-fill" @click="openModal('account_restore_local')">
+								<i class="bi bi-arrow-clockwise"></i> Restore
+							</button>
+						</div>
 					</div>
 				</div>
+
+				<!-- Shamir Shares -->
+				<div class="card mb-3 shadow-sm border-0">
+					<div class="card-body">
+						<div class="d-flex align-items-center mb-2">
+							<i class="_icon_shares bg-dark fs-3 me-3" style="width: 2rem; height: 2rem;"></i>
+							<h5 class="card-title mb-0 fw-bold">Distributed Shares (Shamir)</h5>
+						</div>
+						<p class="card-text text-secondary mb-3">
+							Split your key among trusted contacts or devices.
+						</p>
+						<div class="d-flex gap-2">
+							<button class="btn btn-outline-dark flex-fill" @click="openModal('account_backup_shamir_create')">
+								+ Create Backup
+							</button>
+							<button class="btn btn-dark flex-fill" @click="openModal('account_backup_shamir_restore')">
+								<i class="bi bi-arrow-clockwise"></i> Restore
+							</button>
+						</div>
+					</div>
+				</div>
+
+				<!-- Blockchain -->
+				<div class="card mb-3 shadow-sm border-0" style="opacity: 0.7;">
+					<div class="card-body">
+						<div class="d-flex align-items-center mb-2">
+							<i class="_icon_network bg-dark fs-3 me-3" style="width: 2rem; height: 2rem;"></i>
+							<h5 class="card-title mb-0 fw-bold">Blockchain Recovery</h5>
+							<span class="badge bg-secondary ms-2 rounded-pill">Coming Soon</span>
+						</div>
+						<p class="card-text text-secondary mb-3">
+							Link a crypto wallet for on-chain authentication.
+						</p>
+						<div class="d-flex gap-2">
+							<button class="btn btn-outline-dark flex-fill" disabled>
+								+ Create Backup
+							</button>
+							<button class="btn btn-dark flex-fill" disabled>
+								<i class="bi bi-arrow-clockwise"></i> Restore
+							</button>
+						</div>
+					</div>
+				</div>
+
 			</div>
 		</template>
 	</FullContentBlock>
@@ -53,38 +86,20 @@
 ._full_width_block {
 	width: 100%;
 }
-
-.nav-tabs {
-    .nav-link {
-        color: $dark;
-        border: none;
-        border-bottom: 2px solid transparent;
-        padding: 0.5rem 1rem;
-        
-        &:hover {
-            border-color: transparent;
-            color: $primary;
-        }
-        
-        &.active {
-            font-weight: bold;
-            border-bottom-color: $dark;
-            color: $dark;
-            background-color: transparent;
-        }
-    }
+.card {
+	background-color: #f8f9fa;
+	border-radius: 12px;
 }
 </style>
 
 <script setup>
-import { ref, inject } from 'vue';
+import { inject } from 'vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
-import Page_Backup_List from './Page_Backup_List.vue';
-import Page_Backup_Shares from './Page_Backup_Shares.vue';
-import Page_Backup_ExportLocal from './Page_Backup_ExportLocal.vue';
-import Page_Backup_Restore from './Page_Backup_Restore.vue';
-import Page_Backup_DeRec from './Page_Backup_DeRec.vue';
 
 const $userPQ = inject('$userPQ');
-const activeTab = ref('backups');
+const $modal = inject('$modal');
+
+const openModal = (modalId) => {
+	$modal.value.open({ id: modalId });
+};
 </script>

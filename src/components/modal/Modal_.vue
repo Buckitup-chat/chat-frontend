@@ -121,8 +121,36 @@ const modalRegistry = {
 		icon: '_icon_shares',
 	},
 
+	account_backup_local: {
+		header: true,
+		component: 'Modal_Account_Backup_Local',
+		modalClass: 'modal-sm',
+		title: 'Local Backup',
+		icon: '_icon_backups',
+		modalStatic: true,
+	},
+
+	account_backup_shamir_create: {
+		header: true,
+		component: 'Modal_Backup_Shamir_Create',
+		modalClass: 'modal-md',
+		title: 'Shamir Shares Backup',
+		icon: '_icon_shares',
+		modalStatic: true,
+	},
+
+	account_backup_shamir_restore: {
+		header: true,
+		component: 'Modal_Backup_Shamir_Restore',
+		modalClass: 'modal-md',
+		title: 'Restore from Shares',
+		icon: '_icon_shares',
+		modalStatic: true,
+	},
+
 	account_restore_local: {
 		header: true,
+		modalStatic: true,
 		component: 'Modal_Account_Restore_Local',
 		modalClass: 'modal-sm',
 		title: 'Restore account',
