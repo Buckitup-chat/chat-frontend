@@ -247,8 +247,11 @@ export const userPQStore = defineStore('userPQ', () => {
     if (isAuthenticated.value) {
       await logout();
     }
-    await initialize();
+    if (!isInitialized.value) {
+      await initialize();
+    }
     const { identity, keys } = backupData;
+    if (!identity?.name) identity.name = 'Imported Account';
     await em.value.importVaultKeys(keys, identity);
     await refreshAllData();
   };

@@ -45,7 +45,10 @@
 
 			<div class="row justify-content-center gx-2 mt-3">
 				<div class="col-md-20">
-					<button class="btn btn-dark w-100" :disabled="!password" @click="decrypt()">Decrypt and restore</button>
+					<button class="btn btn-dark w-100" :disabled="!password || processing" @click="decrypt()">
+						<span v-if="processing" class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+						Decrypt and restore
+					</button>
 				</div>
 			</div>
 		</template>
@@ -69,6 +72,7 @@ const fileString = ref();
 const requestDecrypt = ref();
 const password = ref();
 const showPassword = ref();
+const processing = ref(false);
 
 const fileInput = ref();
 const fileInputKey = ref(0);
@@ -78,15 +82,19 @@ const handleRestore = async (event) => {
 	requestDecrypt.value = null;
 
 	const file = Array.from(event.target.files)[0];
+	if (!file) return;
+
 	const reader = new FileReader();
 
-	reader.onload = async (event) => {
-		fileString.value = event.target.result;
+	reader.onload = async (e) => {
+		fileString.value = e.target.result;
+		if (!fileString.value) return;
+
 		let data;
 		try {
 			data = JSON.parse(fileString.value);
-		} catch (error) {
-			console.error('handleRestore', error);
+		} catch (_) {
+			// not JSON — likely encrypted
 		}
 
 		if (!data) {
@@ -95,14 +103,26 @@ const handleRestore = async (event) => {
 			await applyBackup(data);
 		}
 	};
+
+	reader.onerror = () => {
+		$swal.fire({
+			icon: 'error',
+			title: 'File read error',
+			text: 'Could not read the selected file.',
+			timer: 5000,
+		});
+	};
+
 	reader.readAsText(file);
 };
 
 const decrypt = async () => {
 	try {
+		processing.value = true;
+		await new Promise(r => setTimeout(r, 100));
 		const base64Password = btoa(password.value);
 		const decryptedBase64 = $enigma.decryptData(fileString.value, base64Password);
-		const jsonString = atob(decryptedBase64);
+		const jsonString = decodeURIComponent(escape(atob(decryptedBase64)));
 		const data = JSON.parse(jsonString);
 		await applyBackup(data);
 	} catch (error) {
@@ -110,22 +130,25 @@ const decrypt = async () => {
 		$swal.fire({
 			icon: 'error',
 			title: 'Unable to decrypt',
-			text: 'Check if backup valid and password is correct', //
+			text: 'Check if password is correct and the backup file is valid.',
 			footer: errorMessage(error),
 			timer: 15000,
 		});
+	} finally {
+		processing.value = false;
 	}
 };
 
 const applyBackup = async (data) => {
 	try {
-		if (!data.identity || !data.keys) {
+		if (!data.identity || !data.keys || !data.identity.user_hash) {
 			$swal.fire({
 				icon: 'error',
 				title: 'Invalid backup format',
-				text: 'This backup file is not compatible with the current version',
+				text: 'This backup file is not compatible with the current version.',
 				timer: 10000,
 			});
+			fileInputKey.value++;
 			return;
 		}
 
@@ -149,6 +172,7 @@ const applyBackup = async (data) => {
 		$mitt.emit('modal::close');
 		$router.replace({ name: 'account_info' });
 	} catch (error) {
+		console.error('applyBackup error:', error);
 		$swal.fire({
 			icon: 'error',
 			title: 'Restore error',
