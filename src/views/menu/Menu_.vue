@@ -365,8 +365,7 @@ onMounted(async () => {
 // TODO: REFACTOR - These hardcoded URLs should use $router.push() for SPA navigation
 // External URLs break the SPA experience and re-initialize the app
 const navigateToHome = () => {
-	// Change the browser location to `/` and reload the page
-	window.location.href = '/';
+	window.location.href = '/trusted';
 };
 
 const navigateToRooms = () => {
