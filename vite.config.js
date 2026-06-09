@@ -7,20 +7,19 @@ import WALC from '@lo-fi/webauthn-local-client/bundlers/vite';
 
 import { viteCommonjs } from '@originjs/vite-plugin-commonjs'
 
-import fs from 'fs';
 import path from 'path';
 
 import wasm from 'vite-plugin-wasm';
 import { fileURLToPath, URL } from 'node:url';
 
-let production = process.env.NODE_ENV === 'production';
-let productionApi = process.env.NODE_ENV === 'production';
-production = true;
-productionApi = true;
+const DOMAIN = process.env.DOMAIN
+const isLocalhost = DOMAIN?.startsWith('localhost')
+const isProduction = !isLocalhost
+const apiBase = isLocalhost ? `http://${DOMAIN}` : `https://${DOMAIN || 'buckitup.xyz'}`
 
 // https://vite.dev/config/
 export default defineConfig(({ command }) => {
-	const isBuild = command === 'build'
+	const isDev = command !== 'build'
 
 	return {
 		esbuild: {
@@ -67,18 +66,18 @@ export default defineConfig(({ command }) => {
 			vue(),
 		],
 		define: {
-			//sodium,
-			ELECTRIC_API_URL: JSON.stringify(isBuild ? 'https://buckitup.xyz/electric/v1' : 'http://localhost:5173/api'),
-			API_URL: JSON.stringify('https://buckitup.xyz'),
-			CONNECTOR_URL: JSON.stringify(productionApi ? 'wss://buckitupss.appdev.pp.ua/connector' : 'ws://localhost:3953'),
-			IS_PRODUCTION: production,
-			IS_PRODUCTION_API: productionApi,
-			API_SURL: JSON.stringify(productionApi ? 'https://buckitup.xyz' : 'http://localhost:3950'), //http://192.168.100.28:3900 https://d1ca-2a01-c844-251d-5100-fa2f-930b-157d-3af1.ngrok-free.app
-
+			ELECTRIC_API_URL: JSON.stringify(
+				isDev ? '/api'
+				: `${apiBase}/electric/v1`
+			),
+			API_URL: JSON.stringify(apiBase),
+			CONNECTOR_URL: JSON.stringify(isLocalhost ? 'ws://localhost:3953' : 'wss://buckitupss.appdev.pp.ua/connector'),
+			IS_PRODUCTION: isProduction,
+			IS_PRODUCTION_API: isProduction,
+			API_SURL: JSON.stringify(isLocalhost ? `http://${DOMAIN}` : apiBase),
 			API_SPATH: JSON.stringify('/api'),
-			TM_BOT: JSON.stringify(productionApi ? 'BuckitUpDemoBot' : 'BuckitUpLocalBot'),
+			TM_BOT: JSON.stringify(isLocalhost ? 'BuckitUpLocalBot' : 'BuckitUpDemoBot'),
 			LIT_PKP_PUBLIC_KEY: JSON.stringify('0x040886717a89b4ca1f41c39006c85f27dad31ef1d53072bc63ba1b69e7cd70363b8e283077071af75f29c48375c98c77ae5e81995986edcd783b8fa3c45e2c1d1e'),
-
 			IPFS_URL: JSON.stringify('https://fanaticodev.infura-ipfs.io/ipfs/'),
 			INFURA_PR_ID: JSON.stringify('c683c07028924e35ae07d1b82ecbe342'),
 			INFURA_SERCET: JSON.stringify('iWIYyzBCkJHfHxYlHYSKnulu3rkCP3stdSr6AX6BVsFxi4kZYPXN7Q'),
@@ -87,7 +86,7 @@ export default defineConfig(({ command }) => {
 			alias: {
 				'@': fileURLToPath(new URL('./src', import.meta.url)),
 				bootstrap: path.resolve(__dirname, 'node_modules/bootstrap'), // ✅ Fix Sass Import
-				'aes-js': path.resolve(__dirname, 'node_modules/aes-js/lib.commonjs/index.js'),
+				'aes-js': path.resolve(__dirname, 'node_modules/ethers/node_modules/aes-js/lib.commonjs/index.js'),
 				// '@noble/hashes/hmac': '@noble/hashes/hmac.js',
 				// '@noble/hashes/sha256': '@noble/hashes/sha256.js',
 				// '@noble/hashes/sha512': '@noble/hashes/sha512.js',
@@ -120,14 +119,16 @@ export default defineConfig(({ command }) => {
 		server: {
 			proxy: {
 				'/api': {
-					target: 'https://buckitup.xyz/electric/v1',
+					target: isLocalhost
+						? `http://${DOMAIN}/electric/v1`
+						: `${apiBase}/electric/v1`,
 					changeOrigin: true,
 					rewrite: (path) => path.replace(/^\/api/, ''),
 					secure: false,
 				},
 			},
 		},
-		base: isBuild ? '/' : '/',
+		base: DOMAIN ? '/app/' : '/',
 		build: {
 			//outDir: "../priv/static/frontend",
 			emptyOutDir: true,
