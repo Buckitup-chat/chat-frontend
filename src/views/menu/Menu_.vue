@@ -36,8 +36,12 @@
 					<div>Account</div>
 				</div>
 
-				<div class="_menu_btn order-1" @click="navigateToHome">
+				<div class="_menu_btn order-1" @click="navigateToTrusted">
 					<div class="fs-4">BE</div>
+				</div>
+
+				<div class="_menu_btn order-1" @click="navigateToElectric">
+					<div class="fs-4">EL</div>
 				</div>
 
 				<!-- <div class="_menu_btn order-1" :class="{ _active: $route.path === '/storage-api-client' }"
@@ -364,9 +368,12 @@ onMounted(async () => {
 
 // TODO: REFACTOR - These hardcoded URLs should use $router.push() for SPA navigation
 // External URLs break the SPA experience and re-initialize the app
-const navigateToHome = () => {
-	// Change the browser location to `/` and reload the page
-	window.location.href = '/';
+const navigateToTrusted = () => {
+	window.location.href = '/trusted';
+};
+
+const navigateToElectric = () => {
+	window.location.href = '/electric';
 };
 
 const navigateToRooms = () => {
