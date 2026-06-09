@@ -15,7 +15,7 @@ import { fileURLToPath, URL } from 'node:url';
 const DOMAIN = process.env.DOMAIN
 const isLocalhost = DOMAIN?.startsWith('localhost')
 const isProduction = !isLocalhost
-const apiBase = isLocalhost ? '' : `https://${DOMAIN || 'buckitup.xyz'}`
+const apiBase = isLocalhost ? `http://${DOMAIN}` : `https://${DOMAIN || 'buckitup.xyz'}`
 
 // https://vite.dev/config/
 export default defineConfig(({ command }) => {
