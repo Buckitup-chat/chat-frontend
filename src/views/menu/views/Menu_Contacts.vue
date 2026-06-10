@@ -5,20 +5,22 @@
 </template>
 
 <script setup>
+import { useMenu } from '@/composables/useMenu';
+
 import Contacts_List from '@/views/contacts/Contacts_List.vue';
 import { ref, inject, watch, onMounted, computed } from 'vue';
 
 const $route = inject('$route');
 const $router = inject('$router');
 const $user = inject('$user');
-const $menuOpened = inject('$menuOpened');
+const { isOpen: $menuOpened, close: closeMenu } = useMenu();
 
 const selected = ref([]);
 
 const select = (address) => {
 	selected.value = [address];
 	$router.push({ name: 'contact', params: { address } });
-	$menuOpened.value = false;
+	closeMenu();
 };
 
 onMounted(async () => {

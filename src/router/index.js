@@ -16,12 +16,24 @@ const routes = [
 	},
 
 	{
+		path: '/chats',
+		name: 'chats',
+		component: () => import('../views/Page_Empty.vue'),
+		meta: { auth: true, name: 'Chats' },
+	},
+	{
 		path: '/chat/:address',
 		name: 'chat',
 		component: () => import('../views/chats/Page_Chat.vue'),
 		meta: { auth: true, name: 'Chat' },
 	},
 
+	{
+		path: '/rooms',
+		name: 'rooms',
+		component: () => import('../views/Page_Empty.vue'),
+		meta: { auth: true, name: 'Rooms' },
+	},
 	{
 		path: '/room/:roomId',
 		name: 'room',
@@ -41,6 +53,12 @@ const routes = [
 				meta: { auth: true, name: 'Create', sub: true },
 			},
 		],
+	},
+	{
+		path: '/contacts',
+		name: 'contacts',
+		component: () => import('../views/Page_Empty.vue'),
+		meta: { auth: true, name: 'Contacts' },
 	},
 	{
 		path: '/contact/:address',

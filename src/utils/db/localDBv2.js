@@ -97,6 +97,11 @@ class LocalDBv2 {
     // Skip if already syncing
     if (this.syncEngine) return;
 
+    if (localStorage.getItem('DISABLE_SYNC') === 'true') {
+      console.log('Shape sync disabled via localStorage');
+      return;
+    }
+
     try {
       const { setOffline } = useOnlineStatus();
       this.syncEngine = await this.db.electric.syncShapeToTable({

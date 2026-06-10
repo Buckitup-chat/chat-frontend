@@ -5,20 +5,22 @@
 </template>
 
 <script setup>
+import { useMenu } from '@/composables/useMenu';
+
 import Users_List from '@/views/users/Users_List.vue';
 import { ref, inject, watch, onMounted, computed } from 'vue';
 import { useLiveQuery } from '@electric-sql/pglite-vue';
 
 const $route = inject('$route');
 const $router = inject('$router');
-const $menuOpened = inject('$menuOpened');
+const { isOpen: $menuOpened, close: closeMenu } = useMenu();
 
 const selected = ref([]);
 
 const select = (address) => {
 	selected.value = [address];
 	$router.push({ name: 'contact', params: { address } });
-	$menuOpened.value = false;
+	closeMenu();
 };
 
 const dbUsers = useLiveQuery(`SELECT count(*) as count from user_cards;`);

@@ -12,7 +12,7 @@
 				</div>
 
 				<!-- toggle -->
-				<div class="_toggler" @click="$menuOpened = !$menuOpened" v-if="$breakpoint.lt('md')" ref="toggler">
+				<div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')" ref="toggler">
 					<div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>
 				</div>
 			</div>
@@ -150,9 +150,11 @@
 </style>
 
 <script setup>
+import { useMenu } from '@/composables/useMenu';
+
 import { inject } from 'vue';
 
-const $menuOpened = inject('$menuOpened');
+const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
 const { blockClass } = defineProps({
 	blockClass: { type: String },
 });

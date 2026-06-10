@@ -19,12 +19,14 @@
 </style>
 
 <script setup>
+import { useMenu } from '@/composables/useMenu';
+
 
 import { inject } from 'vue';
-const $menuOpened = inject('$menuOpened')
+const { isOpen: $menuOpened, close: closeMenu } = useMenu();
 
 const select = (navigate) => {
-    $menuOpened.value = false
+    closeMenu();
     navigate()
 }
 

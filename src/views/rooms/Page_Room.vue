@@ -1,5 +1,8 @@
 <template>
-	<div>Room</div>
+	<div class="d-flex flex-column w-100 h-100 justify-content-center align-items-center">
+		<div class="fs-3 fw-bold">{{ roomName }}</div>
+        <div class="text-muted mt-2">Mock Room Interface (ID: {{ $route.params.roomId }})</div>
+	</div>
 </template>
 
 <style lang="scss" scoped>
@@ -7,16 +10,19 @@
 </style>
 
 <script setup>
-import { ref, onMounted, watch, inject, computed } from 'vue';
+import { computed } from 'vue';
 import { useRoute } from 'vue-router';
 
-const $user = inject('$user');
-const $web3 = inject('$web3');
-const $swal = inject('$swal');
 const $route = useRoute();
-const $loader = inject('$loader');
 
-const contact = computed(() => {
-	return $user.contacts.find((e) => e.address === $route.params.address);
+const mockRooms = [
+    { roomId: 'room-1', name: 'General Chat', user_hash: 'r-001', notes: 'Public discussion' },
+    { roomId: 'room-2', name: 'Development', user_hash: 'r-002', notes: 'Tech talk' },
+    { roomId: 'room-3', name: 'Design', user_hash: 'r-003', notes: 'UI/UX' },
+];
+
+const roomName = computed(() => {
+	const room = mockRooms.find((r) => r.roomId === $route.params.roomId);
+    return room ? room.name : 'Unknown Room';
 });
 </script>

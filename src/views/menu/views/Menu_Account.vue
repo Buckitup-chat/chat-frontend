@@ -63,14 +63,16 @@
 </style>
 
 <script setup>
+import { useMenu } from '@/composables/useMenu';
+
 // import Account_Item from '@/components/Account_Item.vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 import { inject } from 'vue';
 
-const $menuOpened = inject('$menuOpened');
+const { isOpen: $menuOpened, close: closeMenu } = useMenu();
 
 const select = (navigate) => {
-	$menuOpened.value = false;
+	closeMenu();
 	navigate();
 };
 </script>

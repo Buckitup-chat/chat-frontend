@@ -126,6 +126,8 @@
 </style>
 
 <script setup>
+import { useMenu } from '@/composables/useMenu';
+
 import { ref, inject, onMounted, computed } from 'vue';
 import Account_Item from '@/components/Account_Item.vue';
 import QRScannerEngine from '@/components/engines/QRScannerEngine.vue';
@@ -135,7 +137,7 @@ const $mitt = inject('$mitt');
 const $router = inject('$router');
 const $swal = inject('$swal');
 const $loader = inject('$loader');
-const $menuOpened = inject('$menuOpened');
+const { isOpen: $menuOpened, close: closeMenu } = useMenu();
 
 const scannerEngineRef = ref(null);
 
@@ -239,7 +241,7 @@ const addContact = async () => {
 			timer: 15000,
 		});
 		
-		$menuOpened.value = false;
+		closeMenu();
 		$router.push({ name: 'contact', params: { address: contact.value.user_hash } });
 		closeModal();
 	} catch (error) {

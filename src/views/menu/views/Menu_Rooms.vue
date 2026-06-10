@@ -1,23 +1,44 @@
 <template>    
-    <Contacts_List @select="select" :selected="selected" v-if="$user.account.rooms?.length" />
-
-    <div class="fs-5 text-center" v-if="!$user.account.rooms?.length">
-        <p>Your list is empty</p>
-    </div>    
+    <Rooms_List @select="select" :selected="selected" />
 </template>
 
 <script setup>
-import Contacts_List from '@/views/contacts/Contacts_List.vue';
-import { ref, inject } from 'vue';
+import { useMenu } from '@/composables/useMenu';
 
-const $router = inject('$router')
-const $user = inject('$user')
+import Rooms_List from '@/views/rooms/Rooms_List.vue';
+import { ref, inject, watch, onMounted } from 'vue';
 
-const selected = ref([])
+const $route = inject('$route');
+const $router = inject('$router');
+const { isOpen: $menuOpened, close: closeMenu } = useMenu();
+
+const selected = ref([]);
 
 const select = (roomId) => {    
-    selected.value = [address]
-    $router.push({ name: 'room', params: { roomId } })
-}
+    selected.value = [roomId];
+    $router.push({ name: 'room', params: { roomId } });
+    closeMenu();
+};
 
+onMounted(() => {
+	if ($menuOpened.value && $route.params.roomId) checkSelection();
+});
+
+watch(
+	() => $menuOpened.value,
+	(newVal) => {
+		if (newVal && $route.params.roomId) checkSelection();
+	},
+);
+
+watch(
+	() => $route.params?.roomId,
+	() => {
+		checkSelection();
+	},
+);
+
+const checkSelection = () => {
+	selected.value = [$route.params.roomId];
+};
 </script>

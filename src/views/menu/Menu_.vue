@@ -11,27 +11,32 @@
 					<div>Rooms</div>
 				</div>
 
+				<div class="_menu_btn order-1" :class="{ _active: menu === 'rooms' }" @click="$router.push('/rooms')">
+					<i class="_icon_rooms" :class="{ _active: menu === 'rooms' }"></i>
+					<div>Rooms (Test)</div>
+				</div>
+
 				<div class="_menu_btn order-1" :class="{ _active: menu === 'chats' }" @click="navigateToChats()">
 					<i class="_icon_chats"></i>
 					<div>Chats</div>
 				</div>
 
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'chats' }" @click="menu = 'chats'">
+				<div class="_menu_btn order-1" :class="{ _active: menu === 'chats' }" @click="$router.push('/chats')">
 					<i class="_icon_chats" :class="{ _active: menu === 'chats' }"></i>
 					<div>Chats (Test)</div>
 				</div>
 
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'contacts' }" @click="menu = 'contacts'">
+				<div class="_menu_btn order-1" :class="{ _active: menu === 'contacts' }" @click="$router.push('/contacts')">
 					<i class="_icon_contacts" :class="{ _active: menu === 'contacts' }"></i>
 					<div>Contacts</div>
 				</div>
 
-				<!-- <div class="_menu_btn order-1" :class="{ _active: menu === 'users' }" @click="menu = 'users'">
+				<!-- <div class="_menu_btn order-1" :class="{ _active: menu === 'users' }" @click="$router.push('/users')">
 					<i class="_icon_contacts" :class="{ _active: menu === 'users' }"></i>
 					<div>Users</div>
 				</div> -->
 
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'account' }" @click="menu = 'account'">
+				<div class="_menu_btn order-1" :class="{ _active: menu === 'account' }" @click="$router.push('/account')">
 					<i class="_icon_profile" :class="{ _active: menu === 'account' }"></i>
 					<div>Account</div>
 				</div>
@@ -77,7 +82,7 @@
 						<i class="_icon_logout bg-white opacity-75"></i>
 					</button-->
 
-					<div class="_btn_back" @click="$menuOpened = false"
+					<div class="_btn_back" @click="closeMenu()"
 						v-if="$router.options.history.state.back && $breakpoint.lt('md')">
 						<i class="_icon_times"></i>
 					</div>
@@ -326,6 +331,8 @@
 </style>
 
 <script setup>
+import { useMenu } from '@/composables/useMenu';
+
 import { ref, shallowRef, onMounted, defineAsyncComponent, inject, watch, computed } from 'vue';
 
 const $router = inject('$router');
@@ -333,9 +340,8 @@ const $route = inject('$route');
 
 const $mitt = inject('$mitt');
 const $breakpoint = inject('$breakpoint');
-const $menuOpened = inject('$menuOpened');
-const menu = ref();
-const component = shallowRef(null);
+const { isOpen: $menuOpened, close: closeMenu } = useMenu();
+
 const menuRegistry = {
 	contacts: {
 		component: 'Menu_Contacts',
@@ -359,11 +365,23 @@ const menuRegistry = {
 	},
 };
 
-onMounted(async () => {
-	if (menu.value) {
+const menu = computed(() => {
+	const routeName = $route.name;
+	if (!routeName) return null;
+	if (routeName.includes('contact') || routeName === 'contacts') return 'contacts';
+	if (routeName === 'users') return 'users';
+	if (routeName.includes('room') || routeName === 'rooms') return 'rooms';
+	if (routeName.includes('chat') || routeName === 'chats') return 'chats';
+	if (routeName.includes('account') || routeName.includes('backup')) return 'account';
+	return null;
+});
+
+const component = computed(() => {
+	if (menu.value && menuRegistry[menu.value]) {
 		const registry = menuRegistry[menu.value];
-		component.value = await defineAsyncComponent(() => import(`./views/${registry.component}.vue`));
+		return defineAsyncComponent(() => import(`./views/${registry.component}.vue`));
 	}
+	return null;
 });
 
 // TODO: REFACTOR - These hardcoded URLs should use $router.push() for SPA navigation
@@ -386,28 +404,4 @@ const navigateToChats = () => {
 	// TODO: REFACTOR - Use internal route: this.$router.push('/chats')
 	window.location.href = 'https://buckitup.xyz/chats';
 };
-
-watch(
-	() => menu.value,
-	async (newVal) => {
-		if (newVal) {
-			const registry = menuRegistry[newVal];
-			component.value = await defineAsyncComponent(() => import(`./views/${registry.component}.vue`));
-		}
-	},
-);
-
-watch(
-	() => $route.name,
-	(newVal) => {
-		if (newVal) {
-			if ($route.name.includes('contact')) menu.value = 'contacts';
-			if ($route.name === 'users') menu.value = 'users';
-			if ($route.name.includes('room')) menu.value = 'rooms';
-			if ($route.name.includes('chat')) menu.value = 'chats';
-			if ($route.name.includes('account') || $route.name.includes('backup')) menu.value = 'account';
-			if ($route.name === 'storage_api_client') menu.value = null;
-		}
-	},
-);
 </script>

@@ -5,7 +5,7 @@
 				<Menu class="_menu" :class="{ _opened: $menuOpened }" />
 
 				<div class="_menu_backdrop" :class="{ _opened: $menuOpened && $breakpoint.lt('md') }"
-					@click="$menuOpened = false">
+					@click="closeMenu()">
 				</div>
 
 				<div class="_main" v-if="$userPQ.currentUser">
@@ -118,6 +118,8 @@
 </style>
 
 <script setup>
+import { useMenu } from '@/composables/useMenu';
+
 import Loader from './components/Loader.vue';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';
@@ -149,8 +151,7 @@ provide('$route', $route);
 const $router = useRouter();
 provide('$router', $router);
 
-const $menuOpened = ref(true);
-provide('$menuOpened', $menuOpened);
+const { isOpen: $menuOpened, open: openMenu, close: closeMenu } = useMenu();
 
 const $modal = ref();
 provide('$modal', $modal);
@@ -164,7 +165,7 @@ provide('$timestamp', timestamp);
 watch(
 	() => $breakpoint.current,
 	() => {
-		if ($breakpoint.gt('sx')) $menuOpened.value = true;
+		if ($breakpoint.gt('sx')) openMenu();
 	},
 );
 
