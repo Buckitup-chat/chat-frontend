@@ -46,10 +46,10 @@ Without the simultaneous combination of both shares ($S=MasterA\oplus MasterB$),
 
 ```mermaid
 flowchart TD
-    classDef secret fill:#6b46c1,stroke:#2d1b69,stroke-width:3px,color:#fff;
-    classDef crypto fill:#0f766e,stroke:#14b8a6,stroke-width:2px,stroke-dasharray: 5 5,color:#fff;
-    classDef nodes fill:#1e40af,stroke:#60a5fa,stroke-width:2.5px,color:#fff;
-    classDef helpers fill:#166534,stroke:#4ade80,stroke-width:2.5px,color:#fff;
+    classDef secret fill:#6b46c1,stroke:#2d1b69,stroke-width:3px,color:#111;
+    classDef crypto fill:#0f766e,stroke:#14b8a6,stroke-width:2px,stroke-dasharray: 5 5,color:#111;
+    classDef nodes fill:#1e40af,stroke:#60a5fa,stroke-width:2.5px,color:#111;
+    classDef helpers fill:#166534,stroke:#4ade80,stroke-width:2.5px,color:#111;
 
     S[["Compact Secret S<br>(Payload)"]]:::secret
 
@@ -86,10 +86,10 @@ This guarantees Forward Secrecy: even if an adversary records all network traffi
 
 ```mermaid
 flowchart TD
-    classDef ephemeralUser fill:#c026d3,stroke:#9f1bb8,stroke-width:3px,color:#fff;
-    classDef nodes fill:#1e40af,stroke:#60a5fa,stroke-width:2.5px,color:#fff;
-    classDef helpers fill:#166534,stroke:#4ade80,stroke-width:2.5px,color:#fff;
-    classDef reconstruction fill:#854d0e,stroke:#fbbf24,stroke-width:2px,color:#fff;
+    classDef ephemeralUser fill:#c026d3,stroke:#9f1bb8,stroke-width:3px,color:#111;
+    classDef nodes fill:#1e40af,stroke:#60a5fa,stroke-width:2.5px,color:#111;
+    classDef helpers fill:#166534,stroke:#4ade80,stroke-width:2.5px,color:#111;
+    classDef reconstruction fill:#854d0e,stroke:#fbbf24,stroke-width:2px,color:#111;
 
     subgraph Network ["Network Gathering"]
         direction TB
