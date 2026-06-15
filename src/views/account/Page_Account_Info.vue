@@ -83,6 +83,9 @@
 </style>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 // TODO: PQ - This page is already adapted for PQ user data
 // Future: Add contact management, settings, etc.
 
@@ -91,7 +94,7 @@ import Account_Info from '@/components/Account_Info.vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import copyToClipboard from '@/utils/copyToClipboard';
 
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $swalModal = inject('$swalModal');
 const $router = inject('$router');
 const $mitt = inject('$mitt');
@@ -156,9 +159,8 @@ function sharePublicKey() {
 }
 
 const deleteAccount = async () => {
-	if (!(await $swalModal.value.open({ id: 'delete_account' }))) return;
+	if (!(await $swalModal.value.open({ id: 'delete_account', data: $userPQ.currentUser }))) return;
 
-	await $userPQ.logout();
 	$router.push({ name: 'login' });
 };
 </script>

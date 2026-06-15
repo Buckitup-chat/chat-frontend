@@ -85,12 +85,15 @@
 </style>
 
 <script setup>
+import { userStore } from '@/store/user.store';
+
+
 import { mediaUrl } from '@/utils/mediaUrl';
 import Avatar from 'vue-boring-avatars';
 import { inject, computed } from 'vue';
 
 const defaultAvatar = '/img/profile.webp';
-const $user = inject('$user');
+const $user = userStore();
 const $enigma = inject('$enigma');
 
 const { account, self } = defineProps({

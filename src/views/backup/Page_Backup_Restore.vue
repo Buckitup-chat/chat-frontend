@@ -52,6 +52,9 @@
 </style>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { ref, inject } from 'vue';
 import RestoreFromShares from './RestoreFromShares.vue';
 import RestoreFromLocal from './RestoreFromLocal.vue';
@@ -59,7 +62,7 @@ import RestoreFromLit from './RestoreFromLit.vue';
 
 const activeTab = ref('file');
 const secretText = ref();
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $swal = inject('$swal');
 const $router = inject('$router');
 const updateKey = ref(0);

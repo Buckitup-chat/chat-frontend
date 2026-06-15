@@ -112,6 +112,19 @@ export const userPQStore = defineStore('userPQ', () => {
     console.log('[userStore] User logged out');
   };
 
+  const deleteAccount = async (userHash) => {
+    if (em.value) {
+      await em.value.deleteUserVault(userHash);
+    }
+    
+    if (currentUser.value && currentUser.value.user_hash === userHash) {
+      currentUser.value = null;
+    }
+
+    await refreshMyLocalUsers();
+    console.log(`[userStore] Account ${userHash} deleted`);
+  };
+
   const refreshAllData = async () => {
     await Promise.all([
       refreshMyLocalUsers(),
@@ -294,6 +307,7 @@ export const userPQStore = defineStore('userPQ', () => {
     registerNewUser,
     login,
     logout,
+    deleteAccount,
     updateCurrentUserName,
     updateCurrentUserProfile,
     refreshMyLocalUsers,

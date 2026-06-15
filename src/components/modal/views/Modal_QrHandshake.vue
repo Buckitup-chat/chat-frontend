@@ -126,17 +126,22 @@
 </style>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import { useMenu } from '@/composables/useMenu';
 
 import { ref, inject, onMounted, computed } from 'vue';
 import Account_Item from '@/components/Account_Item.vue';
 import QRScannerEngine from '@/components/engines/QRScannerEngine.vue';
 
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $mitt = inject('$mitt');
 const $router = inject('$router');
 const $swal = inject('$swal');
-const $loader = inject('$loader');
+const $loader = useLoader();
 const { isOpen: $menuOpened, close: closeMenu } = useMenu();
 
 const scannerEngineRef = ref(null);

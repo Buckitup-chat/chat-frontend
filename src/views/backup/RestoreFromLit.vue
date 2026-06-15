@@ -48,6 +48,13 @@
 </template>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import { ref, onMounted, inject } from 'vue';
 import axios from 'axios';
 import { Wallet } from 'ethers';
@@ -56,9 +63,9 @@ import Account_Activate_Reminder from '@/components/Account_Activate_Reminder.vu
 import Offline_Reminder from '@/components/Offline_Reminder.vue';
 import errorMessage from '@/utils/errorMessage';
 
-const $userPQ = inject('$userPQ');
-const $web3 = inject('$web3');
-const $loader = inject('$loader');
+const $userPQ = userPQStore();
+const $web3 = web3Store();
+const $loader = useLoader();
 const $swal = inject('$swal');
 const $date = inject('$date');
 const $mitt = inject('$mitt');

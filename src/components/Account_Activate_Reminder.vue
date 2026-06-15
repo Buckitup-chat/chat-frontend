@@ -19,12 +19,15 @@
 </template>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { ref, inject, onMounted } from 'vue';
 import { deriveEvmAccount } from '@/utils/deriveEvmAccount';
 import { web3Store } from '@/store/web3.store';
 
 const $mitt = inject('$mitt');
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 
 const showReminder = ref(true);
 

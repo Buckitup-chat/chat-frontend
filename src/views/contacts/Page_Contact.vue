@@ -74,13 +74,16 @@
 </style>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { ref, onMounted, watch, inject, computed, nextTick } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import errorMessage from '@/utils/errorMessage';
 import dayjs from 'dayjs';
 
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $swal = inject('$swal');
 const $route = inject('$route');
 const $router = inject('$router');

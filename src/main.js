@@ -12,7 +12,7 @@ import { userPQStore } from './store/userPQ.store';
 import { createPinia } from 'pinia';
 import $socket from './libs/socket';
 import $mitt from './libs/emitter';
-import { useLoader } from './store/loader.store.js';
+import { useLoader } from './composables/useLoader';
 import $swal from './libs/swal';
 
 // dayjs
@@ -35,10 +35,9 @@ const pinia = createPinia();
 app.use(pinia);
 
 // breakpoint
-import { useBreakpoint } from './store/breakpoint.store';
+import { useBreakpoint } from './composables/useBreakpoint';
 app.config.globalProperties.$breakpoint = useBreakpoint();
 app.config.globalProperties.$breakpoint.init();
-app.provide('$breakpoint', useBreakpoint());
 
 // mitt
 app.provide('$mitt', $mitt);
@@ -58,18 +57,14 @@ app.provide('$socket', $socket);
 
 // web3Store
 app.config.globalProperties.$web3 = web3Store();
-app.provide('$web3', web3Store());
 
 app.config.globalProperties.$user = userStore();
-app.provide('$user', userStore());
 
 // Create single instance for PQ store
 const $userPQ = userPQStore();
 app.config.globalProperties.$userPQ = $userPQ;
-app.provide('$userPQ', $userPQ);
 
 app.config.globalProperties.$loader = useLoader();
-app.provide('$loader', useLoader());
 
 app.provide('$enigma', $enigma);
 

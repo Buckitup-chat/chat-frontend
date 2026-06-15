@@ -218,6 +218,13 @@
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import { ref, onMounted, watch, inject, computed } from 'vue';
 import { decryptToString } from '@lit-protocol/encryption';
 import { cipher, decryptWithPrivateKey } from 'eth-crypto';
@@ -229,10 +236,10 @@ import errorMessage from '@/utils/errorMessage';
 import Transactions from '@/views/account/Transactions.vue';
 
 const $timestamp = inject('$timestamp');
-const $userPQ = inject('$userPQ');
-const $web3 = inject('$web3');
+const $userPQ = userPQStore();
+const $web3 = web3Store();
 const $swal = inject('$swal');
-const $loader = inject('$loader');
+const $loader = useLoader();
 const $swalModal = inject('$swalModal');
 const $router = inject('$router');
 const $appstate = inject('$appstate');

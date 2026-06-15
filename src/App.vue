@@ -118,6 +118,17 @@
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+import { userStore } from '@/store/user.store';
+
+import { useBreakpoint } from '@/composables/useBreakpoint';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import { useMenu } from '@/composables/useMenu';
 
 import Loader from './components/Loader.vue';
@@ -130,16 +141,16 @@ import { useRoute, useRouter } from 'vue-router';
 
 const $socket = inject('$socket');
 const $mitt = inject('$mitt');
-const $user = inject('$user');
-const $userPQ = inject('$userPQ');
-const $breakpoint = inject('$breakpoint');
+const $user = userStore();
+const $userPQ = userPQStore();
+const $breakpoint = useBreakpoint();
 
 const $encryptionManager = inject('$encryptionManager');
 const $encryptionManagerPQ = inject('$encryptionManagerPQ');
 
-// const $web3 = inject('$web3');
+// const $web3 = web3Store();
 // const $swal = inject('$swal');
-// const $loader = inject('$loader');
+// const $loader = useLoader();
 // const $isProd = inject('$isProd');
 
 const $appstate = ref({});

@@ -67,14 +67,19 @@
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { ref, onMounted, inject, computed } from 'vue';
 import errorMessage from '@/utils/errorMessage';
 import copyToClipboard from '@/utils/copyToClipboard';
 
 const shares = ref([]);
-const $web3 = inject('$web3');
+const $web3 = web3Store();
 const $swal = inject('$swal');
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $appstate = inject('$appstate');
 const $swalModal = inject('$swalModal');
 const $router = inject('$router');

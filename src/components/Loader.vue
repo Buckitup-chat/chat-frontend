@@ -70,6 +70,9 @@
 </style>
 
 <script setup>
+import { useLoader } from '@/composables/useLoader';
+
+
 import { inject } from 'vue';
-const $loader = inject('$loader');
+const $loader = useLoader();
 </script>

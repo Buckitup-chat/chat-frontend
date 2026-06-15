@@ -5,6 +5,9 @@
 </template>
 
 <script setup>
+import { userStore } from '@/store/user.store';
+
+
 import { useMenu } from '@/composables/useMenu';
 
 import Contacts_List from '@/views/contacts/Contacts_List.vue';
@@ -12,7 +15,7 @@ import { ref, inject, watch, onMounted, computed } from 'vue';
 
 const $route = inject('$route');
 const $router = inject('$router');
-const $user = inject('$user');
+const $user = userStore();
 const { isOpen: $menuOpened, close: closeMenu } = useMenu();
 
 const selected = ref([]);

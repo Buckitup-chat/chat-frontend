@@ -71,6 +71,13 @@
 </template>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userStore } from '@/store/user.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import BackupShareItem from './Backup_Share_Item.vue';
 import { ref, onMounted, watch, inject, computed } from 'vue';
 import { decryptWithPrivateKey, cipher } from 'eth-crypto';
@@ -79,10 +86,10 @@ import axios from 'axios';
 import Transactions from '@/views/account/Transactions.vue';
 
 const $timestamp = inject('$timestamp');
-const $user = inject('$user');
-const $web3 = inject('$web3');
+const $user = userStore();
+const $web3 = web3Store();
 const $swal = inject('$swal');
-const $loader = inject('$loader');
+const $loader = useLoader();
 const $swalModal = inject('$swalModal');
 
 const { backup } = defineProps({

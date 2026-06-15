@@ -37,17 +37,24 @@
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+import { userStore } from '@/store/user.store';
+
+
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import Transactions from './Transactions.vue';
 import Offline_Reminder from '../../components/Offline_Reminder.vue';
 import { ref, onMounted, watch, inject, computed, onUnmounted } from 'vue';
 import axios from 'axios';
 
-const $user = inject('$user');
-const $userPQ = inject('$userPQ');
+const $user = userStore();
+const $userPQ = userPQStore();
 
 const $mitt = inject('$mitt');
-const $web3 = inject('$web3');
+const $web3 = web3Store();
 const $socket = inject('$socket');
 
 const dataDefault = {

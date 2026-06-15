@@ -24,12 +24,17 @@
 </template>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+import { useBreakpoint } from '@/composables/useBreakpoint';
+
+
 import BackupShareItem from './Backup_Share_Item.vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 import { inject, computed } from 'vue';
 
-const $userPQ = inject('$userPQ');
-const $breakpoint = inject('$breakpoint');
+const $userPQ = userPQStore();
+const $breakpoint = useBreakpoint();
 
 const { item } = defineProps({
 	item: { type: Object, required: true },

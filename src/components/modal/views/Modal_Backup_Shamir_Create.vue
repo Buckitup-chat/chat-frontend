@@ -76,11 +76,16 @@
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { inject, ref } from 'vue';
 import copyToClipboard from '@/utils/copyToClipboard';
 
-const $userPQ = inject('$userPQ');
-const $web3 = inject('$web3');
+const $userPQ = userPQStore();
+const $web3 = web3Store();
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');
 

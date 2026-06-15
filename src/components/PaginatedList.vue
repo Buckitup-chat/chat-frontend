@@ -39,11 +39,14 @@
 <style lang="scss" scoped></style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+
 import { ref, onMounted, inject } from 'vue';
 import axios from 'axios';
 import Paginate from './Paginate.vue';
 
-const $web3 = inject('$web3');
+const $web3 = web3Store();
 
 const dataDefault = {
 	query: { sort: 'desc', page: 1, limit: 10 },

@@ -31,7 +31,7 @@ const routes = [
 	{
 		path: '/rooms',
 		name: 'rooms',
-		component: () => import('../views/Page_Empty.vue'),
+		component: () => import('../views/rooms/Page_Room_Empty.vue'),
 		meta: { auth: true, name: 'Rooms' },
 	},
 	{

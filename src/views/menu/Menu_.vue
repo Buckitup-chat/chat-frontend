@@ -331,6 +331,9 @@
 </style>
 
 <script setup>
+import { useBreakpoint } from '@/composables/useBreakpoint';
+
+
 import { useMenu } from '@/composables/useMenu';
 
 import { ref, shallowRef, onMounted, defineAsyncComponent, inject, watch, computed } from 'vue';
@@ -339,7 +342,7 @@ const $router = inject('$router');
 const $route = inject('$route');
 
 const $mitt = inject('$mitt');
-const $breakpoint = inject('$breakpoint');
+const $breakpoint = useBreakpoint();
 const { isOpen: $menuOpened, close: closeMenu } = useMenu();
 
 const menuRegistry = {

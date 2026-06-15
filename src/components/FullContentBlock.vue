@@ -150,6 +150,9 @@
 </style>
 
 <script setup>
+import { useBreakpoint } from '@/composables/useBreakpoint';
+
+
 import { useMenu } from '@/composables/useMenu';
 
 import { inject } from 'vue';
@@ -159,5 +162,5 @@ const { blockClass } = defineProps({
 	blockClass: { type: String },
 });
 
-const $breakpoint = inject('$breakpoint');
+const $breakpoint = useBreakpoint();
 </script>

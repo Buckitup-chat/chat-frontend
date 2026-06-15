@@ -93,10 +93,13 @@
 </style>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { inject } from 'vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $modal = inject('$modal');
 
 const openModal = (modalId) => {

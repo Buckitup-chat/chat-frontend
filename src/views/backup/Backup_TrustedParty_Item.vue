@@ -77,11 +77,14 @@
 </template>
 
 <script setup>
+import { userStore } from '@/store/user.store';
+
+
 import { watch, computed, inject } from 'vue';
 import Account_Item from '@/components/Account_Item.vue';
 const maxMessageLength = 150;
 const delays = [0, 600, 3600, 86400, 259200, 604800, 1296000, 2592000];
-const $user = inject('$user');
+const $user = userStore();
 
 const { wallet, data } = defineProps({
 	wallet: { typ: Object, required: true },
