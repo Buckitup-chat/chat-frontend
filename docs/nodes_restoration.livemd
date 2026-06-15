@@ -45,26 +45,29 @@ Without the simultaneous combination of both shares ($S=MasterA\oplus MasterB$),
 ### Backup Architecture Schema
 
 ```mermaid
-graph TD
-    classDef secret fill:#f9f,stroke:#333,stroke-width:2px;
-    classDef crypto fill:#fff3e0,stroke:#333,stroke-width:1px,stroke-dasharray: 5 5;
-    classDef nodes fill:#bbf,stroke:#333,stroke-width:2px;
-    classDef helpers fill:#bfb,stroke:#333,stroke-width:2px;
+flowchart TD
+    classDef secret fill:#6b46c1,stroke:#2d1b69,stroke-width:3px,color:#fff;
+    classDef crypto fill:#0f766e,stroke:#14b8a6,stroke-width:2px,stroke-dasharray: 5 5,color:#fff;
+    classDef nodes fill:#1e40af,stroke:#60a5fa,stroke-width:2.5px,color:#fff;
+    classDef helpers fill:#166534,stroke:#4ade80,stroke-width:2.5px,color:#fff;
 
-    S[["Compact Secret S <br> (Payload)"]]:::secret
+    S[["Compact Secret S<br>(Payload)"]]:::secret
 
-    subgraph Vernam [Vernam Cipher / XOR]
-        S --> XOR{"S = A ⊕ B"}
+    subgraph Vernam ["Vernam Cipher / XOR"]
+        direction TB
         RNG["CSPRNG (Entropy)"] --> MasterA["Master A"]
-        MasterA --> XOR
+        MasterA --> XOR{"S = A ⊕ B"}
+        S --> XOR
         XOR --> MasterB["Master B"]
-    end:::crypto
+    end
+
+    class Vernam crypto
 
     MasterA --> SSS_A{"Shamir (3 of 5)"}
     MasterB --> SSS_B{"Shamir (2 of 3)"}
 
-    SSS_A --> N["Backend Federated Nodes <br> (Isolation + Time-Lock)"]:::nodes
-    SSS_B --> H["P2P Helpers <br> (Social Graph)"]:::helpers
+    SSS_A --> N["Backend Federated Nodes<br>(Isolation + Time-Lock)"]:::nodes
+    SSS_B --> H["P2P Helpers<br>(Social Graph)"]:::helpers
 ```
 
 ## 3. Recovery Process: Routing and the Ephemeral User
@@ -82,32 +85,33 @@ This guarantees Forward Secrecy: even if an adversary records all network traffi
 ### Recovery Architecture Schema
 
 ```mermaid
-graph TD
-    classDef ephemeralUser fill:#333,color:#fff,stroke:#ff4500,stroke-width:3px;
-    classDef nodes fill:#bbf,stroke:#333,stroke-width:2px;
-    classDef helpers fill:#bfb,stroke:#333,stroke-width:2px;
+flowchart TD
+    classDef ephemeralUser fill:#c026d3,stroke:#9f1bb8,stroke-width:3px,color:#fff;
+    classDef nodes fill:#1e40af,stroke:#60a5fa,stroke-width:2.5px,color:#fff;
+    classDef helpers fill:#166534,stroke:#4ade80,stroke-width:2.5px,color:#fff;
+    classDef reconstruction fill:#854d0e,stroke:#fbbf24,stroke-width:2px,color:#fff;
 
-    subgraph Network [Network Gathering]
-        N["Backend Federated Nodes"]:::nodes -- "Wait 48h <br> Encrypt with ephemeral key" --> EphUser
-        H["P2P Helpers"]:::helpers -- "Instant <br> Encrypt with ephemeral key" --> EphUser
+    subgraph Network ["Network Gathering"]
+        direction TB
+        N["Backend Federated Nodes"]:::nodes -- "Wait 48h<br>Encrypt with ephemeral key" --> EphUser
+        H["P2P Helpers"]:::helpers -- "Instant<br>Encrypt with ephemeral key" --> EphUser
     end
 
-    EphUser(["Temporary Account 'Ephemeral User' <br> (Ephemeral Private Key)"]):::ephemeralUser
+    EphUser(["Temporary Account<br>'Ephemeral User'<br>(Ephemeral Private Key)"]):::ephemeralUser
 
-    subgraph Reconstruction [Local Decryption]
+    subgraph Reconstruction ["Local Decryption"]
+        direction TB
         EphUser --> Decrypt{"Decrypt Packets"}
         Decrypt --> SSS_Combine_A{"Shamir Combine (Nodes)"}
         Decrypt --> SSS_Combine_B{"Shamir Combine (Helpers)"}
-
         SSS_Combine_A --> MasterA["Master A"]
         SSS_Combine_B --> MasterB["Master B"]
-
         MasterA --> XOR{"A ⊕ B"}
         MasterB --> XOR
-
-        XOR --> S[["Recovered Secret S <br> (Payload)"]]
+        XOR --> S[["Recovered Secret S<br>(Payload)"]]
     end
 
-    S --> Profile["Profile Access Restored <br> 'Ephemeral User' is destroyed"]
+    class Reconstruction reconstruction
 
+    S --> Profile["Profile Access Restored<br>'Ephemeral User' is destroyed"]
 ```
