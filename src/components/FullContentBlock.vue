@@ -12,7 +12,7 @@
 				</div>
 
 				<!-- toggle -->
-				<div class="_toggler" @click="$menuOpened = !$menuOpened" v-if="$breakpoint.lt('md')" ref="toggler">
+				<div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')" ref="toggler">
 					<div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>
 				</div>
 			</div>
@@ -86,7 +86,8 @@
 
 ._toggler {
 	border: none;
-	padding-right: 1rem;
+	padding: 0.75rem 1rem;
+	cursor: pointer;
 
 	div {
 		width: 22px;
@@ -150,12 +151,17 @@
 </style>
 
 <script setup>
+import { useBreakpoint } from '@/composables/useBreakpoint';
+
+
+import { useMenu } from '@/composables/useMenu';
+
 import { inject } from 'vue';
 
-const $menuOpened = inject('$menuOpened');
+const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
 const { blockClass } = defineProps({
 	blockClass: { type: String },
 });
 
-const $breakpoint = inject('$breakpoint');
+const $breakpoint = useBreakpoint();
 </script>

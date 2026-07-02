@@ -6,8 +6,11 @@
 </template>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { inject, computed } from 'vue';
 
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const isOnline = computed(() => $userPQ.isOnline);
 </script>

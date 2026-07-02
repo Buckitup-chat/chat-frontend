@@ -56,13 +56,16 @@
 </style>
 
 <script setup>
+import { userStore } from '@/store/user.store';
+
+
 import { ref, onMounted, watch, inject, onUnmounted } from 'vue';
 import copyToClipboard from '@/utils/copyToClipboard';
 import QRCode from 'qrcode';
 import Peer from 'simple-peer';
 
 const qrCode = ref(); //
-const $user = inject('$user');
+const $user = userStore();
 const $enigma = inject('$enigma');
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');

@@ -27,10 +27,15 @@
 </template>
 
 <script setup>
+import { userStore } from '@/store/user.store';
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { inject, ref } from 'vue';
 import errorMessage from '@/utils/errorMessage';
 
-const $user = inject('$user');
+const $user = userStore();
+const $userPQ = userPQStore();
 const $encryptionManager = inject('$encryptionManager');
 const $mitt = inject('$mitt');
 const $swal = inject('$swal');
@@ -53,9 +58,14 @@ function backup() {
 async function confirm() {
 	$mitt.emit('swal::close', 'ok');
 	try {
-		await $encryptionManager.removeVault();
-		await $user.logout();
-		$user.vaults = await $encryptionManager.getVaults();
+		if (data?.user_hash || $userPQ.currentUser?.user_hash) {
+			const hash = data?.user_hash || $userPQ.currentUser?.user_hash;
+			await $userPQ.deleteAccount(hash);
+		} else {
+			await $encryptionManager.removeVault();
+			await $user.logout();
+			$user.vaults = await $encryptionManager.getVaults();
+		}
 
 		$swal.fire({
 			icon: 'success',

@@ -28,10 +28,13 @@
 </template>
 
 <script setup>
+import { userStore } from '@/store/user.store';
+
+
 import { inject, ref, onMounted } from 'vue';
 
 const $mitt = inject('$mitt');
-const $user = inject('$user');
+const $user = userStore();
 
 const delays = [0, 600, 3600, 86400, 259200, 604800, 1296000, 2592000];
 const newDelay = ref(0);

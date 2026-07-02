@@ -16,10 +16,10 @@
 			</div>
 		</div> -->
 
-		<div class="_contacts_list mb-2" v-if="$userPQ.pqUserCards">
+		<div class="_contacts_list mb-2" v-if="$userPQ.myLocalUsers">
 			<h6>Select Account</h6>
 
-			<div class="_search" v-if="$userPQ.pqUserCards.length > 5">
+			<div class="_search" v-if="$userPQ.myLocalUsers.length > 5">
 				<div class="_input_search">
 					<div class="_icon_search"></div>
 					<input class="" type="text" v-model="search" autocomplete="off" placeholder="Search..." />
@@ -28,7 +28,7 @@
 			</div>
 
 			<div class="_list">
-				<div class="_contact" @click="selectPQ(account)" v-for="account in $userPQ.pqUserCards"
+				<div class="_contact" @click="selectPQ(account)" v-for="account in $userPQ.myLocalUsers"
 					:class="{ _selected: account.user_hash === selected?.user_hash, _connected: account.user_hash === $userPQ.currentUser?.user_hash }">
 					<Account_Item_PQ :account="account" />
 				</div>
@@ -116,15 +116,24 @@ h6 {
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+import { userStore } from '@/store/user.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import { computed, inject, ref, onMounted, nextTick } from 'vue';
 // import Account_Item from '@/components/Account_Item.vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 
 const $mitt = inject('$mitt');
-const $loader = inject('$loader');
-const $web3 = inject('$web3');
-// const $user = inject('$user');
-const $userPQ = inject('$userPQ');
+const $loader = useLoader();
+const $web3 = web3Store();
+// const $user = userStore();
+const $userPQ = userPQStore();
 
 const $swal = inject('$swal');
 const $router = inject('$router');
@@ -334,7 +343,7 @@ const signinPQ = async () => {
 };
 
 const deleteAccount = async () => {
-	if (!(await $swalModal.value.open({ id: 'delete_account' }))) return;
+	if (!(await $swalModal.value.open({ id: 'delete_account', data: selected.value }))) return;
 
 	// TODO: PQ Account Selector - commented out old Web3 code
 	// if ($user.account?.address === selected.value.address) {

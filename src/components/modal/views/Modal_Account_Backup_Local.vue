@@ -43,11 +43,14 @@
 </template>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { inject, ref, watch, computed } from 'vue';
 import errorMessage from '@/utils/errorMessage';
 
 const $enigma = inject('$enigma');
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');
 

@@ -40,10 +40,13 @@
 </template>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { inject, ref, watch, computed } from 'vue';
 
 const $enigma = inject('$enigma');
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $swal = inject('$swal');
 
 const protect = ref(true);

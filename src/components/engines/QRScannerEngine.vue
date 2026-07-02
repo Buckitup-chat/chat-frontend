@@ -12,6 +12,9 @@
 </template>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { ref, reactive, inject, onMounted, onBeforeUnmount } from 'vue';
 import QRCode from 'qrcode';
 import QrScanner from 'qr-scanner';
@@ -21,7 +24,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { QWBPConnection, base64urlEncode, base64urlDecode } from 'qwbp';
 
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 
 const props = defineProps({
 	options: {

@@ -192,6 +192,13 @@
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import TrustedParty_Item from './Backup_TrustedParty_Item.vue';
 import Account_Activate_Reminder from '@/components/Account_Activate_Reminder.vue';
 import { ref, onMounted, watch, inject, computed, nextTick, onUnmounted } from 'vue';
@@ -206,13 +213,13 @@ import { Wallet, isAddress } from 'ethers';
 import Offline_Reminder from '../../components/Offline_Reminder.vue';
 import { deriveEvmAccount } from '@/utils/deriveEvmAccount';
 
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $timestamp = inject('$timestamp');
-const $web3 = inject('$web3');
+const $web3 = web3Store();
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');
 const $socket = inject('$socket');
-const $loader = inject('$loader');
+const $loader = useLoader();
 const $modal = inject('$modal');
 const $swalModal = inject('$swalModal');
 const $router = inject('$router');

@@ -1,0 +1,117 @@
+# RFC: Compartmented Multi-Secret Recovery Architecture
+
+**Project:** Buckitup-chat
+**Component:** Decentralized Account Recovery
+**Status:** Proposed Architecture
+
+---
+
+## 1. Architectural Context
+
+### The Problem: SSS Network Bloat
+
+In decentralized, local-first environments, recovering accounts secured by post-quantum cryptographic primitives (such as ML-KEM and ML-DSA) presents a significant network routing challenge. Classical Shamir's Secret Sharing (SSS), while mathematically robust, scales poorly when splitting large volumes of data. Applying SSS directly to massive post-quantum keys or complex user configurations exponentially bloats P2P network traffic and increases the likelihood of packet loss or corruption during transmission.
+
+### The Solution: Compartmented Secret Sharing
+
+To mitigate network bloat and isolate trust planes, we introduce the **Compartmented Secret Sharing** architecture. In this model, the heavy lifting of Shamir's mathematics is completely decoupled from the bulk data. SSS is applied exclusively to an abstract "Compact Secret" (the Payload).
+
+Furthermore, this Compact Secret is divided into two distinct, mathematically isolated planes of trust:
+
+- **The Infrastructure Plane:** Backend servers (Federated Nodes) operating with a strict 48-hour time-lock.
+- **The Social Graph:** P2P Helpers (trusted contacts) capable of instant response.
+
+---
+
+## 2. Backup Creation: Splitting Logic and the Vernam Cipher
+
+The fundamental security of our routing architecture relies on XOR compartmentation, an implementation of the **Vernam Cipher (One-Time Pad)**. This ensures that no single trust plane can extract any meaningful data without the cryptographic consent of the other.
+
+### The Cryptographic Flow
+
+Let $S$ be the Compact Secret (Payload). The system splits $S$ into two master shares:
+
+1. **Generation of Master A:** The client uses a Cryptographically Secure Pseudorandom Number Generator (CSPRNG) to create `Master A`. This is a string of pure, absolutely random cryptographic noise equal in length to $S$. `Master A` is designated for the Infrastructure Plane (Backend Nodes).
+2. **Calculation of Master B:** The client performs a bitwise XOR operation between the Compact Secret and Master A:
+   $MasterB=S\oplus MasterA$
+   `Master B` is designated for the Social Graph (Helpers).
+
+### Information-Theoretic Security (Perfect Secrecy)
+
+This approach guarantees information-theoretic security. Because `Master A` is generated via CSPRNG, `Master B` is also mathematically indistinguishable from random noise.
+
+Without the simultaneous combination of both shares ($S=MasterA\oplus MasterB$), each individual master share provides zero context about the original Payload. Even a hypothetical quantum computer executing Grover's or Shor's algorithms would fail to break this layer, as there is no mathematical structure to exploit—only pure entropy.
+
+### Backup Architecture Schema
+
+```mermaid
+flowchart TD
+    classDef secret fill:#6b46c1,stroke:#2d1b69,stroke-width:3px,color:#111;
+    classDef crypto fill:#0f766e,stroke:#14b8a6,stroke-width:2px,stroke-dasharray: 5 5,color:#111;
+    classDef nodes fill:#1e40af,stroke:#60a5fa,stroke-width:2.5px,color:#111;
+    classDef helpers fill:#166534,stroke:#4ade80,stroke-width:2.5px,color:#111;
+
+    S[["Compact Secret S<br>(Payload)"]]:::secret
+
+    subgraph Vernam ["Vernam Cipher / XOR"]
+        direction TB
+        RNG["CSPRNG (Entropy)"] --> MasterA["Master A"]
+        MasterA --> XOR{"S = A ⊕ B"}
+        S --> XOR
+        XOR --> MasterB["Master B"]
+    end
+
+    class Vernam crypto
+
+    MasterA --> SSS_A{"Shamir (3 of 5)"}
+    MasterB --> SSS_B{"Shamir (2 of 3)"}
+
+    SSS_A --> N["Backend Federated Nodes<br>(Isolation + Time-Lock)"]:::nodes
+    SSS_B --> H["P2P Helpers<br>(Social Graph)"]:::helpers
+```
+
+## 3. Recovery Process: Routing and the Ephemeral User
+
+When a user loses access to their device, they must retrieve the shares from the P2P network securely, without exposing their identity or the shares to man-in-the-middle (MITM) attacks. To clarify terminology: the recovery client acts as an **User**, while the backend infrastructure is referred to as **Nodes**.
+
+### The "Ephemeral User" Lifecycle
+
+1. **Initialization:** The user's new client device creates a temporary, anonymous profile internally referred to as the **"Ephemeral User"**.
+2. **Share Collection:** The Ephemeral User broadcasts a request to the network. When Backend Nodes (after the 48-hour time-lock) and P2P Helpers receive this request, they encrypt their respective Shamir shares using the Ephemeral User's _public key_ before transmitting them over the network.
+3. **Reconstruction & Forward Secrecy:** The Ephemeral User receives the encrypted packets, decrypts them locally, runs the Shamir Combine functions, and executes the final XOR operation to recover $S$. Immediately upon successful recovery of the underlying profile, the Ephemeral User account and its private keys are **irretrievably destroyed**.
+
+This guarantees Forward Secrecy: even if an adversary records all network traffic during the recovery phase and compromises the device months later, they cannot retroactively decrypt the share transmission.
+
+### Recovery Architecture Schema
+
+```mermaid
+flowchart TD
+    classDef ephemeralUser fill:#c026d3,stroke:#9f1bb8,stroke-width:3px,color:#111;
+    classDef nodes fill:#1e40af,stroke:#60a5fa,stroke-width:2.5px,color:#111;
+    classDef helpers fill:#166534,stroke:#4ade80,stroke-width:2.5px,color:#111;
+    classDef reconstruction fill:#854d0e,stroke:#fbbf24,stroke-width:2px,color:#111;
+
+    subgraph Network ["Network Gathering"]
+        direction TB
+        N["Backend Federated Nodes"]:::nodes -- "Wait 48h<br>Encrypt with ephemeral key" --> EphUser
+        H["P2P Helpers"]:::helpers -- "Instant<br>Encrypt with ephemeral key" --> EphUser
+    end
+
+    EphUser(["Temporary Account<br>'Ephemeral User'<br>(Ephemeral Private Key)"]):::ephemeralUser
+
+    subgraph Reconstruction ["Local Decryption"]
+        direction TB
+        EphUser --> Decrypt{"Decrypt Packets"}
+        Decrypt --> SSS_Combine_A{"Shamir Combine (Nodes)"}
+        Decrypt --> SSS_Combine_B{"Shamir Combine (Helpers)"}
+        SSS_Combine_A --> MasterA["Master A"]
+        SSS_Combine_B --> MasterB["Master B"]
+        MasterA --> XOR{"A ⊕ B"}
+        MasterB --> XOR
+        XOR --> S[["Recovered Secret S<br>(Payload)"]]
+    end
+
+    class Reconstruction reconstruction
+
+    S --> Profile["Profile Access Restored<br>'Ephemeral User' is destroyed"]
+```

@@ -59,6 +59,11 @@
 </style>
 
 <script setup>
+import { userStore } from '@/store/user.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import { ref, onMounted, inject, onBeforeUnmount, onUnmounted } from 'vue';
 import QrScanner from 'qr-scanner';
 import Peer from 'simple-peer';
@@ -71,9 +76,9 @@ const hasCamera = ref();
 const $route = inject('$route');
 const $router = inject('$router');
 const $swal = inject('$swal');
-const $loader = inject('$loader');
+const $loader = useLoader();
 const $mitt = inject('$mitt');
-const $user = inject('$user');
+const $user = userStore();
 const $enigma = inject('$enigma');
 const $encryptionManager = inject('$encryptionManager');
 const $swalModal = inject('$swalModal');

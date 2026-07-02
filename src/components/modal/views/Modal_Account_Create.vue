@@ -16,10 +16,13 @@
 <style lang="scss" scoped></style>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { ref, inject } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
 
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $mitt = inject('$mitt');
 const $router = inject('$router');
 

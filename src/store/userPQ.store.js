@@ -1,28 +1,31 @@
 import { defineStore } from 'pinia';
-import { ref, computed, watch } from 'vue';
+import { ref, shallowRef, computed, watch } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { localDB } from '@/utils/db/localDBv2';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
   const isInitialized = ref(false);
+  const localDataReady = ref(false);
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
   const pqUserCards = ref([]);
 
   const currentUser = ref(null);
   const myLocalUsers = ref([]);
-  const allNetworkUsers = ref([]);
+  const allNetworkUsers = shallowRef([]);
+  let liveQueryObj = null;
+  let liveQueryRows = null;
+  let liveQueryRaf = null;
 
   const contactsMap = ref({});
   const contacts = computed(() => {
     return Object.values(contactsMap.value).map(contact => {
-      // Merge with network info if available
       const networkUser = allNetworkUsers.value.find(u => u.user_hash === contact.user_hash);
       return {
         ...networkUser,
-        ...contact, // Local overrides take precedence (like custom name/notes)
-        address: contact.user_hash, // Aliases for backward compatibility in views
+        ...contact,
+        address: contact.user_hash,
         publicKey: contact.user_hash,
       };
     });
@@ -40,14 +43,43 @@ export const userPQStore = defineStore('userPQ', () => {
   const initialize = async () => {
     if (isInitialized.value) return;
 
-    await localDB.init();
-
+    // Phase 1: IndexedDB (fast, no PGlite)
     em.value = EncryptionManagerPQ.getInstance();
     await em.value.initialize();
-
     myLocalUsers.value = await em.value.getLocalUserCards();
+    localDataReady.value = true;
+
+    // Phase 2: PGlite + live query (slow, fire-and-forget)
+    initDbAndLiveQuery();
+  };
+
+  const initDbAndLiveQuery = async () => {
+    await localDB.init();
+
+    try {
+      liveQueryObj = await localDB.db.live.query('SELECT * FROM user_cards WHERE NOT deleted_flag ORDER BY name ASC');
+      allNetworkUsers.value = liveQueryObj.initialResults.rows;
+      liveQueryObj.subscribe((result) => {
+        console.time('liveQuery calback');
+        if (allNetworkUsers.value.length === 0 && result.rows.length > 0) {
+          console.timeEnd('post-init wait');
+        }
+        liveQueryRows = result.rows;
+        if (!liveQueryRaf) {
+          liveQueryRaf = requestAnimationFrame(() => {
+            liveQueryRaf = null;
+            allNetworkUsers.value = liveQueryRows;
+          });
+        }
+        console.timeEnd('liveQuery calback');
+      });
+    } catch (e) {
+      console.warn('[userStore] Live query failed, falling back to manual refresh:', e);
+    }
 
     isInitialized.value = true;
+
+    setTimeout(() => localDB.triggerSync(), 1000);
 
     console.log(`[userStore] Initialized | Local users: ${myLocalUsers.value.length}`);
   };
@@ -70,34 +102,34 @@ export const userPQStore = defineStore('userPQ', () => {
     await initialize();
 
     let identity = await em.value.login(userHash);
-    
-    const profile = await em.value.loadUserProfile();
-    if (profile) {
-      identity = {
-        ...identity,
-        name: profile.name || identity.name,
-        userStorage: {
-          ...identity.userStorage,
-          notes: profile.notes,
-          avatarUuid: profile.avatarUuid
-        }
-      };
-    }
-
-    const loadedContacts = await em.value.loadContacts();
-    const map = {};
-    if (Array.isArray(loadedContacts)) {
-      loadedContacts.forEach(c => {
-        if (c.user_hash) map[c.user_hash] = c;
-      });
-    }
-    contactsMap.value = map;
-
     currentUser.value = identity;
 
-    // await appInitializer.initializeAfterLogin();
+    // Load profile + contacts in background (PGlite may not be ready yet)
+    em.value.loadUserProfile().then(profile => {
+      if (profile) {
+        currentUser.value = {
+          ...currentUser.value,
+          name: profile.name || identity.name,
+          userStorage: {
+            ...identity.userStorage,
+            notes: profile.notes,
+            avatarUuid: profile.avatarUuid
+          }
+        };
+      }
+    }).catch(() => {});
 
-    await refreshAllData();
+    em.value.loadContacts().then(loadedContacts => {
+      const map = {};
+      if (Array.isArray(loadedContacts)) {
+        loadedContacts.forEach(c => {
+          if (c.user_hash) map[c.user_hash] = c;
+        });
+      }
+      contactsMap.value = map;
+    }).catch(() => {});
+
+    refreshAllData();
 
     return identity;
   };
@@ -112,11 +144,21 @@ export const userPQStore = defineStore('userPQ', () => {
     console.log('[userStore] User logged out');
   };
 
+  const deleteAccount = async (userHash) => {
+    if (em.value) {
+      await em.value.deleteUserVault(userHash);
+    }
+    
+    if (currentUser.value && currentUser.value.user_hash === userHash) {
+      currentUser.value = null;
+    }
+
+    await refreshMyLocalUsers();
+    console.log(`[userStore] Account ${userHash} deleted`);
+  };
+
   const refreshAllData = async () => {
-    await Promise.all([
-      refreshMyLocalUsers(),
-      refreshNetworkUsers()
-    ]);
+    await refreshMyLocalUsers();
   };
 
   const refreshMyLocalUsers = async () => {
@@ -125,7 +167,9 @@ export const userPQStore = defineStore('userPQ', () => {
   };
 
   const refreshNetworkUsers = async () => {
-    allNetworkUsers.value = await localDB.getUsers();
+    if (!liveQueryObj) {
+      allNetworkUsers.value = await localDB.getUsers();
+    }
   };
 
   const updateCurrentUserName = async (newName) => {
@@ -276,6 +320,8 @@ export const userPQStore = defineStore('userPQ', () => {
   };
 
   return {
+    isInitialized,
+    localDataReady,
     isAuthenticated,
     currentUserHash,
     currentUser: currentUserFull,
@@ -294,6 +340,7 @@ export const userPQStore = defineStore('userPQ', () => {
     registerNewUser,
     login,
     logout,
+    deleteAccount,
     updateCurrentUserName,
     updateCurrentUserProfile,
     refreshMyLocalUsers,

@@ -63,6 +63,13 @@
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import Backup_OwnerGroup_Item from './Backup_OwnerGroup_Item.vue';
 import Paginate from '@/components/Paginate.vue';
 import { ref, onMounted, watch, inject, onUnmounted } from 'vue';
@@ -71,11 +78,11 @@ import Account_Activate_Reminder from '@/components/Account_Activate_Reminder.vu
 import { computeAddress } from 'ethers';
 import Offline_Reminder from '../../components/Offline_Reminder.vue';
 
-const $userPQ = inject('$userPQ');
-const $web3 = inject('$web3');
+const $userPQ = userPQStore();
+const $web3 = web3Store();
 const $swal = inject('$swal');
 const $socket = inject('$socket');
-const $loader = inject('$loader');
+const $loader = useLoader();
 
 let stealthAddresses = [];
 

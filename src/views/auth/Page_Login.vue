@@ -221,16 +221,23 @@
 </style>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+import { userStore } from '@/store/user.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import Account_Selector from '@/components/Account_Selector.vue';
 import { inject, ref, onMounted, onUnmounted, computed, nextTick } from 'vue';
 import * as $enigma from '@/libs/enigma';
 
 const $mitt = inject('$mitt');
-const $user = inject('$user');
-const $userPQ = inject('$userPQ');
+const $user = userStore();
+const $userPQ = userPQStore();
 // const $swal = inject('$swal');
 const $route = inject('$route');
-// const $loader = inject('$loader');
+// const $loader = useLoader();
 // const $isProd = inject('$isProd');
 // const $router = inject('$router');
 const $encryptionManager = inject('$encryptionManager');

@@ -9,7 +9,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { localDB } from '../utils/db/localDBv2';
-import { arrayToBase64 } from './enigma';
+import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 
 const VAULT_KEY_OPTIONS = {
   authenticatorSelection: {
@@ -237,6 +237,38 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#dispatchAuthChange();
   }
 
+  async deleteUserVault(userHash) {
+    await this.#loadLocalUserCards();
+    const identityIndex = this.#localUserCards.findIndex(i => i.user_hash === userHash);
+    if (identityIndex === -1) {
+      throw new Error(`User ${userHash} not found in local cards`);
+    }
+    const identity = this.#localUserCards[identityIndex];
+
+    if (this.#currentUserHash === userHash) {
+      await this.logout();
+    }
+
+    try {
+      const vaultId = identity.vaultId;
+      const vaultData = await this.#rawStore.get(`local-vault-${vaultId}`);
+      
+      const vaultToClear = await this.#connectToUserVault(vaultId);
+      await vaultToClear.clear();
+
+      if (vaultData && vaultData.accountID) {
+        removeLocalAccount(vaultData.accountID);
+      }
+      await this.#rawStore.remove(`local-vault-${vaultId}`);
+    } catch (e) {
+      console.warn('Could not delete from local-vault', e);
+    }
+
+    this.#localUserCards.splice(identityIndex, 1);
+    await this.#saveLocalUserCards();
+    console.log(`Deleted user vault: ${userHash}`);
+  }
+
   #normalizeKey(key) {
     if (!key) return null;
     if (key instanceof Uint8Array) return key;
@@ -437,8 +469,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const storage = await localDB.getUserStorage(this.#currentUserHash, 'profile');
     if (!storage || !storage.value_b64) return null;
 
-    const binary = atob(storage.value_b64);
-    const combined = Uint8Array.from(binary, c => c.charCodeAt(0));
+    const combined = decodeHexOrBase64(storage.value_b64);
 
     const iv = combined.slice(0, 12);
     const encryptedData = combined.slice(12);
@@ -493,8 +524,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const storage = await localDB.getUserStorage(this.#currentUserHash, 'contacts');
     if (!storage || !storage.value_b64) return [];
 
-    const binary = atob(storage.value_b64);
-    const combined = Uint8Array.from(binary, c => c.charCodeAt(0));
+    const combined = decodeHexOrBase64(storage.value_b64);
 
     const iv = combined.slice(0, 12);
     const encryptedData = combined.slice(12);
@@ -567,9 +597,7 @@ export class EncryptionManagerPQ extends EventTarget {
       return null;
     }
 
-    const encryptedB64 = storage.value_b64;
-    const binary = atob(encryptedB64);
-    const combined = Uint8Array.from(binary, c => c.charCodeAt(0));
+    const combined = decodeHexOrBase64(storage.value_b64);
 
     const iv = combined.slice(0, 12);
     const encryptedData = combined.slice(12);

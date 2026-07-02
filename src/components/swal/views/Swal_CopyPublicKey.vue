@@ -21,11 +21,14 @@
 </template>
 
 <script setup>
+import { userPQStore } from '@/store/userPQ.store';
+
+
 import { inject } from 'vue';
 import copyToClipboard from '@/utils/copyToClipboard';
 
 const $mitt = inject('$mitt');
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 
 function cancel() {
 	$mitt.emit('swal::close', false);

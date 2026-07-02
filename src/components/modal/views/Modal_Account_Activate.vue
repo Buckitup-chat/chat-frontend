@@ -134,6 +134,13 @@
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import { ref, inject, onMounted, onUnmounted } from 'vue';
 import Transactions from '@/views/account/Transactions.vue';
 import axios from 'axios';
@@ -141,11 +148,11 @@ import errorMessage from '@/utils/errorMessage';
 import { deriveEvmAccount } from '@/utils/deriveEvmAccount';
 
 const $mitt = inject('$mitt');
-const $userPQ = inject('$userPQ');
+const $userPQ = userPQStore();
 const $timestamp = inject('$timestamp');
-const $web3 = inject('$web3');
+const $web3 = web3Store();
 const $swal = inject('$swal');
-const $loader = inject('$loader');
+const $loader = useLoader();
 const $socket = inject('$socket');
 
 const steps = [1, 2, 3, 4];

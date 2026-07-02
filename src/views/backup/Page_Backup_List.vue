@@ -68,6 +68,15 @@
 </style>
 
 <script setup>
+import { web3Store } from '@/store/web3.store';
+
+import { userPQStore } from '@/store/userPQ.store';
+
+import { useBreakpoint } from '@/composables/useBreakpoint';
+
+import { useLoader } from '@/composables/useLoader';
+
+
 import Offline_Reminder from '../../components/Offline_Reminder.vue';
 import Account_Activate_Reminder from '@/components/Account_Activate_Reminder.vue';
 import BackupItem from './Backup_Item.vue';
@@ -76,12 +85,12 @@ import { ref, onMounted, inject, onUnmounted, watch } from 'vue';
 import axios from 'axios';
 
 const $router = inject('$router');
-const $web3 = inject('$web3');
-const $userPQ = inject('$userPQ');
+const $web3 = web3Store();
+const $userPQ = userPQStore();
 const $socket = inject('$socket');
-const $loader = inject('$loader');
+const $loader = useLoader();
 const $swal = inject('$swal');
-const $breakpoint = inject('$breakpoint');
+const $breakpoint = useBreakpoint();
 
 const dataDefault = {
 	query: { sort: 'desc', page: 1, limit: 5, s: '' },

@@ -5,7 +5,7 @@
 				<div class="_img_wrap">
 					<Avatar :name="account.user_hash || 'User'" variant="bauhaus" v-if="!avatarDataUrl && !account.avatar" />
 
-					<img :src="avatarDataUrl || account.avatar" v-if="avatarDataUrl || account.avatar" />
+					<img loading="lazy" :src="avatarDataUrl || account.avatar" v-if="avatarDataUrl || account.avatar" />
 				</div>
 
 				<a href="#" class="btn btn-dark rounded-pill p-2" @click.prevent="$refs.avatarImageInput.click()">
@@ -43,7 +43,7 @@
 							{{ $filters.txHashShort(account.user_hash) }}
 						</div>
 
-						<i class="_icon_copy bg-black ms-2 _pointer" @click="copyUserHash()"></i>
+						<div class="d-inline-flex align-items-center justify-content-center _pointer" style="width:44px;height:44px" @click="copyUserHash()"><i class="_icon_copy bg-black"></i></div>
 					</div>
 				</label>
 			</div>
@@ -95,7 +95,10 @@
 </style>
 
 <script setup>
+
 import { ref, onMounted, watch, inject } from 'vue';
+import { userPQStore } from '@/store/userPQ.store';
+import { useLoader } from '@/composables/useLoader';
 import imageResize from '@/utils/imageResize';
 import errorMessage from '@/utils/errorMessage';
 import copyToClipboard from '@/utils/copyToClipboard';
@@ -103,8 +106,8 @@ import Avatar from 'vue-boring-avatars';
 
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');
-const $loader = inject('$loader');
-const $user = inject('$userPQ');
+const $loader = useLoader();
+const $user = userPQStore();
 const $em = inject('$encryptionManagerPQ');
 
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -201,12 +204,14 @@ const handleImage = async (event) => {
 		reader.readAsDataURL(file);
 	} catch (error) {
 		console.error(error);
+
 		$swal.fire({
 			icon: 'error',
 			title: 'Avatar upload',
 			footer: errorMessage(error),
 			timer: 15000,
 		});
+
 		$loader.hide();
 	}
 

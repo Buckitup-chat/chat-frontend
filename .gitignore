@@ -15,6 +15,7 @@ dist-ssr
 .old_frontend
 .history
 session-*
+.opencode/*
 
 ssl
 
