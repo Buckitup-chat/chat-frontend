@@ -23,7 +23,7 @@ const select = (address) => {
 	closeMenu();
 };
 
-const dbUsers = useLiveQuery(`SELECT count(*) as count from user_cards;`);
+const dbUsers = useLiveQuery(`SELECT count(*) as count from user_cards WHERE NOT deleted_flag;`);
 
 const hasUsers = computed(() => {
 	return (dbUsers?.rows?.value?.[0]?.count ?? 0) > 0;

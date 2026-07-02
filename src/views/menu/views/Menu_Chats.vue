@@ -28,7 +28,7 @@ const select = (address) => {
 	closeMenu();
 };
 
-const dbUsers = useLiveQuery(`SELECT count(*) as count from user_cards;`);
+const dbUsers = useLiveQuery(`SELECT count(*) as count from user_cards WHERE NOT deleted_flag;`);
 
 // If rows.value is undefined, the query hasn't resolved yet
 const isLoading = computed(() => {

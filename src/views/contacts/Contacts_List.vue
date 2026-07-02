@@ -36,7 +36,7 @@
 
 	&._has_contacts {
 		flex-grow: 1;
-		height: calc(100vh - 3rem);
+		height: calc(100dvh - 3rem);
 	}
 
 	._list {

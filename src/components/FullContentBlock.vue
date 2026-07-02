@@ -86,7 +86,8 @@
 
 ._toggler {
 	border: none;
-	padding-right: 1rem;
+	padding: 0.75rem 1rem;
+	cursor: pointer;
 
 	div {
 		width: 22px;

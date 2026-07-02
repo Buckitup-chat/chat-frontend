@@ -44,16 +44,13 @@ $form-check-input-indeterminate-bg-image: url("data:image/svg+xml,<svg xmlns='ht
 // required parts
 @import 'bootstrap/scss/bootstrap.scss';
 
-html,
-body {
-	overflow-x: hidden;
-}
 #app {
 	height: 100%;
 }
 
 body {
-	height: 100vh; /* full browser height */
+	height: 100vh;
+	height: 100dvh;
 	min-height: 100%;
 	margin: 0;
 	padding: 0;

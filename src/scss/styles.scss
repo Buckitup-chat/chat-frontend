@@ -18,7 +18,7 @@
 }
 
 ._btn_back {
-	padding: 0.4rem 0.8rem;
+	padding: 0.875rem 0.8rem;
 	cursor: pointer;
 	i {
 		margin-top: 0.15rem;
@@ -126,7 +126,7 @@
 
 ._search {
 	flex-shrink: 0;
-	height: 2.2rem;
+	min-height: 2.8rem;
 	._input_search {
 		width: 100%;
 		display: flex;

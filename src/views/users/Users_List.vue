@@ -70,7 +70,7 @@ const isSelected = (address) => {
 };
 
 // Query all user_cards
-const dbUsers = useLiveQuery(`SELECT * from user_cards ORDER BY name ASC;`);
+const dbUsers = useLiveQuery(`SELECT * from user_cards WHERE NOT deleted_flag ORDER BY name ASC;`);
 
 const users = computed(() => {
 	return (dbUsers?.rows?.value ?? []).map(u => ({

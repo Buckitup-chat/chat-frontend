@@ -12,9 +12,9 @@ const { selected } = defineProps({
 
 const search = ref('')
 
-const dbUsers = useLiveQuery(`SELECT * from user_cards ORDER BY name ASC;`)
+const dbUsers = useLiveQuery(`SELECT * from user_cards WHERE NOT deleted_flag ORDER BY name ASC;`)
 
-const dbUsersLocal = useLiveQuery(`SELECT * from user_cards_local;`)
+const dbUsersLocal = useLiveQuery(`SELECT * from user_cards WHERE modified_columns IS NOT NULL;`)
 
 const users: any = computed(() => dbUsers?.rows?.value ?? [])
 
@@ -76,7 +76,7 @@ const filtered = computed(() => {
 
   &._has_users {
     flex-grow: 1;
-    height: calc(100vh - 3rem);
+    height: calc(100dvh - 3rem);
   }
 
   ._list {

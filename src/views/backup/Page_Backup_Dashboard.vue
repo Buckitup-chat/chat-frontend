@@ -3,7 +3,7 @@
 		<template #header>
 			<div class="fw-bold fs-5 py-1">Security & Recovery</div>
 		</template>
-		
+
 		<template #content>
 			<div class="_full_width_block">
 				<div class="text-secondary mb-4 text-center">
@@ -49,6 +49,11 @@
 								<i class="bi bi-arrow-clockwise"></i> Restore
 							</button>
 						</div>
+						<div class="mt-3 text-center">
+							<router-link :to="{ name: 'account_backup_teststand' }" class="btn btn-sm btn-outline-info w-100">
+								🧪 Open Architecture Teststand (Vernam + Shamir)
+							</router-link>
+						</div>
 					</div>
 				</div>
 
@@ -86,6 +91,7 @@
 ._full_width_block {
 	width: 100%;
 }
+
 .card {
 	background-color: #f8f9fa;
 	border-radius: 12px;

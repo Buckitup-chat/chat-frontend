@@ -1,20 +1,18 @@
 <template>
 	<div class="wrapper" v-if="$userPQ.currentUser">
-		<Suspense>
-			<PGLiteProvider>
-				<Menu class="_menu" :class="{ _opened: $menuOpened }" />
+		<PGLiteProvider>
+			<Menu class="_menu" :class="{ _opened: $menuOpened }" />
 
-				<div class="_menu_backdrop" :class="{ _opened: $menuOpened && $breakpoint.lt('md') }"
-					@click="closeMenu()">
-				</div>
+			<div class="_menu_backdrop" :class="{ _opened: $menuOpened && $breakpoint.lt('md') }"
+				@click="closeMenu()">
+			</div>
 
-				<div class="_main" v-if="$userPQ.currentUser">
-					<router-view v-slot="{ Component, route }">
-						<component :is="Component" :key="route.path" />
-					</router-view>
-				</div>
-			</PGLiteProvider>
-		</Suspense>
+			<div class="_main">
+				<router-view v-slot="{ Component, route }">
+					<component :is="Component" :key="route.path" />
+				</router-view>
+			</div>
+		</PGLiteProvider>
 	</div>
 
 	<div v-if="!$userPQ.currentUser" class="_login">
@@ -47,7 +45,8 @@
 
 .wrapper {
 	display: flex;
-	height: 100vh; // Full viewport height
+	height: 100vh;
+	height: 100dvh;
 	flex-direction: row;
 }
 
@@ -59,18 +58,17 @@
 	position: fixed;
 	top: 0;
 	left: 0;
-	width: 0;
-	transition: $transition;
+	width: 360px;
+	transform: translateX(-100%);
+	transition: transform 0.3s ease;
 
 	&._opened {
-		width: 360px;
-		max-width: 360px;
+		transform: translateX(0);
 	}
 
 	@include media-breakpoint-up(md) {
 		position: unset;
-		width: 360px;
-		max-width: 360px;
+		transform: none;
 	}
 
 	box-shadow: 15px 0rem 1rem 0px rgb(0 0 0 / 12%);
@@ -80,18 +78,17 @@
 ._menu_backdrop {
 	position: fixed;
 	height: 100%;
-	width: 0;
+	width: 100%;
 	z-index: 9;
 	background-color: rgba(0, 0, 0, 0.3);
-	//transition: backdrop-filter .3s ease;
+	opacity: 0;
+	transition: opacity 0.3s ease;
 	pointer-events: none;
 
 	&._opened {
-		width: 100%;
+		opacity: 1;
 		pointer-events: all;
 		cursor: pointer;
-		//backdrop-filter: blur(3px); // Apply blur effect
-		//-webkit-backdrop-filter: blur(3px); // For Safari support
 	}
 }
 
@@ -176,15 +173,11 @@ provide('$timestamp', timestamp);
 watch(
 	() => $breakpoint.current,
 	() => {
-		if ($breakpoint.gt('sx')) openMenu();
+		if ($breakpoint.gt('xs')) openMenu();
 	},
 );
 
-	onMounted(async () => {
-		// console.log('mount start')
-
-		// $user.setEncryptionManager($encryptionManager);
-
+	onMounted(() => {
 		window.addEventListener('online', () => ($user.isOnline = navigator.onLine));
 		window.addEventListener('offline', () => ($user.isOnline = navigator.onLine));
 		setTimeout(function tick() {
@@ -192,11 +185,6 @@ watch(
 			setTimeout(tick, 1000);
 		}, 1000);
 
-		// Initialize PQ user store
-		await $userPQ.initialize();
-
-		// $user.vaults = await $encryptionManager.getVaults();
-
-		// console.log('local cards', $userPQ.pqUserCards)
+		$userPQ.initialize();
 	});
 </script>

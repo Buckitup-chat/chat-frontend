@@ -3,6 +3,10 @@ import { createApp } from 'vue';
 import App from './App.vue';
 
 //
+import '@fontsource/inter/400.css';
+import '@fontsource/inter/500.css';
+import '@fontsource/inter/600.css';
+import '@fontsource/inter/700.css';
 import 'bootstrap';
 import './scss/app.scss';
 
@@ -80,6 +84,9 @@ app.use(router);
 
 import FloatingVue from 'floating-vue';
 app.use(FloatingVue);
+
+import { localDB } from './utils/db/localDBv2';
+localDB.init();
 
 import InfoTooltip from '@/components/InfoTooltip.vue';
 app.component('InfoTooltip', InfoTooltip);

@@ -57,7 +57,7 @@
 	flex-direction: column;
 	overflow: hidden;
     flex-grow: 1;
-    height: calc(100vh - 3rem);
+    height: calc(100dvh - 3rem);
 
 	._list {
 		flex-grow: 1;

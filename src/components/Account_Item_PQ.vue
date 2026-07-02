@@ -2,7 +2,7 @@
   <div class="_account">
     <div class="_avatar">
       <Avatar :name="acc.user_hash" variant="bauhaus" v-if="acc.user_hash && !acc?.avatar" />
-      <img :src="acc.avatar" v-if="acc?.avatar" @error="(event) => (event.target.src = defaultAvatar)" />
+      <img loading="lazy" :src="acc.avatar" v-if="acc?.avatar" @error="(event) => (event.target.src = defaultAvatar)" />
     </div>
     <div class="_info">
       <div class="d-flex">
@@ -106,6 +106,6 @@ const acc = computed(() => {
 });
 
 const shortCode = computed(() => {
-  if (acc.value.user_hash) return acc.value.user_hash.slice(-5);
+  if (acc.value.user_hash) return acc.value.user_hash.slice(2, 7);
 });
 </script>

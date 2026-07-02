@@ -59,7 +59,7 @@ export default defineConfig(({ command }) => {
 						'**/node_modules/@spruceid/siwe-parser/**',
 						'**/node_modules/siwe/**',
 						'**/node_modules/@noble/hashes/**',
-						'**/node_modules/@lit-protocol/**'
+						'**/node_modules/@lit-protocol/**',
 					]
 				}
 			),
@@ -113,7 +113,7 @@ export default defineConfig(({ command }) => {
 				'@spruceid/siwe-parser',
 				'siwe',
 				'ethers',
-				'@lit-protocol/auth-helpers'
+				'@lit-protocol/auth-helpers',
 			]
 		},
 		server: {

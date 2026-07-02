@@ -16,7 +16,7 @@
 								</div>
 							</div>
 							<div class="d-flex">
-								<div class="btn _icon_times bg-dark" @click="closeModal()"></div>
+								<div class="btn _icon_times bg-dark p-3" @click="closeModal()"></div>
 							</div>
 						</div>
 						<!--div class="border-bottom w-100 mt-3 mb-2"></div-->
@@ -49,7 +49,7 @@ const scrollable = ref(null);
 const modal = ref(null);
 const modalId = ref(null);
 const modalElement = ref(null);
-const modalSizes = ['modal-sm', 'modal-lg', 'modal-xl'];
+const modalSizes = ['modal-sm', 'modal-md', 'modal-lg', 'modal-xl'];
 let resolvePromise;
 
 const modalRegistry = {

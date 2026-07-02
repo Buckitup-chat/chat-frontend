@@ -357,6 +357,24 @@ export const stringToBase64 = (string) => {
 	return Buffer.from(string, 'utf-8').toString('base64');
 };
 /**
+ * Decodes a string that may be PostgreSQL hex (\\x...) or standard base64.
+ * @param {string} str - Hex (\\x prefix) or base64 string.
+ * @returns {Uint8Array|null} - Decoded bytes.
+ */
+export const decodeHexOrBase64 = (str) => {
+    if (!str) return null;
+    if (typeof str === 'string' && str.startsWith('\\x')) {
+        const hex = str.slice(2);
+        const arr = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < hex.length; i += 2) {
+            arr[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+        }
+        return arr;
+    }
+    const binary = atob(str);
+    return Uint8Array.from(binary, c => c.charCodeAt(0));
+};
+/**
  * Converts a public key from base64 to hexadecimal format.
  * @param {string} publicKeyBase64 - Public key in base64 format.
  * @returns {string} - Public key in hexadecimal format.

@@ -2,7 +2,7 @@
 	<div class="_account">
 		<div class="_avatar">
 			<Avatar :name="acc.user_hash" variant="bauhaus" v-if="acc.user_hash && !acc?.avatar" />
-			<img v-if="acc?.avatar" :src="mediaUrl(acc.avatar, defaultAvatar)"
+			<img loading="lazy" v-if="acc?.avatar" :src="mediaUrl(acc.avatar, defaultAvatar)"
 				@error="(event) => (event.target.src = defaultAvatar)" />
 		</div>
 		<div class="_info">

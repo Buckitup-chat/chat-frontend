@@ -6,24 +6,24 @@
 					<div class="_icon_logo"></div>
 				</div>
 
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'rooms' }" @click="navigateToRooms()">
+				<!-- <div class="_menu_btn order-1" :class="{ _active: menu === 'rooms' }" @click="navigateToRooms()">
+					<i class="_icon_rooms" :class="{ _active: menu === 'rooms' }"></i>
+					<div>Rooms</div>
+				</div> -->
+
+				<div class="_menu_btn order-1" :class="{ _active: menu === 'rooms' }" @click="$router.push('/rooms')">
 					<i class="_icon_rooms" :class="{ _active: menu === 'rooms' }"></i>
 					<div>Rooms</div>
 				</div>
 
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'rooms' }" @click="$router.push('/rooms')">
-					<i class="_icon_rooms" :class="{ _active: menu === 'rooms' }"></i>
-					<div>Rooms (Test)</div>
-				</div>
-
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'chats' }" @click="navigateToChats()">
+				<!-- <div class="_menu_btn order-1" :class="{ _active: menu === 'chats' }" @click="navigateToChats()">
 					<i class="_icon_chats"></i>
 					<div>Chats</div>
-				</div>
+				</div> -->
 
 				<div class="_menu_btn order-1" :class="{ _active: menu === 'chats' }" @click="$router.push('/chats')">
 					<i class="_icon_chats" :class="{ _active: menu === 'chats' }"></i>
-					<div>Chats (Test)</div>
+					<div>Chats</div>
 				</div>
 
 				<div class="_menu_btn order-1" :class="{ _active: menu === 'contacts' }" @click="$router.push('/contacts')">
@@ -82,8 +82,7 @@
 						<i class="_icon_logout bg-white opacity-75"></i>
 					</button-->
 
-					<div class="_btn_back" @click="closeMenu()"
-						v-if="$router.options.history.state.back && $breakpoint.lt('md')">
+					<div class="_btn_back" @click="closeMenu()" v-if="$router.options.history.state.back && $breakpoint.lt('md')">
 						<i class="_icon_times"></i>
 					</div>
 				</div>
@@ -185,7 +184,7 @@
 			cursor: pointer;
 			transition: $transition;
 			font-size: 0.9rem;
-			padding: 0.5rem 0.5rem;
+			padding: 0.6rem 0.5rem;
 			margin-bottom: 0.5rem;
 			font-weight: 500;
 
@@ -379,13 +378,13 @@ const menu = computed(() => {
 	return null;
 });
 
-const component = computed(() => {
-	if (menu.value && menuRegistry[menu.value]) {
-		const registry = menuRegistry[menu.value];
-		return defineAsyncComponent(() => import(`./views/${registry.component}.vue`));
-	}
-	return null;
-});
+const component = shallowRef(null);
+
+watch(menu, (val) => {
+	const registry = val && menuRegistry[val];
+	if (!registry) { component.value = null; return; }
+	component.value = defineAsyncComponent(() => import(`./views/${registry.component}.vue`));
+}, { immediate: true });
 
 // TODO: REFACTOR - These hardcoded URLs should use $router.push() for SPA navigation
 // External URLs break the SPA experience and re-initialize the app

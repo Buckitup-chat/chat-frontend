@@ -9,7 +9,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { localDB } from '../utils/db/localDBv2';
-import { arrayToBase64 } from './enigma';
+import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 
 const VAULT_KEY_OPTIONS = {
   authenticatorSelection: {
@@ -469,8 +469,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const storage = await localDB.getUserStorage(this.#currentUserHash, 'profile');
     if (!storage || !storage.value_b64) return null;
 
-    const binary = atob(storage.value_b64);
-    const combined = Uint8Array.from(binary, c => c.charCodeAt(0));
+    const combined = decodeHexOrBase64(storage.value_b64);
 
     const iv = combined.slice(0, 12);
     const encryptedData = combined.slice(12);
@@ -525,8 +524,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const storage = await localDB.getUserStorage(this.#currentUserHash, 'contacts');
     if (!storage || !storage.value_b64) return [];
 
-    const binary = atob(storage.value_b64);
-    const combined = Uint8Array.from(binary, c => c.charCodeAt(0));
+    const combined = decodeHexOrBase64(storage.value_b64);
 
     const iv = combined.slice(0, 12);
     const encryptedData = combined.slice(12);
@@ -599,9 +597,7 @@ export class EncryptionManagerPQ extends EventTarget {
       return null;
     }
 
-    const encryptedB64 = storage.value_b64;
-    const binary = atob(encryptedB64);
-    const combined = Uint8Array.from(binary, c => c.charCodeAt(0));
+    const combined = decodeHexOrBase64(storage.value_b64);
 
     const iv = combined.slice(0, 12);
     const encryptedData = combined.slice(12);
