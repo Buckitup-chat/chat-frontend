@@ -18,6 +18,58 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // Cache of derived / unwrapped keys to avoid repeated computation
     const senderMsgKeys = ref({}); // { [dialogHash_authorHash]: Uint8Array }
 
+    // Optimistic (in-flight) items shown in UI before DB round-trip
+    const optimisticItems = ref(new Map()); // id -> { type, dialogHash, status, ... }
+    let optimisticCounter = 0;
+
+    const formatTimestamp = (ts) => {
+        const d = new Date(ts * 1000);
+        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    };
+
+    const addOptimisticMessage = (dialogHash, text) => {
+        const id = `opt_msg_${++optimisticCounter}_${Date.now()}`;
+        return addOptimisticMessageWithId(dialogHash, id, text);
+    };
+
+    const addOptimisticMessageWithId = (dialogHash, id, text, ownerTimestamp = null) => {
+        const nowSec = ownerTimestamp || Math.floor(Date.now() / 1000);
+        optimisticItems.value.set(id, {
+            type: 'message',
+            id,
+            dialogHash,
+            text,
+            authorName: 'Me',
+            isMine: true,
+            timestamp: formatTimestamp(nowSec),
+            ownerTimestamp: nowSec,
+            status: 'sending',
+        });
+        return id;
+    };
+
+    const addOptimisticReaction = (dialogHash, messageId, emoji) => {
+        const id = `opt_react_${++optimisticCounter}_${Date.now()}`;
+        optimisticItems.value.set(id, {
+            type: 'reaction',
+            id,
+            dialogHash,
+            messageId,
+            emoji,
+            status: 'sending',
+        });
+        return id;
+    };
+
+    const updateOptimisticStatus = (id, status) => {
+        const item = optimisticItems.value.get(id);
+        if (item) item.status = status;
+    };
+
+    const removeOptimisticItem = (id) => {
+        optimisticItems.value.delete(id);
+    };
+
     const getDialogHash = (peerHash) => {
         if (!$userPQ.currentUserHash) return null;
         return DialogCrypto.computeDialogHash($userPQ.currentUserHash, peerHash);
@@ -150,35 +202,46 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     /**
-     * Send a message
+     * Send a message (optimistic: returns immediately, syncs in background)
      */
-    const sendMessage = async (peerHash, text) => {
-        const dialogHash = await initDialogKeys(peerHash);
-        const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
+    const sendMessage = async (peerHash, text, onStatus, messageId = null, ownerTimestamp = null) => {
+        if (!messageId) {
+            const { v7 } = await import('uuid');
+            messageId = "dmsg_" + v7();
+        }
 
-        const contentJson = JSON.stringify({ type: "text", text: text });
-        const contentB64 = await DialogCrypto.encryptContent(myKey, contentJson);
+        const nowSec = ownerTimestamp || Math.floor(Date.now() / 1000);
 
-        // Calculate simple refs_map logic for now (mock: empty map, will implement proper DAG tails later)
-        const refsMap = {};
-        const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
+        (async () => {
+            onStatus?.('sending');
+            try {
+                const dialogHash = await initDialogKeys(peerHash);
+                const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
-        // Use standard uuid package but formatted for our PQ standard
-        const { v7 } = await import('uuid');
-        const messageId = "dmsg_" + v7();
+                const contentJson = JSON.stringify({ type: "text", text: text });
+                const contentB64 = await DialogCrypto.encryptContent(myKey, contentJson);
 
-        await localDB.upsertDialogMessageLocal({
-            message_id: messageId,
-            dialog_hash: dialogHash,
-            sender_hash: $userPQ.currentUserHash,
-            content_b64: contentB64,
-            deleted_flag: false,
-            refs_map_b64: refsMapB64,
-            parent_sign_hash: null,
-            owner_timestamp: Math.floor(Date.now() / 1000),
-            sign_b64: null, // Auto signed by client
-            sign_hash: null
-        });
+                const refsMap = {};
+                const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
+
+                onStatus?.('syncing');
+                await localDB.upsertDialogMessageLocal({
+                    message_id: messageId,
+                    dialog_hash: dialogHash,
+                    sender_hash: $userPQ.currentUserHash,
+                    content_b64: contentB64,
+                    deleted_flag: false,
+                    refs_map_b64: refsMapB64,
+                    parent_sign_hash: null,
+                    owner_timestamp: nowSec,
+                    sign_b64: null,
+                    sign_hash: null
+                });
+            } catch (e) {
+                console.error('[dialogs] sendMessage failed:', e);
+                onStatus?.('error');
+            }
+        })();
 
         return messageId;
     };
@@ -244,49 +307,65 @@ export const useDialogsStore = defineStore('dialogs', () => {
         }
     };
 
-    const toggleReaction = async (peerHash, messageId, emoji) => {
-        const dialogHash = await initDialogKeys(peerHash);
-        const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
+    /**
+     * Toggle reaction (optimistic: returns immediately, syncs in background)
+     */
+    const toggleReaction = async (peerHash, messageId, emoji, onStatus) => {
+        (async () => {
+            onStatus?.('sending');
+            try {
+                const dialogHash = await initDialogKeys(peerHash);
+                const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
-        const reactionHash = DialogCrypto.computeReactionHash(
-            myKey, messageId, $userPQ.currentUserHash, emoji
-        );
+                const reactionHash = DialogCrypto.computeReactionHash(
+                    myKey, messageId, $userPQ.currentUserHash, emoji
+                );
 
-        const { rows } = await localDB.db.query(
-            `SELECT deleted_flag FROM dialog_message_reactions WHERE reaction_hash = $1`,
-            [reactionHash]
-        );
+                const { rows: msgRows } = await localDB.db.query(
+                    `SELECT sign_hash FROM dialog_messages WHERE message_id = $1`,
+                    [messageId]
+                );
+                const messageSignHash = msgRows[0]?.sign_hash || '';
 
-        const exists = rows.length > 0 && !rows[0].deleted_flag;
+                const { rows } = await localDB.db.query(
+                    `SELECT deleted_flag FROM dialog_message_reactions WHERE reaction_hash = $1`,
+                    [reactionHash]
+                );
 
-        if (exists) {
-            await localDB.upsertDialogReactionLocal({
-                reaction_hash: reactionHash,
-                dialog_hash: dialogHash,
-                message_id: messageId,
-                message_sign_hash: '',
-                reactor_hash: $userPQ.currentUserHash,
-                type_b64: '',
-                deleted_flag: true,
-                owner_timestamp: Math.floor(Date.now() / 1000),
-                sign_b64: null
-            });
-            return false;
-        }
+                const exists = rows.length > 0 && !rows[0].deleted_flag;
 
-        const typeB64 = await DialogCrypto.encryptContent(myKey, emoji);
-        await localDB.upsertDialogReactionLocal({
-            reaction_hash: reactionHash,
-            dialog_hash: dialogHash,
-            message_id: messageId,
-            message_sign_hash: '',
-            reactor_hash: $userPQ.currentUserHash,
-            type_b64: typeB64,
-            deleted_flag: false,
-            owner_timestamp: Math.floor(Date.now() / 1000),
-            sign_b64: null
-        });
-        return true;
+                onStatus?.('syncing');
+                if (exists) {
+                    await localDB.upsertDialogReactionLocal({
+                        reaction_hash: reactionHash,
+                        dialog_hash: dialogHash,
+                        message_id: messageId,
+                        message_sign_hash: messageSignHash,
+                        reactor_hash: $userPQ.currentUserHash,
+                        type_b64: '',
+                        deleted_flag: true,
+                        owner_timestamp: Math.floor(Date.now() / 1000),
+                        sign_b64: null
+                    });
+                } else {
+                    const typeB64 = await DialogCrypto.encryptContent(myKey, emoji);
+                    await localDB.upsertDialogReactionLocal({
+                        reaction_hash: reactionHash,
+                        dialog_hash: dialogHash,
+                        message_id: messageId,
+                        message_sign_hash: messageSignHash,
+                        reactor_hash: $userPQ.currentUserHash,
+                        type_b64: typeB64,
+                        deleted_flag: false,
+                        owner_timestamp: Math.floor(Date.now() / 1000),
+                        sign_b64: null
+                    });
+                }
+            } catch (e) {
+                console.error('[dialogs] toggleReaction failed:', e);
+                onStatus?.('error');
+            }
+        })();
     };
 
     const decryptReactionRow = async (dialogHash, row) => {
@@ -311,5 +390,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
         decryptMessageRow,
         toggleReaction,
         decryptReactionRow,
+        optimisticItems,
+        addOptimisticMessage,
+        addOptimisticMessageWithId,
+        addOptimisticReaction,
+        updateOptimisticStatus,
+        removeOptimisticItem,
     };
 });

@@ -7,6 +7,23 @@ import schemaSQL from "./schemaV4.sql?raw";
 import { api } from "../../api/client";
 import { useOnlineStatus } from "../../composables/useOnlineStatus";
 
+const TABLE_PKS = {
+  user_cards: ['user_hash'],
+  user_storage: ['user_hash', 'uuid'],
+  dialog_keys: ['dialog_hash', 'sender_hash'],
+  dialog_messages: ['message_id'],
+  dialog_messages_versions: ['message_id', 'sign_hash'],
+  dialog_message_reactions: ['reaction_hash'],
+  dialog_message_receipts: ['receipt_hash'],
+};
+
+const isAlreadyExistsError = (r) => {
+  if (r.status !== "error" || r.error !== "validation_failed") return false;
+  return Object.values(r.details || {}).some(v =>
+    Array.isArray(v) && v.some(msg => /has already been taken/i.test(msg))
+  );
+};
+
 class LocalDBv2 {
   #getSignSkey = null;
 
@@ -232,6 +249,16 @@ class LocalDBv2 {
       sign_b64
     } = userData;
 
+    const changed = `user_cards.sign_pkey IS DISTINCT FROM EXCLUDED.sign_pkey
+      OR user_cards.crypt_pkey IS DISTINCT FROM EXCLUDED.crypt_pkey
+      OR user_cards.crypt_cert IS DISTINCT FROM EXCLUDED.crypt_cert
+      OR user_cards.contact_pkey IS DISTINCT FROM EXCLUDED.contact_pkey
+      OR user_cards.contact_cert IS DISTINCT FROM EXCLUDED.contact_cert
+      OR user_cards.name IS DISTINCT FROM EXCLUDED.name
+      OR user_cards.deleted_flag IS DISTINCT FROM EXCLUDED.deleted_flag
+      OR user_cards.owner_timestamp IS DISTINCT FROM EXCLUDED.owner_timestamp
+      OR user_cards.sign_b64 IS DISTINCT FROM EXCLUDED.sign_b64`;
+
     await this.db.query(
       `INSERT INTO user_cards (
         user_hash, sign_pkey, crypt_pkey, crypt_cert,
@@ -249,8 +276,8 @@ class LocalDBv2 {
         deleted_flag = EXCLUDED.deleted_flag,
         owner_timestamp = EXCLUDED.owner_timestamp,
         sign_b64   = EXCLUDED.sign_b64,
-        modified_columns = ARRAY['__all__'],
-        sent_to_server = FALSE,
+        modified_columns = CASE WHEN ${changed} THEN ARRAY['__all__'] ELSE user_cards.modified_columns END,
+        sent_to_server = CASE WHEN ${changed} THEN FALSE ELSE user_cards.sent_to_server END,
         updated_at = NOW()`,
       [user_hash, sign_pkey, crypt_pkey, crypt_cert, contact_pkey, contact_cert, name || "", deleted_flag, owner_timestamp, sign_b64]
     );
@@ -265,8 +292,8 @@ class LocalDBv2 {
        VALUES ($1, TRUE, ARRAY['__all__'], FALSE, NOW())
        ON CONFLICT (user_hash) DO UPDATE SET
          deleted_flag = TRUE,
-         modified_columns = ARRAY['__all__'],
-         sent_to_server = FALSE,
+         modified_columns = CASE WHEN user_cards.deleted_flag = TRUE THEN user_cards.modified_columns ELSE ARRAY['__all__'] END,
+         sent_to_server = CASE WHEN user_cards.deleted_flag = TRUE THEN user_cards.sent_to_server ELSE FALSE END,
          updated_at = NOW()`,
       [userHash]
     );
@@ -324,6 +351,19 @@ class LocalDBv2 {
 
         for (const row of rows) {
           if (++mutationCount % 50 === 0) await new Promise(r => setTimeout(r, 0));
+
+          const v = this.validateMutation(row, t.table);
+          if (!v.valid) {
+            const pkCol = this.#getPkCol(t.table);
+            const pkVal = row[pkCol];
+            console.warn(`[localDB] Skipping invalid ${t.table} ${pkVal}: ${v.reason}`);
+            await this.db.query(
+              `UPDATE ${t.table} SET modified_columns = NULL, sent_to_server = TRUE WHERE ${pkCol} = $1`,
+              [pkVal]
+            );
+            continue;
+          }
+
           const mutationType = row.deleted_flag ? 'update' : 'insert';
 
           switch (t.factory) {
@@ -365,10 +405,17 @@ class LocalDBv2 {
 
       console.time('http ingest');
       const resp = await api.ingestWithAuthEach(mutations, signSkey);
-      const body = await resp.json();
       console.timeEnd('http ingest');
 
+      if (!resp.ok) {
+        console.error(`[localDB] ingest HTTP ${resp.status}:`, await resp.text().catch(() => '<no body>'));
+        return;
+      }
+
+      const body = await resp.json();
+
       const allOk = body.results.every(r => r.status === "ok");
+
       if (allOk) {
         console.time('mark synced');
         await Promise.all(this.#tables.map(t =>
@@ -377,11 +424,44 @@ class LocalDBv2 {
         console.timeEnd('mark synced');
         this.isLocalStash = false;
       } else {
+        const okOrExists = body.results.filter(r =>
+          r.status === "ok" || isAlreadyExistsError(r)
+        );
+
+        if (okOrExists.length > 0) {
+          console.time('mark synced (partial)');
+          for (const r of okOrExists) {
+            const m = mutations[r.index];
+            if (!m) continue;
+            const rel = m.syncMetadata?.relation;
+            if (!rel) continue;
+            const pkData = m.type === 'insert' ? m.modified : (m.original || {});
+            const pkCols = TABLE_PKS[rel];
+            if (!pkCols) continue;
+            const conds = pkCols.map(c => `${c} = $${pkCols.indexOf(c) + 1}`).join(' AND ');
+            const params = pkCols.map(c => pkData[c]);
+            await this.db.query(
+              `UPDATE ${rel} SET modified_columns = NULL, sent_to_server = TRUE WHERE ${conds}`,
+              params
+            );
+          }
+          console.timeEnd('mark synced (partial)');
+          await this.checkLocalStash();
+        }
+
         for (const r of body.results) {
-          if (r.status !== "ok") console.warn(`Mutation ${r.index} failed:`, r.error);
+          if (r.status !== "ok" && !isAlreadyExistsError(r)) {
+            console.warn(`Mutation ${r.index} failed:`, r.error);
+          }
+        }
+
+        if (body.results.every(r => r.status === "ok" || isAlreadyExistsError(r))) {
+          this.isLocalStash = false;
         }
       }
-      console.log(`Sent ${mutations.length} pending changes (${body.results.filter(r => r.status === "ok").length} ok)`);
+      const okCount = body.results.filter(r => r.status === "ok").length;
+      const existsCount = body.results.filter(isAlreadyExistsError).length;
+      console.log(`Sent ${mutations.length} pending changes (${okCount} ok, ${existsCount} already-exists)`);
     } catch (e) { console.warn('Sync failed:', e); }
     finally { console.timeEnd('sendChanges'); this.#syncPending = false; }
   }
@@ -451,6 +531,15 @@ class LocalDBv2 {
 
   async upsertStorageLocal({ userHash, uuid, valueB64, hashB64, version, deletedFlag, parentSignHash, signHash, ownerTimestamp, signB64 }) {
     if (!this.db) return;
+    const changed = `user_storage.value_b64 IS DISTINCT FROM EXCLUDED.value_b64
+      OR user_storage.hash_b64 IS DISTINCT FROM EXCLUDED.hash_b64
+      OR user_storage.deleted_flag IS DISTINCT FROM EXCLUDED.deleted_flag
+      OR user_storage.parent_sign_hash IS DISTINCT FROM EXCLUDED.parent_sign_hash
+      OR user_storage.sign_hash IS DISTINCT FROM EXCLUDED.sign_hash
+      OR user_storage.owner_timestamp IS DISTINCT FROM EXCLUDED.owner_timestamp
+      OR user_storage.sign_b64 IS DISTINCT FROM EXCLUDED.sign_b64
+      OR user_storage.version IS DISTINCT FROM EXCLUDED.version`;
+
     await this.db.query(
       `INSERT INTO user_storage (
             user_hash, uuid, version, value_b64, hash_b64, deleted_flag,
@@ -466,8 +555,8 @@ class LocalDBv2 {
             owner_timestamp = EXCLUDED.owner_timestamp,
             sign_b64 = EXCLUDED.sign_b64,
             version = EXCLUDED.version,
-            modified_columns = ARRAY['__all__'],
-            sent_to_server = FALSE,
+            modified_columns = CASE WHEN ${changed} THEN ARRAY['__all__'] ELSE user_storage.modified_columns END,
+            sent_to_server = CASE WHEN ${changed} THEN FALSE ELSE user_storage.sent_to_server END,
             updated_at = NOW()`,
       [userHash, uuid, version, valueB64, hashB64, deletedFlag, parentSignHash, signHash, ownerTimestamp, signB64]
     );
@@ -482,8 +571,8 @@ class LocalDBv2 {
          VALUES ($1, $2, TRUE, ARRAY['__all__'], FALSE, NOW())
          ON CONFLICT (user_hash, uuid) DO UPDATE SET
             deleted_flag = TRUE,
-            modified_columns = ARRAY['__all__'],
-            sent_to_server = FALSE,
+            modified_columns = CASE WHEN user_storage.deleted_flag = TRUE THEN user_storage.modified_columns ELSE ARRAY['__all__'] END,
+            sent_to_server = CASE WHEN user_storage.deleted_flag = TRUE THEN user_storage.sent_to_server ELSE FALSE END,
             updated_at = NOW()`,
       [userHash, uuid]
     );
@@ -495,6 +584,13 @@ class LocalDBv2 {
 
   async upsertDialogKeysLocal(data) {
     if (!this.db) return;
+    const changed = `dialog_keys.peer_hash IS DISTINCT FROM EXCLUDED.peer_hash
+      OR dialog_keys.peer_kem_wrap_key_b64 IS DISTINCT FROM EXCLUDED.peer_kem_wrap_key_b64
+      OR dialog_keys.peer_wrapped_msg_key_b64 IS DISTINCT FROM EXCLUDED.peer_wrapped_msg_key_b64
+      OR dialog_keys.owner_timestamp IS DISTINCT FROM EXCLUDED.owner_timestamp
+      OR dialog_keys.deleted_flag IS DISTINCT FROM EXCLUDED.deleted_flag
+      OR dialog_keys.sign_b64 IS DISTINCT FROM EXCLUDED.sign_b64`;
+
     await this.db.query(
       `INSERT INTO dialog_keys (
               dialog_hash, sender_hash, peer_hash, peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64,
@@ -508,8 +604,8 @@ class LocalDBv2 {
               owner_timestamp = EXCLUDED.owner_timestamp,
               deleted_flag = EXCLUDED.deleted_flag,
               sign_b64 = EXCLUDED.sign_b64,
-              modified_columns = ARRAY['__all__'],
-              sent_to_server = FALSE,
+              modified_columns = CASE WHEN ${changed} THEN ARRAY['__all__'] ELSE dialog_keys.modified_columns END,
+              sent_to_server = CASE WHEN ${changed} THEN FALSE ELSE dialog_keys.sent_to_server END,
               updated_at = NOW()`,
       [data.dialog_hash, data.sender_hash, data.peer_hash, data.peer_kem_wrap_key_b64, data.peer_wrapped_msg_key_b64,
       data.owner_timestamp, data.deleted_flag, data.sign_b64]
@@ -522,6 +618,14 @@ class LocalDBv2 {
     if (!this.db) return;
 
     const signHash = data.sign_hash || (data.sign_b64 ? "dms_" + bytesToHex(sha3_512(Uint8Array.from(atob(data.sign_b64), c => c.charCodeAt(0)))) : null);
+
+    const msgChanged = `dialog_messages.content_b64 IS DISTINCT FROM EXCLUDED.content_b64
+      OR dialog_messages.deleted_flag IS DISTINCT FROM EXCLUDED.deleted_flag
+      OR dialog_messages.refs_map_b64 IS DISTINCT FROM EXCLUDED.refs_map_b64
+      OR dialog_messages.parent_sign_hash IS DISTINCT FROM EXCLUDED.parent_sign_hash
+      OR dialog_messages.owner_timestamp IS DISTINCT FROM EXCLUDED.owner_timestamp
+      OR dialog_messages.sign_b64 IS DISTINCT FROM EXCLUDED.sign_b64
+      OR dialog_messages.sign_hash IS DISTINCT FROM EXCLUDED.sign_hash`;
 
     await this.db.query(
       `INSERT INTO dialog_messages (
@@ -537,14 +641,23 @@ class LocalDBv2 {
               owner_timestamp = EXCLUDED.owner_timestamp,
               sign_b64 = EXCLUDED.sign_b64,
               sign_hash = EXCLUDED.sign_hash,
-              modified_columns = ARRAY['__all__'],
-              sent_to_server = FALSE,
+              modified_columns = CASE WHEN ${msgChanged} THEN ARRAY['__all__'] ELSE dialog_messages.modified_columns END,
+              sent_to_server = CASE WHEN ${msgChanged} THEN FALSE ELSE dialog_messages.sent_to_server END,
               updated_at = NOW()`,
       [data.message_id, data.dialog_hash, data.sender_hash, data.content_b64, data.deleted_flag,
       data.refs_map_b64, data.parent_sign_hash, data.owner_timestamp, data.sign_b64, signHash]
     );
 
     if (signHash) {
+      const versionChanged = `dialog_messages_versions.dialog_hash IS DISTINCT FROM EXCLUDED.dialog_hash
+        OR dialog_messages_versions.sender_hash IS DISTINCT FROM EXCLUDED.sender_hash
+        OR dialog_messages_versions.content_b64 IS DISTINCT FROM EXCLUDED.content_b64
+        OR dialog_messages_versions.deleted_flag IS DISTINCT FROM EXCLUDED.deleted_flag
+        OR dialog_messages_versions.refs_map_b64 IS DISTINCT FROM EXCLUDED.refs_map_b64
+        OR dialog_messages_versions.parent_sign_hash IS DISTINCT FROM EXCLUDED.parent_sign_hash
+        OR dialog_messages_versions.owner_timestamp IS DISTINCT FROM EXCLUDED.owner_timestamp
+        OR dialog_messages_versions.sign_b64 IS DISTINCT FROM EXCLUDED.sign_b64`;
+
       await this.db.query(
         `INSERT INTO dialog_messages_versions (
                 message_id, sign_hash, dialog_hash, sender_hash, content_b64, deleted_flag,
@@ -552,8 +665,16 @@ class LocalDBv2 {
                 modified_columns, sent_to_server, updated_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ARRAY['__all__'], FALSE, NOW())
             ON CONFLICT (message_id, sign_hash) DO UPDATE SET
-                modified_columns = ARRAY['__all__'],
-                sent_to_server = FALSE,
+                dialog_hash = EXCLUDED.dialog_hash,
+                sender_hash = EXCLUDED.sender_hash,
+                content_b64 = EXCLUDED.content_b64,
+                deleted_flag = EXCLUDED.deleted_flag,
+                refs_map_b64 = EXCLUDED.refs_map_b64,
+                parent_sign_hash = EXCLUDED.parent_sign_hash,
+                owner_timestamp = EXCLUDED.owner_timestamp,
+                sign_b64 = EXCLUDED.sign_b64,
+                modified_columns = CASE WHEN ${versionChanged} THEN ARRAY['__all__'] ELSE dialog_messages_versions.modified_columns END,
+                sent_to_server = CASE WHEN ${versionChanged} THEN FALSE ELSE dialog_messages_versions.sent_to_server END,
                 updated_at = NOW()`,
         [data.message_id, signHash, data.dialog_hash, data.sender_hash, data.content_b64, data.deleted_flag,
         data.refs_map_b64, data.parent_sign_hash, data.owner_timestamp, data.sign_b64]
@@ -566,6 +687,11 @@ class LocalDBv2 {
 
   async upsertDialogReactionLocal(data) {
     if (!this.db) return;
+    const changed = `dialog_message_reactions.type_b64 IS DISTINCT FROM EXCLUDED.type_b64
+      OR dialog_message_reactions.deleted_flag IS DISTINCT FROM EXCLUDED.deleted_flag
+      OR dialog_message_reactions.owner_timestamp IS DISTINCT FROM EXCLUDED.owner_timestamp
+      OR dialog_message_reactions.sign_b64 IS DISTINCT FROM EXCLUDED.sign_b64`;
+
     await this.db.query(
       `INSERT INTO dialog_message_reactions (
               reaction_hash, dialog_hash, message_id, message_sign_hash, reactor_hash,
@@ -577,8 +703,8 @@ class LocalDBv2 {
               deleted_flag = EXCLUDED.deleted_flag,
               owner_timestamp = EXCLUDED.owner_timestamp,
               sign_b64 = EXCLUDED.sign_b64,
-              modified_columns = ARRAY['__all__'],
-              sent_to_server = FALSE,
+              modified_columns = CASE WHEN ${changed} THEN ARRAY['__all__'] ELSE dialog_message_reactions.modified_columns END,
+              sent_to_server = CASE WHEN ${changed} THEN FALSE ELSE dialog_message_reactions.sent_to_server END,
               updated_at = NOW()`,
       [data.reaction_hash, data.dialog_hash, data.message_id, data.message_sign_hash, data.reactor_hash,
       data.type_b64, data.deleted_flag, data.owner_timestamp, data.sign_b64]
@@ -589,6 +715,11 @@ class LocalDBv2 {
 
   async upsertDialogReceiptLocal(data) {
     if (!this.db) return;
+    const changed = `dialog_message_receipts.type IS DISTINCT FROM EXCLUDED.type
+      OR dialog_message_receipts.message_sign_hash IS DISTINCT FROM EXCLUDED.message_sign_hash
+      OR dialog_message_receipts.owner_timestamp IS DISTINCT FROM EXCLUDED.owner_timestamp
+      OR dialog_message_receipts.sign_b64 IS DISTINCT FROM EXCLUDED.sign_b64`;
+
     await this.db.query(
       `INSERT INTO dialog_message_receipts (
               receipt_hash, dialog_hash, message_id, peer_hash, type,
@@ -600,8 +731,8 @@ class LocalDBv2 {
               message_sign_hash = EXCLUDED.message_sign_hash,
               owner_timestamp = EXCLUDED.owner_timestamp,
               sign_b64 = EXCLUDED.sign_b64,
-              modified_columns = ARRAY['__all__'],
-              sent_to_server = FALSE,
+              modified_columns = CASE WHEN ${changed} THEN ARRAY['__all__'] ELSE dialog_message_receipts.modified_columns END,
+              sent_to_server = CASE WHEN ${changed} THEN FALSE ELSE dialog_message_receipts.sent_to_server END,
               updated_at = NOW()`,
       [data.receipt_hash, data.dialog_hash, data.message_id, data.peer_hash, data.type,
       data.message_sign_hash, data.owner_timestamp, data.sign_b64]
@@ -615,6 +746,106 @@ class LocalDBv2 {
     const pending = await this.getAllPendingChanges();
     console.table({ syncedAndLocalView: users, pendingChanges: pending });
   }
+
+  async cleanupBrokenReactions() {
+    if (!this.db) return { updated: 0 };
+    const { rows: before } = await this.db.query(
+      `SELECT COUNT(*)::int AS n FROM dialog_message_reactions
+       WHERE modified_columns IS NOT NULL
+         AND (message_sign_hash = '' OR message_sign_hash IS NULL)`
+    );
+    const { rows: updated } = await this.db.query(
+      `UPDATE dialog_message_reactions
+       SET modified_columns = NULL, sent_to_server = TRUE, updated_at = NOW()
+       WHERE modified_columns IS NOT NULL
+         AND (message_sign_hash = '' OR message_sign_hash IS NULL)
+       RETURNING reaction_hash`
+    );
+    console.log(`[localDB] cleanupBrokenReactions: marked ${updated.length} broken reaction(s) as synced`);
+    return { updated: updated.length, wasPending: before[0]?.n || 0 };
+  }
+
+  async cleanupStuckMutations() {
+    if (!this.db) return { total: 0, byTable: {} };
+    const result = { total: 0, byTable: {} };
+
+    for (const t of this.#tables) {
+      const { rows } = await this.db.query(
+        `SELECT * FROM ${t.table} WHERE modified_columns IS NOT NULL`
+      );
+      if (rows.length === 0) continue;
+
+      const pkCol = this.#getPkCol(t.table);
+      const invalid = [];
+      for (const row of rows) {
+        const v = this.validateMutation(row, t.table);
+        if (!v.valid) invalid.push({ pk: row[pkCol], reason: v.reason });
+      }
+
+      if (invalid.length > 0) {
+        const pks = invalid.map(i => i.pk);
+        for (const pk of pks) {
+          await this.db.query(
+            `UPDATE ${t.table} SET modified_columns = NULL, sent_to_server = TRUE, updated_at = NOW() WHERE ${pkCol} = $1`,
+            [pk]
+          );
+        }
+        result.byTable[t.table] = invalid;
+        result.total += invalid.length;
+      }
+    }
+
+    if (result.total > 0) {
+      console.log(`[localDB] cleanupStuckMutations: cleared ${result.total} invalid mutation(s)`, result.byTable);
+    }
+    return result;
+  }
+
+  validateMutation(row, relation) {
+    const checks = {
+      dialog_message_reactions: () => {
+        if (!row.message_sign_hash) return { valid: false, reason: 'empty message_sign_hash' };
+        return { valid: true };
+      },
+      dialog_message_receipts: () => {
+        if (!row.message_sign_hash) return { valid: false, reason: 'empty message_sign_hash' };
+        return { valid: true };
+      },
+      dialog_messages: () => {
+        if (!row.content_b64 && !row.deleted_flag) return { valid: false, reason: 'empty content_b64' };
+        return { valid: true };
+      },
+      dialog_keys: () => {
+        if (!row.peer_kem_wrap_key_b64) return { valid: false, reason: 'missing peer_kem_wrap_key_b64' };
+        if (!row.peer_wrapped_msg_key_b64) return { valid: false, reason: 'missing peer_wrapped_msg_key_b64' };
+        return { valid: true };
+      },
+      user_storage: () => {
+        if (!row.value_b64 && !row.deleted_flag) return { valid: false, reason: 'empty value_b64' };
+        return { valid: true };
+      },
+      user_cards: () => {
+        if (!row.sign_pkey || !row.contact_pkey || !row.crypt_pkey) {
+          return { valid: false, reason: 'missing keys' };
+        }
+        return { valid: true };
+      },
+    };
+    return (checks[relation] || (() => ({ valid: true })))();
+  }
+
+  #getPkCol(table) {
+    return {
+      user_cards: 'user_hash',
+      user_storage: 'uuid',
+      dialog_keys: 'dialog_hash',
+      dialog_messages: 'message_id',
+      dialog_messages_versions: 'message_id',
+      dialog_message_reactions: 'reaction_hash',
+      dialog_message_receipts: 'receipt_hash',
+    }[table] || 'id';
+  }
 }
 
 export const localDB = new LocalDBv2();
+if (typeof window !== 'undefined') window.localDB = localDB;
