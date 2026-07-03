@@ -3,12 +3,15 @@ import Account_Item_PQ from '@/components/Account_Item_PQ.vue'
 import SyncStatus from './SyncStatus.vue'
 import { ref, computed } from 'vue'
 import { useLiveQuery } from '@electric-sql/pglite-vue'
+import { userPQStore } from '@/store/userPQ.store'
 
 const emit = defineEmits<{ select: [address: string] }>()
 
 const { selected } = defineProps({
   selected: { type: Array, default: () => [] },
 })
+
+const $userPQ = userPQStore()
 
 const search = ref('')
 
@@ -32,6 +35,9 @@ const select = (address) => {
 
 const filtered = computed(() => {
   let list = users.value
+  if ($userPQ.currentUserHash) {
+    list = list.filter((u) => u.user_hash !== $userPQ.currentUserHash)
+  }
   if (search.value) {
     const term = search.value.toLowerCase()
     list = list.filter((u) => u.name?.toLowerCase().includes(term))

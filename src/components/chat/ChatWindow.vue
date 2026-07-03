@@ -1,10 +1,7 @@
 <template>
   <div class="chat-window d-flex flex-column w-100 h-100">
     <!-- Header -->
-    <div class="chat-header d-flex align-items-center px-3 py-2 border-bottom">
-      <button class="btn btn-link text-decoration-none p-0 me-3 text-dark" @click="$router.back()">
-        <i class="bi bi-arrow-left fs-4"></i> &larr;
-      </button>
+    <div class="chat-header d-flex align-items-center justify-content-between px-3 py-2 border-bottom">
       <div class="d-flex align-items-center text-dark">
         <!-- Avatar -->
         <div
@@ -16,13 +13,17 @@
         </div>
         <div class="fw-bold fs-5">{{ title }}</div>
       </div>
+      <div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')">
+        <div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>
+      </div>
     </div>
 
     <!-- Messages Area -->
     <div class="chat-body flex-grow-1 p-3 overflow-y-auto" ref="messagesContainer">
-      <div v-for="msg in messages" :key="msg.id" class="message-wrapper d-flex mb-3"
+        <div v-for="msg in messages" :key="msg.id" class="message-wrapper d-flex mb-3"
         :class="msg.isMine ? 'justify-content-end' : 'justify-content-start'">
-        <div class="message-bubble p-2 rounded-3 shadow-sm" :class="msg.isMine ? 'message-mine' : 'message-peer'"
+        <div class="message-bubble p-2 rounded-3 shadow-sm"
+          :class="[msg.isMine ? 'message-mine' : 'message-peer', { 'message-pending': msg._syncStatus && msg._syncStatus !== 'synced' }]"
           style="max-width: 75%; min-width: 150px;" @contextmenu.prevent="openContextMenu($event, msg)">
           <div v-if="!msg.isMine && showAuthorName" class="fw-bold text-muted mb-1" style="font-size: 0.8rem;">
             {{ msg.authorName }}
@@ -42,7 +43,8 @@
             class="reactions-container d-flex flex-wrap gap-1 mt-1">
             <button v-for="(data, emoji) in reactions[msg.id]" :key="emoji" type="button"
               class="reaction-badge btn btn-sm p-0 px-2 rounded-pill d-inline-flex align-items-center"
-              :class="{ 'reaction-mine': data.hasMine }" @click="handleReactionClick(msg.id, emoji)"
+              :class="{ 'reaction-mine': data.hasMine, 'reaction-pending': data.status && data.status !== 'synced' }"
+              @click="handleReactionClick(msg.id, emoji)"
               :title="data.hasMine ? 'Remove' : 'React'">
               <span class="reaction-emoji">{{ emoji }}</span>
               <span v-if="data.count > 1" class="reaction-count ms-1">{{ data.count }}</span>
@@ -50,6 +52,9 @@
           </div>
           <div class="message-time text-end mt-1" :class="msg.isMine ? 'text-dark' : 'text-muted'">
             {{ msg.timestamp }}
+            <span v-if="msg._syncStatus === 'sending' || msg._syncStatus === 'syncing'" class="sync-status pending" title="Syncing...">✓</span>
+            <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Synced">✓</span>
+            <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Failed to sync">!</span>
           </div>
         </div>
       </div>
@@ -76,7 +81,7 @@
           @click="selectEmojiFromContext(emoji)">{{ emoji }}</button>
       </div>
       <div class="context-menu-divider"></div>
-      <button v-if="contextMenuMsg && contextMenuMsg.isMine" type="button" class="context-menu-action"
+      <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced'" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
         <i class="bi bi-pencil me-2"></i>Edit
       </button>
@@ -89,10 +94,12 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
-import { useRouter } from 'vue-router';
+import { useBreakpoint } from '@/composables/useBreakpoint';
+import { useMenu } from '@/composables/useMenu';
 import Avatar from 'vue-boring-avatars';
 
-const $router = useRouter();
+const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
+const $breakpoint = useBreakpoint();
 const defaultAvatar = '/img/profile.webp';
 
 const EMOJI_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '💯', '👀', '🎉', '👏', '🤔', '😎', '🚀', '✨', '💪'];
@@ -255,6 +262,8 @@ watch(() => props.messages, () => {
 </script>
 
 <style lang="scss" scoped>
+@import '@/scss/variables.scss';
+
 .chat-window {
   background: transparent;
 }
@@ -296,6 +305,30 @@ watch(() => props.messages, () => {
   font-size: 10px;
 }
 
+.sync-status {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 10px;
+  line-height: 1;
+
+  &.pending {
+    opacity: 0.5;
+  }
+
+  &.synced {
+    opacity: 1;
+  }
+
+  &.error {
+    color: #dc3545;
+    font-weight: bold;
+  }
+}
+
+.message-pending {
+  opacity: 0.75;
+}
+
 .reactions-container {
   position: relative;
 }
@@ -316,6 +349,10 @@ watch(() => props.messages, () => {
   &.reaction-mine {
     background: #cce5ff;
     border-color: #99c2ff;
+  }
+
+  &.reaction-pending {
+    opacity: 0.65;
   }
 }
 
@@ -409,5 +446,70 @@ watch(() => props.messages, () => {
 .chat-body::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.2);
   border-radius: 3px;
+}
+
+._toggler {
+  border: none;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+
+  div {
+    width: 22px;
+    height: 20px;
+    position: relative;
+    transform: rotate(0deg);
+    transition: 0.5s ease-in-out;
+    cursor: pointer;
+
+    span {
+      display: block;
+      position: absolute;
+      height: 3px;
+      width: 100%;
+      background: $dark;
+      border-radius: 2px;
+      opacity: 1;
+      left: 0;
+      transform: rotate(0deg);
+      transition: 0.25s ease-in-out;
+
+      &:nth-child(1) {
+        top: 0px;
+      }
+
+      &:nth-child(2),
+      &:nth-child(3) {
+        top: 8px;
+      }
+
+      &:nth-child(4) {
+        top: 16px;
+      }
+    }
+
+    &._open {
+      span {
+        &:nth-child(1) {
+          top: 8px;
+          width: 0%;
+          left: 50%;
+        }
+
+        &:nth-child(2) {
+          transform: rotate(45deg);
+        }
+
+        &:nth-child(3) {
+          transform: rotate(-45deg);
+        }
+
+        &:nth-child(4) {
+          top: 16px;
+          width: 0%;
+          left: 50%;
+        }
+      }
+    }
+  }
 }
 </style>

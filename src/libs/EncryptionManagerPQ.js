@@ -449,15 +449,26 @@ export class EncryptionManagerPQ extends EventTarget {
     await this.#saveLocalUserCards();
 
     const updated = this.#localUserCards[idx];
-    await localDB.upsertUserLocal({
-      user_hash: updated.user_hash,
-      sign_pkey: updated.sign_pkey,
-      crypt_pkey: updated.crypt_pkey,
-      crypt_cert: updated.crypt_cert,
-      contact_pkey: updated.contact_pkey,
-      contact_cert: updated.contact_cert,
-      name: updated.name,
-    });
+    const cardChanged = (
+      (name !== undefined && name !== current.name) ||
+      current.sign_pkey !== updated.sign_pkey ||
+      current.crypt_pkey !== updated.crypt_pkey ||
+      current.crypt_cert !== updated.crypt_cert ||
+      current.contact_pkey !== updated.contact_pkey ||
+      current.contact_cert !== updated.contact_cert
+    );
+
+    if (cardChanged) {
+      await localDB.upsertUserLocal({
+        user_hash: updated.user_hash,
+        sign_pkey: updated.sign_pkey,
+        crypt_pkey: updated.crypt_pkey,
+        crypt_cert: updated.crypt_cert,
+        contact_pkey: updated.contact_pkey,
+        contact_cert: updated.contact_cert,
+        name: updated.name,
+      });
+    }
 
     return updated;
   }
