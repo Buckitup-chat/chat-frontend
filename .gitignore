@@ -21,7 +21,13 @@ session-*
 
 ssl
 
-build.js
+# Environment files (real secrets live outside git)
+.env
+.env.*
+!.env.example
+
+# Windows NTFS download markers
+*:Zone.Identifier
 
 # Editor directories and files
 .vscode/*
