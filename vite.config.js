@@ -56,10 +56,7 @@ export default defineConfig(({ command }) => {
 			viteCommonjs(
 				{
 					include: [
-						'**/node_modules/@spruceid/siwe-parser/**',
-						'**/node_modules/siwe/**',
 						'**/node_modules/@noble/hashes/**',
-						'**/node_modules/@lit-protocol/**',
 					]
 				}
 			),
@@ -77,10 +74,6 @@ export default defineConfig(({ command }) => {
 			API_SURL: JSON.stringify(isLocalhost ? `http://${DOMAIN}` : apiBase),
 			API_SPATH: JSON.stringify('/api'),
 			TM_BOT: JSON.stringify(isLocalhost ? 'BuckitUpLocalBot' : 'BuckitUpDemoBot'),
-			LIT_PKP_PUBLIC_KEY: JSON.stringify('0x040886717a89b4ca1f41c39006c85f27dad31ef1d53072bc63ba1b69e7cd70363b8e283077071af75f29c48375c98c77ae5e81995986edcd783b8fa3c45e2c1d1e'),
-			IPFS_URL: JSON.stringify('https://fanaticodev.infura-ipfs.io/ipfs/'),
-			INFURA_PR_ID: JSON.stringify('c683c07028924e35ae07d1b82ecbe342'),
-			INFURA_SERCET: JSON.stringify('iWIYyzBCkJHfHxYlHYSKnulu3rkCP3stdSr6AX6BVsFxi4kZYPXN7Q'),
 		},
 		resolve: {
 			alias: {
@@ -110,10 +103,7 @@ export default defineConfig(({ command }) => {
 			include: [
 				'@noble/hashes',
 				'@noble/hashes/sha3',
-				'@spruceid/siwe-parser',
-				'siwe',
 				'ethers',
-				'@lit-protocol/auth-helpers',
 			]
 		},
 		server: {

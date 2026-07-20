@@ -42,19 +42,6 @@ const routes = [
 	},
 
 	{
-		path: '/backup',
-		name: 'backup',
-		meta: { auth: true, name: 'Backup' },
-		children: [
-			{
-				path: 'create',
-				name: 'backup_create',
-				component: () => import('../views/backup/Page_Backup_Create.vue'),
-				meta: { auth: true, name: 'Create', sub: true },
-			},
-		],
-	},
-	{
 		path: '/contacts',
 		name: 'contacts',
 		component: () => import('../views/Page_Empty.vue'),

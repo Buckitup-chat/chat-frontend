@@ -60,10 +60,9 @@ netlify/        Netlify redirect function for SPA preview hosting
 
 ## Account recovery (status)
 
-The account backup/recovery system is mid-migration:
+Current backup options: encrypted local file export and distributed Shamir shares. The old on-chain flow (Lit Protocol + IPFS/Infura) was removed — the Lit network it relied on is offline.
 
-- **Legacy flow** (Lit Protocol + IPFS/Infura) — deprecated: the old Lit network is offline and the flow is scheduled for removal.
-- **New flow** — Compartmented Multi-Secret Sharing across helper contacts and independent nodes, with a smart-contract condition layer. See [docs/restoration.livemd](docs/restoration.livemd) and the [RFC](https://github.com/Community-secret-sharing/backitup-smart-contracts/blob/main/RFC_COMPARTMENTED_RECOVERY_WITH_CONTRACT.md); frontend integration lives in `src/lib/testbed/`.
+The upcoming node-based flow — Compartmented Multi-Secret Sharing across helper contacts and independent nodes, with a smart-contract condition layer — is under development. See [docs/restoration.livemd](docs/restoration.livemd) and the [RFC](https://github.com/Community-secret-sharing/backitup-smart-contracts/blob/main/RFC_COMPARTMENTED_RECOVERY_WITH_CONTRACT.md); frontend integration lives in `src/lib/testbed/` (reachable via the Backup Teststand page).
 
 ## Deployment
 
