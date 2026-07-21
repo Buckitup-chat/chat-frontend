@@ -15,18 +15,6 @@
 			</div>
 		</div>
 
-		<div class="_input_block mt-2 d-flex _pointer p-3" @click="createShare()">
-			<div class="_icon_gnossis_chain _select_icon"></div>
-			<div>
-				<div class="d-flex justify-content-between align-items-center">
-					<div class="fw-bold fs-5">Gnosis blockchain</div>
-
-					<div class="_icon_wifi" :class="[$userPQ.isOnline ? 'bg-success' : 'bg-danger']"></div>
-				</div>
-
-				<div class="text-secondary">Secure your key parts with additional security features on the decentralised network.</div>
-			</div>
-		</div>
 		<div class="_input_block mt-2 d-flex p-2 px-3" v-if="showLocal">
 			<div class="_icon_buckup_devices _select_icon"></div>
 			<div class="">
@@ -98,8 +86,6 @@ import { inject, ref, watch, computed } from 'vue';
 const $enigma = inject('$enigma');
 const $userPQ = userPQStore();
 const $swal = inject('$swal');
-const $router = inject('$router');
-const $mitt = inject('$mitt');
 
 const protect = ref(true);
 const showPassword = ref(true);
@@ -131,19 +117,6 @@ watch(
 		}
 	},
 );
-
-const createShare = () => {
-	if (!$userPQ.isOnline) {
-		$swal.fire({
-			icon: 'warning',
-			title: 'You are offline',
-			text: 'Please check your internet connection',
-		});
-		return;
-	}
-	$mitt.emit('modal::close');
-	$router.push({ name: 'backup_create' });
-};
 
 const backup = async () => {
 	dirty.value = true;
