@@ -42,6 +42,13 @@ const routes = [
 	},
 
 	{
+		// PoC: TanStack DB message path (see docs/poc_tanstack_db.md)
+		path: '/chat2/:address',
+		name: 'chat_tanstack',
+		component: () => import('../views/chats/Page_Chat_TanStack.vue'),
+		meta: { auth: true, name: 'Chat (PoC)' },
+	},
+	{
 		path: '/contacts',
 		name: 'contacts',
 		component: () => import('../views/Page_Empty.vue'),
@@ -143,5 +150,10 @@ router.beforeEach(async (to, from, next) => {
 		}
 	}
 });
+
+// Dev-only hook for driving navigation from e2e tooling / browser console
+if (import.meta.env.DEV) {
+	window.__router = router;
+}
 
 export default router;

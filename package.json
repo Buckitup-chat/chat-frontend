@@ -31,6 +31,8 @@
     "@noble/post-quantum": "^0.5.4",
     "@noble/secp256k1": "^2.2.3",
     "@popperjs/core": "^2.11.8",
+    "@tanstack/db": "^0.6.16",
+    "@tanstack/electric-db-collection": "^0.3.14",
     "@vueuse/core": "^13.0.0",
     "aes-js": "^3.1.2",
     "axios": "^1.8.4",
