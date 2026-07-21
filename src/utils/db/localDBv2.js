@@ -40,6 +40,8 @@ class LocalDBv2 {
   #initPromise = null;
   #syncPending = false;
   #syncTimeout = null;
+  #failStreak = 0;
+  #backoffUntil = 0;
 
   constructor() {
     this.isOnline = navigator.onLine;
@@ -407,12 +409,16 @@ class LocalDBv2 {
       const resp = await api.ingestWithAuthEach(mutations, signSkey);
       console.timeEnd('http ingest');
 
-      if (!resp.ok) {
-        console.error(`[localDB] ingest HTTP ${resp.status}:`, await resp.text().catch(() => '<no body>'));
+      // The server reports per-row outcomes in the body even on 4xx —
+      // always try to read them before declaring the whole batch failed.
+      let body = null;
+      try { body = await resp.json(); } catch { /* non-JSON body */ }
+
+      if (!body || !Array.isArray(body.results)) {
+        console.error(`[localDB] ingest HTTP ${resp.status}: no per-row results`);
+        this.#registerSendFailure();
         return;
       }
-
-      const body = await resp.json();
 
       const allOk = body.results.every(r => r.status === "ok");
 
@@ -423,47 +429,72 @@ class LocalDBv2 {
         ));
         console.timeEnd('mark synced');
         this.isLocalStash = false;
+        this.#failStreak = 0;
+        this.#backoffUntil = 0;
+        console.log(`Sent ${mutations.length} pending changes (all ok)`);
       } else {
-        const okOrExists = body.results.filter(r =>
-          r.status === "ok" || isAlreadyExistsError(r)
-        );
-
-        if (okOrExists.length > 0) {
-          console.time('mark synced (partial)');
-          for (const r of okOrExists) {
-            const m = mutations[r.index];
-            if (!m) continue;
-            const rel = m.syncMetadata?.relation;
-            if (!rel) continue;
-            const pkData = m.type === 'insert' ? m.modified : (m.original || {});
-            const pkCols = TABLE_PKS[rel];
-            if (!pkCols) continue;
-            const conds = pkCols.map(c => `${c} = $${pkCols.indexOf(c) + 1}`).join(' AND ');
-            const params = pkCols.map(c => pkData[c]);
-            await this.db.query(
-              `UPDATE ${rel} SET modified_columns = NULL, sent_to_server = TRUE WHERE ${conds}`,
-              params
-            );
-          }
-          console.timeEnd('mark synced (partial)');
-          await this.checkLocalStash();
-        }
-
-        for (const r of body.results) {
-          if (r.status !== "ok" && !isAlreadyExistsError(r)) {
-            console.warn(`Mutation ${r.index} failed:`, r.error);
-          }
-        }
-
-        if (body.results.every(r => r.status === "ok" || isAlreadyExistsError(r))) {
-          this.isLocalStash = false;
-        }
+        await this.#applyIngestResults(mutations, body.results);
       }
-      const okCount = body.results.filter(r => r.status === "ok").length;
-      const existsCount = body.results.filter(isAlreadyExistsError).length;
-      console.log(`Sent ${mutations.length} pending changes (${okCount} ok, ${existsCount} already-exists)`);
-    } catch (e) { console.warn('Sync failed:', e); }
+    } catch (e) {
+      console.warn('Sync failed:', e);
+      this.#registerSendFailure();
+    }
     finally { console.timeEnd('sendChanges'); this.#syncPending = false; }
+  }
+
+  // Row-level outcome handling. Success and already-exists rows are marked
+  // synced; permanently rejected rows are quarantined so a single bad row
+  // cannot poison every subsequent batch; the rest stay pending for retry.
+  async #applyIngestResults(mutations, results) {
+    let okCount = 0, existsCount = 0, quarantined = 0, toRetry = 0;
+
+    for (const r of results) {
+      const m = mutations[r.index];
+      if (!m) continue;
+
+      if (r.status === "ok" || isAlreadyExistsError(r)) {
+        r.status === "ok" ? okCount++ : existsCount++;
+        await this.#markRow(m, `modified_columns = NULL, sent_to_server = TRUE`);
+      } else if (r.error === 'validation_failed') {
+        quarantined++;
+        console.error(`[localDB] Mutation ${r.index} permanently rejected, quarantined locally:`, JSON.stringify(r.details || r));
+        // sent_to_server stays FALSE: the row remains local-only, visibly unsynced
+        await this.#markRow(m, `modified_columns = NULL`);
+      } else {
+        toRetry++;
+        console.warn(`[localDB] Mutation ${r.index} failed (will retry):`, r.error);
+      }
+    }
+
+    if (toRetry === 0) {
+      this.#failStreak = 0;
+      this.#backoffUntil = 0;
+    } else {
+      this.#registerSendFailure();
+    }
+
+    await this.checkLocalStash();
+    console.log(`Sent ${mutations.length} pending changes (${okCount} ok, ${existsCount} already-exists, ${quarantined} quarantined, ${toRetry} to retry)`);
+  }
+
+  async #markRow(m, setClause) {
+    const rel = m.syncMetadata?.relation;
+    if (!rel) return;
+    const pkCols = TABLE_PKS[rel];
+    if (!pkCols) return;
+    const pkData = m.type === 'insert' ? m.modified : (m.original || {});
+    const conds = pkCols.map((c, i) => `${c} = $${i + 1}`).join(' AND ');
+    await this.db.query(
+      `UPDATE ${rel} SET ${setClause} WHERE ${conds}`,
+      pkCols.map(c => pkData[c])
+    );
+  }
+
+  #registerSendFailure() {
+    this.#failStreak = Math.min(this.#failStreak + 1, 6);
+    const delay = Math.min(5000 * 2 ** this.#failStreak, 300000);
+    this.#backoffUntil = Date.now() + delay;
+    console.warn(`[localDB] sync backoff ${Math.round(delay / 1000)}s (streak ${this.#failStreak})`);
   }
 
   #base64ToArray(base64) {
@@ -478,6 +509,7 @@ class LocalDBv2 {
 
   #triggerSync() {
     if (!this.db || !navigator.onLine || !this.#getSignSkey) return;
+    if (Date.now() < this.#backoffUntil) return;
     const skey = this.#getSignSkey();
     if (!skey) return;
     if (this.#syncPending) return;
