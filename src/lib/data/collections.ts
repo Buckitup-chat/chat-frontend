@@ -44,7 +44,10 @@ const buildUserCards = () =>
 		electricCollectionOptions<UserCardRow>({
 			id: 'user_cards',
 			shapeOptions: {
-				url: electricUrl('/user_card'),
+				// NOTE: the guarded /user_card proxy currently returns an empty shape
+				// (observed 2026-07-31 against staging); the client-controlled /shapes
+				// endpoint serves the table correctly.
+				url: electricUrl('/shapes'),
 				params: { table: 'user_cards' },
 				...shapeDefaults,
 			},
@@ -63,7 +66,7 @@ const buildUserStorage = () =>
 		electricCollectionOptions<UserStorageRow>({
 			id: 'user_storage',
 			shapeOptions: {
-				url: electricUrl('/user_storage'),
+				url: electricUrl('/shapes'),
 				params: { table: 'user_storage' },
 				...shapeDefaults,
 			},
