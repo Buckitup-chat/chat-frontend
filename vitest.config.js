@@ -7,8 +7,12 @@ export default defineConfig({
 			'@': fileURLToPath(new URL('./src', import.meta.url)),
 		},
 	},
+	define: {
+		// Build-time constants normally injected by vite.config.js
+		ELECTRIC_API_URL: JSON.stringify('/api'),
+	},
 	test: {
 		environment: 'node',
-		include: ['tests/**/*.test.js'],
+		include: ['tests/**/*.test.{js,ts}'],
 	},
 });

@@ -40,6 +40,16 @@ export default [
 		},
 	},
 	{
+		files: ['**/*.ts'],
+		languageOptions: {
+			parser: tsParser,
+		},
+		rules: {
+			// TS declarations (interface fields, type params) confuse the JS rule
+			'no-unused-vars': 'off',
+		},
+	},
+	{
 		rules: {
 			// Formatting is Prettier's job — keep ESLint focused on correctness.
 			'vue/html-indent': 'off',
