@@ -2,7 +2,9 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { localDB } from '@/utils/db/localDBv2';
-import { getUserCardsCollection } from '@/lib/data/collections';
+import { getUserCardsCollection, getDialogCollections } from '@/lib/data/collections';
+import { sendMutationsWithRetry } from '@/lib/data/ingest';
+import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
@@ -22,6 +24,24 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // Optimistic (in-flight) items shown in UI before DB round-trip
     const optimisticItems = ref(new Map()); // id -> { type, dialogHash, status, ... }
     let optimisticCounter = 0;
+
+    // --- direct write path (TanStack migration, PR C) ---
+    // One logical write = one signed mutation posted straight to /ingest_each.
+    // The shape stream returns the server-confirmed row, which drops the
+    // optimistic UI entry. The legacy PGlite push queue is no longer involved
+    // for dialog tables.
+
+    const getSignSkeyBytes = async () => {
+        const em = EncryptionManagerPQ.getInstance();
+        const keys = await em.exportVaultKeys();
+        return safeBase64Decode(keys.sign_skey, 'sign_skey');
+    };
+
+    const pushRow = async (relation, row, mutationType = 'insert') => {
+        const signSkey = await getSignSkeyBytes();
+        const mutation = api.createGenericMutation(relation, row, signSkey, mutationType);
+        return sendMutationsWithRetry([mutation], signSkey);
+    };
 
     const formatTimestamp = (ts) => {
         const d = new Date(ts * 1000);
@@ -122,7 +142,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             // Wrap for peer
             const { peerKemWrapKeyB64, peerWrappedMsgKeyB64 } = await DialogCrypto.wrapSenderMsgKey(senderMsgKey, peerCryptPkey);
 
-            await localDB.upsertDialogKeysLocal({
+            const keysRow = {
                 dialog_hash: dialogHash,
                 sender_hash: $userPQ.currentUserHash,
                 peer_hash: peerHash,
@@ -130,7 +150,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 peer_wrapped_msg_key_b64: peerWrappedMsgKeyB64,
                 owner_timestamp: Math.floor(Date.now() / 1000),
                 deleted_flag: false,
-                sign_b64: null // Will be auto-signed by sendPendingDialogChanges
+                sign_b64: null
+            };
+
+            // Local write keeps offline reads working (and the legacy queue as
+            // a delivery fallback); the direct mutation delivers immediately.
+            await localDB.upsertDialogKeysLocal(keysRow);
+            pushRow('dialog_keys', keysRow).catch((e) => {
+                console.warn('[dialogs] direct dialog_keys push failed, legacy queue will retry:', e);
             });
 
             // Cache it
@@ -234,7 +261,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
 
                 onStatus?.('syncing');
-                await localDB.upsertDialogMessageLocal({
+                await pushRow('dialog_messages', {
                     message_id: messageId,
                     dialog_hash: dialogHash,
                     sender_hash: $userPQ.currentUserHash,
@@ -243,9 +270,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
                     refs_map_b64: refsMapB64,
                     parent_sign_hash: null,
                     owner_timestamp: nowSec,
-                    sign_b64: null,
-                    sign_hash: null
                 });
+                onStatus?.('synced');
             } catch (e) {
                 console.error('[dialogs] sendMessage failed:', e);
                 onStatus?.('error');
@@ -262,12 +288,18 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const dialogHash = await initDialogKeys(peerHash);
         const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
-        const { rows } = await localDB.db.query(
-            `SELECT dialog_hash, sender_hash, sign_hash FROM dialog_messages WHERE message_id = $1`,
-            [messageId]
-        );
-        if (rows.length === 0) throw new Error('Message not found');
-        if (rows[0].sender_hash !== $userPQ.currentUserHash) {
+        // The server-confirmed row (with its sign_hash) lives in the dialog
+        // collection; fall back to the legacy local DB during the transition.
+        let current = getDialogCollections(dialogHash).messages.get(messageId) || null;
+        if (!current) {
+            const { rows } = await localDB.db.query(
+                `SELECT dialog_hash, sender_hash, sign_hash FROM dialog_messages WHERE message_id = $1`,
+                [messageId]
+            );
+            current = rows[0] || null;
+        }
+        if (!current) throw new Error('Message not found');
+        if (current.sender_hash !== $userPQ.currentUserHash) {
             throw new Error('Cannot edit: not owner');
         }
 
@@ -276,17 +308,15 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const refsMap = {};
         const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
 
-        await localDB.upsertDialogMessageLocal({
+        await pushRow('dialog_messages', {
             message_id: messageId,
             dialog_hash: dialogHash,
             sender_hash: $userPQ.currentUserHash,
             content_b64: contentB64,
             deleted_flag: false,
             refs_map_b64: refsMapB64,
-            parent_sign_hash: rows[0].sign_hash,
+            parent_sign_hash: current.sign_hash,
             owner_timestamp: Math.floor(Date.now() / 1000),
-            sign_b64: null,
-            sign_hash: null
         });
 
         return messageId;
@@ -330,46 +360,28 @@ export const useDialogsStore = defineStore('dialogs', () => {
                     myKey, messageId, $userPQ.currentUserHash, emoji
                 );
 
-                const { rows: msgRows } = await localDB.db.query(
-                    `SELECT sign_hash FROM dialog_messages WHERE message_id = $1`,
-                    [messageId]
-                );
-                const messageSignHash = msgRows[0]?.sign_hash || '';
+                const dialogColls = getDialogCollections(dialogHash);
+                const messageSignHash = dialogColls.messages.get(messageId)?.sign_hash || '';
 
-                const { rows } = await localDB.db.query(
-                    `SELECT deleted_flag FROM dialog_message_reactions WHERE reaction_hash = $1`,
-                    [reactionHash]
-                );
-
-                const exists = rows.length > 0 && !rows[0].deleted_flag;
+                const existing = dialogColls.reactions.get(reactionHash);
+                const exists = !!existing && !existing.deleted_flag;
 
                 onStatus?.('syncing');
+                const base = {
+                    reaction_hash: reactionHash,
+                    dialog_hash: dialogHash,
+                    message_id: messageId,
+                    message_sign_hash: messageSignHash,
+                    reactor_hash: $userPQ.currentUserHash,
+                    owner_timestamp: Math.floor(Date.now() / 1000),
+                };
                 if (exists) {
-                    await localDB.upsertDialogReactionLocal({
-                        reaction_hash: reactionHash,
-                        dialog_hash: dialogHash,
-                        message_id: messageId,
-                        message_sign_hash: messageSignHash,
-                        reactor_hash: $userPQ.currentUserHash,
-                        type_b64: '',
-                        deleted_flag: true,
-                        owner_timestamp: Math.floor(Date.now() / 1000),
-                        sign_b64: null
-                    });
+                    await pushRow('dialog_message_reactions', { ...base, type_b64: '', deleted_flag: true }, 'update');
                 } else {
                     const typeB64 = await DialogCrypto.encryptContent(myKey, emoji);
-                    await localDB.upsertDialogReactionLocal({
-                        reaction_hash: reactionHash,
-                        dialog_hash: dialogHash,
-                        message_id: messageId,
-                        message_sign_hash: messageSignHash,
-                        reactor_hash: $userPQ.currentUserHash,
-                        type_b64: typeB64,
-                        deleted_flag: false,
-                        owner_timestamp: Math.floor(Date.now() / 1000),
-                        sign_b64: null
-                    });
+                    await pushRow('dialog_message_reactions', { ...base, type_b64: typeB64, deleted_flag: false });
                 }
+                onStatus?.('synced');
             } catch (e) {
                 console.error('[dialogs] toggleReaction failed:', e);
                 onStatus?.('error');
