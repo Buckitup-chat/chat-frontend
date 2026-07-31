@@ -44,9 +44,9 @@ const buildUserCards = () =>
 		electricCollectionOptions<UserCardRow>({
 			id: 'user_cards',
 			shapeOptions: {
-				// NOTE: the guarded /user_card proxy currently returns an empty shape
-				// (observed 2026-07-31 against staging); the client-controlled /shapes
-				// endpoint serves the table correctly.
+				// /shapes is the sanctioned endpoint going forward (backend team,
+				// 2026-07-31); the legacy guarded /user_card proxy needs a special
+				// offset dance and is being phased out.
 				url: electricUrl('/shapes'),
 				params: { table: 'user_cards' },
 				...shapeDefaults,
