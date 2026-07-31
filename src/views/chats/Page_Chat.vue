@@ -16,7 +16,8 @@ import { useRoute } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
-import { useLiveQuery } from '@electric-sql/pglite-vue';
+import { getDialogCollections } from '@/lib/data/collections';
+import { useCollectionRows } from '@/lib/data/useCollection';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
@@ -47,11 +48,11 @@ const avatarUrl = computed(() => {
 
 const avatarHash = computed(() => peerHash.value || '');
 
-// Live Query for Messages
-const { rows: rawMessages } = useLiveQuery(
-    `SELECT * FROM dialog_messages WHERE dialog_hash = $1 AND NOT deleted_flag ORDER BY owner_timestamp ASC`,
-    computed(() => [dialogHash.value])
-);
+// Electric shape → TanStack DB collections for this dialog (lazy, per-dialog)
+const dialogCollections = computed(() => (dialogHash.value ? getDialogCollections(dialogHash.value) : null));
+
+// Live rows for messages (deleted rows are filtered in the decrypt pipeline)
+const { rows: rawMessages } = useCollectionRows(computed(() => dialogCollections.value?.messages ?? null));
 
 const decryptedMessages = ref([]);
 const messageCache = new Map();
@@ -72,11 +73,11 @@ const rebuildDecryptedMessages = (newRows) => {
 watch(() => rawMessages.value, (newRows, _, onCleanup) => {
     if (!newRows) return;
 
-    // Update sync status on cached entries immediately, re-render
+    // Rows from the shape stream are server-confirmed by definition
     for (const row of newRows) {
         const cached = messageCache.get(row.message_id);
         if (cached) {
-            cached._syncStatus = row.modified_columns !== null ? 'syncing' : 'synced';
+            cached._syncStatus = 'synced';
         }
     }
     rebuildDecryptedMessages(newRows);
@@ -95,7 +96,7 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
             await Promise.all(pending.map(async (row) => {
                 const decrypted = await $dialogs.decryptMessageRow(row);
                 const date = new Date(row.owner_timestamp * 1000);
-                const syncStatus = row.modified_columns !== null ? 'syncing' : 'synced';
+                const syncStatus = 'synced';
                 messageCache.set(row.message_id, {
                     id: row.message_id,
                     text: decrypted.text,
@@ -114,11 +115,9 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
     onCleanup(() => { if (decryptTimer) { clearTimeout(decryptTimer); decryptTimer = null; } });
 }, { immediate: true });
 
-// Reactions
-const { rows: rawReactions } = useLiveQuery(
-    `SELECT * FROM dialog_message_reactions WHERE dialog_hash = $1 AND deleted_flag = FALSE`,
-    computed(() => [dialogHash.value])
-);
+// Reactions (deleted rows filtered below — the shape carries the full table slice)
+const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollections.value?.reactions ?? null));
+const rawReactions = computed(() => rawAllReactions.value.filter((r) => !r.deleted_flag));
 
 const reactionsByMsgId = ref({});
 let reactionTimer = null;

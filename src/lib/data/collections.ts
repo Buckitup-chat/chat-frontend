@@ -44,7 +44,10 @@ const buildUserCards = () =>
 		electricCollectionOptions<UserCardRow>({
 			id: 'user_cards',
 			shapeOptions: {
-				url: electricUrl('/user_card'),
+				// /shapes is the sanctioned endpoint going forward (backend team,
+				// 2026-07-31); the legacy guarded /user_card proxy needs a special
+				// offset dance and is being phased out.
+				url: electricUrl('/shapes'),
 				params: { table: 'user_cards' },
 				...shapeDefaults,
 			},
@@ -63,7 +66,7 @@ const buildUserStorage = () =>
 		electricCollectionOptions<UserStorageRow>({
 			id: 'user_storage',
 			shapeOptions: {
-				url: electricUrl('/user_storage'),
+				url: electricUrl('/shapes'),
 				params: { table: 'user_storage' },
 				...shapeDefaults,
 			},

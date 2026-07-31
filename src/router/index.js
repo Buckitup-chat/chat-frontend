@@ -144,4 +144,9 @@ router.beforeEach(async (to, from, next) => {
 	}
 });
 
+// Dev-only hook for driving navigation from e2e tooling / browser console
+if (import.meta.env.DEV) {
+	window.__router = router;
+}
+
 export default router;

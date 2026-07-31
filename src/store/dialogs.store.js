@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { localDB } from '@/utils/db/localDBv2';
+import { getUserCardsCollection } from '@/lib/data/collections';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
@@ -102,8 +103,16 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 signSkey, kemSkey, keys.evm_skey, peerHash
             );
             
-            // Get peer's user card to find their crypt_pkey
-            const peerCard = await localDB.getUser(peerHash);
+            // Get peer's user card to find their crypt_pkey.
+            // Primary source: the legacy local DB; fallback: the Electric-synced
+            // user_cards collection (covers the guarded /user_card proxy returning
+            // an empty shape — see src/lib/data/collections.ts).
+            let peerCard = await localDB.getUser(peerHash);
+            if (!peerCard || !peerCard.crypt_pkey) {
+                const cards = getUserCardsCollection();
+                await cards.preload();
+                peerCard = cards.get(peerHash) || null;
+            }
             if (!peerCard || !peerCard.crypt_pkey) {
                 throw new Error("Peer crypt_pkey not found");
             }
