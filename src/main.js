@@ -85,9 +85,6 @@ app.use(router);
 import FloatingVue from 'floating-vue';
 app.use(FloatingVue);
 
-import { localDB } from './utils/db/localDBv2';
-localDB.init();
-
 import InfoTooltip from '@/components/InfoTooltip.vue';
 app.component('InfoTooltip', InfoTooltip);
 

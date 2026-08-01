@@ -1,18 +1,16 @@
 <template>
 	<div class="wrapper" v-if="$userPQ.currentUser">
-		<PGLiteProvider>
-			<Menu class="_menu" :class="{ _opened: $menuOpened }" />
+		<Menu class="_menu" :class="{ _opened: $menuOpened }" />
 
-			<div class="_menu_backdrop" :class="{ _opened: $menuOpened && $breakpoint.lt('md') }"
-				@click="closeMenu()">
-			</div>
+		<div class="_menu_backdrop" :class="{ _opened: $menuOpened && $breakpoint.lt('md') }"
+			@click="closeMenu()">
+		</div>
 
-			<div class="_main">
-				<router-view v-slot="{ Component, route }">
-					<component :is="Component" :key="route.path" />
-				</router-view>
-			</div>
-		</PGLiteProvider>
+		<div class="_main">
+			<router-view v-slot="{ Component, route }">
+				<component :is="Component" :key="route.path" />
+			</router-view>
+		</div>
 	</div>
 
 	<div v-if="!$userPQ.currentUser" class="_login">
@@ -132,7 +130,6 @@ import Loader from './components/Loader.vue';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';
 import Swal from '@/components/swal/Swal_.vue';
-import PGLiteProvider from '@/components/providers/PGLiteProvider.vue';
 import { ref, provide, watch, onMounted, inject, computed, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
