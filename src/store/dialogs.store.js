@@ -1,7 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
-import { localDB } from '@/utils/db/localDBv2';
 import { getUserCardsCollection, getDialogCollections } from '@/lib/data/collections';
 import { sendMutationsWithRetry } from '@/lib/data/ingest';
 import { api } from '@/api/client';
@@ -103,13 +102,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const dialogHash = getDialogHash(peerHash);
         if (!dialogHash) throw new Error("Not logged in");
 
-        // Try to get my own keys from DB
-        let { rows: myKeys } = await localDB.db.query(
-            `SELECT * FROM dialog_keys WHERE dialog_hash = $1 AND sender_hash = $2 AND NOT deleted_flag`,
-            [dialogHash, $userPQ.currentUserHash]
-        );
+        // Try to get my own keys from the dialog collection
+        const dialogColls = getDialogCollections(dialogHash);
+        await dialogColls.keys.preload().catch(() => {});
+        const myKeyRow = dialogColls.keys.get(`${dialogHash}|${$userPQ.currentUserHash}`);
 
-        if (myKeys.length === 0) {
+        if (!myKeyRow || myKeyRow.deleted_flag) {
             console.log(`Generating new dialog keys for dialog: ${dialogHash}`);
             
             // Generate keys
@@ -123,16 +121,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 signSkey, kemSkey, keys.evm_skey, peerHash
             );
             
-            // Get peer's user card to find their crypt_pkey.
-            // Primary source: the legacy local DB; fallback: the Electric-synced
-            // user_cards collection (covers the guarded /user_card proxy returning
-            // an empty shape — see src/lib/data/collections.ts).
-            let peerCard = await localDB.getUser(peerHash);
-            if (!peerCard || !peerCard.crypt_pkey) {
-                const cards = getUserCardsCollection();
-                await cards.preload();
-                peerCard = cards.get(peerHash) || null;
-            }
+            // Get peer's user card (Electric-synced collection) for crypt_pkey
+            const cards = getUserCardsCollection();
+            await cards.preload();
+            const peerCard = cards.get(peerHash) || null;
             if (!peerCard || !peerCard.crypt_pkey) {
                 throw new Error("Peer crypt_pkey not found");
             }
@@ -153,12 +145,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 sign_b64: null
             };
 
-            // Local write keeps offline reads working (and the legacy queue as
-            // a delivery fallback); the direct mutation delivers immediately.
-            await localDB.upsertDialogKeysLocal(keysRow);
-            pushRow('dialog_keys', keysRow).catch((e) => {
-                console.warn('[dialogs] direct dialog_keys push failed, legacy queue will retry:', e);
-            });
+            // Own sender key is deterministically re-derivable from vault
+            // secrets, so no local persistence is needed — the signed row
+            // just has to reach the server for the peer (and other devices).
+            await pushRow('dialog_keys', keysRow);
 
             // Cache it
             senderMsgKeys.value[`${dialogHash}_${$userPQ.currentUserHash}`] = senderMsgKey;
@@ -190,42 +180,34 @@ export const useDialogsStore = defineStore('dialogs', () => {
         if (pendingKeys[cacheKey]) return pendingKeys[cacheKey];
 
         const promise = (async () => {
+            const dialogColls = getDialogCollections(dialogHash);
+            await dialogColls.keys.preload().catch(() => {});
+            const keyRow = dialogColls.keys.get(`${dialogHash}|${authorHash}`);
+            if (!keyRow || keyRow.deleted_flag) return null;
+
             // Is it our own key?
             if (authorHash === $userPQ.currentUserHash) {
-                const { rows: keysRows } = await localDB.db.query(
-                    `SELECT peer_hash FROM dialog_keys WHERE dialog_hash = $1 AND sender_hash = $2 AND NOT deleted_flag`,
-                    [dialogHash, authorHash]
-                );
-                if (keysRows.length === 0) return null;
-                
                 const em = EncryptionManagerPQ.getInstance();
                 const keys = await em.exportVaultKeys();
                 const signSkey = safeBase64Decode(keys.sign_skey, 'sign_skey');
                 const kemSkey = safeBase64Decode(keys.crypt_skey, 'crypt_skey');
-                
+
                 const senderMsgKey = DialogCrypto.deriveSenderMsgKey(
-                    signSkey, kemSkey, keys.evm_skey, keysRows[0].peer_hash
+                    signSkey, kemSkey, keys.evm_skey, keyRow.peer_hash
                 );
                 senderMsgKeys.value[cacheKey] = senderMsgKey;
                 return senderMsgKey;
             }
 
             // It's a peer's key, we need to decap and unwrap
-            const { rows: keysRows } = await localDB.db.query(
-                `SELECT peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64 FROM dialog_keys WHERE dialog_hash = $1 AND sender_hash = $2 AND NOT deleted_flag`,
-                [dialogHash, authorHash]
-            );
-
-            if (keysRows.length === 0) return null;
-
             const em = EncryptionManagerPQ.getInstance();
             const keys = await em.exportVaultKeys();
             const cryptSkey = safeBase64Decode(keys.crypt_skey, 'crypt_skey');
 
             const unwrapped = await DialogCrypto.unwrapSenderMsgKey(
                 cryptSkey,
-                keysRows[0].peer_kem_wrap_key_b64,
-                keysRows[0].peer_wrapped_msg_key_b64
+                keyRow.peer_kem_wrap_key_b64,
+                keyRow.peer_wrapped_msg_key_b64
             );
 
             senderMsgKeys.value[cacheKey] = unwrapped;
@@ -288,16 +270,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const dialogHash = await initDialogKeys(peerHash);
         const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
-        // The server-confirmed row (with its sign_hash) lives in the dialog
-        // collection; fall back to the legacy local DB during the transition.
-        let current = getDialogCollections(dialogHash).messages.get(messageId) || null;
-        if (!current) {
-            const { rows } = await localDB.db.query(
-                `SELECT dialog_hash, sender_hash, sign_hash FROM dialog_messages WHERE message_id = $1`,
-                [messageId]
-            );
-            current = rows[0] || null;
-        }
+        // The server-confirmed row (with its sign_hash) lives in the dialog collection
+        const msgColl = getDialogCollections(dialogHash).messages;
+        await msgColl.preload().catch(() => {});
+        const current = msgColl.get(messageId) || null;
         if (!current) throw new Error('Message not found');
         if (current.sender_hash !== $userPQ.currentUserHash) {
             throw new Error('Cannot edit: not owner');

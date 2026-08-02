@@ -55,8 +55,9 @@
 <script setup>
 import { ref, computed } from 'vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
-import { useLiveQuery } from '@electric-sql/pglite-vue';
+import { userPQStore } from '@/store/userPQ.store';
 
+const $userPQ = userPQStore();
 const search = ref('');
 
 const { selected } = defineProps({
@@ -69,11 +70,9 @@ const isSelected = (address) => {
 	return selected.findIndex((a) => a === address) > -1;
 };
 
-// Query all user_cards
-const dbUsers = useLiveQuery(`SELECT * from user_cards WHERE NOT deleted_flag ORDER BY name ASC;`);
-
+// Electric-synced user cards
 const users = computed(() => {
-	return (dbUsers?.rows?.value ?? []).map(u => ({
+	return $userPQ.allNetworkUsers.map(u => ({
 		...u,
 		address: u.user_hash // Alias for Account_Item compatibility
 	}));
