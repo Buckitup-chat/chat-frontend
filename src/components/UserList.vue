@@ -2,7 +2,6 @@
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue'
 import SyncStatus from './SyncStatus.vue'
 import { ref, computed } from 'vue'
-import { useLiveQuery } from '@electric-sql/pglite-vue'
 import { userPQStore } from '@/store/userPQ.store'
 
 const emit = defineEmits<{ select: [address: string] }>()
@@ -15,13 +14,11 @@ const $userPQ = userPQStore()
 
 const search = ref('')
 
-const dbUsers = useLiveQuery(`SELECT * from user_cards WHERE NOT deleted_flag ORDER BY name ASC;`)
+// Electric-synced user cards (rows in the collection are server-confirmed,
+// so there is no "locally modified, not yet synced" set anymore)
+const users: any = computed(() => $userPQ.allNetworkUsers)
 
-const dbUsersLocal = useLiveQuery(`SELECT * from user_cards WHERE modified_columns IS NOT NULL;`)
-
-const users: any = computed(() => dbUsers?.rows?.value ?? [])
-
-const usersLocal: any = computed(() => dbUsersLocal?.rows?.value ?? [])
+const usersLocal: any = computed(() => [])
 
 const hasUsers = computed(() => users.value.length > 0)
 

@@ -8,8 +8,10 @@ import { sha3_512 } from '@noble/hashes/sha3';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
-import { localDB } from '../utils/db/localDBv2';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
+import { api } from '@/api/client';
+import { sendMutationsWithRetry } from '@/lib/data/ingest';
+import { getStorageRow, upsertStorageRow, STORAGE_SLOTS } from '@/lib/data/userStorage';
 
 const VAULT_KEY_OPTIONS = {
   authenticatorSelection: {
@@ -53,9 +55,31 @@ export class EncryptionManagerPQ extends EventTarget {
 
     EncryptionManagerPQ.instance = this;
 
-    localDB.setAuthProvider(() => this.#signSkey);
-
     this.#loadLocalUserCards()
+  }
+
+  // Push own user card to the server as a signed mutation.
+  // Fire-and-forget with retry: card data also lives in the local vault
+  // registry, so a failed push costs nothing locally.
+  #pushOwnCard(card, { isUpdate = false, signSkey = null } = {}) {
+    const key = signSkey || this.#signSkey;
+    if (!key) return;
+    try {
+      const { mutation } = api.createUserCard(card.name || 'User', {
+        user_hash: card.user_hash,
+        sign_pkey: decodeHexOrBase64(card.sign_pkey),
+        contact_pkey: decodeHexOrBase64(card.contact_pkey),
+        contact_cert: decodeHexOrBase64(card.contact_cert),
+        crypt_pkey: decodeHexOrBase64(card.crypt_pkey),
+        crypt_cert: decodeHexOrBase64(card.crypt_cert),
+        sign_skey: key,
+      }, isUpdate ? 'update' : 'insert');
+      sendMutationsWithRetry([mutation], key).catch((e) => {
+        console.warn('[EncryptionManagerPQ] card push failed:', e?.message || e);
+      });
+    } catch (e) {
+      console.warn('[EncryptionManagerPQ] card push build failed:', e);
+    }
   }
 
   static getInstance() {
@@ -136,17 +160,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await this.#saveLocalUserCards();
 
-    await localDB.upsertUserLocal({
-      user_hash: userHash,
-      sign_pkey: identity.sign_pkey,
-      crypt_pkey: identity.crypt_pkey,
-      crypt_cert: identity.crypt_cert,
-      contact_pkey: identity.contact_pkey,
-      contact_cert: identity.contact_cert,
-      name,
-      deleted_flag: false,
-      owner_timestamp: Date.now(),
-    });
+    this.#pushOwnCard({ ...identity, name }, { signSkey });
 
     await this.login(userHash);
 
@@ -315,6 +329,12 @@ export class EncryptionManagerPQ extends EventTarget {
     return [...this.#localUserCards];
   }
 
+  // Re-push the current user's card (e.g. after a name change).
+  pushCurrentUserCard() {
+    const card = this.#localUserCards.find(u => u.user_hash === this.#currentUserHash);
+    if (card) this.#pushOwnCard(card, { isUpdate: true });
+  }
+
   // Sign Challenge
 
   async signChallenge(challenge) {
@@ -381,17 +401,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards.push(identity);
     await this.#saveLocalUserCards();
 
-    await localDB.upsertUserLocal({
-      user_hash: identity.user_hash,
-      sign_pkey: identity.sign_pkey,
-      crypt_pkey: identity.crypt_pkey,
-      crypt_cert: identity.crypt_cert,
-      contact_pkey: identity.contact_pkey,
-      contact_cert: identity.contact_cert,
-      name: identity.name,
-      deleted_flag: false,
-      owner_timestamp: Date.now(),
-    });
+    this.#pushOwnCard(identity, { signSkey });
 
     await this.login(identity.user_hash);
   }
@@ -420,11 +430,12 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    await localDB.upsertUserStorage({
+    await upsertStorageRow({
       userHash: this.#currentUserHash,
-      uuid: 'profile',
+      uuid: STORAGE_SLOTS.profile,
       valueB64: combined,
       hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
+      signSkey: this.#signSkey,
     });
 
     // 2. Update local cards
@@ -459,15 +470,7 @@ export class EncryptionManagerPQ extends EventTarget {
     );
 
     if (cardChanged) {
-      await localDB.upsertUserLocal({
-        user_hash: updated.user_hash,
-        sign_pkey: updated.sign_pkey,
-        crypt_pkey: updated.crypt_pkey,
-        crypt_cert: updated.crypt_cert,
-        contact_pkey: updated.contact_pkey,
-        contact_cert: updated.contact_cert,
-        name: updated.name,
-      });
+      this.#pushOwnCard(updated, { isUpdate: true });
     }
 
     return updated;
@@ -477,7 +480,7 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
     if (!this.#cryptSkey) return null;
 
-    const storage = await localDB.getUserStorage(this.#currentUserHash, 'profile');
+    const storage = await getStorageRow(this.#currentUserHash, STORAGE_SLOTS.profile);
     if (!storage || !storage.value_b64) return null;
 
     const combined = decodeHexOrBase64(storage.value_b64);
@@ -518,11 +521,12 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    await localDB.upsertUserStorage({
+    await upsertStorageRow({
       userHash: this.#currentUserHash,
-      uuid: 'contacts',
+      uuid: STORAGE_SLOTS.contacts,
       valueB64: combined,
       hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
+      signSkey: this.#signSkey,
     });
 
     return true;
@@ -532,7 +536,7 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
     if (!this.#cryptSkey) return [];
 
-    const storage = await localDB.getUserStorage(this.#currentUserHash, 'contacts');
+    const storage = await getStorageRow(this.#currentUserHash, STORAGE_SLOTS.contacts);
     if (!storage || !storage.value_b64) return [];
 
     const combined = decodeHexOrBase64(storage.value_b64);
@@ -582,13 +586,12 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    console.log('Calling upsertUserStorage with:', { uuid, valueLen: combined.length });
-
-    await localDB.upsertUserStorage({
+    await upsertStorageRow({
       userHash: this.#currentUserHash,
       uuid,
       valueB64: combined,
       hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
+      signSkey: this.#signSkey,
     });
 
     return uuid;
@@ -603,7 +606,7 @@ export class EncryptionManagerPQ extends EventTarget {
       throw new Error('Crypt key not loaded');
     }
 
-    const storage = await localDB.getUserStorage(this.#currentUserHash, uuid);
+    const storage = await getStorageRow(this.#currentUserHash, uuid);
     if (!storage || !storage.value_b64) {
       return null;
     }

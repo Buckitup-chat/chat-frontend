@@ -16,7 +16,8 @@ import { useRoute } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
-import { useLiveQuery } from '@electric-sql/pglite-vue';
+import { getDialogCollections } from '@/lib/data/collections';
+import { useCollectionRows } from '@/lib/data/useCollection';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
@@ -47,11 +48,16 @@ const avatarUrl = computed(() => {
 
 const avatarHash = computed(() => peerHash.value || '');
 
-// Live Query for Messages
-const { rows: rawMessages } = useLiveQuery(
-    `SELECT * FROM dialog_messages WHERE dialog_hash = $1 AND NOT deleted_flag ORDER BY owner_timestamp ASC`,
-    computed(() => [dialogHash.value])
-);
+// Electric shape → TanStack DB collections for this dialog (lazy, per-dialog)
+const dialogCollections = computed(() => (dialogHash.value ? getDialogCollections(dialogHash.value) : null));
+
+// Live rows for messages (deleted rows are filtered in the decrypt pipeline)
+const { rows: rawMessages } = useCollectionRows(computed(() => dialogCollections.value?.messages ?? null));
+
+// Sender keys stream in independently of the messages they unlock: the peer
+// creates its dialog_keys row at the same moment it sends its first message,
+// so a message can arrive before the key that decrypts it.
+const { rows: rawKeys } = useCollectionRows(computed(() => dialogCollections.value?.keys ?? null));
 
 const decryptedMessages = ref([]);
 const messageCache = new Map();
@@ -69,25 +75,15 @@ const rebuildDecryptedMessages = (newRows) => {
     decryptedMessages.value = out;
 };
 
-watch(() => rawMessages.value, (newRows, _, onCleanup) => {
-    if (!newRows) return;
-
-    // Update sync status on cached entries immediately, re-render
-    for (const row of newRows) {
-        const cached = messageCache.get(row.message_id);
-        if (cached) {
-            cached._syncStatus = row.modified_columns !== null ? 'syncing' : 'synced';
-        }
-    }
-    rebuildDecryptedMessages(newRows);
-
+const scheduleDecrypt = (newRows) => {
     if (decryptTimer) clearTimeout(decryptTimer);
     decryptTimer = setTimeout(async () => {
         const pending = [];
         for (const row of newRows) {
             if (row.deleted_flag) continue;
             const cached = messageCache.get(row.message_id);
-            if (!cached || cached._contentB64 !== row.content_b64) pending.push(row);
+            // Undecrypted entries are retried: their key may have arrived since.
+            if (!cached || !cached._decrypted || cached._contentB64 !== row.content_b64) pending.push(row);
         }
 
         if (pending.length > 0) {
@@ -95,7 +91,7 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
             await Promise.all(pending.map(async (row) => {
                 const decrypted = await $dialogs.decryptMessageRow(row);
                 const date = new Date(row.owner_timestamp * 1000);
-                const syncStatus = row.modified_columns !== null ? 'syncing' : 'synced';
+                const syncStatus = 'synced';
                 messageCache.set(row.message_id, {
                     id: row.message_id,
                     text: decrypted.text,
@@ -103,6 +99,7 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
                     isMine: decrypted.isMine,
                     timestamp: `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`,
                     _syncStatus: syncStatus,
+                    _decrypted: decrypted.decrypted === true,
                     _contentB64: row.content_b64,
                     _raw: row
                 });
@@ -111,19 +108,33 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
 
         rebuildDecryptedMessages(newRows);
     }, 200);
+};
+
+watch(() => rawMessages.value, (newRows, _, onCleanup) => {
+    if (!newRows) return;
+
+    // Rows from the shape stream are server-confirmed by definition
+    for (const row of newRows) {
+        const cached = messageCache.get(row.message_id);
+        if (cached) {
+            cached._syncStatus = 'synced';
+        }
+    }
+    rebuildDecryptedMessages(newRows);
+
+    scheduleDecrypt(newRows);
     onCleanup(() => { if (decryptTimer) { clearTimeout(decryptTimer); decryptTimer = null; } });
 }, { immediate: true });
 
-// Reactions
-const { rows: rawReactions } = useLiveQuery(
-    `SELECT * FROM dialog_message_reactions WHERE dialog_hash = $1 AND deleted_flag = FALSE`,
-    computed(() => [dialogHash.value])
-);
+
+// Reactions (deleted rows filtered below — the shape carries the full table slice)
+const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollections.value?.reactions ?? null));
+const rawReactions = computed(() => rawAllReactions.value.filter((r) => !r.deleted_flag));
 
 const reactionsByMsgId = ref({});
 let reactionTimer = null;
 
-watch(() => rawReactions.value, (newRows, _, onCleanup) => {
+const aggregateReactions = (newRows) => {
     if (reactionTimer) clearTimeout(reactionTimer);
     reactionTimer = setTimeout(async () => {
         if (!newRows) {
@@ -163,10 +174,23 @@ watch(() => rawReactions.value, (newRows, _, onCleanup) => {
             }
         }
     }, 200);
+};
+
+watch(() => rawReactions.value, (newRows, _, onCleanup) => {
+    aggregateReactions(newRows);
     onCleanup(() => { if (reactionTimer) { clearTimeout(reactionTimer); reactionTimer = null; } });
 }, { immediate: true });
 
-// Merge optimistic messages with live-query results
+// A sender key arriving after the messages it unlocks: re-run decryption for
+// everything still waiting, otherwise those messages stay on
+// "Waiting for keys..." until the page is reloaded. This is the common case
+// for the peer's first message — their key row and message land together.
+watch(() => rawKeys.value, () => {
+    scheduleDecrypt(rawMessages.value || []);
+    aggregateReactions(rawReactions.value || []);
+});
+
+// Merge optimistic messages with server rows
 const displayMessages = computed(() => {
     const dbIds = new Set((rawMessages.value || []).map(r => r.message_id));
     const decryptedIds = new Set(decryptedMessages.value.map(m => m.id));
