@@ -149,11 +149,13 @@ export const api = {
     const ts = ownerTimestamp || Math.floor(Date.now() / 1000);
     const del = isDelete || deletedFlag;
 
+    // Must mirror the server's Signable impl for UserStorage, which drops
+    // sign_b64 and sign_hash before building the payload — including
+    // sign_hash here produced "invalid_signature" on every write.
     const signatureFields = {
       deleted_flag: del,
       owner_timestamp: ts,
       parent_sign_hash: parentSignHash,
-      sign_hash: signHash,
       user_hash: userHash,
       uuid: uuid,
       value_b64: valueB64,
@@ -161,10 +163,18 @@ export const api = {
 
     const signatureData = buildSignatureData(signatureFields);
     let finalSignB64 = existingSignB64;
-    
+
     if (!finalSignB64 && signSkey) {
         const signBytes = ml_dsa87.sign(new TextEncoder().encode(signatureData), signSkey);
         finalSignB64 = encodeBase64(signBytes, true);
+    }
+
+    // The server requires sign_hash: "uss_" + SHA3-512 of the raw signature
+    // bytes (same derivation dialog rows use, with their own prefix).
+    let finalSignHash = signHash;
+    if (!finalSignHash && finalSignB64) {
+      const decodedSign = Uint8Array.from(atob(finalSignB64), c => c.charCodeAt(0));
+      finalSignHash = "uss_" + bytesToHex(sha3_512(decodedSign));
     }
 
     const changes = {
@@ -175,7 +185,7 @@ export const api = {
       deleted_flag: del,
       owner_timestamp: ts,
       parent_sign_hash: parentSignHash,
-      sign_hash: signHash,
+      sign_hash: finalSignHash,
       sign_b64: finalSignB64
     };
 

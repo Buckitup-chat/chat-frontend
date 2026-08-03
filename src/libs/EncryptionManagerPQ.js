@@ -11,7 +11,7 @@ import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { api } from '@/api/client';
 import { sendMutationsWithRetry } from '@/lib/data/ingest';
-import { getStorageRow, upsertStorageRow } from '@/lib/data/userStorage';
+import { getStorageRow, upsertStorageRow, STORAGE_SLOTS } from '@/lib/data/userStorage';
 
 const VAULT_KEY_OPTIONS = {
   authenticatorSelection: {
@@ -432,7 +432,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await upsertStorageRow({
       userHash: this.#currentUserHash,
-      uuid: 'profile',
+      uuid: STORAGE_SLOTS.profile,
       valueB64: combined,
       hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
       signSkey: this.#signSkey,
@@ -480,7 +480,7 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
     if (!this.#cryptSkey) return null;
 
-    const storage = await getStorageRow(this.#currentUserHash, 'profile');
+    const storage = await getStorageRow(this.#currentUserHash, STORAGE_SLOTS.profile);
     if (!storage || !storage.value_b64) return null;
 
     const combined = decodeHexOrBase64(storage.value_b64);
@@ -523,7 +523,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await upsertStorageRow({
       userHash: this.#currentUserHash,
-      uuid: 'contacts',
+      uuid: STORAGE_SLOTS.contacts,
       valueB64: combined,
       hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
       signSkey: this.#signSkey,
@@ -536,7 +536,7 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
     if (!this.#cryptSkey) return [];
 
-    const storage = await getStorageRow(this.#currentUserHash, 'contacts');
+    const storage = await getStorageRow(this.#currentUserHash, STORAGE_SLOTS.contacts);
     if (!storage || !storage.value_b64) return [];
 
     const combined = decodeHexOrBase64(storage.value_b64);

@@ -1,21 +1,38 @@
 // user_storage rows without PGlite: local durability via IndexedDB KV,
 // server sync via direct signed mutations, reads preferring the freshest
 // of local vs Electric-synced state.
-//
-// Known server limitation: rows whose uuid is not a real UUID ('profile',
-// 'contacts') are rejected by ingest validation, so those stay local-only
-// until the backend relaxes the check. Avatar rows (crypto.randomUUID)
-// sync fine.
 import { kvGet, kvSet } from './localStore';
 import { getUserStorageCollection } from './collections';
 import { sendMutationsWithRetry, IngestError } from './ingest';
 import { api } from '@/api/client';
 import type { UserStorageRow } from './types';
 
+// The user_storage.uuid column is a real Ecto.UUID server-side, so the
+// well-known slots need actual UUIDs rather than labels. The primary key is
+// (user_hash, uuid), so one fixed UUID per slot is safe across all users.
+export const STORAGE_SLOTS = {
+	profile: '00000000-0000-4000-8000-000000000001',
+	contacts: '00000000-0000-4000-8000-000000000002',
+} as const;
+
+// Labels these slots used before the fix — rows written then still sit in the
+// local KV store under the old key and must stay readable.
+const LEGACY_LABELS: Record<string, string> = {
+	[STORAGE_SLOTS.profile]: 'profile',
+	[STORAGE_SLOTS.contacts]: 'contacts',
+};
+
 const kvKey = (userHash: string, uuid: string) => `us|${userHash}|${uuid}`;
 
 export async function getStorageRow(userHash: string, uuid: string): Promise<UserStorageRow | null> {
-	const local = await kvGet<UserStorageRow>(kvKey(userHash, uuid)).catch(() => undefined);
+	let local = await kvGet<UserStorageRow>(kvKey(userHash, uuid)).catch(() => undefined);
+
+	// Migration read: pick up data saved under the pre-UUID label. The next
+	// write lands under the new uuid, so this path fades out on its own.
+	const legacy = LEGACY_LABELS[uuid];
+	if (!local && legacy) {
+		local = await kvGet<UserStorageRow>(kvKey(userHash, legacy)).catch(() => undefined);
+	}
 
 	let remote: UserStorageRow | undefined;
 	try {

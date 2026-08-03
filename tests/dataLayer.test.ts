@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
+import { sha3_512 } from '@noble/hashes/sha3';
+import { bytesToHex } from '@noble/hashes/utils';
+import { api } from '../src/api/client';
 import { sendMutations, sendMutationsWithRetry, IngestError } from '../src/lib/data/ingest';
 import { getDialogCollections, _dialogRegistrySize } from '../src/lib/data/collections';
 
@@ -113,5 +116,60 @@ describe('dialog collection registry', () => {
 			expect(c[key]).toBeTruthy();
 			expect(typeof c[key].preload).toBe('function');
 		}
+	});
+});
+
+// --- user_storage mutation: must match the server's Signable/Integrity impl ---
+// Reference: chat/lib/chat/data/schemas/user_storage.ex (signable_fields drops
+// sign_b64 + sign_hash) and chat/lib/chat/data/integrity.ex (sorted keys,
+// per-suffix encoding). Getting this wrong yields "invalid_signature".
+describe('createStorageMutation signing', () => {
+	const { publicKey, secretKey } = ml_dsa87.keygen();
+	const userHash = 'u_' + 'ab'.repeat(64);
+	const uuid = '00000000-0000-4000-8000-000000000001';
+	const valueB64 = 'aGVsbG8gd29ybGQ=';
+	const ownerTimestamp = 1785000000;
+
+	const serverEncodeField = (key: string, value: unknown): string => {
+		if (value === null || value === undefined) return 'null';
+		if (key.endsWith('_b64') || key.endsWith('_cert') || key.endsWith('_pkey')) return String(value);
+		if (value === true) return 'true';
+		if (value === false) return 'false';
+		return String(value);
+	};
+
+	// Exactly the fields the server keeps, in its sort order.
+	const serverPayload = (fields: Record<string, unknown>) =>
+		Object.keys(fields)
+			.sort()
+			.map((k) => serverEncodeField(k, fields[k]))
+			.join('');
+
+	const build = () =>
+		api.createStorageMutation(
+			userHash, uuid, valueB64, null, 0, ownerTimestamp,
+			secretKey, false, false, null, null, null, 'insert'
+		);
+
+	it('derives sign_hash as "uss_" + SHA3-512 of the raw signature', () => {
+		const m = build();
+		const signBytes = Uint8Array.from(atob(m.modified.sign_b64), (c) => c.charCodeAt(0));
+		expect(m.modified.sign_hash).toBe('uss_' + bytesToHex(sha3_512(signBytes)));
+		expect(m.modified.sign_hash).toMatch(/^uss_[0-9a-f]{128}$/);
+	});
+
+	it('signs exactly the field set the server verifies', () => {
+		const m = build();
+		const payload = serverPayload({
+			deleted_flag: false,
+			owner_timestamp: ownerTimestamp,
+			parent_sign_hash: null,
+			user_hash: userHash,
+			uuid,
+			value_b64: valueB64,
+		});
+		const signBytes = Uint8Array.from(atob(m.modified.sign_b64), (c) => c.charCodeAt(0));
+		const ok = ml_dsa87.verify(signBytes, new TextEncoder().encode(payload), publicKey);
+		expect(ok).toBe(true);
 	});
 });
