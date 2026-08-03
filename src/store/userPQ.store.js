@@ -14,7 +14,8 @@ export const userPQStore = defineStore('userPQ', () => {
   const currentUser = ref(null);
   const myLocalUsers = ref([]);
   const allNetworkUsers = shallowRef([]);
-  let cardsUnsub = null;
+  // CollectionSubscription (has .unsubscribe()), not a plain function
+  let cardsSub = null;
 
   const contactsMap = ref({});
   const contacts = computed(() => {
@@ -64,8 +65,8 @@ export const userPQStore = defineStore('userPQ', () => {
     try {
       await coll.preload();
       allNetworkUsers.value = readCards(coll);
-      if (!cardsUnsub) {
-        cardsUnsub = coll.subscribeChanges(() => {
+      if (!cardsSub) {
+        cardsSub = coll.subscribeChanges(() => {
           allNetworkUsers.value = readCards(coll);
         });
       }

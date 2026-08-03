@@ -3,23 +3,34 @@
 // collection changes (e.g. navigating between dialogs) or unmounts.
 import { ref, watch, onBeforeUnmount, type Ref } from 'vue';
 
+// subscribeChanges returns a CollectionSubscription object, not an unsubscribe
+// function — calling the return value throws and takes the component's
+// beforeUnmount hook down with it.
+interface Subscription {
+	unsubscribe: () => void;
+}
+
 interface CollectionLike<T> {
 	preload: () => Promise<unknown>;
-	subscribeChanges: (cb: () => void) => () => void;
+	subscribeChanges: (cb: () => void) => Subscription;
 	readonly toArray: T[];
 }
 
 export function useCollectionRows<T>(collection: Ref<CollectionLike<T> | null | undefined>) {
 	const rows = ref<T[]>([]) as Ref<T[]>;
 	const ready = ref(false);
-	let unsub: (() => void) | null = null;
+	let sub: Subscription | null = null;
 	let token = 0;
 
 	const detach = () => {
 		token++;
-		if (unsub) {
-			unsub();
-			unsub = null;
+		if (sub) {
+			try {
+				sub.unsubscribe();
+			} catch (e) {
+				console.warn('[data] unsubscribe failed:', e);
+			}
+			sub = null;
 		}
 	};
 
@@ -40,7 +51,7 @@ export function useCollectionRows<T>(collection: Ref<CollectionLike<T> | null | 
 
 		rows.value = coll.toArray;
 		ready.value = true;
-		unsub = coll.subscribeChanges(() => {
+		sub = coll.subscribeChanges(() => {
 			rows.value = coll.toArray;
 		});
 	};
