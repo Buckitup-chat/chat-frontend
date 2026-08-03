@@ -54,6 +54,11 @@ const dialogCollections = computed(() => (dialogHash.value ? getDialogCollection
 // Live rows for messages (deleted rows are filtered in the decrypt pipeline)
 const { rows: rawMessages } = useCollectionRows(computed(() => dialogCollections.value?.messages ?? null));
 
+// Sender keys stream in independently of the messages they unlock: the peer
+// creates its dialog_keys row at the same moment it sends its first message,
+// so a message can arrive before the key that decrypts it.
+const { rows: rawKeys } = useCollectionRows(computed(() => dialogCollections.value?.keys ?? null));
+
 const decryptedMessages = ref([]);
 const messageCache = new Map();
 let decryptTimer = null;
@@ -70,25 +75,15 @@ const rebuildDecryptedMessages = (newRows) => {
     decryptedMessages.value = out;
 };
 
-watch(() => rawMessages.value, (newRows, _, onCleanup) => {
-    if (!newRows) return;
-
-    // Rows from the shape stream are server-confirmed by definition
-    for (const row of newRows) {
-        const cached = messageCache.get(row.message_id);
-        if (cached) {
-            cached._syncStatus = 'synced';
-        }
-    }
-    rebuildDecryptedMessages(newRows);
-
+const scheduleDecrypt = (newRows) => {
     if (decryptTimer) clearTimeout(decryptTimer);
     decryptTimer = setTimeout(async () => {
         const pending = [];
         for (const row of newRows) {
             if (row.deleted_flag) continue;
             const cached = messageCache.get(row.message_id);
-            if (!cached || cached._contentB64 !== row.content_b64) pending.push(row);
+            // Undecrypted entries are retried: their key may have arrived since.
+            if (!cached || !cached._decrypted || cached._contentB64 !== row.content_b64) pending.push(row);
         }
 
         if (pending.length > 0) {
@@ -104,6 +99,7 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
                     isMine: decrypted.isMine,
                     timestamp: `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`,
                     _syncStatus: syncStatus,
+                    _decrypted: decrypted.decrypted === true,
                     _contentB64: row.content_b64,
                     _raw: row
                 });
@@ -112,8 +108,24 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
 
         rebuildDecryptedMessages(newRows);
     }, 200);
+};
+
+watch(() => rawMessages.value, (newRows, _, onCleanup) => {
+    if (!newRows) return;
+
+    // Rows from the shape stream are server-confirmed by definition
+    for (const row of newRows) {
+        const cached = messageCache.get(row.message_id);
+        if (cached) {
+            cached._syncStatus = 'synced';
+        }
+    }
+    rebuildDecryptedMessages(newRows);
+
+    scheduleDecrypt(newRows);
     onCleanup(() => { if (decryptTimer) { clearTimeout(decryptTimer); decryptTimer = null; } });
 }, { immediate: true });
+
 
 // Reactions (deleted rows filtered below — the shape carries the full table slice)
 const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollections.value?.reactions ?? null));
@@ -122,7 +134,7 @@ const rawReactions = computed(() => rawAllReactions.value.filter((r) => !r.delet
 const reactionsByMsgId = ref({});
 let reactionTimer = null;
 
-watch(() => rawReactions.value, (newRows, _, onCleanup) => {
+const aggregateReactions = (newRows) => {
     if (reactionTimer) clearTimeout(reactionTimer);
     reactionTimer = setTimeout(async () => {
         if (!newRows) {
@@ -162,10 +174,23 @@ watch(() => rawReactions.value, (newRows, _, onCleanup) => {
             }
         }
     }, 200);
+};
+
+watch(() => rawReactions.value, (newRows, _, onCleanup) => {
+    aggregateReactions(newRows);
     onCleanup(() => { if (reactionTimer) { clearTimeout(reactionTimer); reactionTimer = null; } });
 }, { immediate: true });
 
-// Merge optimistic messages with live-query results
+// A sender key arriving after the messages it unlocks: re-run decryption for
+// everything still waiting, otherwise those messages stay on
+// "Waiting for keys..." until the page is reloaded. This is the common case
+// for the peer's first message — their key row and message land together.
+watch(() => rawKeys.value, () => {
+    scheduleDecrypt(rawMessages.value || []);
+    aggregateReactions(rawReactions.value || []);
+});
+
+// Merge optimistic messages with server rows
 const displayMessages = computed(() => {
     const dbIds = new Set((rawMessages.value || []).map(r => r.message_id));
     const decryptedIds = new Set(decryptedMessages.value.map(m => m.id));
