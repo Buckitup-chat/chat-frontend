@@ -117,6 +117,16 @@ describe('dialog collection registry', () => {
 			expect(typeof c[key].preload).toBe('function');
 		}
 	});
+
+	// subscribeChanges returns a subscription object, NOT an unsubscribe
+	// function. Treating it as callable threw inside beforeUnmount and broke
+	// the whole chat component on navigation.
+	it('returns a subscription object with unsubscribe()', () => {
+		const sub = getDialogCollections('di_ddd').messages.subscribeChanges(() => {});
+		expect(typeof sub).toBe('object');
+		expect(typeof sub.unsubscribe).toBe('function');
+		expect(() => sub.unsubscribe()).not.toThrow();
+	});
 });
 
 // --- user_storage mutation: must match the server's Signable/Integrity impl ---
