@@ -40,6 +40,12 @@ export default [
 		},
 	},
 	{
+		files: ['**/*.ts'],
+		languageOptions: {
+			parser: tsParser,
+		},
+	},
+	{
 		rules: {
 			// Formatting is Prettier's job — keep ESLint focused on correctness.
 			'vue/html-indent': 'off',
