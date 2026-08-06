@@ -1,6 +1,7 @@
 import js from '@eslint/js';
 import pluginVue from 'eslint-plugin-vue';
 import tsParser from '@typescript-eslint/parser';
+import tsPlugin from '@typescript-eslint/eslint-plugin';
 import globals from 'globals';
 
 export default [
@@ -81,6 +82,20 @@ export default [
 			'vue/no-unused-vars': 'warn',
 			'vue/no-ref-as-operand': 'warn',
 			'vue/no-side-effects-in-computed-properties': 'warn',
+		},
+	},
+	{
+		files: ['**/*.ts'],
+		plugins: { '@typescript-eslint': tsPlugin },
+		rules: {
+			...tsPlugin.configs['flat/recommended'][1].rules,
+			...tsPlugin.configs['flat/recommended'][2].rules,
+
+			'@typescript-eslint/no-unused-vars': [
+				'warn',
+				{ args: 'none', caughtErrors: 'none' },
+			],
+			'@typescript-eslint/no-explicit-any': 'warn',
 		},
 	},
 ];
