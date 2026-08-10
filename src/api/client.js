@@ -177,11 +177,12 @@ export const api = {
       finalSignHash = "uss_" + bytesToHex(sha3_512(decodedSign));
     }
 
+    // Server schema fields only — hash_b64 is a local convenience and is
+    // neither part of the server row nor of the signature payload.
     const changes = {
       user_hash: userHash,
       uuid,
       value_b64: valueB64,
-      hash_b64: hashB64,
       deleted_flag: del,
       owner_timestamp: ts,
       parent_sign_hash: parentSignHash,

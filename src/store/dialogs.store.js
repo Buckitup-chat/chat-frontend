@@ -3,6 +3,7 @@ import { ref, computed } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { getUserCardsCollection, getDialogCollections } from '@/lib/data/collections';
 import { sendMutationsWithRetry } from '@/lib/data/ingest';
+import { nextOwnerTimestamp } from '@/lib/data/time';
 import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
@@ -284,6 +285,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const refsMap = {};
         const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
 
+        // An edit is an HTTP `update`: the server replaces the tip and archives
+        // the previous revision in dialog_messages_versions. The timestamp must
+        // be strictly newer than the tip's, even inside the same second.
         await pushRow('dialog_messages', {
             message_id: messageId,
             dialog_hash: dialogHash,
@@ -292,8 +296,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
             deleted_flag: false,
             refs_map_b64: refsMapB64,
             parent_sign_hash: current.sign_hash,
-            owner_timestamp: Math.floor(Date.now() / 1000),
-        });
+            owner_timestamp: nextOwnerTimestamp(current.owner_timestamp),
+        }, 'update');
 
         return messageId;
     };
@@ -339,8 +343,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 const dialogColls = getDialogCollections(dialogHash);
                 const messageSignHash = dialogColls.messages.get(messageId)?.sign_hash || '';
 
+                // reaction_hash is a deterministic PK: once a row exists — even
+                // as a tombstone after un-reacting — every later toggle must be
+                // an `update`. Re-inserting the same PK is rejected by the
+                // server, which used to be masked and left reactions
+                // impossible to re-add.
                 const existing = dialogColls.reactions.get(reactionHash);
-                const exists = !!existing && !existing.deleted_flag;
+                const active = !!existing && !existing.deleted_flag;
 
                 onStatus?.('syncing');
                 const base = {
@@ -349,13 +358,23 @@ export const useDialogsStore = defineStore('dialogs', () => {
                     message_id: messageId,
                     message_sign_hash: messageSignHash,
                     reactor_hash: $userPQ.currentUserHash,
-                    owner_timestamp: Math.floor(Date.now() / 1000),
                 };
-                if (exists) {
-                    await pushRow('dialog_message_reactions', { ...base, type_b64: '', deleted_flag: true }, 'update');
+                if (existing) {
+                    const typeB64 = active ? '' : await DialogCrypto.encryptContent(myKey, emoji);
+                    await pushRow('dialog_message_reactions', {
+                        ...base,
+                        type_b64: typeB64,
+                        deleted_flag: active,
+                        owner_timestamp: nextOwnerTimestamp(existing.owner_timestamp),
+                    }, 'update');
                 } else {
                     const typeB64 = await DialogCrypto.encryptContent(myKey, emoji);
-                    await pushRow('dialog_message_reactions', { ...base, type_b64: typeB64, deleted_flag: false });
+                    await pushRow('dialog_message_reactions', {
+                        ...base,
+                        type_b64: typeB64,
+                        deleted_flag: false,
+                        owner_timestamp: nextOwnerTimestamp(null),
+                    });
                 }
                 onStatus?.('synced');
             } catch (e) {

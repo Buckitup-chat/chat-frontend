@@ -4,6 +4,7 @@ import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { api } from '../src/api/client';
 import { sendMutations, sendMutationsWithRetry, IngestError } from '../src/lib/data/ingest';
+import { nextOwnerTimestamp } from '../src/lib/data/time';
 import { getDialogCollections, _dialogRegistrySize } from '../src/lib/data/collections';
 
 const { secretKey: signSkey } = ml_dsa87.keygen();
@@ -39,15 +40,21 @@ describe('sendMutations', () => {
 		expect(res.txids).toEqual([42]);
 	});
 
-	it('treats "has already been taken" as success', async () => {
+	// A unique-key conflict is NOT success by itself: the server row may be a
+	// different revision (review finding 3 — masked conflicts silently lost
+	// edits). sendMutations reports it; the retry wrapper resolves it via the
+	// signature identity check.
+	it('classifies "has already been taken" as a unique conflict, not success', async () => {
 		mockFetchSequence(422, {
 			results: [
 				{ index: 0, status: 'ok', txid: 7 },
 				{ index: 1, status: 'error', error: 'validation_failed', details: { user_hash: ['has already been taken'] } },
 			],
 		});
-		const res = await sendMutations([mutation, mutation], signSkey);
-		expect(res.txids).toEqual([7]);
+		const err = await sendMutations([mutation, mutation], signSkey).catch((e) => e);
+		expect(err).toBeInstanceOf(IngestError);
+		expect(err.uniqueConflictOnly).toBe(true);
+		expect(err.permanent).toBe(true);
 	});
 
 	it('throws permanent IngestError on validation failure', async () => {
@@ -64,6 +71,19 @@ describe('sendMutations', () => {
 		const err = await sendMutations([mutation], signSkey).catch((e) => e);
 		expect(err).toBeInstanceOf(IngestError);
 		expect(err.permanent).toBe(false);
+	});
+
+	// Business-rule rejections are not `validation_failed`, but a 422 verdict
+	// is still final — treating it as transient produced endless retries of a
+	// hopeless mutation (found live: "cannot react to own message").
+	it('treats business-rule 422 rejections as permanent', async () => {
+		mockFetchSequence(422, {
+			results: [{ index: 0, status: 'error', error: 'cannot react to own message' }],
+		});
+		const err = await sendMutations([mutation], signSkey).catch((e) => e);
+		expect(err).toBeInstanceOf(IngestError);
+		expect(err.permanent).toBe(true);
+		expect(err.uniqueConflictOnly).toBe(false);
 	});
 });
 
@@ -98,6 +118,47 @@ describe('sendMutationsWithRetry', () => {
 		expect(res.txids).toEqual([1]);
 		expect(ingestCalls).toBe(3);
 	});
+
+	// Idempotent retry: the conflict is success ONLY when the server row is
+	// proven identical to ours (signature match) — e.g. the first attempt
+	// landed but its response was lost to a network error.
+	it('resolves a unique conflict as success when identity is confirmed', async () => {
+		mockFetchSequence(422, {
+			results: [{ index: 0, status: 'error', error: 'validation_failed', details: { message_id: ['has already been taken'] } }],
+		});
+		const confirmApplied = vi.fn(async () => true);
+		const res = await sendMutationsWithRetry([mutation], signSkey, { retries: 2, baseDelayMs: 1, confirmApplied });
+		expect(confirmApplied).toHaveBeenCalledTimes(1);
+		expect(res.results.length).toBe(1);
+	});
+
+	it('turns a unique conflict into a permanent error when the server row differs', async () => {
+		mockFetchSequence(422, {
+			results: [{ index: 0, status: 'error', error: 'validation_failed', details: { message_id: ['has already been taken'] } }],
+		});
+		const confirmApplied = vi.fn(async () => false);
+		const err = await sendMutationsWithRetry([mutation], signSkey, { retries: 2, baseDelayMs: 1, confirmApplied }).catch((e) => e);
+		expect(err).toBeInstanceOf(IngestError);
+		expect(err.permanent).toBe(true);
+		expect(err.uniqueConflictOnly).toBe(true);
+	});
+});
+
+// Monotonic revision timestamps (review finding 7): the server orders
+// revisions by owner_timestamp, so consecutive operations inside one
+// wall-clock second must still strictly increase.
+describe('nextOwnerTimestamp', () => {
+	it('advances past a previous timestamp in the same second', () => {
+		const now = Math.floor(Date.now() / 1000);
+		expect(nextOwnerTimestamp(now)).toBe(now + 1);
+		expect(nextOwnerTimestamp(now + 5)).toBe(now + 6);
+	});
+
+	it('uses wall clock when there is no previous value', () => {
+		const now = Math.floor(Date.now() / 1000);
+		expect(nextOwnerTimestamp(null)).toBeGreaterThanOrEqual(now);
+		expect(nextOwnerTimestamp(0)).toBeGreaterThanOrEqual(now);
+	});
 });
 
 describe('dialog collection registry', () => {
@@ -126,6 +187,52 @@ describe('dialog collection registry', () => {
 		expect(typeof sub).toBe('object');
 		expect(typeof sub.unsubscribe).toBe('function');
 		expect(() => sub.unsubscribe()).not.toThrow();
+	});
+});
+
+// Update mutations must carry `original` with the row's identifying fields —
+// the server routes them to update_changeset (edit/tombstone semantics),
+// while inserts on an existing PK are rejected outright.
+describe('createGenericMutation update shape', () => {
+	const { secretKey } = ml_dsa87.keygen();
+
+	it('builds an update with original identity fields', () => {
+		const m = api.createGenericMutation('dialog_message_reactions', {
+			reaction_hash: 'dmr_' + 'cd'.repeat(64),
+			dialog_hash: 'di_' + 'ab'.repeat(64),
+			message_id: 'dmsg_1',
+			message_sign_hash: 'dms_' + 'ef'.repeat(64),
+			reactor_hash: 'u_' + 'ab'.repeat(64),
+			type_b64: '',
+			deleted_flag: true,
+			owner_timestamp: 1785000001,
+		}, secretKey, 'update');
+
+		expect(m.type).toBe('update');
+		expect(m.original).toMatchObject({
+			reaction_hash: expect.stringMatching(/^dmr_/),
+			dialog_hash: expect.stringMatching(/^di_/),
+			message_id: 'dmsg_1',
+		});
+		expect(m.changes.deleted_flag).toBe(true);
+		expect(m.changes.sign_b64).toBeTruthy();
+	});
+
+	it('builds a dialog_messages edit as update with parent_sign_hash', () => {
+		const m = api.createGenericMutation('dialog_messages', {
+			message_id: 'dmsg_2',
+			dialog_hash: 'di_' + 'ab'.repeat(64),
+			sender_hash: 'u_' + 'ab'.repeat(64),
+			content_b64: 'bmV3',
+			deleted_flag: false,
+			refs_map_b64: 'cmVmcw',
+			parent_sign_hash: 'dms_' + '12'.repeat(64),
+			owner_timestamp: 1785000002,
+		}, secretKey, 'update');
+
+		expect(m.type).toBe('update');
+		expect(m.original.message_id).toBe('dmsg_2');
+		expect(m.changes.parent_sign_hash).toMatch(/^dms_/);
 	});
 });
 
