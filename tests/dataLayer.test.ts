@@ -163,16 +163,17 @@ describe('nextOwnerTimestamp', () => {
 
 describe('dialog collection registry', () => {
 	it('reuses collections per dialog hash', () => {
-		const a1 = getDialogCollections('di_aaa');
-		const a2 = getDialogCollections('di_aaa');
-		const b = getDialogCollections('di_bbb');
+		const dh = (c: string) => 'di_' + c.repeat(128);
+		const a1 = getDialogCollections(dh('a'));
+		const a2 = getDialogCollections(dh('a'));
+		const b = getDialogCollections(dh('b'));
 		expect(a1.messages).toBe(a2.messages);
 		expect(b.messages).not.toBe(a1.messages);
 		expect(_dialogRegistrySize()).toBeGreaterThanOrEqual(2);
 	});
 
 	it('exposes all five dialog tables', () => {
-		const c = getDialogCollections('di_ccc');
+		const c = getDialogCollections('di_' + 'c'.repeat(128));
 		for (const key of ['keys', 'messages', 'versions', 'reactions', 'receipts'] as const) {
 			expect(c[key]).toBeTruthy();
 			expect(typeof c[key].preload).toBe('function');
@@ -183,7 +184,7 @@ describe('dialog collection registry', () => {
 	// function. Treating it as callable threw inside beforeUnmount and broke
 	// the whole chat component on navigation.
 	it('returns a subscription object with unsubscribe()', () => {
-		const sub = getDialogCollections('di_ddd').messages.subscribeChanges(() => {});
+		const sub = getDialogCollections('di_' + 'd'.repeat(128)).messages.subscribeChanges(() => {});
 		expect(typeof sub).toBe('object');
 		expect(typeof sub.unsubscribe).toBe('function');
 		expect(() => sub.unsubscribe()).not.toThrow();

@@ -32,7 +32,18 @@ const electricUrl = (path: string): string => {
 const parser = { int8: (v: string) => Number(v) };
 
 const DIALOG_GC_MS = 60_000; // keep closed dialogs warm for quick back-navigation
-const q = (v: string) => v.replace(/'/g, ""); // hashes are hex + prefix; strip quotes defensively
+
+// Validation, not sanitization: the dialog hash format is fixed by the
+// protocol (chat docs: pq_dialogs.md §Identifiers). Anything else is a bug at
+// the call site and must fail loudly, not be silently rewritten into a
+// different (still wrong) shape filter.
+const DIALOG_HASH_RE = /^di_[0-9a-f]{128}$/;
+const assertDialogHash = (value: string): string => {
+	if (!DIALOG_HASH_RE.test(value)) {
+		throw new Error(`Invalid dialog_hash: ${JSON.stringify(value)}`);
+	}
+	return value;
+};
 
 const shapeDefaults = { parser, runtimeVisibility: alwaysActiveVisibility };
 
@@ -91,7 +102,7 @@ export interface DialogCollections {
 
 const dialogShape = (table: string, dialogHash: string) => ({
 	url: electricUrl('/shapes'),
-	params: { table, where: `dialog_hash = '${q(dialogHash)}'` },
+	params: { table, where: `dialog_hash = '${assertDialogHash(dialogHash)}'` },
 	...shapeDefaults,
 });
 

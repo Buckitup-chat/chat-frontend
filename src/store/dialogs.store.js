@@ -150,9 +150,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const dialogHash = getDialogHash(peerHash);
         if (!dialogHash) throw new Error("Not logged in");
 
-        // Try to get my own keys from the dialog collection
+        // Try to get my own keys from the dialog collection.
+        // A preload FAILURE means "state unknown", not "row absent" — swallowing
+        // it here used to trigger a key write on a mere read error. Let it
+        // throw; the send path surfaces it as an error and retries later.
         const dialogColls = getDialogCollections(dialogHash);
-        await dialogColls.keys.preload().catch(() => {});
+        await dialogColls.keys.preload();
         const myKeyRow = dialogColls.keys.get(`${dialogHash}|${$userPQ.currentUserHash}`);
 
         if (!myKeyRow || myKeyRow.deleted_flag) {
@@ -320,9 +323,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const dialogHash = await initDialogKeys(peerHash);
         const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
-        // The server-confirmed row (with its sign_hash) lives in the dialog collection
+        // The server-confirmed row (with its sign_hash) lives in the dialog
+        // collection. A preload failure is "state unknown" — it must not be
+        // collapsed into "message not found" (which would mislead the user
+        // and could mask a mere connectivity blip as a missing message).
         const msgColl = getDialogCollections(dialogHash).messages;
-        await msgColl.preload().catch(() => {});
+        await msgColl.preload();
         const current = msgColl.get(messageId) || null;
         if (!current) throw new Error('Message not found');
         if (current.sender_hash !== $userPQ.currentUserHash) {
