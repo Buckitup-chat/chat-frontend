@@ -430,13 +430,19 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    await upsertStorageRow({
+    // Profile is a user-visible "saved" action: wait for the server verdict
+    // instead of reporting success while the write silently stays local-only.
+    const profileWrite = await upsertStorageRow({
       userHash: this.#currentUserHash,
       uuid: STORAGE_SLOTS.profile,
       valueB64: combined,
       hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
       signSkey: this.#signSkey,
     });
+    const profileSync = await profileWrite.sync;
+    if (profileSync.status === 'failed') {
+      throw new Error('Profile saved locally but failed to sync to the server');
+    }
 
     // 2. Update local cards
     const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
@@ -521,13 +527,17 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    await upsertStorageRow({
+    const contactsWrite = await upsertStorageRow({
       userHash: this.#currentUserHash,
       uuid: STORAGE_SLOTS.contacts,
       valueB64: combined,
       hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
       signSkey: this.#signSkey,
     });
+    const contactsSync = await contactsWrite.sync;
+    if (contactsSync.status === 'failed') {
+      throw new Error('Contacts saved locally but failed to sync to the server');
+    }
 
     return true;
   }

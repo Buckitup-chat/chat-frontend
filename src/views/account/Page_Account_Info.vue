@@ -95,6 +95,7 @@ import FullContentBlock from '@/components/FullContentBlock.vue';
 import copyToClipboard from '@/utils/copyToClipboard';
 
 const $userPQ = userPQStore();
+const $swal = inject('$swal');
 const $swalModal = inject('$swalModal');
 const $router = inject('$router');
 const $mitt = inject('$mitt');
@@ -136,19 +137,30 @@ const hasChanges = computed(() => {
 async function saveProfile() {
 	if (!hasChanges.value) return;
 
-	let uuid = draftAccount.value.avatarUuid;
+	try {
+		let uuid = draftAccount.value.avatarUuid;
 
-	if (draftAvatarBlob.value) {
-		uuid = await $em.encryptAndStoreAvatar(draftAvatarBlob.value);
-		draftAvatarBlob.value = null;
+		if (draftAvatarBlob.value) {
+			uuid = await $em.encryptAndStoreAvatar(draftAvatarBlob.value);
+			draftAvatarBlob.value = null;
+		}
+
+		await $userPQ.updateCurrentUserProfile({
+			name: draftAccount.value.name,
+			notes: draftAccount.value.notes,
+			avatarUuid: uuid,
+			avatarDataUrl: draftAccount.value.avatar
+		});
+	} catch (e) {
+		// The write survives locally; what failed is server sync — say so
+		// instead of pretending the save fully succeeded (review finding 12)
+		console.error('[account] profile save failed:', e);
+		$swal.fire({
+			icon: 'error',
+			title: 'Profile not synced',
+			text: 'Changes are saved on this device but could not reach the server. They will not appear on your other devices yet.',
+		});
 	}
-
-	await $userPQ.updateCurrentUserProfile({
-		name: draftAccount.value.name,
-		notes: draftAccount.value.notes,
-		avatarUuid: uuid,
-		avatarDataUrl: draftAccount.value.avatar
-	});
 }
 
 function sharePublicKey() {
