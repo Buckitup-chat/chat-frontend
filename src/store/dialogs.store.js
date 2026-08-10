@@ -110,7 +110,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return id;
     };
 
-    const addOptimisticReaction = (dialogHash, messageId, emoji) => {
+    // Optimistic reaction records the DESIRED end state and the deterministic
+    // reaction_hash. Reconciliation matches server rows (including tombstones)
+    // by hash — an un-react confirms as a tombstone, which carries no emoji,
+    // so matching by emoji alone could never confirm removals.
+    const addOptimisticReaction = (dialogHash, messageId, emoji, reactionHash, desiredActive) => {
         const id = `opt_react_${++optimisticCounter}_${Date.now()}`;
         optimisticItems.value.set(id, {
             type: 'reaction',
@@ -118,6 +122,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
             dialogHash,
             messageId,
             emoji,
+            reactionHash,
+            desiredActive,
             status: 'sending',
         });
         return id;
@@ -373,31 +379,37 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     /**
-     * Toggle reaction (optimistic: returns immediately, syncs in background)
+     * Toggle reaction. Owns its optimistic state: computes the deterministic
+     * reaction_hash and desired end state, registers the optimistic item, and
+     * syncs in the background. `messageSignHash` must be the sign_hash of the
+     * message revision the user is looking at — reacting to an unsynced
+     * revision is an error, not a signed mutation with an empty hash.
      */
-    const toggleReaction = async (peerHash, messageId, emoji, onStatus) => {
+    const toggleReaction = async (peerHash, { messageId, messageSignHash, emoji }) => {
+        if (!messageSignHash) {
+            throw new Error('Cannot react: message revision is not synced yet');
+        }
+
+        const dialogHash = await initDialogKeys(peerHash);
+        const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
+
+        const reactionHash = DialogCrypto.computeReactionHash(
+            myKey, messageId, $userPQ.currentUserHash, emoji
+        );
+
+        // reaction_hash is a deterministic PK: once a row exists — even as a
+        // tombstone after un-reacting — every later toggle must be an
+        // `update`. Re-inserting the same PK is rejected by the server.
+        const dialogColls = getDialogCollections(dialogHash);
+        const existing = dialogColls.reactions.get(reactionHash);
+        const active = !!existing && !existing.deleted_flag;
+        const desiredActive = !active;
+
+        const optimisticId = addOptimisticReaction(dialogHash, messageId, emoji, reactionHash, desiredActive);
+
         (async () => {
-            onStatus?.('sending');
             try {
-                const dialogHash = await initDialogKeys(peerHash);
-                const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
-
-                const reactionHash = DialogCrypto.computeReactionHash(
-                    myKey, messageId, $userPQ.currentUserHash, emoji
-                );
-
-                const dialogColls = getDialogCollections(dialogHash);
-                const messageSignHash = dialogColls.messages.get(messageId)?.sign_hash || '';
-
-                // reaction_hash is a deterministic PK: once a row exists — even
-                // as a tombstone after un-reacting — every later toggle must be
-                // an `update`. Re-inserting the same PK is rejected by the
-                // server, which used to be masked and left reactions
-                // impossible to re-add.
-                const existing = dialogColls.reactions.get(reactionHash);
-                const active = !!existing && !existing.deleted_flag;
-
-                onStatus?.('syncing');
+                updateOptimisticStatus(optimisticId, 'syncing');
                 const base = {
                     reaction_hash: reactionHash,
                     dialog_hash: dialogHash,
@@ -406,11 +418,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
                     reactor_hash: $userPQ.currentUserHash,
                 };
                 if (existing) {
-                    const typeB64 = active ? '' : await DialogCrypto.encryptContent(myKey, emoji);
+                    const typeB64 = desiredActive ? await DialogCrypto.encryptContent(myKey, emoji) : '';
                     await pushRow('dialog_message_reactions', {
                         ...base,
                         type_b64: typeB64,
-                        deleted_flag: active,
+                        deleted_flag: !desiredActive,
                         owner_timestamp: nextOwnerTimestamp(existing.owner_timestamp),
                     }, 'update');
                 } else {
@@ -422,12 +434,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
                         owner_timestamp: nextOwnerTimestamp(null),
                     });
                 }
-                onStatus?.('synced');
+                updateOptimisticStatus(optimisticId, 'synced');
             } catch (e) {
                 console.error('[dialogs] toggleReaction failed:', e);
-                onStatus?.('error');
+                updateOptimisticStatus(optimisticId, 'error');
             }
         })();
+
+        return optimisticId;
     };
 
     const decryptReactionRow = async (dialogHash, row) => {

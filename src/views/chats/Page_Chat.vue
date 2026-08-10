@@ -63,7 +63,17 @@ const decryptedMessages = ref([]);
 const messageCache = new Map();
 let decryptTimer = null;
 
-watch(dialogHash, () => { messageCache.clear(); });
+// Async decryption started for dialog A must never write into dialog B:
+// clearTimeout cannot cancel promises already in flight, so every async
+// continuation checks the generation it was started under.
+let dialogGeneration = 0;
+
+watch(dialogHash, () => {
+    dialogGeneration++;
+    messageCache.clear();
+    decryptedMessages.value = [];
+    reactionsByMsgId.value = {};
+});
 
 const rebuildDecryptedMessages = (newRows) => {
     const out = [];
@@ -77,7 +87,10 @@ const rebuildDecryptedMessages = (newRows) => {
 
 const scheduleDecrypt = (newRows) => {
     if (decryptTimer) clearTimeout(decryptTimer);
+    const generation = dialogGeneration;
     decryptTimer = setTimeout(async () => {
+        if (generation !== dialogGeneration) return;
+
         const pending = [];
         for (const row of newRows) {
             if (row.deleted_flag) continue;
@@ -88,22 +101,24 @@ const scheduleDecrypt = (newRows) => {
 
         if (pending.length > 0) {
             const name = chatName.value;
-            await Promise.all(pending.map(async (row) => {
+            const entries = await Promise.all(pending.map(async (row) => {
                 const decrypted = await $dialogs.decryptMessageRow(row);
                 const date = new Date(row.owner_timestamp * 1000);
-                const syncStatus = 'synced';
-                messageCache.set(row.message_id, {
+                return [row.message_id, {
                     id: row.message_id,
                     text: decrypted.text,
                     authorName: decrypted.isMine ? 'Me' : name,
                     isMine: decrypted.isMine,
                     timestamp: `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`,
-                    _syncStatus: syncStatus,
+                    _syncStatus: 'synced',
                     _decrypted: decrypted.decrypted === true,
                     _contentB64: row.content_b64,
                     _raw: row
-                });
+                }];
             }));
+            // Apply only if the user is still looking at the same dialog
+            if (generation !== dialogGeneration) return;
+            for (const [id, entry] of entries) messageCache.set(id, entry);
         }
 
         rebuildDecryptedMessages(newRows);
@@ -136,7 +151,9 @@ let reactionTimer = null;
 
 const aggregateReactions = (newRows) => {
     if (reactionTimer) clearTimeout(reactionTimer);
+    const generation = dialogGeneration;
     reactionTimer = setTimeout(async () => {
+        if (generation !== dialogGeneration) return;
         if (!newRows) {
             reactionsByMsgId.value = {};
             return;
@@ -164,12 +181,19 @@ const aggregateReactions = (newRows) => {
             }
         }));
 
+        // The user may have switched dialogs while we were decrypting
+        if (generation !== dialogGeneration) return;
         reactionsByMsgId.value = aggregated;
 
-        // Clean up optimistic reactions whose real DB rows have arrived
+        // Reconcile optimistic reactions against server rows INCLUDING
+        // tombstones, matched by the deterministic reaction_hash: an
+        // un-react confirms as a tombstone, which carries no emoji and
+        // never appears in the active aggregate.
+        const serverRows = rawAllReactions.value;
         for (const item of $dialogs.optimisticItems.values()) {
             if (item.type !== 'reaction' || item.dialogHash !== dialogHashVal) continue;
-            if (aggregated[item.messageId]?.[item.emoji]?.hasMine) {
+            const serverRow = serverRows.find((r) => r.reaction_hash === item.reactionHash);
+            if (serverRow && !serverRow.deleted_flag === item.desiredActive) {
                 $dialogs.removeOptimisticItem(item.id);
             }
         }
@@ -232,10 +256,27 @@ const displayReactions = computed(() => {
         if (item.type !== 'reaction' || item.dialogHash !== dialogHash.value) continue;
         if (!merged[item.messageId]) merged[item.messageId] = {};
         const existing = merged[item.messageId][item.emoji];
-        if (existing) {
+
+        if (item.desiredActive) {
+            if (existing) {
+                if (!existing.hasMine) {
+                    existing.count++;
+                    existing.hasMine = true;
+                }
+                existing.status = item.status;
+            } else {
+                merged[item.messageId][item.emoji] = { count: 1, hasMine: true, status: item.status };
+            }
+        } else if (existing && existing.hasMine) {
+            // Optimistic removal: my reaction disappears before the tombstone
+            // returns through the shape stream
+            existing.count = Math.max(0, existing.count - 1);
+            existing.hasMine = false;
             existing.status = item.status;
-        } else {
-            merged[item.messageId][item.emoji] = { count: 1, hasMine: true, status: item.status };
+            if (existing.count === 0) {
+                delete merged[item.messageId][item.emoji];
+                if (Object.keys(merged[item.messageId]).length === 0) delete merged[item.messageId];
+            }
         }
     }
 
@@ -244,15 +285,23 @@ const displayReactions = computed(() => {
 
 const handleToggleReaction = async (messageId, emoji) => {
     if (!peerHash.value || !dialogHash.value) return;
-    const dialogHashVal = dialogHash.value;
-    const optimisticId = $dialogs.addOptimisticReaction(dialogHashVal, messageId, emoji);
+
+    // React to the exact revision the user is looking at. A message that has
+    // not round-tripped yet has no sign_hash — reacting to it would produce a
+    // signed mutation with an invalid empty target.
+    const message = decryptedMessages.value.find((m) => m.id === messageId);
+    const messageSignHash = message?._raw?.sign_hash;
+    if (!messageSignHash) {
+        console.warn('[chat] reaction skipped: message not synced yet', messageId);
+        return;
+    }
+
     try {
-        await $dialogs.toggleReaction(peerHash.value, messageId, emoji, (status) => {
-            $dialogs.updateOptimisticStatus(optimisticId, status);
-        });
+        // The store owns the optimistic state (deterministic reaction_hash,
+        // desired end state) — see dialogs.store toggleReaction
+        await $dialogs.toggleReaction(peerHash.value, { messageId, messageSignHash, emoji });
     } catch (e) {
         console.error("Failed to toggle reaction:", e);
-        $dialogs.updateOptimisticStatus(optimisticId, 'error');
     }
 };
 
