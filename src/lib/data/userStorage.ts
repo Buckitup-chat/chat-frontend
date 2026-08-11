@@ -5,8 +5,15 @@
 // (user_hash, uuid) is an `insert`; every later revision MUST be an `update`
 // with parent_sign_hash pointing at the server tip and a strictly newer
 // owner_timestamp — a repeated insert is rejected with 422 regardless of
-// content. Freshness between local and server state is compared by
-// owner_timestamp only; the server row shape carries no client-side fields.
+// content.
+//
+// Two invariants this module enforces:
+//   1. A mutation is only signed against a KNOWN server base. "Server
+//      unreachable" is not "row absent" — signing an insert from an unknown
+//      base produces a guaranteed conflict once connectivity returns.
+//   2. Writes to one slot are serialized. Overlapping saves would otherwise
+//      sign sibling revisions off the same parent and let a slower-but-older
+//      operation overwrite the local cache of a newer one.
 import { kvGet, kvSet } from './localStore';
 import { getUserStorageCollection } from './collections';
 import { sendMutationsWithRetry } from './ingest';
@@ -40,6 +47,17 @@ interface LocalStorageEntry {
 	syncError?: string;
 }
 
+/**
+ * Server state for one slot. `absent` and `unavailable` are deliberately
+ * distinct: only `absent` proves an insert is the right mutation.
+ * A tombstone counts as `found` — the logical PK exists, so writes remain
+ * updates.
+ */
+type ServerLookup =
+	| { state: 'found'; row: UserStorageRow }
+	| { state: 'absent' }
+	| { state: 'unavailable'; error: unknown };
+
 const kvKey = (userHash: string, uuid: string) => `us|${userHash}|${uuid}`;
 
 // Older builds stored the bare row (with a synthetic `version`) instead of
@@ -68,52 +86,104 @@ const getLocalEntry = async (userHash: string, uuid: string): Promise<LocalStora
 	return undefined;
 };
 
-const getServerRow = async (userHash: string, uuid: string): Promise<UserStorageRow | undefined> => {
+export const getServerState = async (userHash: string, uuid: string): Promise<ServerLookup> => {
+	const coll = getUserStorageCollection();
 	try {
-		const coll = getUserStorageCollection();
 		await coll.preload();
-		const row = coll.get(`${userHash}|${uuid}`) as UserStorageRow | undefined;
-		return row && !row.deleted_flag ? row : undefined;
-	} catch (e) {
-		console.warn('[userStorage] collection read failed:', e);
-		return undefined;
+	} catch (error) {
+		return { state: 'unavailable', error };
 	}
+	const row = coll.get(`${userHash}|${uuid}`) as UserStorageRow | undefined;
+	if (!row) return { state: 'absent' };
+	// Tombstones included on purpose: the row exists, so a write is an update
+	return { state: 'found', row };
 };
 
 const tsOf = (row?: UserStorageRow | null): number => Number(row?.owner_timestamp || 0);
 
 /** Freshest readable row: server vs locally pending, by owner_timestamp. */
 export async function getStorageRow(userHash: string, uuid: string): Promise<UserStorageRow | null> {
-	const [local, server] = await Promise.all([getLocalEntry(userHash, uuid), getServerRow(userHash, uuid)]);
+	const [local, server] = await Promise.all([getLocalEntry(userHash, uuid), getServerState(userHash, uuid)]);
 
 	const localRow = local && !local.row.deleted_flag ? local.row : undefined;
-	const candidates = [localRow, server].filter((r): r is UserStorageRow => !!r);
+	const serverRow = server.state === 'found' && !server.row.deleted_flag ? server.row : undefined;
+
+	const candidates = [localRow, serverRow].filter((r): r is UserStorageRow => !!r);
 	if (candidates.length === 0) return null;
 	return candidates.reduce((a, b) => (tsOf(b) > tsOf(a) ? b : a));
 }
 
 export interface UpsertResult {
 	row: UserStorageRow;
-	/** resolves when the server accepted or definitively rejected the write */
+	/** settled by the time this resolves: the server accepted or rejected it */
 	sync: Promise<{ status: StorageSyncStatus; error?: unknown }>;
 }
 
-export async function upsertStorageRow(opts: {
+// --- per-slot write serialization -------------------------------------------
+// Each slot has a promise chain; a queued write reads the server tip only
+// after its predecessor has fully settled, so revisions form a linear chain
+// and local persistence cannot be reordered by network timing.
+const slotQueues = new Map<string, Promise<unknown>>();
+
+function enqueueForSlot<T>(key: string, fn: () => Promise<T>): Promise<T> {
+	const previous = slotQueues.get(key) ?? Promise.resolve();
+	// run regardless of whether the predecessor resolved or rejected
+	const next = previous.then(fn, fn);
+	const settled = next.then(
+		() => undefined,
+		() => undefined
+	);
+	slotQueues.set(key, settled);
+	settled.then(() => {
+		if (slotQueues.get(key) === settled) slotQueues.delete(key);
+	});
+	return next;
+}
+
+export interface UpsertOptions {
 	userHash: string;
 	uuid: string;
 	valueB64: string;
 	hashB64: string | null;
 	signSkey: Uint8Array | null;
-}): Promise<UpsertResult> {
+}
+
+async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult> {
 	const { userHash, uuid, valueB64, hashB64, signSkey } = opts;
+	const key = kvKey(userHash, uuid);
 
-	const [local, server] = await Promise.all([getLocalEntry(userHash, uuid), getServerRow(userHash, uuid)]);
+	const [local, server] = await Promise.all([getLocalEntry(userHash, uuid), getServerState(userHash, uuid)]);
 
-	// The mutation type is decided by the SERVER tip, not local state:
-	// a server row means this key exists and any revision must be an update.
-	const mutationType = server ? 'update' : 'insert';
-	const parentSignHash = server?.sign_hash ?? null;
-	const ownerTimestamp = nextOwnerTimestamp(Math.max(tsOf(server), tsOf(local?.row)));
+	const persist = (row: UserStorageRow, syncStatus: StorageSyncStatus, syncError?: string) =>
+		kvSet(key, { row, hash_b64: hashB64, syncStatus, syncError } satisfies LocalStorageEntry);
+
+	// Server base unknown → do not sign anything. Keep the user's edit locally
+	// and report the failure honestly; re-signing against a guessed base would
+	// produce a conflict the moment connectivity returns.
+	// (A durable outbox that materializes the mutation later is the tracked
+	// follow-up — see the offline-first note in the review.)
+	if (server.state === 'unavailable') {
+		const pendingRow: UserStorageRow = {
+			user_hash: userHash,
+			uuid,
+			value_b64: valueB64,
+			deleted_flag: false,
+			parent_sign_hash: local?.row.parent_sign_hash ?? null,
+			sign_hash: null,
+			owner_timestamp: nextOwnerTimestamp(tsOf(local?.row)),
+			sign_b64: null,
+		};
+		await persist(pendingRow, 'failed', 'server state unavailable — not signed');
+		return {
+			row: pendingRow,
+			sync: Promise.resolve({ status: 'failed' as const, error: server.error }),
+		};
+	}
+
+	const serverRow = server.state === 'found' ? server.row : null;
+	const mutationType = serverRow ? 'update' : 'insert';
+	const parentSignHash = serverRow?.sign_hash ?? null;
+	const ownerTimestamp = nextOwnerTimestamp(Math.max(tsOf(serverRow), tsOf(local?.row)));
 
 	const mutation = api.createStorageMutation(
 		userHash, uuid, valueB64, null, 0, ownerTimestamp,
@@ -132,27 +202,31 @@ export async function upsertStorageRow(opts: {
 		sign_b64: (wire.sign_b64 as string) ?? null,
 	};
 
-	const persist = (syncStatus: StorageSyncStatus, syncError?: string) =>
-		kvSet(kvKey(userHash, uuid), { row, hash_b64: hashB64, syncStatus, syncError } satisfies LocalStorageEntry);
-
 	if (!signSkey) {
-		await persist('failed', 'no signing key');
+		await persist(row, 'failed', 'no signing key');
 		return { row, sync: Promise.resolve({ status: 'failed' as const }) };
 	}
 
-	await persist('syncing');
-	const sync = sendMutationsWithRetry([mutation], signSkey)
-		.then(async () => {
-			await persist('synced');
-			return { status: 'synced' as const };
-		})
-		.catch(async (e) => {
-			await persist('failed', String(e?.message || e));
-			console.warn(`[userStorage] ${uuid}: sync failed:`, e?.message || e);
-			return { status: 'failed' as const, error: e };
-		});
+	await persist(row, 'syncing');
+	try {
+		await sendMutationsWithRetry([mutation], signSkey);
+		await persist(row, 'synced');
+		return { row, sync: Promise.resolve({ status: 'synced' as const }) };
+	} catch (e: unknown) {
+		const message = String((e as Error)?.message || e);
+		await persist(row, 'failed', message);
+		console.warn(`[userStorage] ${uuid}: sync failed:`, message);
+		return { row, sync: Promise.resolve({ status: 'failed' as const, error: e }) };
+	}
+}
 
-	return { row, sync };
+/**
+ * Write a slot revision. Serialized per (user_hash, uuid): the returned
+ * promise resolves only after the server has accepted or rejected the write,
+ * so callers can treat it as the definitive outcome.
+ */
+export function upsertStorageRow(opts: UpsertOptions): Promise<UpsertResult> {
+	return enqueueForSlot(kvKey(opts.userHash, opts.uuid), () => upsertStorageRowSerial(opts));
 }
 
 /** Sync status of the locally stored revision, for UI indicators. */
