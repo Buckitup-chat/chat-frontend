@@ -67,6 +67,24 @@ describe('computeTails', () => {
 		expect(tails).toEqual({ m1: 's1x', m2: 's2' });
 	});
 
+	// Unknown refs (peer key not here yet) must not be mistaken for "referenced
+	// nothing": the result is a conservative superset, and once the key arrives
+	// the recomputation is exact — see decryptRefsOf, which never caches null.
+	it('treats unknown refs as unknown, not as an empty map', () => {
+		const withUnknown = computeTails([
+			row('m1', 's1'),
+			{ message_id: 'm2', sign_hash: 's2', refs: null },
+		]);
+		expect(withUnknown).toEqual({ m1: 's1', m2: 's2' });
+
+		// same chain, refs now decryptable → exact single tail
+		const resolved = computeTails([
+			row('m1', 's1'),
+			row('m2', 's2', { m1: 's1' }),
+		]);
+		expect(resolved).toEqual({ m2: 's2' });
+	});
+
 	it('rows without sign_hash (not yet server-confirmed) are skipped', () => {
 		const tails = computeTails([
 			row('m1', 's1'),

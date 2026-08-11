@@ -43,9 +43,13 @@
             class="reactions-container d-flex flex-wrap gap-1 mt-1">
             <button v-for="(data, emoji) in reactions[msg.id]" :key="emoji" type="button"
               class="reaction-badge btn btn-sm p-0 px-2 rounded-pill d-inline-flex align-items-center"
-              :class="{ 'reaction-mine': data.hasMine, 'reaction-pending': data.status && data.status !== 'synced' }"
+              :class="{
+                'reaction-mine': data.hasMine,
+                'reaction-pending': data.status === 'sending' || data.status === 'syncing',
+                'reaction-error': data.status === 'error'
+              }"
               @click="handleReactionClick(msg.id, emoji)"
-              :title="data.hasMine ? 'Remove' : 'React'">
+              :title="data.status === 'error' ? 'Not synced — click to retry' : (data.hasMine ? 'Remove' : 'React')">
               <span class="reaction-emoji">{{ emoji }}</span>
               <span v-if="data.count > 1" class="reaction-count ms-1">{{ data.count }}</span>
             </button>
@@ -353,6 +357,13 @@ watch(() => props.messages, () => {
 
   &.reaction-pending {
     opacity: 0.65;
+  }
+
+  // A failed sync must not look like an in-flight one
+  &.reaction-error {
+    opacity: 0.85;
+    border-color: #dc3545;
+    border-style: dashed;
   }
 }
 

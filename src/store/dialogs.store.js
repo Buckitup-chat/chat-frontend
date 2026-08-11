@@ -49,23 +49,33 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // (message_id, sign_hash). An edit produces a new sign_hash → new entry.
     const decryptedRefsCache = new Map();
 
+    // Returns null for "unknown" (key not here yet / undecryptable blob) —
+    // never cached, so the refs are retried once the key arrives. Caching a
+    // failure as {} used to be permanent: the cache key is the immutable
+    // revision, while messages DO recover on key arrival, so the two states
+    // diverged forever and every later send shipped inflated tails.
     const decryptRefsOf = async (row) => {
         const cacheKey = `${row.message_id}|${row.sign_hash}`;
         if (decryptedRefsCache.has(cacheKey)) return decryptedRefsCache.get(cacheKey);
-        let refs = {};
+
+        // Genesis and refs-less revisions legitimately have no map
+        if (!row.refs_map_b64) {
+            decryptedRefsCache.set(cacheKey, {});
+            return {};
+        }
+
+        const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+        if (!key) return null;
+
         try {
-            if (row.refs_map_b64) {
-                const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
-                if (key) {
-                    const json = await DialogCrypto.decryptContent(key, row.refs_map_b64);
-                    refs = json ? JSON.parse(json) : {};
-                }
-            }
+            const json = await DialogCrypto.decryptContent(key, row.refs_map_b64);
+            const refs = json ? JSON.parse(json) : {};
+            decryptedRefsCache.set(cacheKey, refs);
+            return refs;
         } catch (e) {
             console.warn('[dialogs] refs decrypt failed for', row.message_id, e);
+            return null;
         }
-        decryptedRefsCache.set(cacheKey, refs);
-        return refs;
     };
 
     // The tails the current user observes right now — the refs_map plaintext
@@ -443,7 +453,16 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 updateOptimisticStatus(optimisticId, 'synced');
             } catch (e) {
                 console.error('[dialogs] toggleReaction failed:', e);
-                updateOptimisticStatus(optimisticId, 'error');
+                if (e?.permanent) {
+                    // The server will never accept this toggle — roll the
+                    // optimistic state back so the UI stops showing an action
+                    // that did not happen.
+                    removeOptimisticItem(optimisticId);
+                } else {
+                    // Transient: the write may still land later, so keep it
+                    // visible — but as an explicit error, not as 'syncing'.
+                    updateOptimisticStatus(optimisticId, 'error');
+                }
             }
         })();
 

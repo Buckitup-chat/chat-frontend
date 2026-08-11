@@ -13,8 +13,17 @@ export interface LoadedMessageRefs {
 	message_id: string;
 	/** current revision of this message as loaded */
 	sign_hash: string;
-	/** decrypted refs_map of that revision: {message_id: sign_hash} */
-	refs: Record<string, string>;
+	/**
+	 * Decrypted refs_map of that revision: {message_id: sign_hash}.
+	 * `null` means "unknown" — the sender key has not arrived yet or the blob
+	 * could not be decrypted. Unknown refs contribute nothing to the
+	 * referenced set, so the result is a conservative superset of the true
+	 * tails (over-claiming what was observed, never under-claiming). The
+	 * alternative — blocking the send until everything decrypts — would stall
+	 * exactly the common case where a peer's first message and their key
+	 * arrive together.
+	 */
+	refs: Record<string, string> | null;
 }
 
 const pair = (mid: string, sh: string) => `${mid}|${sh}`;
@@ -31,7 +40,10 @@ const pair = (mid: string, sh: string) => `${mid}|${sh}`;
 export function computeTails(loaded: LoadedMessageRefs[]): Record<string, string> {
 	const referenced = new Set<string>();
 	for (const row of loaded) {
-		for (const [mid, sh] of Object.entries(row.refs || {})) {
+		// null = unknown refs; contributes nothing, yielding extra tails
+		// rather than pretending the revision referenced nothing
+		if (!row.refs) continue;
+		for (const [mid, sh] of Object.entries(row.refs)) {
 			referenced.add(pair(mid, sh));
 		}
 	}

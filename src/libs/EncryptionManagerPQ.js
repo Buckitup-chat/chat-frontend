@@ -596,13 +596,21 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    await upsertStorageRow({
+    // The caller publishes this uuid inside the profile revision, so the
+    // avatar must be accepted by the server FIRST — otherwise a profile can
+    // sync successfully while pointing at an avatar row that never landed,
+    // and another device renders a broken reference.
+    const avatarWrite = await upsertStorageRow({
       userHash: this.#currentUserHash,
       uuid,
       valueB64: combined,
       hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
       signSkey: this.#signSkey,
     });
+    const avatarSync = await avatarWrite.sync;
+    if (avatarSync.status === 'failed') {
+      throw new Error('Avatar saved locally but failed to sync to the server');
+    }
 
     return uuid;
   }
