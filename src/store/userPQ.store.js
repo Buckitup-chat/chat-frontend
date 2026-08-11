@@ -2,10 +2,13 @@ import { defineStore } from 'pinia';
 import { ref, shallowRef, computed, watch } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
+import { preloadWithRetry } from '@/lib/data/attach';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
   const isInitialized = ref(false);
+  // separate from isInitialized: local vault readiness vs network attachment
+  const networkAttached = ref(false);
   const localDataReady = ref(false);
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
@@ -56,23 +59,27 @@ export const userPQStore = defineStore('userPQ', () => {
     .filter((r) => !r.deleted_flag)
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
+  // Local startup is one-shot; attaching to the network shape is not.
+  // `isInitialized` only means "local vault is ready" — it must not gate the
+  // network phase, which retries with the same policy every other collection
+  // uses (src/lib/data/attach.ts). Previously a single failed preload left
+  // the app permanently without user_cards until a reload.
   const initNetworkUsers = async () => {
-    const coll = getUserCardsCollection();
-
     isInitialized.value = true;
     console.log(`[userStore] Initialized | Local users: ${myLocalUsers.value.length}`);
 
-    try {
-      await coll.preload();
-      allNetworkUsers.value = readCards(coll);
-      if (!cardsSub) {
-        cardsSub = coll.subscribeChanges(() => {
-          allNetworkUsers.value = readCards(coll);
-        });
-      }
-    } catch (e) {
-      console.warn('[userStore] user_cards shape preload failed:', e);
+    if (networkAttached.value) return;
+    const coll = getUserCardsCollection();
+    const attached = await preloadWithRetry(coll, () => networkAttached.value, 'user_cards');
+    if (!attached) return;
+
+    allNetworkUsers.value = readCards(coll);
+    if (!cardsSub) {
+      cardsSub = coll.subscribeChanges(() => {
+        allNetworkUsers.value = readCards(coll);
+      });
     }
+    networkAttached.value = true;
   };
 
   const registerNewUser = async ({ name = "Anonymous", notes, avatar, avatarDataUrl }) => {
