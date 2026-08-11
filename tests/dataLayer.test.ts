@@ -132,6 +132,26 @@ describe('sendMutationsWithRetry', () => {
 		expect(res.results.length).toBe(1);
 	});
 
+	// Mixed batch: the server accepted row 0 and rejected row 1 as a conflict.
+	// Only row 1 needs an identity check — making row 0 depend on shape
+	// propagation could fail a batch the server already partly applied.
+	it('confirms only the conflicting rows in a mixed batch', async () => {
+		const m0 = { type: 'insert', modified: { message_id: 'a' }, syncMetadata: { relation: 'dialog_messages' } };
+		const m1 = { type: 'insert', modified: { message_id: 'b' }, syncMetadata: { relation: 'dialog_messages' } };
+		mockFetchSequence(422, {
+			results: [
+				{ index: 0, status: 'ok', txid: 99 },
+				{ index: 1, status: 'error', error: 'validation_failed', details: { message_id: ['has already been taken'] } },
+			],
+		});
+		const confirmApplied = vi.fn(async () => true);
+		const res = await sendMutationsWithRetry([m0, m1], signSkey, { retries: 1, baseDelayMs: 1, confirmApplied });
+
+		expect(confirmApplied).toHaveBeenCalledTimes(1);
+		expect(confirmApplied).toHaveBeenCalledWith(m1);
+		expect(res.txids).toEqual([99]);
+	});
+
 	it('turns a unique conflict into a permanent error when the server row differs', async () => {
 		mockFetchSequence(422, {
 			results: [{ index: 0, status: 'error', error: 'validation_failed', details: { message_id: ['has already been taken'] } }],
@@ -178,6 +198,20 @@ describe('dialog collection registry', () => {
 			expect(c[key]).toBeTruthy();
 			expect(typeof c[key].preload).toBe('function');
 		}
+	});
+
+	// The registry must not grow without bound across a session (finding 8):
+	// keep a warm LRU set, evict the least recently used beyond it.
+	it('evicts least-recently-used dialogs beyond the warm set', () => {
+		const hash = (i: number) => 'di_' + i.toString(16).padStart(2, '0').repeat(64);
+		const first = getDialogCollections(hash(1));
+		for (let i = 2; i <= 12; i++) getDialogCollections(hash(i));
+
+		// the oldest bundle was evicted: asking again builds a new one
+		expect(getDialogCollections(hash(1))).not.toBe(first);
+		// a recently used one is still warm
+		const recent = getDialogCollections(hash(12));
+		expect(getDialogCollections(hash(12))).toBe(recent);
 	});
 
 	// subscribeChanges returns a subscription object, NOT an unsubscribe

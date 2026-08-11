@@ -17,6 +17,8 @@ export class IngestError extends Error {
 	permanent: boolean;
 	/** true when every failed row is a unique-key conflict — candidate for identity check */
 	uniqueConflictOnly: boolean;
+	/** indexes of the rows that actually conflicted (never rows the server accepted) */
+	conflictIndexes: number[];
 	status: number | null;
 	results: IngestRowResult[] | null;
 
@@ -25,6 +27,7 @@ export class IngestError extends Error {
 		opts: {
 			permanent?: boolean;
 			uniqueConflictOnly?: boolean;
+			conflictIndexes?: number[];
 			status?: number | null;
 			results?: IngestRowResult[] | null;
 		} = {}
@@ -33,6 +36,7 @@ export class IngestError extends Error {
 		this.name = 'IngestError';
 		this.permanent = opts.permanent ?? false;
 		this.uniqueConflictOnly = opts.uniqueConflictOnly ?? false;
+		this.conflictIndexes = opts.conflictIndexes ?? [];
 		this.status = opts.status ?? null;
 		this.results = opts.results ?? null;
 	}
@@ -89,9 +93,13 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 		// failures (5xx, 429, no response) are worth retrying.
 		const permanent = resp.status === 422;
 		const uniqueConflictOnly = failed.every(isUniqueConflict);
+		// Only the rows the server actually rejected need an identity check;
+		// rows it reported as ok are already confirmed by this response and
+		// must not be made to depend on shape propagation.
+		const conflictIndexes = failed.filter(isUniqueConflict).map((r) => r.index);
 		throw new IngestError(
 			`ingest rejected ${failed.length}/${results.length} rows: ${JSON.stringify(failed[0]?.details || failed[0]?.error)}`,
-			{ permanent, uniqueConflictOnly, status: resp.status, results }
+			{ permanent, uniqueConflictOnly, conflictIndexes, status: resp.status, results }
 		);
 	}
 
@@ -139,13 +147,19 @@ export async function sendMutationsWithRetry(
 			lastError = e;
 
 			if (e instanceof IngestError && e.uniqueConflictOnly) {
-				const confirmations = await Promise.all(mutations.map((m) => confirmApplied(m)));
+				const confirmations = await Promise.all(
+					e.conflictIndexes.map((index) => confirmApplied(mutations[index]))
+				);
 				if (confirmations.every(Boolean)) {
-					return { txids: [], results: e.results ?? [] };
+					const txids = (e.results ?? [])
+						.filter((r) => typeof r.txid === 'number')
+						.map((r) => r.txid as number);
+					return { txids, results: e.results ?? [] };
 				}
 				throw new IngestError('conflicting row already exists on the server with different content', {
 					permanent: true,
 					uniqueConflictOnly: true,
+					conflictIndexes: e.conflictIndexes,
 					status: e.status,
 					results: e.results,
 				});

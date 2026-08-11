@@ -453,7 +453,16 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 updateOptimisticStatus(optimisticId, 'synced');
             } catch (e) {
                 console.error('[dialogs] toggleReaction failed:', e);
-                updateOptimisticStatus(optimisticId, 'error');
+                if (e?.permanent) {
+                    // The server will never accept this toggle — roll the
+                    // optimistic state back so the UI stops showing an action
+                    // that did not happen.
+                    removeOptimisticItem(optimisticId);
+                } else {
+                    // Transient: the write may still land later, so keep it
+                    // visible — but as an explicit error, not as 'syncing'.
+                    updateOptimisticStatus(optimisticId, 'error');
+                }
             }
         })();
 

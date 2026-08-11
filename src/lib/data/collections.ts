@@ -152,15 +152,36 @@ const buildDialogCollections = (dialogHash: string) => {
 	};
 };
 
+// LRU: the collections themselves stop syncing once unused (gcTime), but the
+// registry would otherwise keep a strong reference to every dialog bundle
+// visited in the session. Keep the current dialog plus a small warm set for
+// quick back-navigation, and drop the rest.
+const MAX_WARM_DIALOGS = 8;
 const dialogRegistry = new Map<string, DialogCollections>();
 
 export function getDialogCollections(dialogHash: string): DialogCollections {
-	let entry = dialogRegistry.get(dialogHash);
-	if (!entry) {
-		entry = buildDialogCollections(dialogHash);
-		dialogRegistry.set(dialogHash, entry);
+	const existing = dialogRegistry.get(dialogHash);
+	if (existing) {
+		// refresh recency: re-insert moves the key to the end of Map order
+		dialogRegistry.delete(dialogHash);
+		dialogRegistry.set(dialogHash, existing);
+		return existing;
+	}
+
+	const entry = buildDialogCollections(dialogHash);
+	dialogRegistry.set(dialogHash, entry);
+
+	while (dialogRegistry.size > MAX_WARM_DIALOGS) {
+		const oldest = dialogRegistry.keys().next().value as string | undefined;
+		if (oldest === undefined) break;
+		dialogRegistry.delete(oldest);
 	}
 	return entry;
+}
+
+/** Drop a dialog's collections immediately (e.g. after deleting a dialog). */
+export function releaseDialogCollections(dialogHash: string): void {
+	dialogRegistry.delete(dialogHash);
 }
 
 /** Test/inspection helper. */
