@@ -100,6 +100,35 @@ describe('upsertStorageRow: server base state', () => {
 	});
 });
 
+// Precondition for avatar ordering (review finding 3): the caller publishes
+// the avatar uuid inside the profile revision, so it must be able to tell that
+// the avatar write was rejected. EncryptionManagerPQ turns this status into a
+// throw before the profile is signed.
+describe('upsertStorageRow: failure is reported to the caller', () => {
+	it('reports failed sync when the server rejects the write', async () => {
+		sendMutationsWithRetry.mockImplementationOnce(async () => {
+			throw Object.assign(new Error('rejected'), { permanent: true });
+		});
+		const res = await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v', hashB64: null, signSkey });
+		const sync = await res.sync;
+		expect(sync.status).toBe('failed');
+		expect(kv.get(`us|${USER}|${SLOT}`)).toMatchObject({ syncStatus: 'failed' });
+	});
+
+	it('resolves only after the server verdict is known', async () => {
+		let settled = false;
+		sendMutationsWithRetry.mockImplementationOnce(async () => {
+			await new Promise((r) => setTimeout(r, 20));
+			settled = true;
+			return { txids: [1], results: [] };
+		});
+		const res = await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v', hashB64: null, signSkey });
+		// the write is already decided by the time the caller gets the result
+		expect(settled).toBe(true);
+		expect((await res.sync).status).toBe('synced');
+	});
+});
+
 describe('upsertStorageRow: per-slot serialization', () => {
 	it('runs overlapping writes to one slot sequentially', async () => {
 		const order: string[] = [];
