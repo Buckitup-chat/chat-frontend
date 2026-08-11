@@ -16,7 +16,7 @@
 //      operation overwrite the local cache of a newer one.
 import { kvGet, kvSet } from './localStore';
 import { getUserStorageCollection } from './collections';
-import { sendMutationsWithRetry } from './ingest';
+import { sendMutationsAndAwaitShape } from './ingest';
 import { nextOwnerTimestamp } from './time';
 import { api } from '@/api/client';
 import type { UserStorageRow } from './types';
@@ -209,7 +209,10 @@ async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult
 
 	await persist(row, 'syncing');
 	try {
-		await sendMutationsWithRetry([mutation], signSkey);
+		// Barrier: the queue must not release the next write for this slot
+		// until the committed revision is visible in the shape, otherwise the
+		// successor reads a stale (or absent) tip and signs a doomed mutation.
+		await sendMutationsAndAwaitShape([mutation], signSkey);
 		await persist(row, 'synced');
 		return { row, sync: Promise.resolve({ status: 'synced' as const }) };
 	} catch (e: unknown) {

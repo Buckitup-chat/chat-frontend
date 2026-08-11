@@ -10,6 +10,7 @@
 // signature (see confirm.ts).
 import { api } from '@/api/client';
 import { mutationAppliedOnServer } from './confirm';
+import { awaitShapeVisibility, collectionForRelation } from './barrier';
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
@@ -172,4 +173,36 @@ export async function sendMutationsWithRetry(
 		}
 	}
 	throw lastError;
+}
+
+interface MutationShape {
+	type?: string;
+	modified?: Record<string, unknown>;
+	changes?: Record<string, unknown>;
+	syncMetadata?: { relation?: string };
+}
+
+/**
+ * Send mutations AND wait until the resulting transaction is visible in the
+ * collection that later writes read as their base.
+ *
+ * Use this for every write whose successor derives parent_sign_hash /
+ * owner_timestamp / existence from the shape. Without the barrier a caller
+ * can sign against a tip the server has already superseded — the HTTP 200
+ * only proves the Postgres commit, not shape delivery.
+ */
+export async function sendMutationsAndAwaitShape(
+	mutations: unknown[],
+	signSkey: Uint8Array,
+	opts: RetryOptions = {}
+): Promise<SendResult> {
+	const result = await sendMutationsWithRetry(mutations, signSkey, opts);
+
+	const first = mutations[0] as MutationShape | undefined;
+	const relation = first?.syncMetadata?.relation;
+	if (relation) {
+		const row = first?.modified ?? first?.changes ?? null;
+		await awaitShapeVisibility(collectionForRelation(relation, row), result.txids, relation);
+	}
+	return result;
 }

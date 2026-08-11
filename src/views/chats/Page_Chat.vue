@@ -144,7 +144,19 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
 
 // Reactions (deleted rows filtered below — the shape carries the full table slice)
 const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollections.value?.reactions ?? null));
-const rawReactions = computed(() => rawAllReactions.value.filter((r) => !r.deleted_flag));
+
+// A reaction belongs to a specific message revision. Editing a message
+// produces a new revision, and reactions made on the previous one are NOT
+// carried over to it — reacting again moves the row to the new revision.
+// Messages are versioned; reactions are not.
+const currentSignHashOf = (messageId) =>
+    (rawMessages.value || []).find((m) => m.message_id === messageId)?.sign_hash;
+
+const rawReactions = computed(() =>
+    rawAllReactions.value.filter(
+        (r) => !r.deleted_flag && r.message_sign_hash === currentSignHashOf(r.message_id)
+    )
+);
 
 const reactionsByMsgId = ref({});
 let reactionTimer = null;
@@ -189,11 +201,17 @@ const aggregateReactions = (newRows) => {
         // tombstones, matched by the deterministic reaction_hash: an
         // un-react confirms as a tombstone, which carries no emoji and
         // never appears in the active aggregate.
+        // The confirmed state must also match the revision the intent targeted:
+        // a row still pointing at the previous revision has not yet absorbed
+        // this click, even though it is live.
         const serverRows = rawAllReactions.value;
         for (const item of $dialogs.optimisticItems.values()) {
             if (item.type !== 'reaction' || item.dialogHash !== dialogHashVal) continue;
             const serverRow = serverRows.find((r) => r.reaction_hash === item.reactionHash);
-            if (serverRow && !serverRow.deleted_flag === item.desiredActive) {
+            if (!serverRow) continue;
+            const confirmedActive =
+                !serverRow.deleted_flag && serverRow.message_sign_hash === currentSignHashOf(item.messageId);
+            if (confirmedActive === item.desiredActive) {
                 $dialogs.removeOptimisticItem(item.id);
             }
         }
