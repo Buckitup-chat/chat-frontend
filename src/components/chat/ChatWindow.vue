@@ -64,6 +64,14 @@
                  attempted text as if it had landed. -->
             <span v-if="msg._editStatus === 'syncing'" class="sync-status pending" title="Saving edit…">✎</span>
             <span v-else-if="msg._editStatus === 'error'" class="sync-status error" title="Edit not saved — others still see the previous version">✎!</span>
+            <!-- Read receipts are irreversible and tied to this exact revision,
+                 so they are only ever produced by the explicit action below. -->
+            <span v-if="msg.isMine && msg._acknowledgedByPeers > 0" class="sync-status acknowledged"
+              title="Recipient confirmed reading this version">&#128065;</span>
+            <span v-else-if="!msg.isMine && msg._acknowledgedByMe" class="sync-status acknowledged"
+              title="You confirmed reading this version">&#128065;</span>
+            <span v-else-if="!msg.isMine && msg._acknowledgePending" class="sync-status pending"
+              title="Sending confirmation…">&#128065;</span>
           </div>
         </div>
       </div>
@@ -93,6 +101,10 @@
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced'" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
         <i class="bi bi-pencil me-2"></i>Edit
+      </button>
+      <button v-if="canAcknowledge" type="button" class="context-menu-action"
+        @click="acknowledgeFromContext">
+        <i class="bi bi-eye me-2"></i>Confirm read
       </button>
       <button type="button" class="context-menu-action" @click="copyMessageText">
         <i class="bi bi-clipboard me-2"></i>Copy text
@@ -140,7 +152,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -193,6 +205,21 @@ const closeContextMenu = () => {
 const handleDocumentClick = (event) => {
   if (event.button !== 0) return;
   closeContextMenu();
+};
+
+// Only the recipient acknowledges, only once, and only for a revision that
+// actually exists on the server. Confirming is a deliberate act the user can
+// never take back, so it lives behind an explicit menu item rather than being
+// emitted when the message scrolls into view.
+const canAcknowledge = computed(() => {
+  const m = contextMenuMsg.value;
+  return !!m && !m.isMine && !m._optimistic && !m._acknowledgedByMe && !m._acknowledgePending;
+});
+
+const acknowledgeFromContext = () => {
+  const msgId = contextMenu.value?.msgId;
+  closeContextMenu();
+  if (msgId) emit('acknowledgeMessage', msgId);
 };
 
 const selectEmojiFromContext = (emoji) => {
@@ -331,6 +358,11 @@ watch(() => props.messages, () => {
   &.error {
     color: #dc3545;
     font-weight: bold;
+  }
+
+  &.acknowledged {
+    opacity: 1;
+    font-size: 11px;
   }
 }
 

@@ -2,7 +2,8 @@
     <div class="h-100 w-100">
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :reactions="displayReactions" @sendMessage="handleSendMessage"
-            @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage" />
+            @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
+            @acknowledgeMessage="handleAcknowledge" />
     </div>
 </template>
 
@@ -159,6 +160,58 @@ const rawReactions = computed(() =>
     )
 );
 
+// Read receipts. Plaintext by design (the server answers unread counts without
+// keys), append-only, and bound to one message revision — an edited message
+// needs its own acknowledgement.
+const { rows: rawReceipts } = useCollectionRows(computed(() => dialogCollections.value?.receipts ?? null));
+
+// message_id -> { mine: bool, peers: [user_hash] } for the displayed revision
+const receiptsByMsgId = computed(() => {
+    const me = $userPQ.currentUserHash;
+    const out = {};
+    for (const r of rawReceipts.value || []) {
+        if (r.type !== 'read') continue;
+        if (r.message_sign_hash !== currentSignHashOf(r.message_id)) continue;
+        const entry = out[r.message_id] || (out[r.message_id] = { mine: false, peers: [] });
+        if (r.peer_hash === me) entry.mine = true;
+        else if (!entry.peers.includes(r.peer_hash)) entry.peers.push(r.peer_hash);
+    }
+    return out;
+});
+
+// Deliberate act, never automatic: sending is driven by a button, not by the
+// message appearing on screen. A receipt cannot be withdrawn (the table has no
+// deleted_flag), so it must not be produced as a side effect of scrolling.
+const pendingReceipts = ref(new Set());
+
+const handleAcknowledge = async (messageId) => {
+    if (!peerHash.value || !dialogHash.value) return;
+    if (pendingReceipts.value.has(messageId)) return;
+
+    const message = decryptedMessages.value.find((m) => m.id === messageId);
+    const messageSignHash = message?._raw?.sign_hash;
+    if (!messageSignHash) {
+        console.warn('[chat] receipt skipped: message not synced yet', messageId);
+        return;
+    }
+
+    pendingReceipts.value = new Set(pendingReceipts.value).add(messageId);
+    try {
+        await $dialogs.sendReadReceipt(peerHash.value, { messageId, messageSignHash });
+    } catch (e) {
+        console.error('Failed to send read receipt:', e);
+        $swal.fire({
+            icon: 'error',
+            title: 'Confirmation not sent',
+            text: e?.message || 'Could not publish the read receipt. Please try again.',
+        });
+    } finally {
+        const next = new Set(pendingReceipts.value);
+        next.delete(messageId);
+        pendingReceipts.value = next;
+    }
+};
+
 const reactionsByMsgId = ref({});
 let reactionTimer = null;
 
@@ -259,7 +312,12 @@ const displayMessages = computed(() => {
     // accepted one.
     const withEdits = decryptedMessages.value.map((m) => {
         const pending = pendingEdits.value.get(m.id);
-        return pending ? { ...m, text: pending.text, _editStatus: pending.status } : m;
+        const base = pending ? { ...m, text: pending.text, _editStatus: pending.status } : { ...m };
+        const receipt = receiptsByMsgId.value[m.id];
+        base._acknowledgedByMe = !!receipt?.mine;
+        base._acknowledgedByPeers = receipt?.peers?.length || 0;
+        base._acknowledgePending = pendingReceipts.value.has(m.id);
+        return base;
     });
 
     return [...activeOptimistic, ...withEdits].sort((a, b) => {

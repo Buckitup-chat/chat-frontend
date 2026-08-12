@@ -542,6 +542,58 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return optimisticId;
     };
 
+    /**
+     * Publish a "read" receipt for a specific message revision.
+     *
+     * Deliberate, never automatic: the product requires the user to confirm
+     * they have reviewed this version of the history by pressing a button, so
+     * this is NOT called on render. Receipts are irreversible by design — the
+     * table has no deleted_flag — which is exactly why the acknowledgement
+     * must be an explicit act.
+     *
+     * Bound to message_sign_hash: an edited message is a new revision and
+     * needs its own acknowledgement.
+     */
+    const sendReadReceipt = async (peerHash, { messageId, messageSignHash }) => {
+        if (!messageSignHash) {
+            throw new Error('Cannot acknowledge: message revision is not synced yet');
+        }
+
+        const dialogHash = await initDialogKeys(peerHash);
+        const myHash = $userPQ.currentUserHash;
+        const type = 'read';
+
+        const receiptHash = DialogCrypto.computeReceiptHash(messageId, messageSignHash, myHash, type);
+
+        const dialogColls = getDialogCollections(dialogHash);
+        await dialogColls.receipts.preload().catch(() => {});
+        const existing = dialogColls.receipts.get(receiptHash);
+        // Already acknowledged: the deterministic hash makes this a no-op
+        // rather than a duplicate insert the server would reject.
+        if (existing) return receiptHash;
+
+        await pushRow('dialog_message_receipts', {
+            receipt_hash: receiptHash,
+            dialog_hash: dialogHash,
+            message_id: messageId,
+            peer_hash: myHash,
+            type,
+            message_sign_hash: messageSignHash,
+            owner_timestamp: nextOwnerTimestamp(null),
+        });
+
+        return receiptHash;
+    };
+
+    /** Revisions the current user has explicitly acknowledged. */
+    const isRevisionAcknowledged = (dialogHash, messageId, messageSignHash) => {
+        if (!messageSignHash) return false;
+        const receiptHash = DialogCrypto.computeReceiptHash(
+            messageId, messageSignHash, $userPQ.currentUserHash, 'read'
+        );
+        return !!getDialogCollections(dialogHash).receipts.get(receiptHash);
+    };
+
     const decryptReactionRow = async (dialogHash, row) => {
         try {
             const key = await getSenderMsgKey(dialogHash, row.reactor_hash);
@@ -563,6 +615,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         editMessage,
         decryptMessageRow,
         toggleReaction,
+        sendReadReceipt,
+        isRevisionAcknowledged,
         decryptReactionRow,
         optimisticItems,
         addOptimisticMessage,

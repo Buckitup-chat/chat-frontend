@@ -29,6 +29,8 @@ const encodeField = (key, value) => {
   return String(value);
 };
 
+const SIGN_HASH_RELATIONS = new Set(['dialog_messages', 'dialog_messages_versions']);
+
 const buildSignatureData = (fields) => {
   return Object.keys(fields)
     .sort()
@@ -233,7 +235,11 @@ export const api = {
     }
 
     const changes = { ...fieldsToSign, sign_b64: finalSignB64 };
-    if (finalSignB64) {
+    // Only dialog_messages and dialog_messages_versions carry a sign_hash
+    // column (DialogMessageSignHash, "dms_" prefix). dialog_keys, reactions
+    // and receipts are keyed by their own deterministic hash and have no such
+    // column — sending one there is a field the server schema cannot cast.
+    if (finalSignB64 && SIGN_HASH_RELATIONS.has(relation)) {
       const decodedSign = Uint8Array.from(atob(finalSignB64), c => c.charCodeAt(0));
       changes.sign_hash = "dms_" + bytesToHex(sha3_512(decodedSign));
     }
