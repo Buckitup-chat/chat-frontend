@@ -19,8 +19,15 @@
 // signature over the row content and never expires. Only the *request* needs
 // a live key (auth challenge), which is why draining requires an unlocked
 // account and entries are partitioned by the user that signed them.
+//
+// Why the queue is encrypted: an entry holds a whole signed mutation, so the
+// envelope — user_hash, dialog_hash, message_id, timestamps, signatures — would
+// otherwise sit in IndexedDB in the clear even though the message body inside
+// it is end-to-end encrypted. secureStore wraps the adapter, so the queue is
+// readable only by the account that wrote it, and only while it is unlocked.
 import { IndexedDBAdapter, WebLocksLeader, BackoffCalculator } from '@tanstack/offline-transactions';
 import { IngestError } from './ingest';
+import { createSecureStore, type StringStore } from './secureStore';
 
 const DB_NAME = 'buckitup-outbox';
 const LOCK_NAME = 'buckitup-outbox-drain';
@@ -43,13 +50,40 @@ export interface OutboxEntry {
  */
 export const MAX_OUTBOX_ENTRIES = 1000;
 
-let storage = new IndexedDBAdapter(DB_NAME);
+const indexedDb = new IndexedDBAdapter(DB_NAME);
+
+/**
+ * Encrypted view: everything written from now on goes through this.
+ *
+ * The key module is imported lazily because it reaches into the vault, and the
+ * vault pulls in the whole crypto stack — the send path must not depend on it
+ * at import time.
+ */
+let storage: StringStore = createSecureStore(indexedDb, {
+	getKey: async () => (await import('./localCrypto')).getLocalStorageKey(),
+});
+/**
+ * Unencrypted view of the same records. Needed for exactly one thing: telling
+ * an entry written before encryption apart from one belonging to a different
+ * account, which are otherwise both "cannot read this".
+ */
+let plainStorage: StringStore = indexedDb;
+let encrypted = true;
+
 const leader = new WebLocksLeader(LOCK_NAME);
 const backoff = new BackoffCalculator(true);
 
-/** Test hook: swap the storage adapter (node has no IndexedDB). */
-export function _setStorageForTests(adapter: typeof storage): void {
+/**
+ * Test hook: swap the storage adapter (node has no IndexedDB).
+ *
+ * With one argument the queue behaves as unencrypted plain storage. Pass a
+ * second adapter — the raw store behind the encrypted one — to exercise the
+ * real encrypted path, including legacy migration.
+ */
+export function _setStorageForTests(adapter: StringStore, rawAdapter?: StringStore): void {
 	storage = adapter;
+	plainStorage = rawAdapter ?? adapter;
+	encrypted = rawAdapter !== undefined;
 }
 
 let seq = 0;
@@ -64,8 +98,10 @@ const relationOf = (mutations: unknown[]): string => {
 
 /**
  * Persist mutations before the send is attempted. Returns the entry id, or
- * null when storage is unavailable (private mode) — the caller still sends,
- * just without durability. Losing durability is bad; refusing to run is worse.
+ * null when storage is unavailable (private mode, or a locked vault leaving no
+ * key to encrypt with) — the caller still sends, just without durability.
+ * Losing durability is bad; refusing to run is worse. In practice the vault is
+ * always unlocked here: these mutations were just signed with it.
  */
 export async function enqueue(mutations: unknown[], userHash: string): Promise<string | null> {
 	if (!userHash) return null;
@@ -111,9 +147,9 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 			await storage.delete(id);
 			return;
 		}
-		const raw = await storage.get(id);
-		if (!raw) return;
-		const entry = JSON.parse(raw) as OutboxEntry;
+		const result = await readEntry(id);
+		if (result.kind !== 'entry') return;
+		const entry = result.entry;
 		entry.attempts += 1;
 		entry.lastError = error instanceof Error ? error.message : String(error);
 		await storage.set(id, JSON.stringify(entry));
@@ -122,20 +158,77 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 	}
 }
 
+type ReadResult =
+	| { kind: 'entry'; entry: OutboxEntry; legacy: boolean }
+	| { kind: 'missing' }
+	/** Written by another account (or tampered with): unreadable, and not ours. */
+	| { kind: 'foreign' }
+	/** Readable but not a valid entry: nothing can ever replay it. */
+	| { kind: 'corrupt' };
+
+/**
+ * Read one record, distinguishing the three ways it can fail.
+ *
+ * The distinction is the whole point: before encryption "cannot read this"
+ * meant a corrupt record and the entry was deleted. Now it far more often means
+ * "belongs to a different account", and deleting those would destroy another
+ * user's pending writes — the exact data loss this queue exists to prevent.
+ */
+async function readEntry(key: string): Promise<ReadResult> {
+	let stored: string | null;
+	try {
+		stored = await plainStorage.get(key);
+	} catch {
+		return { kind: 'foreign' };
+	}
+	if (stored === null) return { kind: 'missing' };
+
+	// Encrypted records are base64, so a leading '{' can only be a record
+	// written before the queue was encrypted.
+	const legacy = encrypted && stored.startsWith('{');
+	if (encrypted && !legacy) {
+		try {
+			stored = await storage.get(key);
+		} catch {
+			return { kind: 'foreign' };
+		}
+		if (stored === null) return { kind: 'missing' };
+	}
+
+	try {
+		return { kind: 'entry', entry: JSON.parse(stored) as OutboxEntry, legacy };
+	} catch {
+		return { kind: 'corrupt' };
+	}
+}
+
+/**
+ * Upgrade a pre-encryption entry in place, the first time its owner sees it.
+ * Entries of other accounts stay readable on disk until that account logs in —
+ * we have no key to re-encrypt them with, and dropping them would lose writes.
+ */
+async function rewriteEncrypted(key: string, entry: OutboxEntry): Promise<void> {
+	try {
+		await storage.set(key, JSON.stringify(entry));
+	} catch (e) {
+		console.warn('[outbox] could not re-encrypt a legacy entry:', e);
+	}
+}
+
 export async function pendingEntries(userHash: string): Promise<OutboxEntry[]> {
 	try {
 		const keys = await storage.keys();
 		const entries: OutboxEntry[] = [];
 		for (const key of keys) {
-			const raw = await storage.get(key);
-			if (!raw) continue;
-			try {
-				const entry = JSON.parse(raw) as OutboxEntry;
-				if (entry.userHash === userHash) entries.push(entry);
-			} catch {
-				// Unreadable entry: nothing can ever replay it.
-				await storage.delete(key);
+			const result = await readEntry(key);
+			if (result.kind === 'corrupt') {
+				await plainStorage.delete(key).catch(() => {});
+				continue;
 			}
+			if (result.kind !== 'entry') continue;
+			if (result.entry.userHash !== userHash) continue;
+			if (result.legacy) await rewriteEncrypted(key, result.entry);
+			entries.push(result.entry);
 		}
 		return entries.sort((a, b) => (a.id < b.id ? -1 : 1));
 	} catch {
