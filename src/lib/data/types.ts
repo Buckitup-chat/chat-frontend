@@ -3,7 +3,7 @@
 // Only server-side columns — local sync bookkeeping (modified_columns,
 // sent_to_server, created_at, updated_at) does not exist in this layer.
 
-export interface UserCardRow {
+export type UserCardRow = {
 	user_hash: string;
 	sign_pkey: string | null;
 	crypt_pkey: string | null;
@@ -21,7 +21,7 @@ export interface UserCardRow {
 // synthetic local counter against Electric rows silently preferred stale
 // local data (third-party review, finding 4). Local-only metadata lives in
 // src/lib/data/userStorage.ts, never in this row type.
-export interface UserStorageRow {
+export type UserStorageRow = {
 	user_hash: string;
 	uuid: string;
 	value_b64: string | null;
@@ -32,7 +32,7 @@ export interface UserStorageRow {
 	sign_b64: string | null;
 }
 
-export interface DialogKeyRow {
+export type DialogKeyRow = {
 	dialog_hash: string;
 	sender_hash: string;
 	peer_hash: string | null;
@@ -43,7 +43,7 @@ export interface DialogKeyRow {
 	sign_b64: string | null;
 }
 
-export interface DialogMessageRow {
+export type DialogMessageRow = {
 	message_id: string;
 	dialog_hash: string;
 	sender_hash: string;
@@ -56,7 +56,7 @@ export interface DialogMessageRow {
 	sign_hash: string | null;
 }
 
-export interface DialogMessageVersionRow {
+export type DialogMessageVersionRow = {
 	message_id: string;
 	sign_hash: string;
 	dialog_hash: string;
@@ -69,7 +69,7 @@ export interface DialogMessageVersionRow {
 	sign_b64: string | null;
 }
 
-export interface DialogMessageReactionRow {
+export type DialogMessageReactionRow = {
 	reaction_hash: string;
 	dialog_hash: string;
 	message_id: string;
@@ -81,7 +81,7 @@ export interface DialogMessageReactionRow {
 	sign_b64: string | null;
 }
 
-export interface DialogMessageReceiptRow {
+export type DialogMessageReceiptRow = {
 	receipt_hash: string;
 	dialog_hash: string;
 	message_id: string;
