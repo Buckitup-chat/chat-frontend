@@ -10,7 +10,9 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { api } from '@/api/client';
-import { sendMutationsWithRetry } from '@/lib/data/ingest';
+import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
+import { nextOwnerTimestamp } from '@/lib/data/time';
+import { getUserCardsCollection } from '@/lib/data/collections';
 import { getStorageRow, upsertStorageRow, STORAGE_SLOTS } from '@/lib/data/userStorage';
 
 const VAULT_KEY_OPTIONS = {
@@ -32,6 +34,7 @@ const VAULT_KEY_OPTIONS = {
  */
 export class EncryptionManagerPQ extends EventTarget {
   static instance = null;
+  static #cardQueues = new Map();
 
   #rawStore = rawStorage('idb');
   #currentVault = null;
@@ -58,28 +61,44 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#loadLocalUserCards()
   }
 
-  // Push own user card to the server as a signed mutation.
-  // Fire-and-forget with retry: card data also lives in the local vault
-  // registry, so a failed push costs nothing locally.
-  #pushOwnCard(card, { isUpdate = false, signSkey = null } = {}) {
+  // Publishing the public user card. Awaited, not fire-and-forget: the
+  // backend refuses a user_storage write until the card exists, so
+  // registration would race its own profile save. Serialized per user_hash
+  // and monotonic, because the server rejects a card update whose timestamp
+  // is not strictly newer than the stored one.
+  async #pushOwnCard(card, { isUpdate = false, signSkey = null } = {}) {
     const key = signSkey || this.#signSkey;
-    if (!key) return;
-    try {
+    if (!key) throw new Error('No signing key for user card');
+
+    const userHash = card.user_hash;
+    const previous = EncryptionManagerPQ.#cardQueues.get(userHash) ?? Promise.resolve();
+    const run = async () => {
+      const serverCard = getUserCardsCollection().get(userHash);
+      const ownerTimestamp = nextOwnerTimestamp(serverCard?.owner_timestamp);
+
       const { mutation } = api.createUserCard(card.name || 'User', {
-        user_hash: card.user_hash,
+        user_hash: userHash,
         sign_pkey: decodeHexOrBase64(card.sign_pkey),
         contact_pkey: decodeHexOrBase64(card.contact_pkey),
         contact_cert: decodeHexOrBase64(card.contact_cert),
         crypt_pkey: decodeHexOrBase64(card.crypt_pkey),
         crypt_cert: decodeHexOrBase64(card.crypt_cert),
         sign_skey: key,
-      }, isUpdate ? 'update' : 'insert');
-      sendMutationsWithRetry([mutation], key).catch((e) => {
-        console.warn('[EncryptionManagerPQ] card push failed:', e?.message || e);
-      });
-    } catch (e) {
-      console.warn('[EncryptionManagerPQ] card push build failed:', e);
-    }
+      }, isUpdate ? 'update' : 'insert', ownerTimestamp);
+
+      // Barrier included: the next card update reads this row as its base.
+      return sendMutationsAndAwaitShape([mutation], key);
+    };
+
+    const next = previous.then(run, run);
+    const settled = next.then(() => undefined, () => undefined);
+    EncryptionManagerPQ.#cardQueues.set(userHash, settled);
+    settled.then(() => {
+      if (EncryptionManagerPQ.#cardQueues.get(userHash) === settled) {
+        EncryptionManagerPQ.#cardQueues.delete(userHash);
+      }
+    });
+    return next;
   }
 
   static getInstance() {
@@ -160,7 +179,9 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await this.#saveLocalUserCards();
 
-    this.#pushOwnCard({ ...identity, name }, { signSkey });
+    // The backend refuses a user_storage write until this card exists, so
+    // the profile save below must not start before it is accepted.
+    await this.#pushOwnCard({ ...identity, name }, { signSkey });
 
     await this.login(userHash);
 
@@ -330,9 +351,25 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   // Re-push the current user's card (e.g. after a name change).
-  pushCurrentUserCard() {
+  async pushCurrentUserCard() {
     const card = this.#localUserCards.find(u => u.user_hash === this.#currentUserHash);
-    if (card) this.#pushOwnCard(card, { isUpdate: true });
+    if (!card) return;
+    return this.#pushOwnCard(card, { isUpdate: true });
+  }
+
+  /**
+   * Rename: local vault registry and the public card are one logical
+   * operation. Doing only half of it let the persisted registry keep the old
+   * name and silently revert it on the next login.
+   */
+  async updateOwnUserCardName(newName) {
+    const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
+    if (idx === -1) throw new Error('User not found in local identities');
+
+    this.#localUserCards[idx] = { ...this.#localUserCards[idx], name: newName };
+    await this.#saveLocalUserCards();
+    await this.#pushOwnCard(this.#localUserCards[idx], { isUpdate: true });
+    return this.#localUserCards[idx];
   }
 
   // Sign Challenge
@@ -401,7 +438,8 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards.push(identity);
     await this.#saveLocalUserCards();
 
-    this.#pushOwnCard(identity, { signSkey });
+    // Same dependency as registration: the card may not exist on this Pi yet.
+    await this.#pushOwnCard(identity, { signSkey });
 
     await this.login(identity.user_hash);
   }
@@ -476,7 +514,7 @@ export class EncryptionManagerPQ extends EventTarget {
     );
 
     if (cardChanged) {
-      this.#pushOwnCard(updated, { isUpdate: true });
+      await this.#pushOwnCard(updated, { isUpdate: true });
     }
 
     return updated;

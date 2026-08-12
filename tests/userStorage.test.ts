@@ -21,9 +21,13 @@ vi.mock('../src/lib/data/collections', () => ({
 	getUserStorageCollection: () => collection,
 }));
 
-const sendMutationsWithRetry = vi.fn(async () => ({ txids: [1], results: [] }));
+// The module under test uses sendMutationsAndAwaitShape, whose contract is
+// "returns only after the committed txid is visible in the collection". The
+// mock therefore models both halves: the HTTP result AND shape delivery.
+const sendAndAwait = vi.fn(async () => ({ txids: [1], results: [] }));
 vi.mock('../src/lib/data/ingest', () => ({
-	sendMutationsWithRetry: (...args: unknown[]) => sendMutationsWithRetry(...(args as [])),
+	sendMutationsAndAwaitShape: (...args: unknown[]) => sendAndAwait(...(args as [])),
+	sendMutationsWithRetry: (...args: unknown[]) => sendAndAwait(...(args as [])),
 }));
 
 const { upsertStorageRow, getStorageRow, STORAGE_SLOTS } = await import('../src/lib/data/userStorage');
@@ -54,7 +58,7 @@ beforeEach(() => {
 	collection.rows.clear();
 	collection.preloadError = null;
 	vi.clearAllMocks();
-	sendMutationsWithRetry.mockImplementation(async () => ({ txids: [1], results: [] }));
+	sendAndAwait.mockImplementation(async () => ({ txids: [1], results: [] }));
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -93,7 +97,7 @@ describe('upsertStorageRow: server base state', () => {
 		const res = await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v1', hashB64: null, signSkey });
 
 		expect(api.createStorageMutation).not.toHaveBeenCalled();
-		expect(sendMutationsWithRetry).not.toHaveBeenCalled();
+		expect(sendAndAwait).not.toHaveBeenCalled();
 		expect((await res.sync).status).toBe('failed');
 		// the user's edit is still kept locally
 		expect(kv.get(`us|${USER}|${SLOT}`)).toMatchObject({ syncStatus: 'failed', row: { value_b64: 'v1' } });
@@ -106,7 +110,7 @@ describe('upsertStorageRow: server base state', () => {
 // throw before the profile is signed.
 describe('upsertStorageRow: failure is reported to the caller', () => {
 	it('reports failed sync when the server rejects the write', async () => {
-		sendMutationsWithRetry.mockImplementationOnce(async () => {
+		sendAndAwait.mockImplementationOnce(async () => {
 			throw Object.assign(new Error('rejected'), { permanent: true });
 		});
 		const res = await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v', hashB64: null, signSkey });
@@ -117,7 +121,7 @@ describe('upsertStorageRow: failure is reported to the caller', () => {
 
 	it('resolves only after the server verdict is known', async () => {
 		let settled = false;
-		sendMutationsWithRetry.mockImplementationOnce(async () => {
+		sendAndAwait.mockImplementationOnce(async () => {
 			await new Promise((r) => setTimeout(r, 20));
 			settled = true;
 			return { txids: [1], results: [] };
@@ -133,13 +137,13 @@ describe('upsertStorageRow: per-slot serialization', () => {
 	it('runs overlapping writes to one slot sequentially', async () => {
 		const order: string[] = [];
 		let release: (() => void) | null = null;
-		sendMutationsWithRetry.mockImplementationOnce(async () => {
+		sendAndAwait.mockImplementationOnce(async () => {
 			order.push('A:start');
 			await new Promise<void>((r) => { release = r; });
 			order.push('A:end');
 			return { txids: [1], results: [] };
 		});
-		sendMutationsWithRetry.mockImplementationOnce(async () => {
+		sendAndAwait.mockImplementationOnce(async () => {
 			order.push('B:start');
 			return { txids: [2], results: [] };
 		});
@@ -159,7 +163,7 @@ describe('upsertStorageRow: per-slot serialization', () => {
 
 	it('lets the second write see the first write as its base', async () => {
 		// after A lands, the server row appears in the collection
-		sendMutationsWithRetry.mockImplementationOnce(async () => {
+		sendAndAwait.mockImplementationOnce(async () => {
 			collection.rows.set(`${USER}|${SLOT}`, serverRow(2000, 'uss_' + 'b'.repeat(128)));
 			return { txids: [1], results: [] };
 		});

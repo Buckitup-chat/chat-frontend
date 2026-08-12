@@ -168,12 +168,15 @@ export const userPQStore = defineStore('userPQ', () => {
     allNetworkUsers.value = readCards(getUserCardsCollection());
   };
 
+  // One logical operation: persist the local vault registry AND publish the
+  // public card, awaited. The previous version mutated only the in-memory
+  // user and fired the push blindly, so refreshMyLocalUsers() reloaded the
+  // registry from IndexedDB and reverted the name.
   const updateCurrentUserName = async (newName) => {
-    if (!currentUser.value || !currentUserHash.value) return false;
+    if (!currentUser.value || !currentUserHash.value || !em.value) return false;
 
+    await em.value.updateOwnUserCardName(newName);
     currentUser.value.name = newName;
-
-    em.value?.pushCurrentUserCard();
 
     await refreshMyLocalUsers();
     return true;
@@ -194,7 +197,9 @@ export const userPQStore = defineStore('userPQ', () => {
       if (avatarUuid !== undefined) currentUser.value.userStorage.avatarUuid = avatarUuid;
     }
 
-    em.value?.pushCurrentUserCard();
+    // updateUserStorage already republished the card when it changed; this
+    // keeps name-only edits in sync and surfaces a failed publication.
+    await em.value.pushCurrentUserCard();
 
     await refreshMyLocalUsers();
     return true;

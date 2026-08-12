@@ -2,7 +2,8 @@
     <div class="h-100 w-100">
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :reactions="displayReactions" @sendMessage="handleSendMessage"
-            @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage" />
+            @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
+            @acknowledgeMessage="handleAcknowledge" />
     </div>
 </template>
 
@@ -11,7 +12,7 @@
 </style>
 
 <script setup>
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, inject } from 'vue';
 import { useRoute } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
@@ -21,6 +22,7 @@ import { useCollectionRows } from '@/lib/data/useCollection';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
+const $swal = inject('$swal');
 const $userPQ = userPQStore();
 const $dialogs = useDialogsStore();
 
@@ -144,7 +146,71 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
 
 // Reactions (deleted rows filtered below — the shape carries the full table slice)
 const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollections.value?.reactions ?? null));
-const rawReactions = computed(() => rawAllReactions.value.filter((r) => !r.deleted_flag));
+
+// A reaction belongs to a specific message revision. Editing a message
+// produces a new revision, and reactions made on the previous one are NOT
+// carried over to it — reacting again moves the row to the new revision.
+// Messages are versioned; reactions are not.
+const currentSignHashOf = (messageId) =>
+    (rawMessages.value || []).find((m) => m.message_id === messageId)?.sign_hash;
+
+const rawReactions = computed(() =>
+    rawAllReactions.value.filter(
+        (r) => !r.deleted_flag && r.message_sign_hash === currentSignHashOf(r.message_id)
+    )
+);
+
+// Read receipts. Plaintext by design (the server answers unread counts without
+// keys), append-only, and bound to one message revision — an edited message
+// needs its own acknowledgement.
+const { rows: rawReceipts } = useCollectionRows(computed(() => dialogCollections.value?.receipts ?? null));
+
+// message_id -> { mine: bool, peers: [user_hash] } for the displayed revision
+const receiptsByMsgId = computed(() => {
+    const me = $userPQ.currentUserHash;
+    const out = {};
+    for (const r of rawReceipts.value || []) {
+        if (r.type !== 'read') continue;
+        if (r.message_sign_hash !== currentSignHashOf(r.message_id)) continue;
+        const entry = out[r.message_id] || (out[r.message_id] = { mine: false, peers: [] });
+        if (r.peer_hash === me) entry.mine = true;
+        else if (!entry.peers.includes(r.peer_hash)) entry.peers.push(r.peer_hash);
+    }
+    return out;
+});
+
+// Deliberate act, never automatic: sending is driven by a button, not by the
+// message appearing on screen. A receipt cannot be withdrawn (the table has no
+// deleted_flag), so it must not be produced as a side effect of scrolling.
+const pendingReceipts = ref(new Set());
+
+const handleAcknowledge = async (messageId) => {
+    if (!peerHash.value || !dialogHash.value) return;
+    if (pendingReceipts.value.has(messageId)) return;
+
+    const message = decryptedMessages.value.find((m) => m.id === messageId);
+    const messageSignHash = message?._raw?.sign_hash;
+    if (!messageSignHash) {
+        console.warn('[chat] receipt skipped: message not synced yet', messageId);
+        return;
+    }
+
+    pendingReceipts.value = new Set(pendingReceipts.value).add(messageId);
+    try {
+        await $dialogs.sendReadReceipt(peerHash.value, { messageId, messageSignHash });
+    } catch (e) {
+        console.error('Failed to send read receipt:', e);
+        $swal.fire({
+            icon: 'error',
+            title: 'Confirmation not sent',
+            text: e?.message || 'Could not publish the read receipt. Please try again.',
+        });
+    } finally {
+        const next = new Set(pendingReceipts.value);
+        next.delete(messageId);
+        pendingReceipts.value = next;
+    }
+};
 
 const reactionsByMsgId = ref({});
 let reactionTimer = null;
@@ -189,11 +255,17 @@ const aggregateReactions = (newRows) => {
         // tombstones, matched by the deterministic reaction_hash: an
         // un-react confirms as a tombstone, which carries no emoji and
         // never appears in the active aggregate.
+        // The confirmed state must also match the revision the intent targeted:
+        // a row still pointing at the previous revision has not yet absorbed
+        // this click, even though it is live.
         const serverRows = rawAllReactions.value;
         for (const item of $dialogs.optimisticItems.values()) {
             if (item.type !== 'reaction' || item.dialogHash !== dialogHashVal) continue;
             const serverRow = serverRows.find((r) => r.reaction_hash === item.reactionHash);
-            if (serverRow && !serverRow.deleted_flag === item.desiredActive) {
+            if (!serverRow) continue;
+            const confirmedActive =
+                !serverRow.deleted_flag && serverRow.message_sign_hash === currentSignHashOf(item.messageId);
+            if (confirmedActive === item.desiredActive) {
                 $dialogs.removeOptimisticItem(item.id);
             }
         }
@@ -235,7 +307,20 @@ const displayMessages = computed(() => {
         });
     }
 
-    return [...activeOptimistic, ...decryptedMessages.value].sort((a, b) => {
+    // Overlay in-flight / failed edits: show the attempted text and mark its
+    // state, so a rejected versioned edit is not indistinguishable from an
+    // accepted one.
+    const withEdits = decryptedMessages.value.map((m) => {
+        const pending = pendingEdits.value.get(m.id);
+        const base = pending ? { ...m, text: pending.text, _editStatus: pending.status } : { ...m };
+        const receipt = receiptsByMsgId.value[m.id];
+        base._acknowledgedByMe = !!receipt?.mine;
+        base._acknowledgedByPeers = receipt?.peers?.length || 0;
+        base._acknowledgePending = pendingReceipts.value.has(m.id);
+        return base;
+    });
+
+    return [...activeOptimistic, ...withEdits].sort((a, b) => {
         const aTs = a._raw?.owner_timestamp || a.ownerTimestamp || 0;
         const bTs = b._raw?.owner_timestamp || b.ownerTimestamp || 0;
         return aTs - bTs;
@@ -325,12 +410,34 @@ const handleSendMessage = (text) => {
     })();
 };
 
+// A versioned edit can legitimately fail (stale base tip, node unreachable).
+// The editor closes immediately on save, so without this the attempted text
+// would be indistinguishable from an accepted one — only a console line.
+const pendingEdits = ref(new Map()); // message_id -> { text, status, error }
+
 const handleEditMessage = async (messageId, newText) => {
     if (!peerHash.value || !newText.trim()) return;
+    const text = newText.trim();
+    pendingEdits.value.set(messageId, { text, status: 'syncing' });
+    pendingEdits.value = new Map(pendingEdits.value);
     try {
-        await $dialogs.editMessage(peerHash.value, messageId, newText);
+        await $dialogs.editMessage(peerHash.value, messageId, text);
+        pendingEdits.value.delete(messageId);
+        pendingEdits.value = new Map(pendingEdits.value);
     } catch (e) {
         console.error("Failed to edit message:", e);
+        pendingEdits.value.set(messageId, { text, status: 'error', error: e });
+        pendingEdits.value = new Map(pendingEdits.value);
+        $swal.fire({
+            icon: 'error',
+            title: 'Edit not saved',
+            text: 'The edited message could not be sent. The original text is still what others see.',
+        });
     }
+};
+
+const retryEdit = (messageId) => {
+    const pending = pendingEdits.value.get(messageId);
+    if (pending) handleEditMessage(messageId, pending.text);
 };
 </script>
