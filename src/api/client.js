@@ -92,8 +92,12 @@ export const api = {
     name,
     userData,
     mutationType = 'insert',
+    ownerTimestampOverride = null,
   ) => {
-    const ownerTimestamp = Math.floor(Date.now() / 1000);
+    // The server rejects a card update whose timestamp is not strictly newer
+    // than the stored one, so two edits inside a second must not collide.
+    // Callers pass nextOwnerTimestamp(serverCard?.owner_timestamp).
+    const ownerTimestamp = ownerTimestampOverride || Math.floor(Date.now() / 1000);
     const deletedFlag = false;
 
     const signatureFields = {

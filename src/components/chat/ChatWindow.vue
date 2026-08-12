@@ -59,6 +59,11 @@
             <span v-if="msg._syncStatus === 'sending' || msg._syncStatus === 'syncing'" class="sync-status pending" title="Syncing...">✓</span>
             <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Synced">✓</span>
             <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Failed to sync">!</span>
+            <!-- A versioned edit that the server did not accept: others still
+                 see the previous revision, so say so instead of showing the
+                 attempted text as if it had landed. -->
+            <span v-if="msg._editStatus === 'syncing'" class="sync-status pending" title="Saving edit…">✎</span>
+            <span v-else-if="msg._editStatus === 'error'" class="sync-status error" title="Edit not saved — others still see the previous version">✎!</span>
           </div>
         </div>
       </div>

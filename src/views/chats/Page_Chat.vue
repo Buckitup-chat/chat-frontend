@@ -11,7 +11,7 @@
 </style>
 
 <script setup>
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, inject } from 'vue';
 import { useRoute } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
@@ -21,6 +21,7 @@ import { useCollectionRows } from '@/lib/data/useCollection';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
+const $swal = inject('$swal');
 const $userPQ = userPQStore();
 const $dialogs = useDialogsStore();
 
@@ -253,7 +254,15 @@ const displayMessages = computed(() => {
         });
     }
 
-    return [...activeOptimistic, ...decryptedMessages.value].sort((a, b) => {
+    // Overlay in-flight / failed edits: show the attempted text and mark its
+    // state, so a rejected versioned edit is not indistinguishable from an
+    // accepted one.
+    const withEdits = decryptedMessages.value.map((m) => {
+        const pending = pendingEdits.value.get(m.id);
+        return pending ? { ...m, text: pending.text, _editStatus: pending.status } : m;
+    });
+
+    return [...activeOptimistic, ...withEdits].sort((a, b) => {
         const aTs = a._raw?.owner_timestamp || a.ownerTimestamp || 0;
         const bTs = b._raw?.owner_timestamp || b.ownerTimestamp || 0;
         return aTs - bTs;
@@ -343,12 +352,34 @@ const handleSendMessage = (text) => {
     })();
 };
 
+// A versioned edit can legitimately fail (stale base tip, node unreachable).
+// The editor closes immediately on save, so without this the attempted text
+// would be indistinguishable from an accepted one — only a console line.
+const pendingEdits = ref(new Map()); // message_id -> { text, status, error }
+
 const handleEditMessage = async (messageId, newText) => {
     if (!peerHash.value || !newText.trim()) return;
+    const text = newText.trim();
+    pendingEdits.value.set(messageId, { text, status: 'syncing' });
+    pendingEdits.value = new Map(pendingEdits.value);
     try {
-        await $dialogs.editMessage(peerHash.value, messageId, newText);
+        await $dialogs.editMessage(peerHash.value, messageId, text);
+        pendingEdits.value.delete(messageId);
+        pendingEdits.value = new Map(pendingEdits.value);
     } catch (e) {
         console.error("Failed to edit message:", e);
+        pendingEdits.value.set(messageId, { text, status: 'error', error: e });
+        pendingEdits.value = new Map(pendingEdits.value);
+        $swal.fire({
+            icon: 'error',
+            title: 'Edit not saved',
+            text: 'The edited message could not be sent. The original text is still what others see.',
+        });
     }
+};
+
+const retryEdit = (messageId) => {
+    const pending = pendingEdits.value.get(messageId);
+    if (pending) handleEditMessage(messageId, pending.text);
 };
 </script>
