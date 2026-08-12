@@ -119,12 +119,34 @@ const applyMutation = (m) => {
 	const pk = PRIMARY_KEY[m.relation];
 	const coll = COLLECTION_FOR[m.relation]?.();
 	if (!pk || !coll) return;
-	coll.rows.set(pk(m.row), { ...coll.rows.get(pk(m.row)), ...m.row });
+	const key = pk(m.row);
+	// The server rejects an insert onto an existing primary key. Modelling
+	// that is what makes a missing dedup guard show its real consequence —
+	// the second write fails and its message never lands.
+	if (m.type === 'insert' && coll.rows.has(key)) {
+		const err = new Error(`duplicate key on ${m.relation}`);
+		err.permanent = true;
+		throw err;
+	}
+	coll.rows.set(key, { ...coll.rows.get(key), ...m.row });
 };
 
-/** Let every queued microtask chain settle. */
+// sendMessage awaits a dynamic import() for uuid before it does anything, so
+// a fixed number of ticks is not a reliable wait — the first, cold resolve is
+// slower than every later one. Poll for the expected state instead.
 const flush = async () => {
-	for (let i = 0; i < 20; i++) await Promise.resolve();
+	for (let i = 0; i < 5; i++) {
+		for (let j = 0; j < 20; j++) await Promise.resolve();
+		await new Promise((r) => setTimeout(r, 0));
+	}
+};
+
+const waitFor = async (predicate, label) => {
+	for (let i = 0; i < 200; i++) {
+		if (predicate()) return;
+		await flush();
+	}
+	throw new Error(`timed out waiting for: ${label}`);
 };
 
 beforeEach(() => {
@@ -207,6 +229,47 @@ describe('initDialogKeys deduplication', () => {
 		await store.initDialogKeys(PEER_HASH);
 
 		expect(sent.filter((m) => m.relation === 'dialog_keys')).toHaveLength(0);
+	});
+});
+
+describe('two first messages in a fresh dialog', () => {
+	// The scenario the guard exists for, driven through the public send path
+	// rather than the guard itself: type two messages before the first has
+	// round-tripped. Both sends need the key row, both used to find the
+	// collection empty, and the second insert collided on the primary key —
+	// so the second message was simply lost.
+	it('creates the key row once and sends both messages', async () => {
+		const store = useDialogsStore();
+		const statuses = [];
+
+		store.sendMessage(PEER_HASH, 'first', (s) => statuses.push(['first', s]));
+		store.sendMessage(PEER_HASH, 'second', (s) => statuses.push(['second', s]));
+		await waitFor(
+			() => statuses.filter(([, s]) => s === 'synced' || s === 'error').length === 2,
+			'both sends to settle'
+		);
+
+		expect(sent.filter((m) => m.relation === 'dialog_keys')).toHaveLength(1);
+
+		const messages = sent.filter((m) => m.relation === 'dialog_messages');
+		expect(messages).toHaveLength(2);
+		expect(statuses.filter(([, s]) => s === 'error')).toHaveLength(0);
+		expect(statuses.filter(([, s]) => s === 'synced')).toHaveLength(2);
+	});
+
+	it('reports an error on both sends when the key row cannot be read', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.preload = async () => {
+			throw new Error('shape unavailable');
+		};
+		const statuses = [];
+
+		store.sendMessage(PEER_HASH, 'first', (s) => statuses.push(s));
+		store.sendMessage(PEER_HASH, 'second', (s) => statuses.push(s));
+		await waitFor(() => statuses.filter((s) => s === 'error').length === 2, 'both sends to fail');
+
+		expect(sent.filter((m) => m.relation === 'dialog_messages')).toHaveLength(0);
+		expect(statuses.filter((s) => s === 'error')).toHaveLength(2);
 	});
 });
 
