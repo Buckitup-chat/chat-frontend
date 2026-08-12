@@ -7,6 +7,8 @@
 // with no subscribers stop syncing and free memory after `gcTime`.
 import { createCollection } from '@tanstack/db';
 import { electricCollectionOptions } from '@tanstack/electric-db-collection';
+import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence';
+import { getPersistence } from './persistence';
 import { alwaysActiveVisibility } from './visibility';
 import type {
 	UserCardRow,
@@ -47,12 +49,36 @@ const assertDialogHash = (value: string): string => {
 
 const shapeDefaults = { parser, runtimeVisibility: alwaysActiveVisibility };
 
+// Wrap an Electric collection config with the shared SQLite persistence when
+// it is available (initPersistence() ran and OPFS exists). Electric stores its
+// shape cursor in the persisted metadata, so a wrapped collection warm-starts
+// from disk and resumes the stream from the stored offset instead of
+// re-fetching the shape. Without persistence the config passes through
+// untouched — same in-memory behaviour as before.
+//
+// Bump SCHEMA_VERSION when a row type changes shape; mismatched local data is
+// then dropped and re-synced from the server (the server is always the source
+// of truth — local SQLite is only a cache plus outbox).
+const SCHEMA_VERSION = 1;
+
+// The wrapped config's generics survive at runtime; typing the passthrough
+// exactly would just duplicate the library's own overloads.
+const persisted = <C extends { id?: string }>(config: C): C => {
+	const persistence = getPersistence();
+	if (!persistence) return config;
+	return persistedCollectionOptions({
+		...(config as C & Parameters<typeof persistedCollectionOptions>[0]),
+		persistence,
+		schemaVersion: SCHEMA_VERSION,
+	}) as unknown as C;
+};
+
 // ---------- global collections ----------
 
 let userCards: ReturnType<typeof buildUserCards> | null = null;
 const buildUserCards = () =>
 	createCollection(
-		electricCollectionOptions<UserCardRow>({
+		persisted(electricCollectionOptions<UserCardRow>({
 			id: 'user_cards',
 			shapeOptions: {
 				// /shapes is the sanctioned endpoint going forward (backend team,
@@ -63,7 +89,7 @@ const buildUserCards = () =>
 				...shapeDefaults,
 			},
 			getKey: (r) => r.user_hash,
-		})
+		}))
 	);
 
 export function getUserCardsCollection() {
@@ -74,7 +100,7 @@ export function getUserCardsCollection() {
 let userStorage: ReturnType<typeof buildUserStorage> | null = null;
 const buildUserStorage = () =>
 	createCollection(
-		electricCollectionOptions<UserStorageRow>({
+		persisted(electricCollectionOptions<UserStorageRow>({
 			id: 'user_storage',
 			shapeOptions: {
 				url: electricUrl('/shapes'),
@@ -82,7 +108,7 @@ const buildUserStorage = () =>
 				...shapeDefaults,
 			},
 			getKey: (r) => `${r.user_hash}|${r.uuid}`,
-		})
+		}))
 	);
 
 export function getUserStorageCollection() {
@@ -110,44 +136,44 @@ const buildDialogCollections = (dialogHash: string) => {
 	const suffix = dialogHash.slice(0, 24);
 	return {
 		keys: createCollection(
-			electricCollectionOptions<DialogKeyRow>({
+			persisted(electricCollectionOptions<DialogKeyRow>({
 				id: `dk-${suffix}`,
 				shapeOptions: dialogShape('dialog_keys', dialogHash),
 				getKey: (r) => `${r.dialog_hash}|${r.sender_hash}`,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 		messages: createCollection(
-			electricCollectionOptions<DialogMessageRow>({
+			persisted(electricCollectionOptions<DialogMessageRow>({
 				id: `dm-${suffix}`,
 				shapeOptions: dialogShape('dialog_messages', dialogHash),
 				getKey: (r) => r.message_id,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 		versions: createCollection(
-			electricCollectionOptions<DialogMessageVersionRow>({
+			persisted(electricCollectionOptions<DialogMessageVersionRow>({
 				id: `dmv-${suffix}`,
 				shapeOptions: dialogShape('dialog_messages_versions', dialogHash),
 				getKey: (r) => `${r.message_id}|${r.sign_hash}`,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 		reactions: createCollection(
-			electricCollectionOptions<DialogMessageReactionRow>({
+			persisted(electricCollectionOptions<DialogMessageReactionRow>({
 				id: `dmr-${suffix}`,
 				shapeOptions: dialogShape('dialog_message_reactions', dialogHash),
 				getKey: (r) => r.reaction_hash,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 		receipts: createCollection(
-			electricCollectionOptions<DialogMessageReceiptRow>({
+			persisted(electricCollectionOptions<DialogMessageReceiptRow>({
 				id: `dmc-${suffix}`,
 				shapeOptions: dialogShape('dialog_message_receipts', dialogHash),
 				getKey: (r) => r.receipt_hash,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 	};
 };

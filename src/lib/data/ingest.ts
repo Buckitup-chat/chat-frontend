@@ -11,6 +11,7 @@
 import { api } from '@/api/client';
 import { mutationAppliedOnServer } from './confirm';
 import { awaitShapeVisibility, collectionForRelation } from './barrier';
+import { enqueue, resolveEntry, recordFailure, drainOutbox } from './outbox';
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
@@ -191,12 +192,49 @@ interface MutationShape {
  * can sign against a tip the server has already superseded — the HTTP 200
  * only proves the Postgres commit, not shape delivery.
  */
+// Which row field names the signing account, per relation. Used to partition
+// outbox entries: only the account whose key signed a mutation may replay it.
+const OWNER_FIELD: Record<string, string> = {
+	user_cards: 'user_hash',
+	user_storage: 'user_hash',
+	dialog_keys: 'sender_hash',
+	dialog_messages: 'sender_hash',
+	dialog_messages_versions: 'sender_hash',
+	dialog_message_reactions: 'reactor_hash',
+	dialog_message_receipts: 'peer_hash',
+};
+
+const ownerOf = (mutations: unknown[]): string => {
+	const first = mutations[0] as MutationShape | undefined;
+	const relation = first?.syncMetadata?.relation;
+	if (!relation) return '';
+	const row = first?.modified ?? first?.changes;
+	const field = OWNER_FIELD[relation];
+	const value = field ? row?.[field] : undefined;
+	return typeof value === 'string' ? value : '';
+};
+
 export async function sendMutationsAndAwaitShape(
 	mutations: unknown[],
 	signSkey: Uint8Array,
 	opts: RetryOptions = {}
 ): Promise<SendResult> {
-	const result = await sendMutationsWithRetry(mutations, signSkey, opts);
+	// Durability first: the signed mutations hit IndexedDB before the network,
+	// so a reload or crash mid-send replays them on the next login instead of
+	// losing them. The entry is removed only after the server confirms.
+	const outboxId = await enqueue(mutations, ownerOf(mutations));
+
+	let result: SendResult;
+	try {
+		result = await sendMutationsWithRetry(mutations, signSkey, opts);
+	} catch (e) {
+		// Permanent rejections die in the outbox too; transient failures stay
+		// for the next drain. Either way the caller sees the same error as
+		// before the outbox existed.
+		await recordFailure(outboxId, e);
+		throw e;
+	}
+	await resolveEntry(outboxId);
 
 	const first = mutations[0] as MutationShape | undefined;
 	const relation = first?.syncMetadata?.relation;
@@ -205,4 +243,24 @@ export async function sendMutationsAndAwaitShape(
 		await awaitShapeVisibility(collectionForRelation(relation, row), result.txids, relation);
 	}
 	return result;
+}
+
+/**
+ * Replay writes that never got a server confirmation — after login (keys just
+ * became available) and on reconnect. The mutations were signed when created,
+ * so they replay verbatim; only the auth challenge needs the live key.
+ */
+export async function drainPendingWrites(userHash: string, signSkey: Uint8Array): Promise<void> {
+	try {
+		const result = await drainOutbox(userHash, (mutations) =>
+			sendMutationsWithRetry(mutations, signSkey, { retries: 1 })
+		);
+		if (result.sent > 0 || result.dropped > 0) {
+			console.log(
+				`[outbox] drained: ${result.sent} delivered, ${result.dropped} dropped, ${result.remaining} left`
+			);
+		}
+	} catch (e) {
+		console.warn('[outbox] drain failed, will retry on next trigger:', e);
+	}
 }

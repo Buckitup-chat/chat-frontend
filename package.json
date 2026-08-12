@@ -21,6 +21,7 @@
   "dependencies": {
     "@electric-sql/client": "^1.4.1",
     "@fontsource/inter": "^5.2.8",
+    "@journeyapps/wa-sqlite": "^1.7.2",
     "@lo-fi/local-data-lock": "^0.16.0",
     "@lo-fi/local-vault": "^0.18.0",
     "@lo-fi/webauthn-local-client": "^0.3000.0",
@@ -28,8 +29,10 @@
     "@noble/post-quantum": "^0.5.4",
     "@noble/secp256k1": "^2.2.3",
     "@popperjs/core": "^2.11.8",
+    "@tanstack/browser-db-sqlite-persistence": "^0.2.9",
     "@tanstack/db": "^0.6.17",
     "@tanstack/electric-db-collection": "^0.3.15",
+    "@tanstack/offline-transactions": "^1.0.42",
     "@vueuse/core": "^13.0.0",
     "aes-js": "^3.1.2",
     "axios": "^1.8.4",

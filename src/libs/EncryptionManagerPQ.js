@@ -10,7 +10,7 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { api } from '@/api/client';
-import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
+import { sendMutationsAndAwaitShape, drainPendingWrites } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { getStorageRow, upsertStorageRow, STORAGE_SLOTS } from '@/lib/data/userStorage';
@@ -251,10 +251,42 @@ export class EncryptionManagerPQ extends EventTarget {
 
     this.#dispatchAuthChange();
 
+    // Writes queued before a reload/crash can replay now that the signing key
+    // is available again. Background: a slow drain must not delay login.
+    this.#startOutboxDrain();
+
     return identity;
   }
 
+  // Replays the durable outbox for the logged-in account: once right away,
+  // and again whenever connectivity returns. The listener is bound to the
+  // account and dropped on logout — entries signed by another user must not
+  // be replayed with this session's auth.
+  #outboxOnlineListener = null;
+
+  #startOutboxDrain() {
+    const userHash = this.#currentUserHash;
+    const signSkey = this.#signSkey;
+    if (!userHash || !signSkey) return;
+
+    drainPendingWrites(userHash, signSkey);
+
+    this.#stopOutboxDrain();
+    this.#outboxOnlineListener = () => drainPendingWrites(userHash, signSkey);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', this.#outboxOnlineListener);
+    }
+  }
+
+  #stopOutboxDrain() {
+    if (this.#outboxOnlineListener && typeof window !== 'undefined') {
+      window.removeEventListener('online', this.#outboxOnlineListener);
+    }
+    this.#outboxOnlineListener = null;
+  }
+
   async logout() {
+    this.#stopOutboxDrain();
     if (this.#signSkey) {
       this.#signSkey.fill(0);
       this.#signSkey = null;

@@ -53,6 +53,8 @@ vi.mock('@/lib/data/collections', () => ({
 
 vi.mock('@/lib/data/ingest', () => ({
 	sendMutationsAndAwaitShape: (m) => sendImpl(m),
+	// Login triggers a background outbox drain; irrelevant to these tests.
+	drainPendingWrites: async () => {},
 }));
 
 vi.mock('@/lib/data/userStorage', () => ({
