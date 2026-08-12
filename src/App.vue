@@ -116,6 +116,7 @@
 import { web3Store } from '@/store/web3.store';
 
 import { userPQStore } from '@/store/userPQ.store';
+import { initPersistence } from '@/lib/data/persistence';
 
 import { userStore } from '@/store/user.store';
 
@@ -174,13 +175,18 @@ watch(
 	},
 );
 
-	onMounted(() => {
+	onMounted(async () => {
 		window.addEventListener('online', () => ($user.isOnline = navigator.onLine));
 		window.addEventListener('offline', () => ($user.isOnline = navigator.onLine));
 		setTimeout(function tick() {
 			timestamp.value = Math.floor(Date.now().valueOf() / 1000);
 			setTimeout(tick, 1000);
 		}, 1000);
+
+		// Must resolve before the first collection is built: collections
+		// created earlier would silently run in-memory. Resolves false (and
+		// the app runs exactly as before) when OPFS is unavailable.
+		await initPersistence();
 
 		$userPQ.initialize();
 	});

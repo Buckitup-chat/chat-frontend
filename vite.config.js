@@ -97,6 +97,11 @@ export default defineConfig(({ command }) => {
 			},
 			exclude: [
 				'@lo-fi/webauthn-local-client',
+				// Ships its OPFS worker + wasm as relative-URL assets; Vite's
+				// dep pre-bundling breaks those URLs ("OPFS worker terminated
+				// unexpectedly"), so serve both packages unbundled.
+				'@tanstack/browser-db-sqlite-persistence',
+				'@journeyapps/wa-sqlite',
 			],
 			include: [
 				'@noble/hashes',
