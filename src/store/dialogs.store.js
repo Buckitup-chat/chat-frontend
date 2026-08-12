@@ -444,13 +444,21 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // effective state is therefore server state overlaid with the latest
     // in-flight intent, and only the FINAL intent is actually written —
     // intermediate clicks collapse.
-    const reactionIntents = new Map(); // reaction_hash -> { desiredActive, messageSignHash }
+    //
+    // An intent outlives its own write. Dropping it the moment the write
+    // starts left the interval between "request sent" and "shape caught up"
+    // unguarded: a click arriving there saw neither a server row nor an
+    // intent, concluded the reaction was off, and re-sent "on" — so a second
+    // click during a slow write silently repeated the first instead of
+    // undoing it. The intent is therefore cleared only once the write has
+    // settled, and `written` stops a queued duplicate from re-sending it.
+    const reactionIntents = new Map(); // reaction_hash -> { desiredActive, messageSignHash, written }
     const reactionQueues = new Map();  // reaction_hash -> Promise
 
     const runReactionWrite = async (reactionHash, ctx) => {
         const intent = reactionIntents.get(reactionHash);
-        if (!intent) return;
-        reactionIntents.delete(reactionHash);
+        if (!intent || intent.written) return;
+        intent.written = true;
 
         const { dialogHash, messageId, emoji, myKey, myHash } = ctx;
         const dialogColls = getDialogCollections(dialogHash);
@@ -477,7 +485,24 @@ export const useDialogsStore = defineStore('dialogs', () => {
         };
 
         // Existing row (even a tombstone, even on another revision) → update
-        await pushRow('dialog_message_reactions', row, existing ? 'update' : 'insert');
+        try {
+            await pushRow('dialog_message_reactions', row, existing ? 'update' : 'insert');
+        } catch (e) {
+            // Transient: the write may still land, and the UI keeps showing the
+            // desired state, so the intent has to stay to keep the next click
+            // inverting from what the user sees. Permanent: fall through and
+            // drop it, back to server truth.
+            if (!e?.permanent && reactionIntents.get(reactionHash) === intent) {
+                intent.written = false;
+            }
+            throw e;
+        } finally {
+            // Only if nobody clicked again: a newer click replaced the entry,
+            // and that one still needs to be written.
+            if (reactionIntents.get(reactionHash) === intent && intent.written) {
+                reactionIntents.delete(reactionHash);
+            }
+        }
     };
 
     const toggleReaction = async (peerHash, { messageId, messageSignHash, emoji }) => {
@@ -504,7 +529,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const effectiveActive = pending ? pending.desiredActive : serverActive;
         const desiredActive = !effectiveActive;
 
-        reactionIntents.set(reactionHash, { desiredActive, messageSignHash });
+        reactionIntents.set(reactionHash, { desiredActive, messageSignHash, written: false });
 
         const optimisticId = addOptimisticReaction(dialogHash, messageId, emoji, reactionHash, desiredActive);
 
