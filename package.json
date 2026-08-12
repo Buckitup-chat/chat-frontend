@@ -15,6 +15,9 @@
     "preview": "vite preview",
     "lint": "eslint src",
     "format": "prettier --write src",
+    "ratchet": "node scripts/ts-ratchet.mjs",
+    "ratchet:list": "node scripts/ts-ratchet.mjs --list",
+    "ratchet:update": "node scripts/ts-ratchet.mjs --update",
     "test": "vitest run",
     "test:watch": "vitest"
   },

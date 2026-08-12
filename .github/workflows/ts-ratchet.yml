@@ -1,0 +1,26 @@
+name: TS Ratchet
+
+# Guards the JS -> TS migration: the number of untyped files may only go down.
+# Kept as its own workflow (not a step in checks.yml) so the typecheck gate and
+# this progress gate can evolve independently.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ratchet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # No dependencies needed: the script is plain Node with no imports
+      # beyond node: builtins, so this job stays fast and never blocks on npm.
+      - name: Check TypeScript ratchet
+        run: npm run ratchet

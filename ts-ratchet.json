@@ -1,0 +1,5 @@
+{
+  "_comment": "TypeScript migration ratchet baseline. These counts may only decrease. Run `npm run ratchet:update` after converting files, and commit this file. See docs/typescript-guidelines.md.",
+  "jsFiles": 35,
+  "untypedVueFiles": 65
+}
