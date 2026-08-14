@@ -9,7 +9,7 @@
 			</div>
 		</div>
 		<div class="_list">
-			<div class="_contact" @click="select(contact.address)" v-for="contact in filteredList" :class="{ _selected: isSelected(contact.address) }">
+			<div class="_contact" @click="select(contact.address)" v-for="contact in filteredList" :key="contact.user_hash" :class="{ _selected: isSelected(contact.address) }">
 				<Account_Item_PQ :account="contact" class="w-100" />
 			</div>
 		</div>
@@ -55,7 +55,7 @@
 <script setup>
 import { ref, computed } from 'vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
-import { useLiveQuery } from '@electric-sql/pglite-vue';
+import { userPQStore } from '@/store/userPQ.store';
 
 const search = ref('');
 
@@ -69,11 +69,10 @@ const isSelected = (address) => {
 	return selected.findIndex((a) => a === address) > -1;
 };
 
-// Query all user_cards
-const dbUsers = useLiveQuery(`SELECT * from user_cards WHERE NOT deleted_flag ORDER BY name ASC;`);
+const $userPQ = userPQStore();
 
 const users = computed(() => {
-	return (dbUsers?.rows?.value ?? []).map(u => ({
+	return $userPQ.allNetworkUsers.map(u => ({
 		...u,
 		address: u.user_hash // Alias for Account_Item compatibility
 	}));

@@ -1,7 +1,15 @@
 import { defineStore } from 'pinia';
-import { ref, shallowRef, computed, watch } from 'vue';
+import { ref, computed, watch } from 'vue';
+import { useLiveQuery } from '@tanstack/vue-db';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { localDB } from '@/utils/db/localDBv2';
+import {
+  userCardsCollection,
+  pendingUserCardsCollection,
+  cachedUserCardsCollection,
+  previewUserCardsCollection,
+  isCacheHydrated,
+} from '@/utils/db/tanstack/user';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
@@ -13,10 +21,23 @@ export const userPQStore = defineStore('userPQ', () => {
 
   const currentUser = ref(null);
   const myLocalUsers = ref([]);
-  const allNetworkUsers = shallowRef([]);
-  let liveQueryObj = null;
-  let liveQueryRows = null;
-  let liveQueryRaf = null;
+  
+  const { data: networkUserCards, isReady: isElectricUsersReady } = useLiveQuery(userCardsCollection);
+  const { data: pendingUserCards } = useLiveQuery(pendingUserCardsCollection);
+  const { data: cachedUserCards } = useLiveQuery(cachedUserCardsCollection);
+  const { data: previewUserCards } = useLiveQuery(previewUserCardsCollection);
+
+  const isNetworkUsersReady = computed(() => isElectricUsersReady.value || isCacheHydrated.value);
+  const allNetworkUsers = computed(() => {
+    const byHash = new Map();
+    for (const u of cachedUserCards.value) byHash.set(u.user_hash, u);
+    for (const u of previewUserCards.value) byHash.set(u.user_hash, u);
+    for (const u of networkUserCards.value) byHash.set(u.user_hash, u);
+    for (const u of pendingUserCards.value) byHash.set(u.user_hash, u);
+    return Array.from(byHash.values())
+      .filter((u) => !u.deleted_flag)
+      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  });
 
   const contactsMap = ref({});
   const contacts = computed(() => {
@@ -55,27 +76,6 @@ export const userPQStore = defineStore('userPQ', () => {
 
   const initDbAndLiveQuery = async () => {
     await localDB.init();
-
-    try {
-      liveQueryObj = await localDB.db.live.query('SELECT * FROM user_cards WHERE NOT deleted_flag ORDER BY name ASC');
-      allNetworkUsers.value = liveQueryObj.initialResults.rows;
-      liveQueryObj.subscribe((result) => {
-        console.time('liveQuery calback');
-        if (allNetworkUsers.value.length === 0 && result.rows.length > 0) {
-          console.timeEnd('post-init wait');
-        }
-        liveQueryRows = result.rows;
-        if (!liveQueryRaf) {
-          liveQueryRaf = requestAnimationFrame(() => {
-            liveQueryRaf = null;
-            allNetworkUsers.value = liveQueryRows;
-          });
-        }
-        console.timeEnd('liveQuery calback');
-      });
-    } catch (e) {
-      console.warn('[userStore] Live query failed, falling back to manual refresh:', e);
-    }
 
     isInitialized.value = true;
 
@@ -167,9 +167,7 @@ export const userPQStore = defineStore('userPQ', () => {
   };
 
   const refreshNetworkUsers = async () => {
-    if (!liveQueryObj) {
-      allNetworkUsers.value = await localDB.getUsers();
-    }
+    await userCardsCollection.preload();
   };
 
   const updateCurrentUserName = async (newName) => {
@@ -177,10 +175,7 @@ export const userPQStore = defineStore('userPQ', () => {
 
     currentUser.value.name = newName;
 
-    await localDB.upsertUserLocal({
-      user_hash: currentUserHash.value,
-      name: newName
-    });
+    await em.value.updateUserCardName(newName);
 
     await refreshMyLocalUsers();
     return true;
@@ -200,16 +195,6 @@ export const userPQStore = defineStore('userPQ', () => {
       if (notes !== undefined) currentUser.value.userStorage.notes = notes;
       if (avatarUuid !== undefined) currentUser.value.userStorage.avatarUuid = avatarUuid;
     }
-
-    await localDB.upsertUserLocal({
-      user_hash: currentUserHash.value,
-      name: currentUser.value?.name,
-      sign_pkey: currentUser.value?.sign_pkey,
-      crypt_pkey: currentUser.value?.crypt_pkey,
-      crypt_cert: currentUser.value?.crypt_cert,
-      contact_pkey: currentUser.value?.contact_pkey,
-      contact_cert: currentUser.value?.contact_cert
-    });
 
     await refreshMyLocalUsers();
     return true;
@@ -327,6 +312,7 @@ export const userPQStore = defineStore('userPQ', () => {
     currentUser: currentUserFull,
     myLocalUsers,
     allNetworkUsers,
+    isNetworkUsersReady,
     isOnline,
 
     pqUserCards,
