@@ -73,3 +73,12 @@ Pushing to `main` triggers `.github/workflows/deploy-staging.yml`: the staging s
 - No one-off scripts in the repo root: recurring utilities live in `scripts/`, experiments stay out of git (history keeps everything if needed).
 - Work notes and reports go to `docs/` or the PR description, not the repo root.
 - Tests live in `tests/` and run via `npm test`.
+
+### TypeScript adoption
+
+TypeScript is opt-in, checked with `npm run typecheck` (`vue-tsc --noEmit`, `strict: true`):
+
+- New modules are written in TypeScript (`.ts`).
+- New Vue components use `<script setup lang="ts">`.
+- Existing `.js` files are not migrated in bulk — convert a file to TypeScript only when it's already undergoing a substantial rewrite.
+- New code must not add ESLint warnings.

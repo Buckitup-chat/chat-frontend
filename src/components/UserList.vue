@@ -5,31 +5,36 @@ import { ref, computed } from 'vue'
 import { useLiveQuery } from '@electric-sql/pglite-vue'
 import { userPQStore } from '@/store/userPQ.store'
 
+interface UserCard {
+  user_hash: string
+  name: string
+}
+
 const emit = defineEmits<{ select: [address: string] }>()
 
-const { selected } = defineProps({
-  selected: { type: Array, default: () => [] },
+const props = withDefaults(defineProps<{ selected?: string[] }>(), {
+  selected: () => [],
 })
 
 const $userPQ = userPQStore()
 
 const search = ref('')
 
-const dbUsers = useLiveQuery(`SELECT * from user_cards WHERE NOT deleted_flag ORDER BY name ASC;`)
+const dbUsers = useLiveQuery<UserCard>(`SELECT * from user_cards WHERE NOT deleted_flag ORDER BY name ASC;`)
 
-const dbUsersLocal = useLiveQuery(`SELECT * from user_cards WHERE modified_columns IS NOT NULL;`)
+const dbUsersLocal = useLiveQuery<UserCard>(`SELECT * from user_cards WHERE modified_columns IS NOT NULL;`)
 
-const users: any = computed(() => dbUsers?.rows?.value ?? [])
+const users = computed(() => dbUsers?.rows?.value ?? [])
 
-const usersLocal: any = computed(() => dbUsersLocal?.rows?.value ?? [])
+const usersLocal = computed(() => dbUsersLocal?.rows?.value ?? [])
 
 const hasUsers = computed(() => users.value.length > 0)
 
-const isSelected = (address) => {
-  return selected.findIndex((a) => a === address) > -1
+const isSelected = (address: string) => {
+  return props.selected.findIndex((a) => a === address) > -1
 }
 
-const select = (address) => {
+const select = (address: string) => {
   emit('select', address)
 }
 
