@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { localDB } from '@/utils/db/localDBv2';
+import { getUser as getUserCard } from '@/utils/db/tanstack/user';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
@@ -103,7 +104,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             );
             
             // Get peer's user card to find their crypt_pkey
-            const peerCard = await localDB.getUser(peerHash);
+            const peerCard = await getUserCard(peerHash);
             if (!peerCard || !peerCard.crypt_pkey) {
                 throw new Error("Peer crypt_pkey not found");
             }

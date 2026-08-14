@@ -2,13 +2,8 @@
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue'
 import SyncStatus from './SyncStatus.vue'
 import { ref, computed } from 'vue'
-import { useLiveQuery } from '@electric-sql/pglite-vue'
 import { userPQStore } from '@/store/userPQ.store'
-
-interface UserCard {
-  user_hash: string
-  name: string
-}
+import { queueStatus } from '@/utils/db/tanstack/userQueue'
 
 const emit = defineEmits<{ select: [address: string] }>()
 
@@ -20,15 +15,15 @@ const $userPQ = userPQStore()
 
 const search = ref('')
 
-const dbUsers = useLiveQuery<UserCard>(`SELECT * from user_cards WHERE NOT deleted_flag ORDER BY name ASC;`)
-
-const dbUsersLocal = useLiveQuery<UserCard>(`SELECT * from user_cards WHERE modified_columns IS NOT NULL;`)
-
-const users = computed(() => dbUsers?.rows?.value ?? [])
-
-const usersLocal = computed(() => dbUsersLocal?.rows?.value ?? [])
+const users = computed(() => $userPQ.allNetworkUsers);
 
 const hasUsers = computed(() => users.value.length > 0)
+
+const isSynced = computed(() => (
+  queueStatus.value.pending === 0 &&
+  queueStatus.value.awaitingRemote === 0 &&
+  queueStatus.value.quarantined === 0
+))
 
 const isSelected = (address: string) => {
   return props.selected.findIndex((a) => a === address) > -1
@@ -54,8 +49,8 @@ const filtered = computed(() => {
 <template>
   <div class="_users_list" :class="{ _has_users: hasUsers }">
     <div v-if="hasUsers">
-      <div class="flex align-center mb-1 w-full" v-if="hasUsers">
-        <SyncStatus :isSynced="usersLocal.length == 0" />
+      <div class="flex align-center mb-1 w-full">
+        <SyncStatus :isSynced="isSynced" />
       </div>
 
       <div class="_search mb-1">
@@ -69,7 +64,7 @@ const filtered = computed(() => {
     </div>
 
     <div class="_list">
-      <div class="_user" @click="select(user.user_hash)" v-for="user in filtered" :class="{ _selected: isSelected(user.user_hash) }">
+      <div class="_user" @click="select(user.user_hash)" v-for="user in filtered" :key="user.user_hash" :class="{ _selected: isSelected(user.user_hash) }">
         <Account_Item_PQ :account="user" class="w-100" />
       </div>
     </div>

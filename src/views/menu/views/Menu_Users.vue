@@ -9,11 +9,13 @@ import { useMenu } from '@/composables/useMenu';
 
 import Users_List from '@/views/users/Users_List.vue';
 import { ref, inject, watch, onMounted, computed } from 'vue';
-import { useLiveQuery } from '@electric-sql/pglite-vue';
+import { userPQStore } from '@/store/userPQ.store';
 
 const $route = inject('$route');
 const $router = inject('$router');
 const { isOpen: $menuOpened, close: closeMenu } = useMenu();
+
+const $userPQ = userPQStore();
 
 const selected = ref([]);
 
@@ -23,10 +25,8 @@ const select = (address) => {
 	closeMenu();
 };
 
-const dbUsers = useLiveQuery(`SELECT count(*) as count from user_cards WHERE NOT deleted_flag;`);
-
 const hasUsers = computed(() => {
-	return (dbUsers?.rows?.value?.[0]?.count ?? 0) > 0;
+	return $userPQ.allNetworkUsers.length > 0;
 });
 
 onMounted(async () => {
