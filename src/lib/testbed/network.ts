@@ -406,7 +406,7 @@ export async function networkRunRecovery(backupId: `0x${string}`, log: LogFn): P
 	await networkCollectAndCombine(backupId, recipient, recipientPk, log);
 }
 
-function findGuardianDevice(eoa: string): { spendingPrivateKey: string; stealthAddress: string; eoaPrivateKey: string; ephemeralPubKey: string } | null {
+function findGuardianDevice(eoa: string): { spendingPrivateKey: `0x${string}`; stealthAddress: string; eoaPrivateKey: `0x${string}`; ephemeralPubKey: string } | null {
 	try {
 		const raw = localStorage.getItem('testbed.guardians');
 		if (!raw) return null;
