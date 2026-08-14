@@ -87,9 +87,13 @@ export function _setStorageForTests(adapter: StringStore, rawAdapter?: StringSto
 }
 
 let seq = 0;
+// Distinguishes tabs: timestamp+seq alone collide when two tabs enqueue in
+// the same millisecond (each tab counts its own seq from 0), and a collision
+// is one tab's pending write silently overwriting another's.
+const tabNonce = Math.random().toString(36).slice(2, 6).padStart(4, '0');
 /** Sortable id: insertion order survives keys() returning in any order. */
 const nextId = (): string =>
-	`${Date.now().toString(36).padStart(9, '0')}-${(seq++).toString(36).padStart(4, '0')}`;
+	`${Date.now().toString(36).padStart(9, '0')}-${(seq++).toString(36).padStart(4, '0')}-${tabNonce}`;
 
 const relationOf = (mutations: unknown[]): string => {
 	const first = mutations[0] as { syncMetadata?: { relation?: string } } | undefined;
