@@ -13,7 +13,7 @@
 
 <script setup>
 import { userPQStore } from '@/store/userPQ.store';
-
+import { previewUserCard } from '@/utils/db/tanstack/user';
 
 import { ref, reactive, inject, onMounted, onBeforeUnmount } from 'vue';
 import QRCode from 'qrcode';
@@ -213,12 +213,7 @@ const setupDataChannelListener = () => {
 			try {
 				const msg = JSON.parse(event.data);
 				if (msg.type === 'USER_CARD' && msg.card) {
-					// We received the card. Add to allNetworkUsers
-					const card = msg.card;
-					const exists = $userPQ.allNetworkUsers.some(u => u.user_hash === card.user_hash);
-					if (!exists) {
-						$userPQ.allNetworkUsers.push(card);
-					}
+					previewUserCard(msg.card);
 					finishHandshake();
 				}
 			} catch (e) {

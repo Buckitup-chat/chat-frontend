@@ -9,6 +9,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { localDB } from '../utils/db/localDBv2';
+import { upsertUser, upsertUserStorage, getUserStorage, setUserAuthProvider, triggerUserFlush, purgeUserData } from '../utils/db/tanstack/user';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 
 const VAULT_KEY_OPTIONS = {
@@ -54,6 +55,11 @@ export class EncryptionManagerPQ extends EventTarget {
     EncryptionManagerPQ.instance = this;
 
     localDB.setAuthProvider(() => this.#signSkey);
+    setUserAuthProvider(() => (
+      this.#signSkey && this.#currentUserHash
+        ? { signSkey: this.#signSkey, userHash: this.#currentUserHash }
+        : null
+    ));
 
     this.#loadLocalUserCards()
   }
@@ -136,7 +142,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await this.#saveLocalUserCards();
 
-    await localDB.upsertUserLocal({
+    await upsertUser({
       user_hash: userHash,
       sign_pkey: identity.sign_pkey,
       crypt_pkey: identity.crypt_pkey,
@@ -215,6 +221,7 @@ export class EncryptionManagerPQ extends EventTarget {
     console.log(`Logged in: ${identity.name} (${userHash})`);
 
     this.#dispatchAuthChange();
+    triggerUserFlush();
 
     return identity;
   }
@@ -266,6 +273,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     this.#localUserCards.splice(identityIndex, 1);
     await this.#saveLocalUserCards();
+    await purgeUserData(userHash);
     console.log(`Deleted user vault: ${userHash}`);
   }
 
@@ -381,7 +389,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards.push(identity);
     await this.#saveLocalUserCards();
 
-    await localDB.upsertUserLocal({
+    await upsertUser({
       user_hash: identity.user_hash,
       sign_pkey: identity.sign_pkey,
       crypt_pkey: identity.crypt_pkey,
@@ -397,7 +405,6 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   // Update User Storage
-
   async updateUserStorage({ name, notes, avatarUuid, avatarDataUrl }) {
     if (!this.#currentUserHash) {
       throw new Error('No user is currently logged in');
@@ -420,7 +427,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    await localDB.upsertUserStorage({
+    await upsertUserStorage({
       userHash: this.#currentUserHash,
       uuid: 'profile',
       valueB64: combined,
@@ -459,7 +466,7 @@ export class EncryptionManagerPQ extends EventTarget {
     );
 
     if (cardChanged) {
-      await localDB.upsertUserLocal({
+      await upsertUser({
         user_hash: updated.user_hash,
         sign_pkey: updated.sign_pkey,
         crypt_pkey: updated.crypt_pkey,
@@ -473,11 +480,17 @@ export class EncryptionManagerPQ extends EventTarget {
     return updated;
   }
 
+  async updateUserCardName(name) {
+    if (!this.#currentUserHash) throw new Error('No user is currently logged in');
+
+    await upsertUser({ user_hash: this.#currentUserHash, name });
+  }
+
   async loadUserProfile() {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
     if (!this.#cryptSkey) return null;
 
-    const storage = await localDB.getUserStorage(this.#currentUserHash, 'profile');
+    const storage = await getUserStorage(this.#currentUserHash, 'profile');
     if (!storage || !storage.value_b64) return null;
 
     const combined = decodeHexOrBase64(storage.value_b64);
@@ -518,7 +531,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    await localDB.upsertUserStorage({
+    await upsertUserStorage({
       userHash: this.#currentUserHash,
       uuid: 'contacts',
       valueB64: combined,
@@ -532,7 +545,7 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
     if (!this.#cryptSkey) return [];
 
-    const storage = await localDB.getUserStorage(this.#currentUserHash, 'contacts');
+    const storage = await getUserStorage(this.#currentUserHash, 'contacts');
     if (!storage || !storage.value_b64) return [];
 
     const combined = decodeHexOrBase64(storage.value_b64);
@@ -584,7 +597,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     console.log('Calling upsertUserStorage with:', { uuid, valueLen: combined.length });
 
-    await localDB.upsertUserStorage({
+    await upsertUserStorage({
       userHash: this.#currentUserHash,
       uuid,
       valueB64: combined,
@@ -603,7 +616,7 @@ export class EncryptionManagerPQ extends EventTarget {
       throw new Error('Crypt key not loaded');
     }
 
-    const storage = await localDB.getUserStorage(this.#currentUserHash, uuid);
+    const storage = await getUserStorage(this.#currentUserHash, uuid);
     if (!storage || !storage.value_b64) {
       return null;
     }

@@ -8,8 +8,6 @@ import { api } from "../../api/client";
 import { useOnlineStatus } from "../../composables/useOnlineStatus";
 
 const TABLE_PKS = {
-  user_cards: ['user_hash'],
-  user_storage: ['user_hash', 'uuid'],
   dialog_keys: ['dialog_hash', 'sender_hash'],
   dialog_messages: ['message_id'],
   dialog_messages_versions: ['message_id', 'sign_hash'],
@@ -28,8 +26,6 @@ class LocalDBv2 {
   #getSignSkey = null;
 
   #tables = [
-    { table: 'user_cards', factory: 'userCard' },
-    { table: 'user_storage', factory: 'storage' },
     { table: 'dialog_keys', factory: 'generic' },
     { table: 'dialog_messages', factory: 'generic' },
     { table: 'dialog_messages_versions', factory: 'generic' },
@@ -122,19 +118,6 @@ class LocalDBv2 {
       return u.startsWith('http') ? u : `${location.origin}${u}`;
     };
 
-    const criticalShapes = {
-      user_cards: {
-        shape: { url: absUrl('/user_card'), params: { table: 'user_cards' } },
-        table: 'user_cards',
-        primaryKey: ['user_hash'],
-      },
-      user_storage: {
-        shape: { url: absUrl('/user_storage'), params: { table: 'user_storage' } },
-        table: 'user_storage',
-        primaryKey: ['user_hash', 'uuid'],
-      },
-    };
-
     const dialogShapes = {
       dialog_keys: {
         shape: { url: absUrl('/dialog_key'), params: { table: 'dialog_keys' } },
@@ -162,16 +145,15 @@ class LocalDBv2 {
 
     try {
       const sync = await this.db.electric.syncShapesToTables({
-        shapes: criticalShapes,
-        key: 'chat-critical',
+        shapes: dialogShapes,
+        key: 'chat-dialog',
         onInitialSync: () => {
           console.timeEnd('sync init');
-          console.log(`[Phase 1: ${Object.keys(criticalShapes).length} shapes] initial sync done`);
-          this.#initDialogSyncs(dialogShapes, setOffline);
+          console.log(`[Chat shapes: ${Object.keys(dialogShapes).length} shapes] initial sync done`);
           setTimeout(() => this.#triggerSync(), 500);
         },
         onError: (error) => {
-          console.error('Phase 1 shape sync error:', error);
+          console.error('Chat shape sync error:', error);
           setOffline();
         },
       });
@@ -188,120 +170,6 @@ class LocalDBv2 {
         console.log('Shapes already syncing');
       } else { throw e; }
     }
-  }
-
-  async #initDialogSyncs(shapes, setOffline) {
-    try {
-      const sync = await this.db.electric.syncShapesToTables({
-        shapes,
-        key: 'chat-dialog',
-        onInitialSync: () => {
-          console.log(`[Phase 2: ${Object.keys(shapes).length} shapes] initial sync done`);
-        },
-        onError: (error) => {
-          console.error('Phase 2 shape sync error:', error);
-          setOffline();
-        },
-      });
-
-      for (const shapeStream of Object.values(sync.streams)) {
-        shapeStream.subscribe(() => {
-          setTimeout(() => this.#triggerSync(), 1200);
-        });
-      }
-    } catch (e) {
-      if (e.message.includes('Already syncing')) {
-        console.log('Dialog shapes already syncing');
-      } else { throw e; }
-    }
-  }
-
-  async getUsers() {
-    if (!this.db) return [];
-    const { rows } = await this.db.query(`SELECT * FROM user_cards WHERE NOT deleted_flag ORDER BY name`);
-    return rows;
-  }
-
-  async getUser(userHash) {
-    if (!this.db) return null;
-    const { rows } = await this.db.query(
-      `SELECT * FROM user_cards WHERE user_hash = $1 AND NOT deleted_flag`,
-      [userHash]
-    );
-    return rows[0] || null;
-  }
-
-  async getPendingChanges() {
-    if (!this.db) return [];
-    const { rows } = await this.db.query(`SELECT * FROM user_cards WHERE modified_columns IS NOT NULL`);
-    return rows;
-  }
-
-  async upsertUserLocal(userData) {
-    const {
-      user_hash,
-      sign_pkey,
-      crypt_pkey,
-      crypt_cert,
-      contact_pkey,
-      contact_cert,
-      name,
-      deleted_flag = false,
-      owner_timestamp,
-      sign_b64
-    } = userData;
-
-    const changed = `user_cards.sign_pkey IS DISTINCT FROM EXCLUDED.sign_pkey
-      OR user_cards.crypt_pkey IS DISTINCT FROM EXCLUDED.crypt_pkey
-      OR user_cards.crypt_cert IS DISTINCT FROM EXCLUDED.crypt_cert
-      OR user_cards.contact_pkey IS DISTINCT FROM EXCLUDED.contact_pkey
-      OR user_cards.contact_cert IS DISTINCT FROM EXCLUDED.contact_cert
-      OR user_cards.name IS DISTINCT FROM EXCLUDED.name
-      OR user_cards.deleted_flag IS DISTINCT FROM EXCLUDED.deleted_flag
-      OR user_cards.owner_timestamp IS DISTINCT FROM EXCLUDED.owner_timestamp
-      OR user_cards.sign_b64 IS DISTINCT FROM EXCLUDED.sign_b64`;
-
-    await this.db.query(
-      `INSERT INTO user_cards (
-        user_hash, sign_pkey, crypt_pkey, crypt_cert,
-        contact_pkey, contact_cert, name, deleted_flag, owner_timestamp, sign_b64,
-        modified_columns, sent_to_server, updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ARRAY['__all__'], FALSE, NOW())
-      ON CONFLICT (user_hash) DO UPDATE SET
-        sign_pkey     = EXCLUDED.sign_pkey,
-        crypt_pkey    = EXCLUDED.crypt_pkey,
-        crypt_cert   = EXCLUDED.crypt_cert,
-        contact_pkey = EXCLUDED.contact_pkey,
-        contact_cert = EXCLUDED.contact_cert,
-        name       = EXCLUDED.name,
-        deleted_flag = EXCLUDED.deleted_flag,
-        owner_timestamp = EXCLUDED.owner_timestamp,
-        sign_b64   = EXCLUDED.sign_b64,
-        modified_columns = CASE WHEN ${changed} THEN ARRAY['__all__'] ELSE user_cards.modified_columns END,
-        sent_to_server = CASE WHEN ${changed} THEN FALSE ELSE user_cards.sent_to_server END,
-        updated_at = NOW()`,
-      [user_hash, sign_pkey, crypt_pkey, crypt_cert, contact_pkey, contact_cert, name || "", deleted_flag, owner_timestamp, sign_b64]
-    );
-
-    this.isLocalStash = true;
-    setTimeout(() => this.#triggerSync(), 100);
-  }
-
-  async markUserAsDeletedLocal(userHash) {
-    await this.db.query(
-      `INSERT INTO user_cards (user_hash, deleted_flag, modified_columns, sent_to_server, updated_at)
-       VALUES ($1, TRUE, ARRAY['__all__'], FALSE, NOW())
-       ON CONFLICT (user_hash) DO UPDATE SET
-         deleted_flag = TRUE,
-         modified_columns = CASE WHEN user_cards.deleted_flag = TRUE THEN user_cards.modified_columns ELSE ARRAY['__all__'] END,
-         sent_to_server = CASE WHEN user_cards.deleted_flag = TRUE THEN user_cards.sent_to_server ELSE FALSE END,
-         updated_at = NOW()`,
-      [userHash]
-    );
-
-    this.isLocalStash = true;
-    setTimeout(() => this.#triggerSync(), 100);
   }
 
   async getAllPendingChanges() {
@@ -369,32 +237,6 @@ class LocalDBv2 {
           const mutationType = row.deleted_flag ? 'update' : 'insert';
 
           switch (t.factory) {
-            case 'userCard':
-              if (!row.sign_pkey || !row.contact_pkey || !row.crypt_pkey) {
-                console.warn(`[localDB] Skipping mutation for ${row.user_hash} due to missing keys`);
-                continue;
-              }
-              mutations.push(api.createUserCard(row.name || 'User', {
-                user_hash: row.user_hash,
-                sign_pkey: this.#base64ToArray(row.sign_pkey),
-                contact_pkey: this.#base64ToArray(row.contact_pkey),
-                contact_cert: this.#base64ToArray(row.contact_cert),
-                crypt_pkey: this.#base64ToArray(row.crypt_pkey),
-                crypt_cert: this.#base64ToArray(row.crypt_cert),
-                sign_skey: signSkey,
-              }, mutationType).mutation);
-              break;
-
-            case 'storage':
-              mutations.push(api.createStorageMutation(
-                row.user_hash, row.uuid, row.value_b64, row.hash_b64,
-                row.version, row.owner_timestamp || Math.floor(Date.now() / 1000), signSkey,
-                row.deleted_flag, row.deleted_flag,
-                row.parent_sign_hash, row.sign_hash, row.sign_b64,
-                mutationType
-              ));
-              break;
-
             case 'generic':
               mutations.push(api.createGenericMutation(t.table, row, signSkey, mutationType));
               break;
@@ -497,12 +339,6 @@ class LocalDBv2 {
     console.warn(`[localDB] sync backoff ${Math.round(delay / 1000)}s (streak ${this.#failStreak})`);
   }
 
-  #base64ToArray(base64) {
-    if (!base64) return null;
-    const binary = atob(base64);
-    return Uint8Array.from(binary, c => c.charCodeAt(0));
-  }
-
   triggerSync() {
     this.#triggerSync();
   }
@@ -518,98 +354,6 @@ class LocalDBv2 {
       this.#syncTimeout = null;
       this.sendAllPendingChanges(skey);
     }, 100);
-  }
-
-  // ========== User Storage Methods ==========
-
-  async getUserStorage(userHash, uuid) {
-    if (!this.db) return null;
-    const { rows } = await this.db.query(
-      `SELECT * FROM user_storage_latest WHERE user_hash = $1 AND uuid = $2`,
-      [userHash, uuid]
-    );
-    return rows[0] || null;
-  }
-
-  async getAllUserStorages(userHash) {
-    if (!this.db) return [];
-    const { rows } = await this.db.query(
-      `SELECT * FROM user_storage_latest WHERE user_hash = $1 ORDER BY updated_at DESC`,
-      [userHash]
-    );
-    return rows;
-  }
-
-  async upsertUserStorage({ userHash, uuid, valueB64, hashB64 = null, deletedFlag = false, parentSignHash = null, signHash = null, ownerTimestamp = null, signB64 = null }) {
-    if (!this.db) {
-      console.error('DB not initialized');
-      return;
-    }
-
-    try {
-      const latest = await this.getUserStorage(userHash, uuid);
-      const newVersion = latest ? Number(latest.version) + 1 : 0;
-
-      await this.upsertStorageLocal({ userHash, uuid, valueB64, hashB64, version: newVersion, deletedFlag, parentSignHash, signHash, ownerTimestamp, signB64 });
-    } catch (error) {
-      console.error('Storage insert failed:', error);
-    }
-  }
-
-  async deleteUserStorage(userHash, uuid) {
-    if (!this.db) return;
-    await this.markStorageForDeletion(userHash, uuid);
-  }
-
-  async upsertStorageLocal({ userHash, uuid, valueB64, hashB64, version, deletedFlag, parentSignHash, signHash, ownerTimestamp, signB64 }) {
-    if (!this.db) return;
-    const changed = `user_storage.value_b64 IS DISTINCT FROM EXCLUDED.value_b64
-      OR user_storage.hash_b64 IS DISTINCT FROM EXCLUDED.hash_b64
-      OR user_storage.deleted_flag IS DISTINCT FROM EXCLUDED.deleted_flag
-      OR user_storage.parent_sign_hash IS DISTINCT FROM EXCLUDED.parent_sign_hash
-      OR user_storage.sign_hash IS DISTINCT FROM EXCLUDED.sign_hash
-      OR user_storage.owner_timestamp IS DISTINCT FROM EXCLUDED.owner_timestamp
-      OR user_storage.sign_b64 IS DISTINCT FROM EXCLUDED.sign_b64
-      OR user_storage.version IS DISTINCT FROM EXCLUDED.version`;
-
-    await this.db.query(
-      `INSERT INTO user_storage (
-            user_hash, uuid, version, value_b64, hash_b64, deleted_flag,
-            parent_sign_hash, sign_hash, owner_timestamp, sign_b64,
-            modified_columns, sent_to_server, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ARRAY['__all__'], FALSE, NOW())
-        ON CONFLICT (user_hash, uuid) DO UPDATE SET
-            value_b64 = EXCLUDED.value_b64,
-            hash_b64 = EXCLUDED.hash_b64,
-            deleted_flag = EXCLUDED.deleted_flag,
-            parent_sign_hash = EXCLUDED.parent_sign_hash,
-            sign_hash = EXCLUDED.sign_hash,
-            owner_timestamp = EXCLUDED.owner_timestamp,
-            sign_b64 = EXCLUDED.sign_b64,
-            version = EXCLUDED.version,
-            modified_columns = CASE WHEN ${changed} THEN ARRAY['__all__'] ELSE user_storage.modified_columns END,
-            sent_to_server = CASE WHEN ${changed} THEN FALSE ELSE user_storage.sent_to_server END,
-            updated_at = NOW()`,
-      [userHash, uuid, version, valueB64, hashB64, deletedFlag, parentSignHash, signHash, ownerTimestamp, signB64]
-    );
-    this.isLocalStash = true;
-    setTimeout(() => this.#triggerSync(), 100);
-  }
-
-  async markStorageForDeletion(userHash, uuid) {
-    if (!this.db) return;
-    await this.db.query(
-      `INSERT INTO user_storage (user_hash, uuid, deleted_flag, modified_columns, sent_to_server, updated_at)
-         VALUES ($1, $2, TRUE, ARRAY['__all__'], FALSE, NOW())
-         ON CONFLICT (user_hash, uuid) DO UPDATE SET
-            deleted_flag = TRUE,
-            modified_columns = CASE WHEN user_storage.deleted_flag = TRUE THEN user_storage.modified_columns ELSE ARRAY['__all__'] END,
-            sent_to_server = CASE WHEN user_storage.deleted_flag = TRUE THEN user_storage.sent_to_server ELSE FALSE END,
-            updated_at = NOW()`,
-      [userHash, uuid]
-    );
-    this.isLocalStash = true;
-    setTimeout(() => this.#triggerSync(), 100);
   }
 
   // ========== Dialog Upserts ==========
@@ -773,12 +517,6 @@ class LocalDBv2 {
     setTimeout(() => this.#triggerSync(), 100);
   }
 
-  async debugLocalState() {
-    const users = await this.getUsers();
-    const pending = await this.getAllPendingChanges();
-    console.table({ syncedAndLocalView: users, pendingChanges: pending });
-  }
-
   async cleanupBrokenReactions() {
     if (!this.db) return { updated: 0 };
     const { rows: before } = await this.db.query(
@@ -852,24 +590,12 @@ class LocalDBv2 {
         if (!row.peer_wrapped_msg_key_b64) return { valid: false, reason: 'missing peer_wrapped_msg_key_b64' };
         return { valid: true };
       },
-      user_storage: () => {
-        if (!row.value_b64 && !row.deleted_flag) return { valid: false, reason: 'empty value_b64' };
-        return { valid: true };
-      },
-      user_cards: () => {
-        if (!row.sign_pkey || !row.contact_pkey || !row.crypt_pkey) {
-          return { valid: false, reason: 'missing keys' };
-        }
-        return { valid: true };
-      },
     };
     return (checks[relation] || (() => ({ valid: true })))();
   }
 
   #getPkCol(table) {
     return {
-      user_cards: 'user_hash',
-      user_storage: 'uuid',
       dialog_keys: 'dialog_hash',
       dialog_messages: 'message_id',
       dialog_messages_versions: 'message_id',
