@@ -55,7 +55,7 @@ src/
   lib/data/     Typed Electric/TanStack data layer (collections, ingest, local KV)
   utils/        Helpers
   views/        Route pages (auth, chats, rooms, contacts, backup, account, ...)
-docs/           Architecture notes (Livebook .livemd files)
+docs/           Architecture notes, invariants (docs/invariants.md), backlog, reports
 netlify/        Netlify redirect function for SPA preview hosting
 ```
 
@@ -71,6 +71,7 @@ Pushing to `main` triggers `.github/workflows/deploy-staging.yml`: the staging s
 
 ## Development conventions
 
+- Read `docs/invariants.md` before changing sync, storage or crypto code — every rule there came from a real failure. `CLAUDE.md` in the repo root carries the same guidance for AI-assisted sessions.
 - No one-off scripts in the repo root: recurring utilities live in `scripts/`, experiments stay out of git (history keeps everything if needed).
 - Work notes and reports go to `docs/` or the PR description, not the repo root.
 - Tests live in `tests/` and run via `npm test`.
