@@ -1,28 +1,26 @@
 // Encryption wrapper for any string key-value storage.
 //
-// Requirement (product, 2026-08-12): user data in local storage is encrypted;
-// every exception must be justified and agreed. This wraps a plain string
-// store so callers keep the same interface while nothing readable reaches
-// disk.
+// Hiding metadata on the client is not a requirement (access control for it
+// starts at the backend — CTO decision, 2026-08-19). This wrapper exists for
+// a different property: several accounts can share one browser profile, and
+// a store wrapped here is readable only by the account whose key wrote it.
+// Another account's pending writes are opaque to the one currently logged in,
+// which is what lets the outbox keep them instead of treating them as
+// corrupt. New stores are free to skip the wrapper when that isolation is not
+// needed.
 //
 // Shape of the interface matches StorageAdapter from
 // @tanstack/offline-transactions on purpose, so it can be dropped straight
 // into the outbox.
 //
-// What is protected: record values, in full — including the envelope
-// (user_hash, dialog_hash, message_id, timestamps, signatures), not just the
-// already-E2E-encrypted payload inside them.
-//
-// What is NOT protected, and why:
-//   - Record key names, unless `hashKeys` is set. Callers that key by an
-//     opaque id (the outbox uses sortable ids) leak only write ordering;
-//     callers whose keys embed identifiers (localStore uses
-//     `us|<user_hash>|<uuid>`) must pass hashKeys: true.
-//   - The number of records and their approximate size.
+// What is covered: record values, in full. Record key names only when
+// `hashKeys` is set — callers that key by an opaque id (the outbox uses
+// sortable ids) need not; callers whose keys embed identifiers (localStore
+// uses `us|<user_hash>|<uuid>`) pass hashKeys: true. Record count and size
+// are visible by nature of IndexedDB.
 //
 // The key never leaves this module and is only obtainable after the vault is
-// unlocked, so every wrapped store is readable only after login — accepted
-// explicitly when this requirement was set.
+// unlocked, so every wrapped store is readable only after login.
 
 export interface StringStore {
 	get: (key: string) => Promise<string | null>;

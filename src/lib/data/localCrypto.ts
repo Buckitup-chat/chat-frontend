@@ -4,8 +4,8 @@
 // so the dependency on EncryptionManagerPQ lives in exactly one place.
 //
 // The key exists only while an account is unlocked. Every wrapped store is
-// therefore readable only after login — an accepted consequence of the
-// "everything encrypted locally" requirement, not an oversight.
+// therefore readable only after login — the point of the wrapper is that one
+// account's records stay opaque to another in the same browser profile.
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { deriveLocalStorageKey } from './secureStore';
 

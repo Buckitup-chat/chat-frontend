@@ -20,11 +20,12 @@
 // a live key (auth challenge), which is why draining requires an unlocked
 // account and entries are partitioned by the user that signed them.
 //
-// Why the queue is encrypted: an entry holds a whole signed mutation, so the
-// envelope — user_hash, dialog_hash, message_id, timestamps, signatures — would
-// otherwise sit in IndexedDB in the clear even though the message body inside
-// it is end-to-end encrypted. secureStore wraps the adapter, so the queue is
-// readable only by the account that wrote it, and only while it is unlocked.
+// Why the queue is encrypted: several accounts can share one browser profile,
+// and each must replay only its own writes. secureStore wraps the adapter, so
+// an entry is readable only by the account that wrote it, and only while it
+// is unlocked — another account's entries are opaque rather than mistaken
+// for corrupt records and deleted. Hiding the envelope from the device owner
+// is not the goal (metadata access control starts at the backend).
 import { IndexedDBAdapter, WebLocksLeader, BackoffCalculator } from '@tanstack/offline-transactions';
 import { IngestError } from './ingest';
 import { createSecureStore, type StringStore } from './secureStore';
