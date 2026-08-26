@@ -1,8 +1,7 @@
 // Durable outbox for signed mutations.
 //
-// Storage, cross-tab leadership and retry pacing come from
-// @tanstack/offline-transactions (IndexedDBAdapter, WebLocksLeader,
-// BackoffCalculator). Only the domain logic lives here — what an entry is,
+// Storage and cross-tab leadership come from @tanstack/offline-transactions
+// (IndexedDBAdapter, WebLocksLeader). Only the domain logic lives here — what an entry is,
 // when it may be replayed, and what ends its life. The package's full
 // OfflineExecutor is not used: it replays through a static collection
 // registry, and dialog collections are created lazily per dialog_hash, so the
@@ -26,7 +25,7 @@
 // is unlocked — another account's entries are opaque rather than mistaken
 // for corrupt records and deleted. Hiding the envelope from the device owner
 // is not the goal (metadata access control starts at the backend).
-import { IndexedDBAdapter, WebLocksLeader, BackoffCalculator } from '@tanstack/offline-transactions';
+import { IndexedDBAdapter, WebLocksLeader } from '@tanstack/offline-transactions';
 import { IngestError } from './ingest';
 import { createSecureStore, type StringStore } from './secureStore';
 
@@ -72,7 +71,6 @@ let plainStorage: StringStore = indexedDb;
 let encrypted = true;
 
 const leader = new WebLocksLeader(LOCK_NAME);
-const backoff = new BackoffCalculator(true);
 
 /**
  * Test hook: swap the storage adapter (node has no IndexedDB).
@@ -266,6 +264,12 @@ export interface DrainResult {
  *
  * Cross-tab: only the Web Locks leader drains, so two tabs never replay the
  * same entry concurrently.
+ *
+ * No delay before an attempt. A drain runs because something said conditions
+ * changed — login, or the `online` event — and pacing the first replay would
+ * only keep the user's message undelivered for seconds after the network came
+ * back. Hammering is prevented by stopping the whole drain on the first
+ * transient failure: one request per trigger, at most.
  */
 export async function drainOutbox(
 	userHash: string,
@@ -282,11 +286,6 @@ export async function drainOutbox(
 		let dropped = 0;
 
 		for (const entry of entries) {
-			if (entry.attempts > 0) {
-				// Pace replays of previously failed entries; first attempts go
-				// straight through.
-				await new Promise((r) => setTimeout(r, backoff.calculate(entry.attempts)));
-			}
 			try {
 				await send(entry.mutations);
 				await resolveEntry(entry.id);
