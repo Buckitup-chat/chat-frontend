@@ -235,6 +235,54 @@ describe('flushPendingDialogChanges — temporary network/server failure', () =>
 	});
 });
 
+describe('flushPendingDialogChanges — owner isolation', () => {
+	it('a flush for owner A never includes owner B\'s pending entry in the ingest batch, and B stays pending after A\'s successful flush', async () => {
+		const q = await freshQueue();
+		q.setSyncedRecorder(() => {});
+
+		const dialogHashA = 'di_' + 'd'.repeat(128);
+		const dialogHashB = 'di_' + 'e'.repeat(128);
+		await q.putPendingDialog('dialog_keys', { ...dialogKeysRecord, dialog_hash: dialogHashA }, 'u_a');
+		await q.putPendingDialog('dialog_keys', { ...dialogKeysRecord, dialog_hash: dialogHashB, sender_hash: 'u_b' }, 'u_b');
+
+		mockResultsFn = (mutations) => {
+			expect(mutations).toHaveLength(1);
+			expect(modifiedOf(mutations[0]).dialog_hash).toBe(dialogHashA);
+			return mutations.map((_, i) => ({ index: i, status: 'ok' }));
+		};
+
+		await q.flushPendingDialogChanges(signSkey, 'u_a');
+
+		expect(q.pendingDialogKeysCollection.get(`${dialogHashA}:u_a`)).toBeUndefined();
+		expect(q.pendingDialogKeysCollection.get(`${dialogHashB}:u_b`)).toBeTruthy();
+
+		q.setSyncedRecorder(null);
+	});
+
+	it('switching to another owner does not touch a pending entry; returning to the original owner sends it via a single ingest call', async () => {
+		const q = await freshQueue();
+		const { api } = await import('@/api/client');
+		const ingestMock = vi.mocked(api.ingestWithAuthEach);
+		q.setSyncedRecorder(() => {});
+
+		const dialogHashA = 'di_' + 'g'.repeat(128);
+		await q.putPendingDialog('dialog_keys', { ...dialogKeysRecord, dialog_hash: dialogHashA }, 'u_a');
+		const keyA = `${dialogHashA}:u_a`;
+
+		await q.flushPendingDialogChanges(signSkey, 'u_b');
+		expect(ingestMock).not.toHaveBeenCalled();
+		expect(q.pendingDialogKeysCollection.get(keyA)).toBeTruthy();
+
+		mockResultsFn = (mutations) => mutations.map((_, i) => ({ index: i, status: 'ok' }));
+		await q.flushPendingDialogChanges(signSkey, 'u_a');
+		expect(ingestMock).toHaveBeenCalledTimes(1);
+		expect(ingestMock.mock.calls[0][0]).toHaveLength(1);
+		expect(q.pendingDialogKeysCollection.get(keyA)).toBeUndefined();
+
+		q.setSyncedRecorder(null);
+	});
+});
+
 describe('validateDialogRecord — per-table normal validators', () => {
 	it('dialog_keys requires both wrapped-key fields', async () => {
 		const q = await freshQueue();

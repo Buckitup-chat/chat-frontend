@@ -693,7 +693,7 @@ export async function flushPendingDialogChanges(signSkey: Uint8Array | null | un
   }
 
   const all = await dbGetAll();
-  const entries = all.filter((e) => e.status === "pending");
+  const entries = all.filter((e) => e.status === "pending" && e.ownerUserHash === ownerUserHash);
   if (entries.length === 0) return;
 
   const tableOrder = new Map(DIALOG_TABLES.map((t, i) => [t, i]));
@@ -738,7 +738,7 @@ export async function flushPendingDialogChanges(signSkey: Uint8Array | null | un
     }
 
     if (body.results.every((r) => r.status === "ok")) {
-      const currentlyPending = (await dbGetAll()).filter((e) => e.status === "pending");
+      const currentlyPending = (await dbGetAll()).filter((e) => e.status === "pending" && e.ownerUserHash === ownerUserHash);
       for (const entry of currentlyPending) {
         await markSynced(entry);
       }

@@ -9,7 +9,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { upsertUser, upsertUserStorage, getUserStorage, setUserAuthProvider, triggerUserFlush, purgeUserData } from '../utils/db/tanstack/user';
-import { setDialogAuthProvider } from '../utils/db/tanstack/dialog';
+import { setDialogAuthProvider, triggerDialogFlush } from '../utils/db/tanstack/dialog';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 
 const VAULT_KEY_OPTIONS = {
@@ -226,6 +226,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     this.#dispatchAuthChange();
     triggerUserFlush();
+    triggerDialogFlush();
 
     return identity;
   }
