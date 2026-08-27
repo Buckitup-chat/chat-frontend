@@ -16,8 +16,25 @@ import { useRoute } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
-import { useLiveQuery } from '@electric-sql/pglite-vue';
+import { useLiveQuery } from '@tanstack/vue-db';
+import {
+    dialogMessagesCollection,
+    pendingDialogMessagesCollection,
+    cachedDialogMessagesCollection,
+    dialogMessageReactionsCollection,
+    pendingDialogReactionsCollection,
+    cachedDialogReactionsCollection,
+    ensureDialogReady,
+    mergeDialogMessagesForDisplay,
+    mergeDialogReactionsForDisplay,
+    isDialogMessagePending,
+    shouldRedecryptMessage,
+    compareByOwnerTimestamp,
+    formatMessageTime,
+} from '@/utils/db/tanstack/dialog';
 import { v7 as uuidv7 } from 'uuid';
+
+ensureDialogReady();
 
 const $route = useRoute();
 const $userPQ = userPQStore();
@@ -47,11 +64,15 @@ const avatarUrl = computed(() => {
 
 const avatarHash = computed(() => peerHash.value || '');
 
-// Live Query for Messages
-const { rows: rawMessages } = useLiveQuery(
-    `SELECT * FROM dialog_messages WHERE dialog_hash = $1 AND NOT deleted_flag ORDER BY owner_timestamp ASC`,
-    computed(() => [dialogHash.value])
+const { data: networkMessages } = useLiveQuery(dialogMessagesCollection);
+const { data: pendingMessages } = useLiveQuery(pendingDialogMessagesCollection);
+const { data: cachedMessages } = useLiveQuery(cachedDialogMessagesCollection);
+
+const rawMessages = computed(() =>
+    mergeDialogMessagesForDisplay(cachedMessages.value, networkMessages.value, pendingMessages.value, dialogHash.value)
 );
+
+const syncStatusFor = (messageId) => (isDialogMessagePending(messageId, pendingMessages.value) ? 'syncing' : 'synced');
 
 const decryptedMessages = ref([]);
 const messageCache = new Map();
@@ -76,7 +97,7 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
     for (const row of newRows) {
         const cached = messageCache.get(row.message_id);
         if (cached) {
-            cached._syncStatus = row.modified_columns !== null ? 'syncing' : 'synced';
+            cached._syncStatus = syncStatusFor(row.message_id);
         }
     }
     rebuildDecryptedMessages(newRows);
@@ -87,21 +108,20 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
         for (const row of newRows) {
             if (row.deleted_flag) continue;
             const cached = messageCache.get(row.message_id);
-            if (!cached || cached._contentB64 !== row.content_b64) pending.push(row);
+            if (shouldRedecryptMessage(cached, row)) pending.push(row);
         }
 
         if (pending.length > 0) {
             const name = chatName.value;
             await Promise.all(pending.map(async (row) => {
                 const decrypted = await $dialogs.decryptMessageRow(row);
-                const date = new Date(row.owner_timestamp * 1000);
-                const syncStatus = row.modified_columns !== null ? 'syncing' : 'synced';
+                const syncStatus = syncStatusFor(row.message_id);
                 messageCache.set(row.message_id, {
                     id: row.message_id,
                     text: decrypted.text,
                     authorName: decrypted.isMine ? 'Me' : name,
                     isMine: decrypted.isMine,
-                    timestamp: `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`,
+                    timestamp: formatMessageTime(row.owner_timestamp),
                     _syncStatus: syncStatus,
                     _contentB64: row.content_b64,
                     _raw: row
@@ -114,10 +134,12 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
     onCleanup(() => { if (decryptTimer) { clearTimeout(decryptTimer); decryptTimer = null; } });
 }, { immediate: true });
 
-// Reactions
-const { rows: rawReactions } = useLiveQuery(
-    `SELECT * FROM dialog_message_reactions WHERE dialog_hash = $1 AND deleted_flag = FALSE`,
-    computed(() => [dialogHash.value])
+const { data: networkReactions } = useLiveQuery(dialogMessageReactionsCollection);
+const { data: pendingReactions } = useLiveQuery(pendingDialogReactionsCollection);
+const { data: cachedReactions } = useLiveQuery(cachedDialogReactionsCollection);
+
+const rawReactions = computed(() =>
+    mergeDialogReactionsForDisplay(cachedReactions.value, networkReactions.value, pendingReactions.value, dialogHash.value)
 );
 
 const reactionsByMsgId = ref({});
@@ -187,11 +209,7 @@ const displayMessages = computed(() => {
         });
     }
 
-    return [...activeOptimistic, ...decryptedMessages.value].sort((a, b) => {
-        const aTs = a._raw?.owner_timestamp || a.ownerTimestamp || 0;
-        const bTs = b._raw?.owner_timestamp || b.ownerTimestamp || 0;
-        return aTs - bTs;
-    });
+    return [...activeOptimistic, ...decryptedMessages.value].sort(compareByOwnerTimestamp);
 });
 
 // Merge optimistic reactions with aggregated reactions

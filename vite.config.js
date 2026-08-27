@@ -98,7 +98,6 @@ export default defineConfig(({ command }) => {
 			exclude: [
 				'@lo-fi/webauthn-local-client',
 				'@electric-sql/pglite',
-				'@electric-sql/pglite/worker',
 			],
 			include: [
 				'@noble/hashes',

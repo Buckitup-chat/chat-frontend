@@ -8,8 +8,8 @@ import { sha3_512 } from '@noble/hashes/sha3';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
-import { localDB } from '../utils/db/localDBv2';
 import { upsertUser, upsertUserStorage, getUserStorage, setUserAuthProvider, triggerUserFlush, purgeUserData } from '../utils/db/tanstack/user';
+import { setDialogAuthProvider } from '../utils/db/tanstack/dialog';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 
 const VAULT_KEY_OPTIONS = {
@@ -54,8 +54,12 @@ export class EncryptionManagerPQ extends EventTarget {
 
     EncryptionManagerPQ.instance = this;
 
-    localDB.setAuthProvider(() => this.#signSkey);
     setUserAuthProvider(() => (
+      this.#signSkey && this.#currentUserHash
+        ? { signSkey: this.#signSkey, userHash: this.#currentUserHash }
+        : null
+    ));
+    setDialogAuthProvider(() => (
       this.#signSkey && this.#currentUserHash
         ? { signSkey: this.#signSkey, userHash: this.#currentUserHash }
         : null
