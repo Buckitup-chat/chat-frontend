@@ -1,5 +1,7 @@
 # Vue Storage Model – High-Level Architecture Overview
 
+> **Stale — describes the pre-TanStack-DB architecture.** This document predates ADR 0001 (PGlite → TanStack DB + Electric collections) and ADR 0006 (PGlite removed entirely; no legacy migration). For the Dialog and User domains, "PGLite" below should be read as "TanStack DB + Electric collections" (see `CONTEXT.md`, `PROJECT-MAP.md`). PGlite is no longer a dependency of this project and there is no legacy-data migration path — old local data from a pre-migration build is not read or carried forward. The rest of this document's separation-of-concerns model (Pinia / lo-fi vault / synced layer) still applies; only the specific "PGLite" storage technology named throughout is outdated.
+
 All user-related data in the application is handled through a clearly separated, security-focused architecture with three distinct layers.
 
 ## 1. Global application user state

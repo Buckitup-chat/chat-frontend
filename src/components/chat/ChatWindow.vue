@@ -44,6 +44,7 @@
             <button v-for="(data, emoji) in reactions[msg.id]" :key="emoji" type="button"
               class="reaction-badge btn btn-sm p-0 px-2 rounded-pill d-inline-flex align-items-center"
               :class="{ 'reaction-mine': data.hasMine, 'reaction-pending': data.status && data.status !== 'synced' }"
+              :disabled="msg.isMine"
               @click="handleReactionClick(msg.id, emoji)"
               :title="data.hasMine ? 'Remove' : 'React'">
               <span class="reaction-emoji">{{ emoji }}</span>
@@ -76,11 +77,13 @@
     <!-- Context Menu -->
     <div v-if="contextMenu" ref="contextMenuRef" class="context-menu"
       :style="{ top: contextMenu.y + 'px', left: contextMenu.x + 'px' }" @click.stop>
-      <div class="context-menu-reactions">
-        <button v-for="emoji in EMOJI_CHOICES" :key="emoji" type="button" class="context-menu-emoji"
-          @click="selectEmojiFromContext(emoji)">{{ emoji }}</button>
-      </div>
-      <div class="context-menu-divider"></div>
+      <template v-if="contextMenuMsg && !contextMenuMsg.isMine">
+        <div class="context-menu-reactions">
+          <button v-for="emoji in EMOJI_CHOICES" :key="emoji" type="button" class="context-menu-emoji"
+            @click="selectEmojiFromContext(emoji)">{{ emoji }}</button>
+        </div>
+        <div class="context-menu-divider"></div>
+      </template>
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced'" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
         <i class="bi bi-pencil me-2"></i>Edit
@@ -154,6 +157,8 @@ const submitMessage = () => {
 };
 
 const handleReactionClick = (messageId, emoji) => {
+  const msg = props.messages.find((m) => m.id === messageId);
+  if (msg?.isMine) return;
   emit('toggleReaction', messageId, emoji);
 };
 
@@ -188,6 +193,7 @@ const handleDocumentClick = (event) => {
 
 const selectEmojiFromContext = (emoji) => {
   if (!contextMenu.value) return;
+  if (contextMenuMsg.value?.isMine) return;
   emit('toggleReaction', contextMenu.value.msgId, emoji);
   closeContextMenu();
 };
@@ -353,6 +359,15 @@ watch(() => props.messages, () => {
 
   &.reaction-pending {
     opacity: 0.65;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.7);
+      transform: none;
+    }
   }
 }
 

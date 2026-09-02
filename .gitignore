@@ -21,6 +21,9 @@ session-*
 
 ssl
 
+# Local dev-only reverse proxy config
+/Caddyfile.dev
+
 # Environment files (real secrets live outside git)
 .env
 .env.*
@@ -28,6 +31,17 @@ ssl
 
 # Windows NTFS download markers
 *:Zone.Identifier
+
+# Canonical architecture context system
+/CLAUDE.md
+/CONTEXT.md
+/PROJECT-MAP.md
+/docs/adr/
+/docs/agents/
+/docs/architecture.md
+/docs/contracts.md
+/docs/current-state.md
+/docs/invariants.md
 
 # Editor directories and files
 .vscode/*

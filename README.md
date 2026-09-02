@@ -5,7 +5,7 @@ Privacy-focused, end-to-end encrypted messenger. This repository contains the Vu
 ## Stack
 
 - **Vue 3** (script setup) + **Vite**, **Pinia** stores, **vue-router**
-- **ElectricSQL + PGlite** — local-first sync of user data (SQL in the browser)
+- **ElectricSQL + TanStack DB** — local-first sync of user data (Dialog and User domains; PGlite has been fully retired)
 - **Yjs** (+ y-webrtc / y-websocket / y-indexeddb) — CRDT sync for messages
 - **Post-quantum cryptography** — [`@noble/post-quantum`](https://github.com/paulmillr/noble-post-quantum), `@noble/secp256k1`, `@noble/hashes`
 - **QR / WebRTC handshake** — device-to-device contact verification (`qwbp`, `qr-scanner`)
@@ -52,7 +52,7 @@ src/
   lib/testbed/  Node-based account recovery testbed (Compartmented Secret Sharing)
   router/       vue-router config
   store/        Pinia stores (user, dialogs, web3, ...)
-  utils/        Helpers, local DB (PGlite) layer
+  utils/        Helpers, local DB (TanStack DB / Electric) layer
   views/        Route pages (auth, chats, rooms, contacts, backup, account, ...)
 docs/           Architecture notes (Livebook .livemd files)
 netlify/        Netlify redirect function for SPA preview hosting
