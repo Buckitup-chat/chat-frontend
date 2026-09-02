@@ -21,6 +21,9 @@ session-*
 
 ssl
 
+# Local dev-only reverse proxy config
+/Caddyfile.dev
+
 # Environment files (real secrets live outside git)
 .env
 .env.*
