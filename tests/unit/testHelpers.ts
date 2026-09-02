@@ -17,7 +17,7 @@ export function changesOf(mutation: ApiMutation): Record<string, unknown> {
 	return mutation.changes;
 }
 
-const DIALOG_DB_NAMES = ['dialog-pending-queue', 'dialog-synced-cache', 'dialog-legacy-migration'];
+const DIALOG_DB_NAMES = ['dialog-pending-queue', 'dialog-synced-cache'];
 
 export async function clearDialogDatabases(): Promise<void> {
 	await Promise.all(DIALOG_DB_NAMES.map(clearDatabaseContents));

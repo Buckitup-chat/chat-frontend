@@ -22,7 +22,6 @@
   },
   "dependencies": {
     "@electric-sql/client": "^1.4.1",
-    "@electric-sql/pglite": "^0.3.16",
     "@fontsource/inter": "^5.2.8",
     "@lo-fi/local-data-lock": "^0.16.0",
     "@lo-fi/local-vault": "^0.18.0",

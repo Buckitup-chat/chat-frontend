@@ -380,47 +380,6 @@ export function putPendingDialog(table: DialogTable, record: DialogRecordFields,
   return putPending(table, keyFor(table, record), record, ownerUserHash, patch);
 }
 
-export type ImportLegacyEntryResult = "imported" | "already-present";
-
-export async function importLegacyPendingEntry(
-  table: DialogTable,
-  key: string,
-  record: DialogRecordFields,
-  ownerUserHash: string
-): Promise<ImportLegacyEntryResult> {
-  if (!ownerUserHash) throw new Error(`[dialogQueue] importLegacyPendingEntry(${table}): ownerUserHash is required`);
-  const id = `${table}:${key}`;
-  const now = Date.now();
-
-  const { outcome } = await atomicMutate(id, (existing) => {
-    if (existing) return { action: "noop" };
-    return {
-      action: "put",
-      entry: {
-        id,
-        table,
-        key,
-        ownerUserHash,
-        record,
-        patch: record,
-        status: "pending",
-        revision: 1,
-        sentSnapshot: null,
-        sentRevision: null,
-        createdAt: now,
-        updatedAt: now,
-        sentAt: null,
-        lastError: null,
-      },
-    };
-  });
-
-  if (outcome.action !== "put") return "already-present";
-  transitionStatus(null, "pending");
-  applyToOverlay(table, record);
-  return "imported";
-}
-
 let rehydratePromise: Promise<void> | null = null;
 
 export function ensureRehydrated() {

@@ -140,31 +140,6 @@ export function recordSynced(
   );
 }
 
-export function importLegacyCachedEntry(table: DialogTable, key: string, record: DialogRecordFields): Promise<"imported" | "already-present"> {
-  return withStore<"imported" | "already-present">(table, "readwrite", (store) => {
-    return new Promise<"imported" | "already-present">((resolve, reject) => {
-      const getReq = store.get(key);
-      getReq.onerror = () => reject(getReq.error);
-      getReq.onsuccess = () => {
-        if (getReq.result) {
-          resolve("already-present");
-          return;
-        }
-        const putReq = store.put({ ...record, __key: key });
-        putReq.onerror = () => reject(putReq.error);
-        putReq.onsuccess = () => resolve("imported");
-      };
-    });
-  }).then((outcome) => {
-    const result = outcome ?? "already-present";
-    if (result === "imported") {
-      touchedKeys.add(`${table}:${key}`);
-      applyToCache(table, key, record);
-    }
-    return result;
-  });
-}
-
 export function forgetSynced(table: DialogTable, key: string) {
   touchedKeys.add(`${table}:${key}`);
   const collection = collectionFor(table);

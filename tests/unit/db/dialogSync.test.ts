@@ -9,31 +9,8 @@ function withVirtualProps<Row extends Record<string, unknown>>(value: Row, key: 
 	return { ...value, $synced: true as const, $origin: 'local' as const, $key: key, $collectionId: 'test' };
 }
 
-const STATUS_DB_NAME = 'dialog-legacy-migration';
-const STATUS_STORE = 'status';
-const STATUS_KEY = 'legacy-pglite-v1';
-
-async function preSeedMigrationComplete(): Promise<void> {
-	await new Promise<void>((resolve, reject) => {
-		const req = indexedDB.open(STATUS_DB_NAME, 1);
-		req.onupgradeneeded = () => req.result.createObjectStore(STATUS_STORE, { keyPath: 'id' });
-		req.onsuccess = () => {
-			const db = req.result;
-			const tx = db.transaction(STATUS_STORE, 'readwrite');
-			tx.objectStore(STATUS_STORE).put({ id: STATUS_KEY, completedAt: Date.now(), importedPending: 0, importedCached: 0, skippedMalformed: 0 });
-			tx.oncomplete = () => {
-				db.close();
-				resolve();
-			};
-			tx.onerror = () => reject(tx.error);
-		};
-		req.onerror = () => reject(req.error);
-	});
-}
-
 async function freshDialog() {
 	vi.resetModules();
-	await preSeedMigrationComplete();
 	vi.stubGlobal('localStorage', { getItem: (key: string) => (key === 'DISABLE_SYNC' ? 'true' : null) });
 	const dialog = await import('@/utils/db/tanstack/dialog');
 	await dialog.ensureDialogReady();

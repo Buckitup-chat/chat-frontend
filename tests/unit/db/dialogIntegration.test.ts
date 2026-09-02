@@ -44,28 +44,6 @@ vi.mock('@/utils/db/tanstack/user', () => ({
 	getUser: async (userHash: string) => (userHash === 'u_peer' ? { user_hash: 'u_peer', crypt_pkey: peerCryptPkeyB64 } : null),
 }));
 
-const STATUS_DB_NAME = 'dialog-legacy-migration';
-const STATUS_STORE = 'status';
-const STATUS_KEY = 'legacy-pglite-v1';
-
-async function preSeedMigrationComplete(): Promise<void> {
-	await new Promise<void>((resolve, reject) => {
-		const req = indexedDB.open(STATUS_DB_NAME, 1);
-		req.onupgradeneeded = () => req.result.createObjectStore(STATUS_STORE, { keyPath: 'id' });
-		req.onsuccess = () => {
-			const db = req.result;
-			const tx = db.transaction(STATUS_STORE, 'readwrite');
-			tx.objectStore(STATUS_STORE).put({ id: STATUS_KEY, completedAt: Date.now(), importedPending: 0, importedCached: 0, skippedMalformed: 0 });
-			tx.oncomplete = () => {
-				db.close();
-				resolve();
-			};
-			tx.onerror = () => reject(tx.error);
-		};
-		req.onerror = () => reject(req.error);
-	});
-}
-
 interface IngestEachBody {
 	auth: { challenge_id: string; signature: string };
 	mutations: ApiMutation[];
@@ -100,7 +78,6 @@ function mockFailingTransportOnce() {
 
 async function freshApp(): Promise<{ dialogQueue: typeof import('@/utils/db/tanstack/dialogQueue'); dialogCache: DialogCacheModule; dialog: DialogModule; store: DialogsStore }> {
 	vi.resetModules();
-	await preSeedMigrationComplete();
 	vi.stubGlobal('localStorage', { getItem: (key: string) => (key === 'DISABLE_SYNC' ? 'true' : null) });
 	const dialogQueue = await import('@/utils/db/tanstack/dialogQueue');
 	const dialogCache = await import('@/utils/db/tanstack/dialogCache');

@@ -64,7 +64,7 @@ export const userPQStore = defineStore('userPQ', () => {
   const initialize = async () => {
     if (isInitialized.value) return;
 
-    // Phase 1: IndexedDB (fast, no PGlite)
+    // Phase 1: IndexedDB (fast)
     em.value = EncryptionManagerPQ.getInstance();
     await em.value.initialize();
     myLocalUsers.value = await em.value.getLocalUserCards();

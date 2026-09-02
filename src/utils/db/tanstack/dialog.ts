@@ -111,12 +111,6 @@ export const dialogMessageReceiptsCollection = dialogSyncDisabled
 
 setSyncedRecorder(recordSynced);
 
-const legacyMigrationPromise = import("./dialogLegacyMigration")
-  .then((m) => m.migrateLegacyDialogState())
-  .catch((err) => {
-    console.error("[dialog] Legacy PGlite migration failed:", err);
-  });
-
 type DialogKeysChange = ChangeMessage<WithVirtualProps<DialogKeysRow, string | number>, string | number>;
 type DialogMessageChange = ChangeMessage<WithVirtualProps<DialogMessageRow, string | number>, string | number>;
 type DialogReactionChange = ChangeMessage<WithVirtualProps<DialogReactionRow, string | number>, string | number>;
@@ -196,7 +190,7 @@ async function ready() {
         dialogMessageReactionsCollection.preload().then(() => setTimeout(() => triggerDialogFlush(), 500));
         dialogMessageReceiptsCollection.preload().then(() => setTimeout(() => triggerDialogFlush(), 500));
       }
-      await Promise.all([ensureRehydrated(), ensureDialogCacheHydrated(), legacyMigrationPromise]);
+      await Promise.all([ensureRehydrated(), ensureDialogCacheHydrated()]);
     })();
   }
   return readyPromise;
