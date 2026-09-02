@@ -1,6 +1,6 @@
 <template>
 	<div class="wrapper" v-if="$userPQ.currentUser">
-		<PGLiteProvider>
+		<template v-if="$userPQ.isInitialized">
 			<Menu class="_menu" :class="{ _opened: $menuOpened }" />
 
 			<div class="_menu_backdrop" :class="{ _opened: $menuOpened && $breakpoint.lt('md') }"
@@ -12,7 +12,7 @@
 					<component :is="Component" :key="route.path" />
 				</router-view>
 			</div>
-		</PGLiteProvider>
+		</template>
 	</div>
 
 	<div v-if="!$userPQ.currentUser" class="_login">
@@ -132,7 +132,6 @@ import Loader from './components/Loader.vue';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';
 import Swal from '@/components/swal/Swal_.vue';
-import PGLiteProvider from '@/components/providers/PGLiteProvider.vue';
 import { ref, provide, watch, onMounted, inject, computed, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
@@ -147,8 +146,19 @@ const $encryptionManagerPQ = inject('$encryptionManagerPQ');
 
 // const $web3 = web3Store();
 // const $swal = inject('$swal');
-// const $loader = useLoader();
 // const $isProd = inject('$isProd');
+
+const $loader = useLoader();
+watch(
+	() => $userPQ.currentUser,
+	(user) => {
+		if (user && !$userPQ.isInitialized) $loader.show();
+	},
+	{ immediate: true }
+);
+watch(() => $userPQ.isInitialized, (val) => {
+	if (val) $loader.hide();
+});
 
 const $appstate = ref({});
 provide('$appstate', $appstate);

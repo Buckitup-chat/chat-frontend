@@ -2,7 +2,6 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { useLiveQuery } from '@tanstack/vue-db';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
-import { localDB } from '@/utils/db/localDBv2';
 import {
   userCardsCollection,
   pendingUserCardsCollection,
@@ -10,6 +9,7 @@ import {
   previewUserCardsCollection,
   isCacheHydrated,
 } from '@/utils/db/tanstack/user';
+import { ensureDialogReady, triggerDialogFlush } from '@/utils/db/tanstack/dialog';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
@@ -64,22 +64,22 @@ export const userPQStore = defineStore('userPQ', () => {
   const initialize = async () => {
     if (isInitialized.value) return;
 
-    // Phase 1: IndexedDB (fast, no PGlite)
+    // Phase 1: IndexedDB (fast)
     em.value = EncryptionManagerPQ.getInstance();
     await em.value.initialize();
     myLocalUsers.value = await em.value.getLocalUserCards();
     localDataReady.value = true;
 
-    // Phase 2: PGlite + live query (slow, fire-and-forget)
-    initDbAndLiveQuery();
+    // Phase 2: dialog storage readiness + live query (slow, fire-and-forget)
+    initDialogsAndLiveQuery();
   };
 
-  const initDbAndLiveQuery = async () => {
-    await localDB.init();
+  const initDialogsAndLiveQuery = async () => {
+    await ensureDialogReady();
 
     isInitialized.value = true;
 
-    setTimeout(() => localDB.triggerSync(), 1000);
+    setTimeout(() => triggerDialogFlush(), 1000);
 
     console.log(`[userStore] Initialized | Local users: ${myLocalUsers.value.length}`);
   };
@@ -104,7 +104,7 @@ export const userPQStore = defineStore('userPQ', () => {
     let identity = await em.value.login(userHash);
     currentUser.value = identity;
 
-    // Load profile + contacts in background (PGlite may not be ready yet)
+    // Load profile + contacts in background (local DB may not be ready yet)
     em.value.loadUserProfile().then(profile => {
       if (profile) {
         currentUser.value = {
