@@ -23,7 +23,12 @@
         <div v-for="msg in messages" :key="msg.id" class="message-wrapper d-flex mb-3"
         :class="msg.isMine ? 'justify-content-end' : 'justify-content-start'">
         <div class="message-bubble p-2 rounded-3 shadow-sm"
-          :class="[msg.isMine ? 'message-mine' : 'message-peer', { 'message-pending': msg._syncStatus && msg._syncStatus !== 'synced' }]"
+          :data-msg-id="msg.id"
+          :class="[msg.isMine ? 'message-mine' : 'message-peer', {
+            'message-pending': msg._syncStatus && msg._syncStatus !== 'synced' && msg._syncStatus !== 'error',
+            'message-error': msg._syncStatus === 'error',
+            'message-unplaced': msg._verify === 'waiting',
+          }]"
           style="max-width: 75%; min-width: 150px;" @contextmenu.prevent="openContextMenu($event, msg)">
           <div v-if="!msg.isMine && showAuthorName" class="fw-bold text-muted mb-1" style="font-size: 0.8rem;">
             {{ msg.authorName }}
@@ -36,8 +41,27 @@
               <button type="button" class="btn btn-sm btn-primary" @click="saveEdit">Save</button>
             </div>
           </div>
-          <div v-else class="message-text text-break">
-            {{ msg.text }}
+          <div v-else>
+            <!-- Quotes render from their own snapshot (the reply carries the
+                 cited content), so they work even when the original never
+                 arrived or was deleted — the jump just degrades honestly. -->
+            <div v-for="(q, qi) in quotesOf(msg)" :key="qi" class="msg-quote" role="button"
+              :class="{ '_historic': quoteOriginalDeleted(q) }"
+              @click="jumpToMessage(q.messageId)">
+              <div class="msg-quote-bar"></div>
+              <div class="msg-quote-body">
+                <div class="msg-quote-author">{{ quoteAuthorName(q.authorHash) }}</div>
+                <div class="msg-quote-text">{{ quotePreview(q) }}</div>
+                <div v-if="quoteOriginalDeleted(q)" class="msg-quote-note">original deleted by author</div>
+                <div v-else-if="!quoteOriginalPresent(q)" class="msg-quote-note"><span class="msg-quote-dot"></span>original not synced yet</div>
+              </div>
+            </div>
+            <div v-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
+            <div v-else class="message-text text-break">
+              {{ msg.text }}
+            </div>
+            <!-- §4.2: admitted but causally unplaced — say why, quietly. -->
+            <div v-if="msg._verify === 'waiting'" class="msg-unplaced-note">waiting for earlier messages…</div>
           </div>
           <div v-if="reactions[msg.id] && Object.keys(reactions[msg.id]).length > 0"
             class="reactions-container d-flex flex-wrap gap-1 mt-1">
@@ -56,9 +80,14 @@
           </div>
           <div class="message-time text-end mt-1" :class="msg.isMine ? 'text-dark' : 'text-muted'">
             {{ msg.timestamp }}
-            <span v-if="msg._syncStatus === 'sending' || msg._syncStatus === 'syncing'" class="sync-status pending" title="Syncing...">✓</span>
-            <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Synced">✓</span>
-            <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Failed to sync">!</span>
+            <!-- §4.3: ◌ stored locally → pale ✓ in flight → ✓ server-accepted.
+                 (✓✓ delivered needs delivery receipts; ↻ auto-retry needs the
+                 outbox hook — both arrive with their transports.) -->
+            <span v-if="msg._syncStatus === 'sending'" class="sync-status local" title="Saved locally">◌</span>
+            <span v-else-if="msg._syncStatus === 'syncing'" class="sync-status pending" title="Sending…">✓</span>
+            <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Accepted by server">✓</span>
+            <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Rejected — not sent">!</span>
+            <span v-if="msg._raw && msg._raw.parent_sign_hash" class="msg-edited" title="This message was edited">edited</span>
             <!-- A versioned edit that the server did not accept: others still
                  see the previous revision, so say so instead of showing the
                  attempted text as if it had landed. -->
@@ -79,6 +108,14 @@
 
     <!-- Footer / Input -->
     <div class="chat-footer p-2 border-top">
+      <div v-if="replyTo" class="reply-preview d-flex align-items-center gap-2 mb-1 px-2 py-1">
+        <div class="msg-quote-bar"></div>
+        <div class="flex-grow-1" style="min-width:0">
+          <div class="msg-quote-author">{{ quoteAuthorName(replyTo.authorHash) }}</div>
+          <div class="msg-quote-text">{{ replyTo.previewText }}</div>
+        </div>
+        <button type="button" class="btn btn-sm btn-light rounded-circle" @click="cancelReply" title="Cancel reply">✕</button>
+      </div>
       <form @submit.prevent="submitMessage" class="d-flex align-items-center m-0">
         <input type="text" class="form-control me-2 rounded-pill px-3" v-model="newMessage"
           placeholder="Type a message..." required />
@@ -98,6 +135,10 @@
           @click="selectEmojiFromContext(emoji)">{{ emoji }}</button>
       </div>
       <div class="context-menu-divider"></div>
+      <button v-if="contextMenuMsg && contextMenuMsg._raw && contextMenuMsg._raw.sign_hash && !contextMenuMsg._deleted"
+        type="button" class="context-menu-action" @click="startReply(contextMenuMsg)">
+        <i class="bi bi-reply me-2"></i>Reply
+      </button>
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced'" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
         <i class="bi bi-pencil me-2"></i>Edit
@@ -115,6 +156,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { contentToText } from '@/lib/pq/content';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { useMenu } from '@/composables/useMenu';
 import Avatar from 'vue-boring-avatars';
@@ -135,6 +177,10 @@ const props = defineProps({
     default: ''
   },
   avatarHash: {
+    type: String,
+    default: ''
+  },
+  myHash: {
     type: String,
     default: ''
   },
@@ -167,11 +213,51 @@ const contextMenuMsg = computed(() => {
   return props.messages.find((m) => m.id === contextMenu.value.msgId) || null;
 });
 
+// ---------- reply / quotes (design board §1.2) ----------
+
+const replyTo = ref(null); // { messageId, signHash, authorHash, snapshot, previewText }
+
+const startReply = (msg) => {
+  // The snapshot travels inside the reply, frozen at citation time — the
+  // quote must render even if the original later edits away or deletes.
+  replyTo.value = {
+    messageId: msg._raw.message_id,
+    signHash: msg._raw.sign_hash,
+    authorHash: msg._raw.sender_hash,
+    snapshot: msg.parts && msg.parts.length ? msg.parts : [{ kind: 'text', text: msg.text }],
+    previewText: msg.text || '…',
+  };
+  closeContextMenu();
+};
+
+const cancelReply = () => { replyTo.value = null; };
+
 const submitMessage = () => {
   if (newMessage.value.trim() !== '') {
-    emit('sendMessage', newMessage.value.trim());
+    emit('sendMessage', newMessage.value.trim(), replyTo.value);
     newMessage.value = '';
+    replyTo.value = null;
   }
+};
+
+const quotesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'quote');
+
+// 1:1 dialog: the only two authors are me and the peer the window shows.
+const quoteAuthorName = (hash) => (hash === props.myHash ? 'Me' : props.title);
+
+const quotePreview = (q) => contentToText(q.snapshot) || '…';
+
+const findOriginal = (q) => props.messages.find((m) => m.id === q.messageId);
+const quoteOriginalPresent = (q) => !!findOriginal(q);
+const quoteOriginalDeleted = (q) => !!findOriginal(q)?._deleted;
+
+// §1.2 "Ссылка и переход": scroll to the original, highlight for 1.5s.
+const jumpToMessage = (messageId) => {
+  const el = messagesContainer.value?.querySelector(`[data-msg-id="${messageId}"]`);
+  if (!el) return; // original not synced yet — the note under the quote says so
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('msg-jump-highlight');
+  setTimeout(() => el.classList.remove('msg-jump-highlight'), 1500);
 };
 
 const handleReactionClick = (messageId, emoji) => {
@@ -560,4 +646,52 @@ watch(() => props.messages, () => {
     }
   }
 }
+
+/* ---------- design board: quotes (§1.2) ---------- */
+.msg-quote {
+  display: flex;
+  gap: 8px;
+  background: rgba(36, 24, 36, .06);
+  border-radius: 9px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+.msg-quote-bar {
+  width: 3px;
+  border-radius: 999px;
+  background: #8e2b77;
+  flex-shrink: 0;
+}
+.msg-quote-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.msg-quote-author { font-size: 11px; line-height: 1.3; font-weight: 600; color: #8e2b77; }
+.msg-quote-text {
+  font-size: 12px;
+  line-height: 1.35;
+  color: #4a4750;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* original deleted: the quote turns historical — struck through, muted */
+.msg-quote._historic .msg-quote-text { color: #8f889b; text-decoration: line-through; opacity: .9; }
+.msg-quote-note { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
+.msg-quote-dot { width: 5px; height: 5px; border-radius: 50%; background: #c2c2c6; }
+
+.reply-preview { background: rgba(36, 24, 36, .06); border-radius: 9px; }
+
+/* §1.2 jump: outline + halo for 1.5s on the original bubble */
+.msg-jump-highlight { outline: 1.5px solid #8e2b77; box-shadow: 0 0 0 4px rgba(142, 43, 119, .22) !important; }
+
+/* ---------- design board: send states (§4.3) ---------- */
+.sync-status.local { color: #9a9c9d; }        /* ◌ stored locally */
+.sync-status.pending { opacity: .45; }         /* pale ✓ in flight */
+/* rejected outright: red frame on the bubble itself, not just the glyph */
+.message-error { border: 1.5px solid #dc3545; }
+.msg-edited { margin-left: 4px; font-size: 10px; color: #8e2b77; cursor: default; }
+
+/* ---------- §4.2: admitted but causally unplaced ---------- */
+.message-unplaced { opacity: .72; }
+.msg-unplaced-note { margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
 </style>

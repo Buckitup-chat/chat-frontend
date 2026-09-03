@@ -7,6 +7,7 @@ import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifySideRow } from '@/lib/pq/verifyDialogRow';
+import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
@@ -386,7 +387,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
     /**
      * Send a message (optimistic: returns immediately, syncs in background)
      */
-    const sendMessage = async (peerHash, text, onStatus, messageId = null, ownerTimestamp = null) => {
+    // `content` is a plain string (text message) or ContentPart[] — a reply
+    // is [quotePart, textPart], per the composed-message convention.
+    const sendMessage = async (peerHash, content, onStatus, messageId = null, ownerTimestamp = null) => {
+        const parts = typeof content === 'string' ? [{ kind: 'text', text: content }] : content;
         if (!messageId) {
             const { v7 } = await import('uuid');
             messageId = "dmsg_" + v7();
@@ -400,8 +404,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 const dialogHash = await initDialogKeys(peerHash);
                 const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
-                const contentJson = JSON.stringify({ type: "text", text: text });
-                const contentB64 = await DialogCrypto.encryptContent(myKey, contentJson);
+                // Canonical wire form (07_content_polymorphism.md): bare
+                // string for text, array for composed — never the legacy
+                // {"type":"text"} shape this client used to emit.
+                const contentB64 = await DialogCrypto.encryptContent(myKey, encodeContent(parts));
 
                 // Causal refs: the DAG tails observed at send time ({} only
                 // for the genesis message, when nothing is loaded yet)
@@ -448,8 +454,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
             throw new Error('Cannot edit: not owner');
         }
 
-        const contentJson = JSON.stringify({ type: "text", text: newText });
-        const contentB64 = await DialogCrypto.encryptContent(myKey, contentJson);
+        const newParts = typeof newText === 'string' ? [{ kind: 'text', text: newText }] : newText;
+        const contentB64 = await DialogCrypto.encryptContent(myKey, encodeContent(newParts));
         // Refs are recomputed at edit time — the tails may have changed since
         // the original authoring; the old refs stay archived with the old
         // revision in dialog_messages_versions (spec: §Behavior on edit)
@@ -482,18 +488,26 @@ export const useDialogsStore = defineStore('dialogs', () => {
             if (!key) return { ...row, decrypted: false, text: "Waiting for keys..." };
 
             const jsonStr = await DialogCrypto.decryptContent(key, row.content_b64);
-            const parsed = jsonStr ? JSON.parse(jsonStr) : { text: "" };
-            
+            // Deletion tombstones carry empty content by design (07: an empty
+            // content_b64 is only valid alongside deleted_flag) — not a format error.
+            const parts = jsonStr ? decodeContent(jsonStr) : [];
+
             return {
                 ...row,
                 decrypted: true,
-                text: parsed.text || "",
-                type: parsed.type || "text",
+                parts,
+                text: contentToText(parts),
                 isMine: row.sender_hash === $userPQ.currentUserHash
             };
         } catch (e) {
-            console.error("Decrypt error", e);
-            return { ...row, decrypted: false, text: "Decryption failed" };
+            const unsupported = e instanceof ContentDecodeError;
+            if (!unsupported) console.error("Decrypt error", e);
+            return {
+                ...row,
+                decrypted: false,
+                parts: [],
+                text: unsupported ? "Unsupported message format" : "Decryption failed",
+            };
         }
     };
 

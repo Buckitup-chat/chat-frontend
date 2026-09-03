@@ -1,7 +1,7 @@
 <template>
     <div class="h-100 w-100">
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
-            :showAuthorName="false" :reactions="displayReactions" @sendMessage="handleSendMessage"
+            :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions" @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge" />
     </div>
@@ -91,7 +91,23 @@ watch(dialogHash, () => {
 const rebuildDecryptedMessages = (newRows) => {
     const out = [];
     for (const row of newRows) {
-        if (row.deleted_flag) continue;
+        // §3.2: deletion is a signed revision, not a disappearance. The
+        // tombstone stays in the feed; reactions on it stay where they were.
+        if (row.deleted_flag) {
+            const date = new Date(row.owner_timestamp * 1000);
+            out.push({
+                id: row.message_id,
+                text: '',
+                parts: [],
+                _deleted: true,
+                isMine: row.sender_hash === $userPQ.currentUserHash,
+                authorName: row.sender_hash === $userPQ.currentUserHash ? 'Me' : chatName.value,
+                timestamp: `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`,
+                _syncStatus: 'synced',
+                _raw: row,
+            });
+            continue;
+        }
         const entry = messageCache.get(row.message_id);
         if (entry) out.push(entry);
     }
@@ -148,6 +164,7 @@ const scheduleDecrypt = (newRows) => {
                 return [row.message_id, {
                     ...base,
                     text: decrypted.text,
+                    parts: decrypted.parts || [],
                     authorName: decrypted.isMine ? 'Me' : name,
                     _decrypted: decrypted.decrypted === true,
                 }];
@@ -453,17 +470,29 @@ const handleToggleReaction = async (messageId, emoji) => {
     }
 };
 
-const handleSendMessage = (text) => {
+const handleSendMessage = (text, replyTo = null) => {
     if (!text.trim() || !peerHash.value || !dialogHash.value) return;
     const dialogHashVal = dialogHash.value;
     const nowSec = Math.floor(Date.now() / 1000);
     const messageId = "dmsg_" + uuidv7();
 
+    // A reply is a composed message: the quote part carries a snapshot of the
+    // cited content, so it stays readable whatever happens to the original.
+    const content = replyTo
+        ? [{
+            kind: 'quote',
+            authorHash: replyTo.authorHash,
+            messageId: replyTo.messageId,
+            signHash: replyTo.signHash,
+            snapshot: replyTo.snapshot,
+        }, { kind: 'text', text: text.trim() }]
+        : text.trim();
+
     const optimisticId = $dialogs.addOptimisticMessageWithId(dialogHashVal, messageId, text.trim(), nowSec);
 
     (async () => {
         try {
-            await $dialogs.sendMessage(peerHash.value, text.trim(), (status) => {
+            await $dialogs.sendMessage(peerHash.value, content, (status) => {
                 $dialogs.updateOptimisticStatus(optimisticId, status);
             }, messageId, nowSec);
         } catch (e) {
