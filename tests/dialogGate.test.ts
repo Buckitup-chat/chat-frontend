@@ -175,6 +175,21 @@ describe('dialog gate — causal rules (T-DAG)', () => {
 		expect(gate.isAdmitted(child.row.message_id, child.row.sign_hash!)).toBe(true);
 	});
 
+	// The parent may verify while its refs stay unreadable (no key yet). Its
+	// revision is still known — children waiting on it must not stay parked.
+	it('drains children when the parent admits without a readable refs map', async () => {
+		const parent = makeMessage(alice, {});
+		const child = makeMessage(bob, { [parent.row.message_id]: parent.row.sign_hash! });
+		const refsOf = new Map<string, Record<string, string> | 'no_key' | 'error'>([
+			[parent.row.message_id, 'no_key'],
+			[child.row.message_id, child.refs],
+		]);
+		const gate = makeGate({ cards: { [alice.userHash]: alice.signPkeyB64, [bob.userHash]: bob.signPkeyB64 }, refsOf });
+		expect((await gate.admit(child.row)).status).toBe('waiting');
+		expect((await gate.admit(parent.row)).status).toBe('verified');
+		expect(gate.isAdmitted(child.row.message_id, child.row.sign_hash!)).toBe(true);
+	});
+
 	it('drains a whole chain delivered in reverse order', async () => {
 		const a = makeMessage(alice, {});
 		const b = makeMessage(bob, { [a.row.message_id]: a.row.sign_hash! });

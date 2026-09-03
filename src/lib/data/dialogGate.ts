@@ -139,7 +139,9 @@ export function createDialogGate(deps: GateDeps) {
 		if (refs === 'no_key') {
 			// Signature holds but the causal map is unreadable without the
 			// sender's key: trusted enough to render, not to order.
-			return finishVerified(row, false, false);
+			const verdict = finishVerified(row, false, false);
+			drainUnblocked(key); // children waiting on this revision can proceed
+			return verdict;
 		}
 
 		const verdict = admitRefs(row, refs);

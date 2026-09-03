@@ -147,6 +147,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
     /** True only for a receipt whose signature verifies against its peer. */
     const admitReceiptRow = (row) => admitSideRow(row, 'peer_hash', 'receipt_hash');
 
+    /** True when the gate has already admitted this exact revision — used by
+     * the render path to reconcile a stale 'waiting' snapshot after a batch:
+     * a child admitted before its parent parks, the parent's arrival drains
+     * it inside the gate, and the UI entry written earlier must catch up. */
+    const isMessageAdmitted = (dialogHash, messageId, signHash) =>
+        dialogGates.get(dialogHash)?.isAdmitted(messageId, signHash) ?? false;
+
     /** Re-checks rows parked on absent author cards; call when user_cards sync. */
     const retryCardAdmissions = async () => {
         for (const gate of dialogGates.values()) await gate.retryAwaitingCards();
@@ -862,6 +869,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         fetchFile,
         getMessageHistory,
         admitMessageRow,
+        isMessageAdmitted,
         admitReactionRow,
         admitReceiptRow,
         retryCardAdmissions,

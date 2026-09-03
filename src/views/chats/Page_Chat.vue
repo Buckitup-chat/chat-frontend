@@ -137,7 +137,13 @@ const scheduleDecrypt = (newRows) => {
 
         if (pending.length > 0) {
             const name = chatName.value;
-            const entries = await Promise.all(pending.map(async (row) => {
+            // Admission is sequential and oldest-first: parents overwhelmingly
+            // predate their children, so this order admits a chain in one
+            // pass instead of parking every child behind a concurrent race.
+            pending.sort((a, b) => a.owner_timestamp - b.owner_timestamp);
+            const entries = [];
+            for (const row of pending) {
+                entries.push(await (async (row) => {
                 // Gate first (chat docs: invariants/02, 04): the row proves its
                 // signature and causal refs before its content is treated as a
                 // message. Invalid rows render as a warning, never as content —
@@ -173,10 +179,22 @@ const scheduleDecrypt = (newRows) => {
                     authorName: decrypted.isMine ? 'Me' : name,
                     _decrypted: decrypted.decrypted === true,
                 }];
-            }));
+                })(row));
+            }
             // Apply only if the user is still looking at the same dialog
             if (generation !== dialogGeneration) return;
             for (const [id, entry] of entries) messageCache.set(id, entry);
+        }
+
+        // Reconcile stale 'waiting' snapshots: a batch admits concurrently
+        // with the gate's own cascade, so a child can be drained to verified
+        // inside the gate after its UI entry was already written as waiting.
+        for (const entry of messageCache.values()) {
+            if (entry._verify === 'waiting' && entry._raw?.sign_hash
+                && $dialogs.isMessageAdmitted(entry._raw.dialog_hash, entry._raw.message_id, entry._raw.sign_hash)) {
+                entry._verify = 'verified';
+                entry._dagVerified = true;
+            }
         }
 
         rebuildDecryptedMessages(newRows);
