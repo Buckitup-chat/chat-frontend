@@ -56,6 +56,42 @@
                 <div v-else-if="!quoteOriginalPresent(q)" class="msg-quote-note"><span class="msg-quote-dot"></span>original not synced yet</div>
               </div>
             </div>
+            <!-- §1.4 video: ThumbHash frame with a play button; playback
+                 starts on the first chunk. The bar underneath is two-layer —
+                 played over the buffer the browser has actually decrypted. -->
+            <div v-for="v in videosOf(msg)" :key="v.fileId" class="msg-video">
+              <div class="msg-video-frame" :style="{ aspectRatio: v.widthAspect + ' / ' + v.heightAspect }"
+                :role="videos[v.fileId]?.url ? undefined : 'button'"
+                @click="!videos[v.fileId]?.url && videos[v.fileId]?.status !== 'opening' && emit('playVideo', v)">
+                <img v-if="thumbUrl(v)" class="msg-image-blur" :src="thumbUrl(v)" alt="" />
+                <video v-if="videos[v.fileId]?.url" class="msg-video-el"
+                  :src="videos[v.fileId].url" controls playsinline
+                  @loadedmetadata="onVideoTime(v.fileId, $event)"
+                  @timeupdate="onVideoTime(v.fileId, $event)"
+                  @progress="onVideoTime(v.fileId, $event)"></video>
+                <div v-else-if="videos[v.fileId]?.status === 'opening'" class="msg-video-play" aria-hidden="true">
+                  <span class="msg-video-spinner"></span>
+                </div>
+                <div v-else class="msg-video-play" aria-hidden="true">
+                  <span class="msg-video-triangle"></span>
+                </div>
+                <!-- The fallback path downloads before playing and reports
+                     chunks; the streaming path buffers silently, so the label
+                     carries whichever truth exists. -->
+                <span v-if="videos[v.fileId]?.status === 'opening'" class="msg-video-buffering">
+                  <template v-if="videos[v.fileId]?.total">buffering · chunk {{ videos[v.fileId].done }} of {{ videos[v.fileId].total }}</template>
+                  <template v-else>buffering</template>
+                </span>
+                <div v-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
+                  video failed — tap to retry
+                </div>
+              </div>
+              <div v-if="videos[v.fileId]?.url" class="msg-video-bar">
+                <div class="msg-video-buffered" :style="{ width: (videoState[v.fileId]?.buffered || 0) + '%' }"></div>
+                <div class="msg-video-played" :style="{ width: (videoState[v.fileId]?.played || 0) + '%' }"></div>
+              </div>
+            </div>
+
             <!-- §1.3 single picture: the box is reserved from the aspect
                  ratio in the message and filled with the ThumbHash blur, so
                  the bubble does not jump when the bytes land. -->
@@ -217,7 +253,7 @@
         <button type="button" class="btn btn-sm btn-light rounded-circle" @click="cancelReply" title="Cancel reply">✕</button>
       </div>
       <form @submit.prevent="submitMessage" class="d-flex align-items-center m-0">
-        <input ref="fileInput" type="file" class="d-none" @change="onFilePicked" />
+        <input ref="fileInput" type="file" multiple class="d-none" @change="onFilePicked" />
         <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
           style="width: 40px; height: 40px; padding: 0;" title="Attach a file" @click="fileInput?.click()">📎</button>
         <input type="text" class="form-control me-2 rounded-pill px-3" v-model="newMessage"
@@ -231,31 +267,30 @@
     </div>
 
     <!-- Carousel (board screen 03): counter in the header, caption under the
-         frame, strip showing which frames are already here. -->
-    <div v-if="lightbox" class="lightbox" @click.self="closeLightbox">
+         frame, a strip of every picture in the dialog in feed order — frames
+         still on their way read as dimmed. Arrows walk past message
+         boundaries; the strip doubles as "which of these are here". -->
+    <div v-if="lightbox && currentFrame" class="lightbox" @click.self="closeLightbox">
       <div class="lightbox-bar">
-        <span class="lightbox-count">{{ lightbox.index + 1 }} / {{ lightbox.parts.length }}</span>
+        <span class="lightbox-count">{{ lightbox.index + 1 }} / {{ allDialogImages.length }}</span>
         <button type="button" class="lightbox-close" @click="closeLightbox" title="Close">✕</button>
       </div>
-      <button v-if="lightbox.parts.length > 1" type="button" class="lightbox-nav _prev" @click.stop="stepLightbox(-1)">‹</button>
+      <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _prev" @click.stop="stepLightbox(-1)">‹</button>
       <div class="lightbox-frame">
-        <img v-if="images[lightbox.parts[lightbox.index].fileId]?.url"
-          :src="images[lightbox.parts[lightbox.index].fileId].url"
-          :alt="lightbox.parts[lightbox.index].name" />
-        <img v-else-if="thumbUrl(lightbox.parts[lightbox.index])" class="_blur"
-          :src="thumbUrl(lightbox.parts[lightbox.index])" alt="" />
-        <div v-if="images[lightbox.parts[lightbox.index].fileId]?.status === 'downloading'" class="msg-image-progress">
-          {{ images[lightbox.parts[lightbox.index].fileId].done }} /
-          {{ images[lightbox.parts[lightbox.index].fileId].total }} chunks
+        <img v-if="images[currentFrame.part.fileId]?.url"
+          :src="images[currentFrame.part.fileId].url" :alt="currentFrame.part.name" />
+        <img v-else-if="thumbUrl(currentFrame.part)" class="_blur" :src="thumbUrl(currentFrame.part)" alt="" />
+        <div v-if="images[currentFrame.part.fileId]?.status === 'downloading'" class="msg-image-progress">
+          {{ images[currentFrame.part.fileId].done }} / {{ images[currentFrame.part.fileId].total }} chunks
         </div>
       </div>
-      <button v-if="lightbox.parts.length > 1" type="button" class="lightbox-nav _next" @click.stop="stepLightbox(1)">›</button>
-      <div v-if="lightbox.caption" class="lightbox-caption">{{ lightbox.caption }}</div>
-      <div v-if="lightbox.parts.length > 1" class="lightbox-strip">
-        <button v-for="(im, i) in lightbox.parts" :key="im.fileId" type="button"
-          class="lightbox-thumb" :class="{ _active: i === lightbox.index, _pending: !images[im.fileId]?.url }"
-          @click.stop="lightbox.index = i; emit('showImage', im)">
-          <img v-if="images[im.fileId]?.url || thumbUrl(im)" :src="images[im.fileId]?.url || thumbUrl(im)" alt="" />
+      <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _next" @click.stop="stepLightbox(1)">›</button>
+      <div v-if="currentFrame.caption" class="lightbox-caption">{{ currentFrame.caption }}</div>
+      <div v-if="allDialogImages.length > 1" class="lightbox-strip">
+        <button v-for="(it, i) in allDialogImages" :key="it.part.fileId" type="button"
+          class="lightbox-thumb" :class="{ _active: i === lightbox.index, _pending: !images[it.part.fileId]?.url }"
+          @click.stop="jumpLightbox(i)">
+          <img v-if="images[it.part.fileId]?.url || thumbUrl(it.part)" :src="images[it.part.fileId]?.url || thumbUrl(it.part)" alt="" />
         </button>
       </div>
     </div>
@@ -347,6 +382,10 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
+  videos: {
+    type: Object,
+    default: () => ({})
+  },
   messages: {
     type: Array,
     required: true,
@@ -361,7 +400,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'cancelUpload', 'downloadFile', 'showImage']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'cancelUpload', 'downloadFile', 'showImage', 'playVideo']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -436,6 +475,28 @@ const partial = (part) => {
   return a.present < a.total ? a : null;
 };
 const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
+const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
+
+// Two layers, both read off the element itself: how far playback got, and
+// how much the browser actually holds decrypted.
+const videoState = ref({});
+const onVideoTime = (fileId, event) => {
+  const el = event.target;
+  if (!el?.duration || !isFinite(el.duration)) return;
+  let buffered = 0;
+  for (let i = 0; i < el.buffered.length; i++) {
+    if (el.buffered.start(i) <= el.currentTime) buffered = Math.max(buffered, el.buffered.end(i));
+  }
+  videoState.value = {
+    ...videoState.value,
+    [fileId]: {
+      played: Math.min(100, (el.currentTime / el.duration) * 100),
+      buffered: Math.min(100, (buffered / el.duration) * 100),
+    },
+  };
+};
+
+
 
 // ThumbHash decodes to a tiny data URL; cached because it is pure and the
 // list re-renders on every sync tick.
@@ -444,23 +505,42 @@ const MAX_TILES = 4;
 const visibleImages = (msg) => imagesOf(msg).slice(0, MAX_TILES);
 const overflowCount = (msg) => Math.max(0, imagesOf(msg).length - MAX_TILES);
 
-const lightbox = ref(null);
-const openLightbox = (msg, index) => {
+// Every picture in the dialog, in feed order — the carousel walks this, so
+// stepping continues into neighbouring messages instead of stopping at the
+// bubble's edge. Computed off the live message list: frames that arrive
+// while the carousel is open join it.
+const allDialogImages = computed(() =>
+  props.messages.flatMap((m) =>
+    imagesOf(m).map((part) => ({ part, caption: contentToText(m.parts || []) }))),
+);
+
+const lightbox = ref(null); // { index } into allDialogImages
+const currentFrame = computed(() =>
+  lightbox.value ? allDialogImages.value[lightbox.value.index] ?? null : null);
+
+const openLightbox = (msg, localIndex) => {
   const parts = imagesOf(msg);
   if (!parts.length) return;
-  // The +N tile opens at the first hidden frame, not at the tile itself.
-  const start = overflowCount(msg) && index === MAX_TILES - 1 ? MAX_TILES - 1 : index;
-  lightbox.value = { parts, index: start, caption: contentToText(msg.parts || []) };
+  const target = parts[Math.min(localIndex, parts.length - 1)];
+  const globalIndex = allDialogImages.value.findIndex((it) => it.part.fileId === target.fileId);
+  if (globalIndex < 0) return;
+  lightbox.value = { index: globalIndex };
   // The carousel asks for whatever frame it shows: one that never arrived
   // (or failed) is fetched now instead of staying a blur.
-  emit('showImage', parts[start]);
+  emit('showImage', target);
 };
 const closeLightbox = () => { lightbox.value = null; };
 const stepLightbox = (delta) => {
   if (!lightbox.value) return;
-  const n = lightbox.value.parts.length;
-  lightbox.value.index = (lightbox.value.index + delta + n) % n;
-  emit('showImage', lightbox.value.parts[lightbox.value.index]);
+  const total = allDialogImages.value.length;
+  if (!total) return closeLightbox();
+  lightbox.value.index = (lightbox.value.index + delta + total) % total;
+  emit('showImage', allDialogImages.value[lightbox.value.index].part);
+};
+const jumpLightbox = (index) => {
+  if (!lightbox.value) return;
+  lightbox.value.index = index;
+  emit('showImage', allDialogImages.value[index].part);
 };
 
 const thumbCache = new Map();
@@ -483,12 +563,12 @@ const fmtSize = (n) => {
 
 const fileInput = ref(null);
 const onFilePicked = (e) => {
-  const file = e.target.files?.[0];
+  const files = Array.from(e.target.files || []);
   e.target.value = '';
-  if (!file) return;
-  // The caption is whatever sits in the input — one composed message
-  // (board screen 02: "подпись набирается в том же поле").
-  emit('sendFile', file, newMessage.value.trim());
+  if (!files.length) return;
+  // Everything picked travels as ONE composed message, captioned by whatever
+  // sits in the input (board screen 02: "подпись набирается в том же поле").
+  emit('sendFile', files, newMessage.value.trim());
   newMessage.value = '';
 };
 
@@ -1096,7 +1176,14 @@ watch(() => props.messages, () => {
 .lightbox-nav._prev { left: 12px; }
 .lightbox-nav._next { right: 12px; }
 .lightbox-caption { color: #fff; font-size: 13px; max-width: min(92vw, 1100px); text-align: center; }
-.lightbox-strip { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.lightbox-strip {
+  display: flex;
+  gap: 6px;
+  max-width: min(92vw, 1100px);
+  overflow-x: auto;
+  padding: 2px;
+}
+.lightbox-thumb { flex-shrink: 0; }
 .lightbox-thumb {
   width: 46px; height: 46px;
   padding: 0;
@@ -1129,4 +1216,60 @@ watch(() => props.messages, () => {
   line-height: 1.2;
   white-space: nowrap;
 }
+
+/* ---------- §1.4 video ---------- */
+.msg-video { margin-bottom: 6px; }
+.msg-video-frame {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #2d2450;
+  max-height: 340px;
+}
+.msg-video-el { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.msg-video-frame[role="button"] { cursor: pointer; }
+.msg-video-play {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 3px;
+}
+.msg-video-triangle {
+  width: 0; height: 0;
+  border-left: 14px solid #241824;
+  border-top: 9px solid transparent;
+  border-bottom: 9px solid transparent;
+}
+.msg-video-spinner {
+  width: 22px; height: 22px;
+  border: 2.6px solid rgba(36, 24, 36, .25);
+  border-top-color: #241824;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+.msg-video-buffering {
+  position: absolute;
+  left: 6px; bottom: 6px;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.3;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .5);
+}
+.msg-video-bar {
+  position: relative;
+  height: 3px;
+  border-radius: 999px;
+  background: #e6e6ea;
+  overflow: hidden;
+  margin-top: 5px;
+}
+/* light = decrypted buffer, dark = played */
+.msg-video-buffered { position: absolute; inset: 0 auto 0 0; background: #c8bcd4; }
+.msg-video-played { position: absolute; inset: 0 auto 0 0; background: #8e2b77; }
 </style>

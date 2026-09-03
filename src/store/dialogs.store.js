@@ -9,7 +9,8 @@ import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
 import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
-import { buildImagePreview, isImageMime } from '@/lib/data/imageMeta';
+import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
+import { openVideo } from '@/lib/data/videoStream';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
@@ -499,7 +500,16 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * Uploads a file and sends the message referencing it. Progress is in
      * chunks (§2.1 — "куски, а не проценты-догадки"). Returns the fileId.
      */
-    const sendFileMessage = async (peerHash, fileMeta, { caption = '', onProgress, onStatus, signal } = {}) => {
+    /**
+     * Uploads one attachment and returns its content part.
+     *
+     * An image or video announces its shape (aspect ratio + ThumbHash) so
+     * the receiver lays it out before downloading; anything that will not
+     * decode travels as a plain file rather than claiming a preview it does
+     * not have. Previews are computed here, from the plaintext — the device
+     * never sees it, so nowhere else can compute them.
+     */
+    const uploadAttachment = async (fileMeta, { onProgress, signal } = {}) => {
         const { name, mimeType, bytes, createdAt, blob } = fileMeta;
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
@@ -512,7 +522,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
             }));
         } catch { /* private mode: resume across reloads degrades, upload still works */ }
 
-        onStatus?.('uploading');
         const up = await uploadFile({
             bytes, uploaderHash, signSkey, ...prepared, onProgress, signal,
         });
@@ -525,13 +534,37 @@ export const useDialogsStore = defineStore('dialogs', () => {
             fileId: up.fileId,
             encSecretB64: up.encSecretB64,
         };
-        // An image announces its shape so the receiver can lay it out before
-        // downloading; anything that will not decode travels as a plain file
-        // rather than claiming a preview it does not have.
-        const preview = blob && isImageMime(mimeType) ? await buildImagePreview(blob).catch(() => null) : null;
-        const parts = [preview ? { kind: 'image', ...preview, ...common } : { kind: 'file', ...common }];
+        const video = blob && isVideoMime(mimeType);
+        const preview = blob && (isImageMime(mimeType) || video)
+            ? await (video ? buildVideoPreview(blob) : buildImagePreview(blob)).catch(() => null)
+            : null;
+        return preview
+            ? { kind: video ? 'video' : 'image', ...preview, ...common }
+            : { kind: 'file', ...common };
+    };
+
+    /**
+     * Sends attachments as ONE composed message (board screen 02): every
+     * file becomes a part, the caption is the trailing text part. Uploads
+     * run sequentially on purpose — the device's chunk lane is single-writer
+     * and answers concurrency with 429s, so parallel uploads only add retry
+     * traffic.
+     *
+     * The message is written after every upload has landed: a composed
+     * message referencing an aborted upload would be a reference to nothing.
+     */
+    const sendFilesMessage = async (peerHash, fileMetas, { caption = '', onFileProgress, onStatus, signal } = {}) => {
+        const parts = [];
+        for (let i = 0; i < fileMetas.length; i++) {
+            signal?.throwIfAborted();
+            parts.push(await uploadAttachment(fileMetas[i], {
+                signal,
+                onProgress: (p) => onFileProgress?.(i, p),
+            }));
+        }
         if (caption.trim()) parts.push({ kind: 'text', text: caption.trim() });
 
+        onStatus?.('sending');
         await new Promise((resolve, reject) => {
             sendMessage(peerHash, parts, (status) => {
                 onStatus?.(status);
@@ -540,9 +573,16 @@ export const useDialogsStore = defineStore('dialogs', () => {
             });
         });
 
-        try { localStorage.removeItem(pendingUploadKey(up.fileId)); } catch { /* already best-effort */ }
-        return up.fileId;
+        for (const part of parts) {
+            if (part.fileId) {
+                try { localStorage.removeItem(pendingUploadKey(part.fileId)); } catch { /* best-effort */ }
+            }
+        }
+        return parts.filter((p) => p.fileId).map((p) => p.fileId);
     };
+
+    /** Playable source for a video part; streams when a worker is available. */
+    const openVideoSource = (part, opts) => openVideo(part, opts);
 
     /** How much of an attachment this node can serve (§2.4). */
     const getFileAvailability = (fileId) => fileAvailability(fileId);
@@ -873,9 +913,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         editMessage,
         decryptMessageRow,
         deleteMessage,
-        sendFileMessage,
+        sendFilesMessage,
         fetchFile,
         getFileAvailability,
+        openVideoSource,
         getMessageHistory,
         admitMessageRow,
         isMessageAdmitted,

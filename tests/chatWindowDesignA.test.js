@@ -264,16 +264,22 @@ describe('§1.5 file attachments', () => {
 		expect(w.emitted('cancelUpload')[0]).toEqual(['up_1']);
 	});
 
-	it('attach button emits the picked file with the caption from the input', async () => {
+	// Board screen 02: several files, one composed message, the caption from
+	// the same input.
+	it('attach button emits everything picked with the caption from the input', async () => {
 		const w = renderWith([]);
-		await w.find('input[type="text"]').setValue('вот акт');
-		const file = new File([new Uint8Array([1, 2, 3])], 'act.pdf', { type: 'application/pdf' });
+		await w.find('input[type="text"]').setValue('схема и акт');
 		const input = w.find('input[type="file"]');
-		Object.defineProperty(input.element, 'files', { value: [file] });
+		expect(input.attributes('multiple')).toBeDefined();
+		const files = [
+			new File([new Uint8Array([1])], 'scheme.jpg', { type: 'image/jpeg' }),
+			new File([new Uint8Array([2])], 'act.pdf', { type: 'application/pdf' }),
+		];
+		Object.defineProperty(input.element, 'files', { value: files });
 		await input.trigger('change');
 		const [emitted, caption] = w.emitted('sendFile')[0];
-		expect(emitted.name).toBe('act.pdf');
-		expect(caption).toBe('вот акт');
+		expect(emitted.map((f) => f.name)).toEqual(['scheme.jpg', 'act.pdf']);
+		expect(caption).toBe('схема и акт');
 		expect(w.find('input[type="text"]').element.value).toBe('');
 	});
 });
@@ -486,5 +492,127 @@ describe('§2.4 file availability', () => {
 		const w = renderWith({ [filePart.fileId]: { present: 5, total: 12, unknown: false, deleted: false } });
 		await w.find('.msg-availability-btn').trigger('click');
 		expect(w.emitted('downloadFile')[0][0]).toMatchObject({ fileId: filePart.fileId });
+	});
+});
+
+describe('§1.4 video', () => {
+	const videoPart = {
+		kind: 'video', widthAspect: 4, heightAspect: 3, thumbHashB64: '',
+		name: 'clip.mp4', size: 52_428_800, mimeType: 'video/mp4',
+		createdAt: 0, fileId: 'f_' + 'e'.repeat(32), encSecretB64: 'AAAA',
+	};
+	const renderWith = (videos = {}) =>
+		mount(ChatWindow, {
+			props: {
+				title: 'Ирина', myHash: MY, reactions: {},
+				messages: [message({ parts: [videoPart], text: '' })],
+				videos,
+			},
+			global: { stubs: { Avatar: true } },
+		});
+
+	it('shows a play affordance over the preview frame, sized by the aspect ratio', () => {
+		const w = renderWith();
+		expect(w.find('.msg-video-triangle').exists()).toBe(true);
+		expect(w.find('.msg-video-frame').attributes('style')).toContain('aspect-ratio: 4 / 3');
+		expect(w.find('video').exists()).toBe(false);
+	});
+
+	it('asks to play on tapping the frame', async () => {
+		const w = renderWith();
+		await w.find('.msg-video-frame').trigger('click');
+		expect(w.emitted('playVideo')[0][0]).toMatchObject({ fileId: videoPart.fileId });
+	});
+
+	it('does not re-ask while the source is already opening', async () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'opening' } });
+		await w.find('.msg-video-frame').trigger('click');
+		expect(w.emitted('playVideo')).toBeFalsy();
+		expect(w.find('.msg-video-spinner').exists()).toBe(true);
+	});
+
+	it('says it is buffering, with chunk progress when the fallback reports it', () => {
+		expect(renderWith({ [videoPart.fileId]: { status: 'opening' } })
+			.find('.msg-video-buffering').text()).toBe('buffering');
+		expect(renderWith({ [videoPart.fileId]: { status: 'opening', done: 3, total: 13 } })
+			.find('.msg-video-buffering').text()).toContain('chunk 3 of 13');
+	});
+
+	it('mounts the player once the source is ready', () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'ready', url: '/encrypted-video/abc', streaming: true } });
+		const el = w.find('video');
+		expect(el.attributes('src')).toBe('/encrypted-video/abc');
+		expect(w.find('.msg-video-triangle').exists()).toBe(false);
+		// two-layer bar: played over decrypted buffer
+		expect(w.find('.msg-video-buffered').exists()).toBe(true);
+		expect(w.find('.msg-video-played').exists()).toBe(true);
+	});
+
+	// The failure text says "tap to retry", so the frame must actually take
+	// the tap in that state.
+	it('retries on tapping a failed frame', async () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'error' } });
+		expect(w.find('.msg-image-progress._err').text()).toMatch(/tap to retry/);
+		await w.find('.msg-video-frame').trigger('click');
+		expect(w.emitted('playVideo')[0][0]).toMatchObject({ fileId: videoPart.fileId });
+	});
+});
+
+describe('carousel walks the whole dialog', () => {
+	const img = (tag) => ({
+		kind: 'image', widthAspect: 1, heightAspect: 1, thumbHashB64: '',
+		name: `${tag}.png`, size: 1, mimeType: 'image/png', createdAt: 0,
+		fileId: 'f_' + tag.repeat(32).slice(0, 32), encSecretB64: 'AAAA',
+	});
+	const msgWith = (id, parts, text) => message({
+		id, parts, text,
+		_raw: { message_id: id, sign_hash: 'dms_' + id, sender_hash: PEER, parent_sign_hash: null },
+	});
+	const renderTwo = () =>
+		mount(ChatWindow, {
+			props: {
+				title: 'Ирина', myHash: MY, reactions: {},
+				messages: [
+					msgWith('dmsg_a', [img('a'), { kind: 'text', text: 'первая пара' }], 'первая пара'),
+					msgWith('dmsg_b', [{ kind: 'text', text: 'между' }], 'между'),
+					msgWith('dmsg_c', [img('c'), img('d')], ''),
+				],
+			},
+			global: { stubs: { Avatar: true } },
+		});
+
+	// The user's ask verbatim: pictures from one message AND from different
+	// messages, in the order they appear in the chat.
+	it('counts every picture in the dialog and steps across messages', async () => {
+		const w = renderTwo();
+		await w.find('.msg-image').trigger('click'); // the lone picture in msg A
+		expect(w.find('.lightbox-count').text()).toBe('1 / 3');
+
+		await w.find('.lightbox-nav._next').trigger('click');
+		expect(w.find('.lightbox-count').text()).toBe('2 / 3'); // first frame of msg C
+		await w.find('.lightbox-nav._next').trigger('click');
+		expect(w.find('.lightbox-count').text()).toBe('3 / 3');
+		await w.find('.lightbox-nav._next').trigger('click');
+		expect(w.find('.lightbox-count').text()).toBe('1 / 3'); // wrapped to msg A
+	});
+
+	it('opens at the tapped frame of a later message, not at the dialog start', async () => {
+		const w = renderTwo();
+		await w.findAll('.msg-gallery-cell')[1].trigger('click');
+		expect(w.find('.lightbox-count').text()).toBe('3 / 3');
+	});
+
+	it('switches the caption to the message each frame belongs to', async () => {
+		const w = renderTwo();
+		await w.find('.msg-image').trigger('click');
+		expect(w.find('.lightbox-caption').text()).toBe('первая пара');
+		await w.find('.lightbox-nav._next').trigger('click');
+		expect(w.find('.lightbox-caption').exists()).toBe(false); // msg C has no caption
+	});
+
+	it('lists every dialog picture in the strip', async () => {
+		const w = renderTwo();
+		await w.find('.msg-image').trigger('click');
+		expect(w.findAll('.lightbox-thumb')).toHaveLength(3);
 	});
 });

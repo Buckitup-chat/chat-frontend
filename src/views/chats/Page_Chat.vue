@@ -4,10 +4,10 @@
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId" :histories="historiesByMsgId"
             :uploads="activeUploads" :downloads="downloadsByFileId" :images="imagesByFileId"
-            :availability="availabilityByFileId"
+            :availability="availabilityByFileId" :videos="videosByFileId"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @cancel-upload="handleCancelUpload" @download-file="handleDownloadFile"
-            @show-image="handleShowImage"
+            @show-image="handleShowImage" @play-video="handlePlayVideo"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge" />
@@ -522,41 +522,57 @@ const patchUpload = (id, patch) => {
     activeUploads.value = activeUploads.value.map((u) => (u.id === id ? { ...u, ...patch } : u));
 };
 
-const handleSendFile = async (file, caption) => {
-    const id = `up_${++uploadSeq}`;
+// One batch = one composed message (board screen 02). Every file gets its
+// own strip row with chunk progress; the ✕ on any row cancels the whole
+// batch, because the message they are becoming is a single unit — sending
+// "some of it" would produce a message the user never composed.
+const handleSendFile = async (files, caption) => {
+    const batchId = `up_${++uploadSeq}`;
     const ctrl = new AbortController();
-    uploadAborts.set(id, ctrl);
-    activeUploads.value = [...activeUploads.value, { id, name: file.name, done: 0, total: 0, status: 'encrypting' }];
+    uploadAborts.set(batchId, ctrl);
+    const rowIds = files.map((_, i) => `${batchId}_${i}`);
+    activeUploads.value = [
+        ...activeUploads.value,
+        ...files.map((f, i) => ({ id: rowIds[i], batchId, name: f.name, done: 0, total: 0, status: 'encrypting' })),
+    ];
+    const dropBatch = () => {
+        activeUploads.value = activeUploads.value.filter((u) => u.batchId !== batchId);
+    };
     try {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        await $dialogs.sendFileMessage(peerHash.value, {
-            name: file.name,
-            mimeType: file.type,
-            bytes,
-            blob: file,
-            createdAt: Math.floor((file.lastModified || Date.now()) / 1000),
-        }, {
+        const metas = [];
+        for (const file of files) {
+            metas.push({
+                name: file.name,
+                mimeType: file.type,
+                bytes: new Uint8Array(await file.arrayBuffer()),
+                blob: file,
+                createdAt: Math.floor((file.lastModified || Date.now()) / 1000),
+            });
+        }
+        await $dialogs.sendFilesMessage(peerHash.value, metas, {
             caption,
             signal: ctrl.signal,
-            onProgress: (p) => patchUpload(id, { done: p.done, total: p.total, status: 'uploading' }),
+            onFileProgress: (i, p) => patchUpload(rowIds[i], { done: p.done, total: p.total, status: 'uploading' }),
         });
-        activeUploads.value = activeUploads.value.filter((u) => u.id !== id);
+        dropBatch();
     } catch (e) {
         if (ctrl.signal.aborted) {
-            activeUploads.value = activeUploads.value.filter((u) => u.id !== id);
+            dropBatch();
         } else {
             console.error('File send failed:', e);
-            patchUpload(id, { status: 'error' });
+            for (const id of rowIds) patchUpload(id, { status: 'error' });
         }
     } finally {
-        uploadAborts.delete(id);
+        uploadAborts.delete(batchId);
     }
 };
 
 const handleCancelUpload = (id) => {
-    uploadAborts.get(id)?.abort();
-    // an errored strip is dismissed by the same ✕
-    activeUploads.value = activeUploads.value.filter((u) => u.id !== id || u.status !== 'error');
+    const row = activeUploads.value.find((u) => u.id === id);
+    if (!row) return;
+    uploadAborts.get(row.batchId)?.abort();
+    // an errored batch is dismissed by the same ✕
+    activeUploads.value = activeUploads.value.filter((u) => u.batchId !== row.batchId || u.status !== 'error');
 };
 
 // §1.3: images fetch themselves — the picture IS the message, so waiting for
@@ -635,6 +651,39 @@ watch(() => decryptedMessages.value, (msgs) => {
 watch(dialogHash, () => {
     availabilityByFileId.value = {};
     availabilityAsked.clear();
+});
+
+// §1.4: a video opens on demand — streaming through the Service Worker when
+// it is available, or as a downloaded blob when it is not.
+const videosByFileId = ref({});
+const videoSources = new Map();
+
+const handlePlayVideo = async (part) => {
+    const id = part.fileId;
+    if (videosByFileId.value[id]?.url) return;
+    videosByFileId.value = { ...videosByFileId.value, [id]: { status: 'opening' } };
+    try {
+        const source = await $dialogs.openVideoSource(part, {
+            onProgress: (p) => {
+                videosByFileId.value = {
+                    ...videosByFileId.value,
+                    [id]: { status: 'opening', done: p.done, total: p.total },
+                };
+            },
+        });
+        videoSources.set(id, source);
+        videosByFileId.value = { ...videosByFileId.value, [id]: { status: 'ready', url: source.url, streaming: source.streaming } };
+    } catch (e) {
+        console.error('Video open failed:', e);
+        videosByFileId.value = { ...videosByFileId.value, [id]: { status: 'error' } };
+    }
+};
+
+// Sessions and blob URLs are process-wide; leaving the dialog releases them.
+watch(dialogHash, () => {
+    for (const s of videoSources.values()) s.release();
+    videoSources.clear();
+    videosByFileId.value = {};
 });
 
 const downloadsByFileId = ref({});
