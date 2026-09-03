@@ -99,7 +99,7 @@
 			</div>
 			<div class="fs-4 mb-4 text-center">
 				<span class="fw-bold">{{ contact.name ? contact.name : 'Unnamed' }}</span>
-				<span class="text-secondary ms-2" v-if="contact.user_hash">[{{ contact.user_hash.slice(2, 7) }}]</span>
+				<span class="text-secondary ms-2" v-if="contact.user_hash">[{{ contact.user_hash.slice(2, 8) }}]</span>
 			</div>
 
 			<div class="col-30">
