@@ -256,14 +256,6 @@ describe('§1.5 file attachments', () => {
 		expect(w.emitted('downloadFile')[0][0]).toMatchObject({ fileId: 'f_' + 'a'.repeat(32) });
 	});
 
-	it('upload strip shows chunk progress and cancels', async () => {
-		const w = renderWith([], { uploads: [{ id: 'up_1', name: 'mesh-dump.tar', done: 9, total: 14, status: 'uploading' }] });
-		const strip = w.find('.upload-strip');
-		expect(strip.text()).toContain('chunk 9 of 14');
-		await strip.find('button').trigger('click');
-		expect(w.emitted('cancelUpload')[0]).toEqual(['up_1']);
-	});
-
 	// Board screen 02: several files, one composed message, the caption from
 	// the same input.
 	it('attach button emits everything picked with the caption from the input', async () => {

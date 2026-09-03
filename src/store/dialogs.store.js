@@ -509,13 +509,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * not have. Previews are computed here, from the plaintext — the device
      * never sees it, so nowhere else can compute them.
      */
-    const uploadAttachment = async (fileMeta, { onProgress, signal } = {}) => {
+    const uploadAttachment = async (fileMeta, { onProgress, signal, prepared: preparedIn, resuming = false } = {}) => {
         const { name, mimeType, bytes, createdAt, blob } = fileMeta;
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
 
-        const { v7 } = await import('uuid');
-        const prepared = prepareUpload(v7());
+        // The queue mints the pair up front so pause/resume re-enter with the
+        // same file_id + enc_secret; a direct call mints its own.
+        const prepared = preparedIn ?? prepareUpload((await import('uuid')).v7());
         try {
             localStorage.setItem(pendingUploadKey(prepared.fileId), JSON.stringify({
                 encSecretB64: prepared.encSecretB64, name, size: bytes.length,
@@ -523,7 +524,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         } catch { /* private mode: resume across reloads degrades, upload still works */ }
 
         const up = await uploadFile({
-            bytes, uploaderHash, signSkey, ...prepared, onProgress, signal,
+            bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,
         });
 
         const common = {
@@ -541,44 +542,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return preview
             ? { kind: video ? 'video' : 'image', ...preview, ...common }
             : { kind: 'file', ...common };
-    };
-
-    /**
-     * Sends attachments as ONE composed message (board screen 02): every
-     * file becomes a part, the caption is the trailing text part. Uploads
-     * run sequentially on purpose — the device's chunk lane is single-writer
-     * and answers concurrency with 429s, so parallel uploads only add retry
-     * traffic.
-     *
-     * The message is written after every upload has landed: a composed
-     * message referencing an aborted upload would be a reference to nothing.
-     */
-    const sendFilesMessage = async (peerHash, fileMetas, { caption = '', onFileProgress, onStatus, signal } = {}) => {
-        const parts = [];
-        for (let i = 0; i < fileMetas.length; i++) {
-            signal?.throwIfAborted();
-            parts.push(await uploadAttachment(fileMetas[i], {
-                signal,
-                onProgress: (p) => onFileProgress?.(i, p),
-            }));
-        }
-        if (caption.trim()) parts.push({ kind: 'text', text: caption.trim() });
-
-        onStatus?.('sending');
-        await new Promise((resolve, reject) => {
-            sendMessage(peerHash, parts, (status) => {
-                onStatus?.(status);
-                if (status === 'synced') resolve();
-                if (status === 'error') reject(new Error('message send failed'));
-            });
-        });
-
-        for (const part of parts) {
-            if (part.fileId) {
-                try { localStorage.removeItem(pendingUploadKey(part.fileId)); } catch { /* best-effort */ }
-            }
-        }
-        return parts.filter((p) => p.fileId).map((p) => p.fileId);
     };
 
     /** Playable source for a video part; streams when a worker is available. */
@@ -913,7 +876,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         editMessage,
         decryptMessageRow,
         deleteMessage,
-        sendFilesMessage,
+        uploadAttachment,
         fetchFile,
         getFileAvailability,
         openVideoSource,

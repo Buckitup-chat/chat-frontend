@@ -230,20 +230,10 @@
 
     <!-- Footer / Input -->
     <div class="chat-footer p-2 border-top">
-      <!-- §2.1 upload strip: name, chunk progress, cancel. Colour lives in
-           the caption, not the button. -->
-      <div v-for="u in uploads" :key="u.id" class="upload-strip d-flex align-items-center gap-2 mb-1 px-2 py-1">
-        <span class="msg-file-icon">📄</span>
-        <div class="flex-grow-1" style="min-width:0">
-          <div class="msg-file-name">{{ u.name }}</div>
-          <div class="msg-file-meta" :class="{ 'msg-file-err': u.status === 'error' }">
-            <template v-if="u.status === 'error'">upload failed</template>
-            <template v-else-if="u.total">sending · chunk {{ u.done }} of {{ u.total }}</template>
-            <template v-else>encrypting…</template>
-          </div>
-        </div>
-        <button type="button" class="btn btn-sm btn-light rounded-circle" @click="emit('cancelUpload', u.id)" title="Cancel">✕</button>
-      </div>
+      <!-- The transfer panel (screen 10) mounts here from the page, so the
+           queue sits where the board puts it: above the input, inside the
+           dialog. -->
+      <slot name="above-input"></slot>
       <div v-if="replyTo" class="reply-preview d-flex align-items-center gap-2 mb-1 px-2 py-1">
         <div class="msg-quote-bar"></div>
         <div class="flex-grow-1" style="min-width:0">
@@ -366,10 +356,6 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
-  uploads: {
-    type: Array,
-    default: () => []
-  },
   downloads: {
     type: Object,
     default: () => ({})
@@ -400,7 +386,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'cancelUpload', 'downloadFile', 'showImage', 'playVideo']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -1048,7 +1034,6 @@ watch(() => props.messages, () => {
 .msg-file-action { border: none; background: #241824; color: #fff; border-radius: 999px; width: 26px; height: 26px; font-size: 13px; line-height: 1; flex-shrink: 0; }
 .msg-file-spinner { width: 16px; height: 16px; border: 2px solid rgba(36,24,36,.2); border-top-color: #8e2b77; border-radius: 50%; flex-shrink: 0; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.upload-strip { background: rgba(36, 24, 36, .06); border-radius: 9px; }
 
 /* ---------- §1.3 images ---------- */
 .msg-image {

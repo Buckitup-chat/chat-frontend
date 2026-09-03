@@ -3,14 +3,16 @@
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId" :histories="historiesByMsgId"
-            :uploads="activeUploads" :downloads="downloadsByFileId" :images="imagesByFileId"
+            :downloads="downloadsByFileId" :images="imagesByFileId"
             :availability="availabilityByFileId" :videos="videosByFileId"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
-            @send-file="handleSendFile" @cancel-upload="handleCancelUpload" @download-file="handleDownloadFile"
+            @send-file="handleSendFile" @download-file="handleDownloadFile"
             @show-image="handleShowImage" @play-video="handlePlayVideo"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
-            @acknowledgeMessage="handleAcknowledge" />
+            @acknowledgeMessage="handleAcknowledge">
+            <template #above-input><TransferPanel /></template>
+        </ChatWindow>
     </div>
 </template>
 
@@ -24,8 +26,11 @@ import { useRoute } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
+import { useTransfersStore } from '@/store/transfers.store';
+import TransferPanel from '@/components/chat/TransferPanel.vue';
 import { getDialogCollections } from '@/lib/data/collections';
 import { useCollectionRows } from '@/lib/data/useCollection';
+import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { v7 as uuidv7 } from 'uuid';
 
@@ -33,6 +38,7 @@ const $route = useRoute();
 const $swal = inject('$swal');
 const $userPQ = userPQStore();
 const $dialogs = useDialogsStore();
+const $transfers = useTransfersStore();
 
 const peerHash = computed(() => $route.params.address);
 const dialogHash = computed(() => $dialogs.getDialogHash(peerHash.value));
@@ -512,77 +518,33 @@ const handleToggleReaction = async (messageId, emoji) => {
     }
 };
 
-// ---------- §2.1 uploads / §2.3 downloads ----------
+// ---------- §2.3 downloads ----------
 
-const activeUploads = ref([]);
-const uploadAborts = new Map();
-let uploadSeq = 0;
-
-const patchUpload = (id, patch) => {
-    activeUploads.value = activeUploads.value.map((u) => (u.id === id ? { ...u, ...patch } : u));
-};
-
-// One batch = one composed message (board screen 02). Every file gets its
-// own strip row with chunk progress; the ✕ on any row cancels the whole
-// batch, because the message they are becoming is a single unit — sending
-// "some of it" would produce a message the user never composed.
-const handleSendFile = async (files, caption) => {
-    const batchId = `up_${++uploadSeq}`;
-    const ctrl = new AbortController();
-    uploadAborts.set(batchId, ctrl);
-    const rowIds = files.map((_, i) => `${batchId}_${i}`);
-    activeUploads.value = [
-        ...activeUploads.value,
-        ...files.map((f, i) => ({ id: rowIds[i], batchId, name: f.name, done: 0, total: 0, status: 'encrypting' })),
-    ];
-    const dropBatch = () => {
-        activeUploads.value = activeUploads.value.filter((u) => u.batchId !== batchId);
-    };
-    try {
-        const metas = [];
-        for (const file of files) {
-            metas.push({
-                name: file.name,
-                mimeType: file.type,
-                bytes: new Uint8Array(await file.arrayBuffer()),
-                blob: file,
-                createdAt: Math.floor((file.lastModified || Date.now()) / 1000),
-            });
-        }
-        await $dialogs.sendFilesMessage(peerHash.value, metas, {
-            caption,
-            signal: ctrl.signal,
-            onFileProgress: (i, p) => patchUpload(rowIds[i], { done: p.done, total: p.total, status: 'uploading' }),
-        });
-        dropBatch();
-    } catch (e) {
-        if (ctrl.signal.aborted) {
-            dropBatch();
-        } else {
-            console.error('File send failed:', e);
-            for (const id of rowIds) patchUpload(id, { status: 'error' });
-        }
-    } finally {
-        uploadAborts.delete(batchId);
-    }
-};
-
-const handleCancelUpload = (id) => {
-    const row = activeUploads.value.find((u) => u.id === id);
-    if (!row) return;
-    uploadAborts.get(row.batchId)?.abort();
-    // an errored batch is dismissed by the same ✕
-    activeUploads.value = activeUploads.value.filter((u) => u.batchId !== row.batchId || u.status !== 'error');
+// One batch = one composed message (screen 02); the queue store owns the
+// rest — per-row pause/resume/cancel, ordering, and sending the message when
+// the last live row lands.
+const handleSendFile = (files, caption) => {
+    $transfers.enqueueBatch(peerHash.value, files, caption).catch((e) => {
+        console.error('Failed to enqueue transfers:', e);
+    });
 };
 
 // §1.3: images fetch themselves — the picture IS the message, so waiting for
 // a tap would leave the bubble showing a blur nobody asked to resolve.
+// Decrypted bytes live in the module-level media cache: chunks are immutable,
+// so re-entering the dialog reuses the picture instead of re-downloading it.
 const imagesByFileId = ref({});
-const imageObjectUrls = new Map();
 
 const fetchImage = async (part) => {
     const id = part.fileId;
     if (imagesByFileId.value[id]?.url || imagesByFileId.value[id]?.status === 'downloading') return;
+
+    const cached = getCachedMedia(id);
+    if (cached) {
+        imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'done', url: cached } };
+        return;
+    }
+
     imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'downloading', done: 0, total: 0 } };
     try {
         const bytes = await $dialogs.fetchFile(part, {
@@ -593,8 +555,7 @@ const fetchImage = async (part) => {
                 }
             },
         });
-        const url = URL.createObjectURL(new Blob([bytes], { type: part.mimeType || 'image/*' }));
-        imageObjectUrls.set(id, url);
+        const url = putCachedMedia(id, bytes, part.mimeType || 'image/*');
         imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'done', url } };
     } catch (e) {
         console.error('Image download failed:', e);
@@ -615,10 +576,9 @@ watch(() => decryptedMessages.value, (msgs) => {
 // frame the user opened is actually being fetched (a failed one retries).
 const handleShowImage = (part) => fetchImage(part);
 
-// Blob URLs are process-wide; leaving a dialog must not leak them.
+// Per-dialog view state resets; the media cache underneath persists, so a
+// return to this dialog repopulates instantly from it.
 watch(dialogHash, () => {
-    for (const url of imageObjectUrls.values()) URL.revokeObjectURL(url);
-    imageObjectUrls.clear();
     imagesByFileId.value = {};
 });
 
