@@ -5,6 +5,9 @@ import { getUserCardsCollection, getDialogCollections } from '@/lib/data/collect
 import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
+import { createDialogGate } from '@/lib/data/dialogGate';
+import { verifySideRow } from '@/lib/pq/verifyDialogRow';
+import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
@@ -80,6 +83,71 @@ export const useDialogsStore = defineStore('dialogs', () => {
             console.warn('[dialogs] refs decrypt failed for', row.message_id, e);
             return null;
         }
+    };
+
+    // ---------- receive verification gate ----------
+    //
+    // A replicated row is not a message until it verifies (lib/data/dialogGate):
+    // author card resolves, signature holds, causal refs admit. One gate per
+    // dialog; verdicts feed the render path, which shows unverified rows as
+    // such instead of trusting whatever Electric delivered.
+
+    const dialogGates = new Map(); // dialogHash -> gate
+
+    // The gate distinguishes "no key yet" (normal right after joining) from
+    // "key present but the blob will not decrypt" (only reachable through a
+    // sender bug, since the signature covers the ciphertext).
+    const decryptRefsVerdict = async (row) => {
+        const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+        if (!key) return 'no_key';
+        const refs = await decryptRefsOf(row);
+        return refs === null ? 'error' : refs;
+    };
+
+    const gateFor = (dialogHash) => {
+        let gate = dialogGates.get(dialogHash);
+        if (!gate) {
+            gate = createDialogGate({
+                resolveSignPkey: (userHash) => getVerifiedSignPkey(userHash),
+                decryptRefs: decryptRefsVerdict,
+            });
+            dialogGates.set(dialogHash, gate);
+        }
+        return gate;
+    };
+
+    /** Gate verdict for a replicated message row. See dialogGate for shapes. */
+    const admitMessageRow = (row) => gateFor(row.dialog_hash).admit(row);
+
+    // Reactions and receipts are signed rows too (invariants/02): a forged
+    // reaction under a peer's name is the same attack as a forged message.
+    // Verdicts are cached by (PK, owner_timestamp) — a re-signed update gets
+    // a fresh check, an unchanged row does not re-run ML-DSA on every render.
+    const sideRowVerdicts = new Map();
+
+    const admitSideRow = async (row, authorField, pkField) => {
+        const cacheKey = `${row[pkField]}|${row.owner_timestamp}`;
+        const cached = sideRowVerdicts.get(cacheKey);
+        if (cached !== undefined) return cached;
+
+        const authorHash = row[authorField];
+        const signPkey = await getVerifiedSignPkey(authorHash);
+        if (!signPkey) return false; // card not here yet — retried, not cached
+
+        const ok = verifySideRow(row, signPkey).status === 'ok';
+        sideRowVerdicts.set(cacheKey, ok);
+        return ok;
+    };
+
+    /** True only for a reaction whose signature verifies against its reactor. */
+    const admitReactionRow = (row) => admitSideRow(row, 'reactor_hash', 'reaction_hash');
+
+    /** True only for a receipt whose signature verifies against its peer. */
+    const admitReceiptRow = (row) => admitSideRow(row, 'peer_hash', 'receipt_hash');
+
+    /** Re-checks rows parked on absent author cards; call when user_cards sync. */
+    const retryCardAdmissions = async () => {
+        for (const gate of dialogGates.values()) await gate.retryAwaitingCards();
     };
 
     // The tails the current user observes right now — the refs_map plaintext
@@ -639,6 +707,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         sendMessage,
         editMessage,
         decryptMessageRow,
+        admitMessageRow,
+        admitReactionRow,
+        admitReceiptRow,
+        retryCardAdmissions,
         toggleReaction,
         sendReadReceipt,
         isRevisionAcknowledged,

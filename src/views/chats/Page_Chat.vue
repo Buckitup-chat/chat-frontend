@@ -19,6 +19,7 @@ import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { getDialogCollections } from '@/lib/data/collections';
 import { useCollectionRows } from '@/lib/data/useCollection';
+import { getUserCardsCollection } from '@/lib/data/collections';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
@@ -61,6 +62,16 @@ const { rows: rawMessages } = useCollectionRows(computed(() => dialogCollections
 // so a message can arrive before the key that decrypts it.
 const { rows: rawKeys } = useCollectionRows(computed(() => dialogCollections.value?.keys ?? null));
 
+// Author cards are a verification dependency, not just display data: a
+// message from a first-time sender parks in the gate until their card
+// arrives and verifies, so a cards tick must re-run the gate and the
+// decrypt pass for anything still unverified.
+const { rows: rawCards } = useCollectionRows(computed(() => getUserCardsCollection()));
+watch(() => rawCards.value, async () => {
+    await $dialogs.retryCardAdmissions();
+    if (rawMessages.value?.length) scheduleDecrypt(rawMessages.value);
+});
+
 const decryptedMessages = ref([]);
 const messageCache = new Map();
 let decryptTimer = null;
@@ -97,25 +108,48 @@ const scheduleDecrypt = (newRows) => {
         for (const row of newRows) {
             if (row.deleted_flag) continue;
             const cached = messageCache.get(row.message_id);
-            // Undecrypted entries are retried: their key may have arrived since.
-            if (!cached || !cached._decrypted || cached._contentB64 !== row.content_b64) pending.push(row);
+            // Undecrypted and unverified entries are retried: the key or the
+            // author's card or a missing parent may have arrived since.
+            if (!cached || !cached._decrypted || cached._verify !== 'verified'
+                || cached._contentB64 !== row.content_b64) pending.push(row);
         }
 
         if (pending.length > 0) {
             const name = chatName.value;
             const entries = await Promise.all(pending.map(async (row) => {
-                const decrypted = await $dialogs.decryptMessageRow(row);
+                // Gate first (chat docs: invariants/02, 04): the row proves its
+                // signature and causal refs before its content is treated as a
+                // message. Invalid rows render as a warning, never as content —
+                // showing attacker-supplied text under a peer's name is the
+                // exact failure the gate exists to stop.
+                const verdict = await $dialogs.admitMessageRow(row);
                 const date = new Date(row.owner_timestamp * 1000);
-                return [row.message_id, {
+                const timestamp = `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+                const base = {
                     id: row.message_id,
+                    isMine: row.sender_hash === $userPQ.currentUserHash,
+                    timestamp,
+                    _syncStatus: 'synced',
+                    _contentB64: row.content_b64,
+                    _verify: verdict.status,
+                    _dagVerified: verdict.status === 'verified' ? verdict.dagVerified : false,
+                    _raw: row
+                };
+                if (verdict.status === 'invalid') {
+                    return [row.message_id, {
+                        ...base,
+                        text: 'Message failed verification',
+                        authorName: base.isMine ? 'Me' : name,
+                        _decrypted: false,
+                        _verifyReason: verdict.reason,
+                    }];
+                }
+                const decrypted = await $dialogs.decryptMessageRow(row);
+                return [row.message_id, {
+                    ...base,
                     text: decrypted.text,
                     authorName: decrypted.isMine ? 'Me' : name,
-                    isMine: decrypted.isMine,
-                    timestamp: `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`,
-                    _syncStatus: 'synced',
                     _decrypted: decrypted.decrypted === true,
-                    _contentB64: row.content_b64,
-                    _raw: row
                 }];
             }));
             // Apply only if the user is still looking at the same dialog
@@ -154,9 +188,25 @@ const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollect
 const currentSignHashOf = (messageId) =>
     (rawMessages.value || []).find((m) => m.message_id === messageId)?.sign_hash;
 
+// Signature admission is async; the verified key set is refreshed per sync
+// tick and the computed below filters on it, so a forged reaction never
+// renders even transiently.
+const verifiedReactionKeys = ref(new Set());
+watch(() => rawAllReactions.value, async (rows) => {
+    if (!rows) return;
+    const keys = new Set();
+    for (const r of rows) {
+        if (r.deleted_flag) continue;
+        if (await $dialogs.admitReactionRow(r)) keys.add(`${r.reaction_hash}|${r.owner_timestamp}`);
+    }
+    verifiedReactionKeys.value = keys;
+}, { immediate: true });
+
 const rawReactions = computed(() =>
     rawAllReactions.value.filter(
-        (r) => !r.deleted_flag && r.message_sign_hash === currentSignHashOf(r.message_id)
+        (r) => !r.deleted_flag
+            && verifiedReactionKeys.value.has(`${r.reaction_hash}|${r.owner_timestamp}`)
+            && r.message_sign_hash === currentSignHashOf(r.message_id)
     )
 );
 
@@ -166,11 +216,24 @@ const rawReactions = computed(() =>
 const { rows: rawReceipts } = useCollectionRows(computed(() => dialogCollections.value?.receipts ?? null));
 
 // message_id -> { mine: bool, peers: [user_hash] } for the displayed revision
+// Same admission as reactions: a read receipt is a signed claim by a peer,
+// and an unverified one must not flip a message to "read".
+const verifiedReceiptKeys = ref(new Set());
+watch(() => rawReceipts.value, async (rows) => {
+    if (!rows) return;
+    const keys = new Set();
+    for (const r of rows) {
+        if (await $dialogs.admitReceiptRow(r)) keys.add(`${r.receipt_hash}|${r.owner_timestamp}`);
+    }
+    verifiedReceiptKeys.value = keys;
+}, { immediate: true });
+
 const receiptsByMsgId = computed(() => {
     const me = $userPQ.currentUserHash;
     const out = {};
     for (const r of rawReceipts.value || []) {
         if (r.type !== 'read') continue;
+        if (!verifiedReceiptKeys.value.has(`${r.receipt_hash}|${r.owner_timestamp}`)) continue;
         if (r.message_sign_hash !== currentSignHashOf(r.message_id)) continue;
         const entry = out[r.message_id] || (out[r.message_id] = { mine: false, peers: [] });
         if (r.peer_hash === me) entry.mine = true;

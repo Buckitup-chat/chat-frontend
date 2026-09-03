@@ -52,8 +52,9 @@ export function createDialogGate(deps: GateDeps) {
 	const pending = new Map<string, PendingEntry>();
 	/** missing revisionKey → keys of pending rows blocked on it */
 	const blockedOn = new Map<string, Set<string>>();
-	/** author user_hash → keys of rows waiting for that author's card */
-	const awaitingCard = new Map<string, MessageLike[]>();
+	/** author user_hash → parked rows by revision key (deduped: the read path
+	 * may re-admit the same row on every sync tick while the card is absent) */
+	const awaitingCard = new Map<string, Map<string, MessageLike>>();
 	let genesisSeen = false;
 	let seq = 0;
 
@@ -124,9 +125,9 @@ export function createDialogGate(deps: GateDeps) {
 		if (!signPkey) {
 			// The author's card is itself a replicated row that may simply not
 			// have arrived. Park the message; onCardVerified re-admits it.
-			const list = awaitingCard.get(row.sender_hash) ?? [];
-			list.push(row);
-			awaitingCard.set(row.sender_hash, list);
+			const parked = awaitingCard.get(row.sender_hash) ?? new Map<string, MessageLike>();
+			parked.set(key, row);
+			awaitingCard.set(row.sender_hash, parked);
 			return { status: 'waiting', missing: [], missingCard: row.sender_hash };
 		}
 
@@ -148,15 +149,22 @@ export function createDialogGate(deps: GateDeps) {
 
 	/** Call when an author's card verifies — re-admits rows parked on it. */
 	const onCardVerified = async (userHash: string): Promise<void> => {
-		const rows = awaitingCard.get(userHash);
-		if (!rows) return;
+		const parked = awaitingCard.get(userHash);
+		if (!parked) return;
 		awaitingCard.delete(userHash);
-		for (const row of rows) await admit(row);
+		for (const row of parked.values()) await admit(row);
+	};
+
+	/** Re-admits everything parked on any card — cheap to call on each
+	 * user_cards sync tick; rows whose card is still absent just re-park. */
+	const retryAwaitingCards = async (): Promise<void> => {
+		for (const userHash of [...awaitingCard.keys()]) await onCardVerified(userHash);
 	};
 
 	return {
 		admit,
 		onCardVerified,
+		retryAwaitingCards,
 		isAdmitted: (messageId: string, signHash: string) => admitted.has(revisionKey(messageId, signHash)),
 		getInvalidReason: (messageId: string, signHash: string) => invalid.get(revisionKey(messageId, signHash)) ?? null,
 		stats: () => ({ admitted: admitted.size, pending: pending.size, invalid: invalid.size, genesisSeen }),
