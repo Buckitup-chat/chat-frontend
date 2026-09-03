@@ -44,6 +44,9 @@ Phoenix / Ecto).
   successor reads the shape must go through `sendMutationsAndAwaitShape`.
 - `owner_timestamp` must be strictly monotonic: use `nextOwnerTimestamp`, never
   bare `Date.now()/1000`.
+- Base64 padding differs by direction and this bites every time: the signature
+  payload is built with padding, the shape endpoint returns binary columns
+  without it. Re-pad a value taken from a shape before signing or verifying.
 - Only `dialog_messages` and `dialog_messages_versions` have `sign_hash`.
 - `/shapes` is the sanctioned read endpoint; `/user_card`, `/user_storage`
   proxies are deprecated.
