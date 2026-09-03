@@ -28,6 +28,12 @@ Phoenix / Ecto).
    for testing) → owner's decision. "Done" means pushed and visible to the
    reviewer, not sitting in a local commit.
 
+4. **No backward compatibility is owed.** The project is in active development
+   with no user base: when a format changes, change it outright. Do not write
+   migrations for existing rows, legacy read paths or version compatibility
+   shims, and do not treat data already published by test accounts as something
+   to protect. Ask first if a case seems to need otherwise.
+
 ## Things that bit us (short list; details in docs/invariants.md)
 
 - Local storage does not need extra encryption to hide metadata (CTO
@@ -72,6 +78,26 @@ Phoenix / Ecto).
   `reaction_hash`, `receipt_hash`), key wrapping, content encryption.
 - `docs/` — invariants, backlog, encryption layout, migration reports.
   Work notes go there or into the PR description, never the repo root.
+
+## Documentation
+
+Documents meant to be read and shared — `README.md`, `docs/*.md`, specs, handover
+notes, exported reports — describe how things are **now**. The path that led there
+is not part of them: a reader who has never seen an earlier version should not be
+able to tell which parts were edited.
+
+- When something turns out wrong or unnecessary, rewrite the sentence. Do not
+  append a correction beside it — no "UPD", no "this is no longer true", no
+  crossed-out text, no warning about a problem that is already gone.
+- Something removed from the product does not earn a line saying it was removed.
+- Keep what looks like history but is current knowledge: why a decision was made,
+  a rule derived from a past failure (state the rule, not the story), migration
+  instructions, and a deprecation notice while the deprecated thing still answers.
+- The record of what changed belongs in the commit message, the PR description or
+  a report — not in the document.
+
+Exempt: logs, working notes, investigation and migration reports. Their subject
+*is* the past, and stripping it would empty them.
 
 ## Environment notes
 
