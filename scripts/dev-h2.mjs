@@ -97,13 +97,18 @@ const REDIRECT_PORT = 5176;
 server.listen(TLS_PORT, '127.0.0.1');
 
 http.createServer((req, res) => {
-	res.writeHead(301, { Location: `https://localhost:5173${req.url}` });
+	// Reflect the Host the client used: the container port and the host port
+	// need not match — Docker remaps when the requested host port is taken,
+	// and a hardcoded port would bounce the browser somewhere unreachable.
+	const host = req.headers.host || 'localhost:5173';
+	res.writeHead(301, { Location: `https://${host}${req.url}` });
 	res.end('dev stand is https (HTTP/2)\n');
 }).listen(REDIRECT_PORT, '127.0.0.1');
 
 net.createServer((socket) => {
 	socket.once('readable', () => {
 		const first = socket.read();
+		if (process.env.SNIFF_DEBUG) console.log('[conn] from', socket.remoteAddress, 'bytes=', first ? first.length : 0, 'first=', first ? first[0] : null);
 		if (!first) return socket.destroy();
 		// 0x16 is the TLS handshake record type; anything else is plain HTTP,
 		// which gets redirected instead of dying as ERR_CONNECTION_CLOSED.
@@ -115,5 +120,5 @@ net.createServer((socket) => {
 	});
 	socket.on('error', () => socket.destroy());
 }).listen(5173, '0.0.0.0', () => {
-	console.log('dev stand on https://localhost:5173 (http:// redirects) → vite :5174, /api → ' + API.host + API.prefix);
+	console.log('dev stand: TLS+h2 on container :5173 (http:// redirects to https on the same host:port) → vite :' + VITE.port + ', /api → ' + API.host + API.prefix);
 });
