@@ -16,12 +16,15 @@ export interface UserCardRow {
 	sign_b64: string | null;
 }
 
+// Exactly the server schema (chat: lib/chat/data/schemas/user_storage.ex).
+// No `version`, no `hash_b64` — those were client inventions; comparing a
+// synthetic local counter against Electric rows silently preferred stale
+// local data (third-party review, finding 4). Local-only metadata lives in
+// src/lib/data/userStorage.ts, never in this row type.
 export interface UserStorageRow {
 	user_hash: string;
 	uuid: string;
-	version: number;
 	value_b64: string | null;
-	hash_b64: string | null;
 	deleted_flag: boolean;
 	parent_sign_hash: string | null;
 	sign_hash: string | null;

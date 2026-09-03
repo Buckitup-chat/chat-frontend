@@ -2,7 +2,9 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { getUserCardsCollection, getDialogCollections } from '@/lib/data/collections';
-import { sendMutationsWithRetry } from '@/lib/data/ingest';
+import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
+import { nextOwnerTimestamp } from '@/lib/data/time';
+import { computeTails } from '@/lib/data/refs';
 import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
@@ -36,10 +38,64 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return safeBase64Decode(keys.sign_skey, 'sign_skey');
     };
 
+    // Every dialog write is followed by a shape barrier: the next operation
+    // (an edit basing on the tip, a second message needing the key row, a
+    // reaction toggle) reads the collection as its base, and an HTTP 200 only
+    // proves the Postgres commit — not that Electric delivered it.
     const pushRow = async (relation, row, mutationType = 'insert') => {
         const signSkey = await getSignSkeyBytes();
         const mutation = api.createGenericMutation(relation, row, signSkey, mutationType);
-        return sendMutationsWithRetry([mutation], signSkey);
+        return sendMutationsAndAwaitShape([mutation], signSkey);
+    };
+
+    // --- causal refs (refs_map) ---
+    // Decrypted refs of a specific revision never change; cache by
+    // (message_id, sign_hash). An edit produces a new sign_hash → new entry.
+    const decryptedRefsCache = new Map();
+
+    // Returns null for "unknown" (key not here yet / undecryptable blob) —
+    // never cached, so the refs are retried once the key arrives. Caching a
+    // failure as {} used to be permanent: the cache key is the immutable
+    // revision, while messages DO recover on key arrival, so the two states
+    // diverged forever and every later send shipped inflated tails.
+    const decryptRefsOf = async (row) => {
+        const cacheKey = `${row.message_id}|${row.sign_hash}`;
+        if (decryptedRefsCache.has(cacheKey)) return decryptedRefsCache.get(cacheKey);
+
+        // Genesis and refs-less revisions legitimately have no map
+        if (!row.refs_map_b64) {
+            decryptedRefsCache.set(cacheKey, {});
+            return {};
+        }
+
+        const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+        if (!key) return null;
+
+        try {
+            const json = await DialogCrypto.decryptContent(key, row.refs_map_b64);
+            const refs = json ? JSON.parse(json) : {};
+            decryptedRefsCache.set(cacheKey, refs);
+            return refs;
+        } catch (e) {
+            console.warn('[dialogs] refs decrypt failed for', row.message_id, e);
+            return null;
+        }
+    };
+
+    // The tails the current user observes right now — the refs_map plaintext
+    // for an outgoing message or edit (pq_dialogs.md §Tail calculation).
+    const computeObservedTails = async (dialogHash) => {
+        const colls = getDialogCollections(dialogHash);
+        await colls.messages.preload().catch(() => {});
+        const loaded = colls.messages.toArray.filter((r) => !r.deleted_flag && r.sign_hash);
+        const withRefs = await Promise.all(
+            loaded.map(async (r) => ({
+                message_id: r.message_id,
+                sign_hash: r.sign_hash,
+                refs: await decryptRefsOf(r),
+            }))
+        );
+        return computeTails(withRefs);
     };
 
     const formatTimestamp = (ts) => {
@@ -68,7 +124,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return id;
     };
 
-    const addOptimisticReaction = (dialogHash, messageId, emoji) => {
+    // Optimistic reaction records the DESIRED end state and the deterministic
+    // reaction_hash. Reconciliation matches server rows (including tombstones)
+    // by hash — an un-react confirms as a tombstone, which carries no emoji,
+    // so matching by emoji alone could never confirm removals.
+    const addOptimisticReaction = (dialogHash, messageId, emoji, reactionHash, desiredActive) => {
         const id = `opt_react_${++optimisticCounter}_${Date.now()}`;
         optimisticItems.value.set(id, {
             type: 'reaction',
@@ -76,6 +136,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
             dialogHash,
             messageId,
             emoji,
+            reactionHash,
+            desiredActive,
             status: 'sending',
         });
         return id;
@@ -95,17 +157,51 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return DialogCrypto.computeDialogHash($userPQ.currentUserHash, peerHash);
     };
 
-    /**
-     * Get or initialize keys for a dialog with a peer
-     */
+    // In-flight guard for dialog-key creation. Keyed by the PK of the row
+    // being created, (dialog_hash, sender_hash): dialog_hash alone identifies
+    // the DIALOG, which holds two key rows — one per direction — and is the
+    // same value for both participants, so it does not identify "my" row.
+    // Without this, two rapid first messages both see the row missing and both
+    // publish a key: the sender_msg_key is deterministic, but its wrapping is
+    // not (ML-KEM encapsulation and the GCM nonce are random), so the loser is
+    // NOT an idempotent retry and fails permanently on the PK conflict.
+    const pendingDialogInit = new Map();
+
     const initDialogKeys = async (peerHash) => {
         const dialogHash = getDialogHash(peerHash);
         if (!dialogHash) throw new Error("Not logged in");
 
-        // Try to get my own keys from the dialog collection
+        // Capture once: reading the store repeatedly could straddle an account
+        // switch and desync the guard key from the row being written.
+        const myHash = $userPQ.currentUserHash;
+        const initKey = `${dialogHash}|${myHash}`;
+
+        const inFlight = pendingDialogInit.get(initKey);
+        if (inFlight) return inFlight;
+
+        const promise = initDialogKeysUnguarded(peerHash, dialogHash, myHash);
+        pendingDialogInit.set(initKey, promise);
+        try {
+            return await promise;
+        } finally {
+            if (pendingDialogInit.get(initKey) === promise) {
+                pendingDialogInit.delete(initKey);
+            }
+        }
+    };
+
+    /**
+     * Get or initialize keys for a dialog with a peer.
+     * Always call through initDialogKeys — never directly.
+     */
+    const initDialogKeysUnguarded = async (peerHash, dialogHash, myHash) => {
+        // Try to get my own keys from the dialog collection.
+        // A preload FAILURE means "state unknown", not "row absent" — swallowing
+        // it here used to trigger a key write on a mere read error. Let it
+        // throw; the send path surfaces it as an error and retries later.
         const dialogColls = getDialogCollections(dialogHash);
-        await dialogColls.keys.preload().catch(() => {});
-        const myKeyRow = dialogColls.keys.get(`${dialogHash}|${$userPQ.currentUserHash}`);
+        await dialogColls.keys.preload();
+        const myKeyRow = dialogColls.keys.get(`${dialogHash}|${myHash}`);
 
         if (!myKeyRow || myKeyRow.deleted_flag) {
             console.log(`Generating new dialog keys for dialog: ${dialogHash}`);
@@ -136,7 +232,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
             const keysRow = {
                 dialog_hash: dialogHash,
-                sender_hash: $userPQ.currentUserHash,
+                sender_hash: myHash,
                 peer_hash: peerHash,
                 peer_kem_wrap_key_b64: peerKemWrapKeyB64,
                 peer_wrapped_msg_key_b64: peerWrappedMsgKeyB64,
@@ -151,10 +247,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
             await pushRow('dialog_keys', keysRow);
 
             // Cache it
-            senderMsgKeys.value[`${dialogHash}_${$userPQ.currentUserHash}`] = senderMsgKey;
+            senderMsgKeys.value[`${dialogHash}_${myHash}`] = senderMsgKey;
         } else {
             // Already initialized, ensure it's in memory cache
-            if (!senderMsgKeys.value[`${dialogHash}_${$userPQ.currentUserHash}`]) {
+            if (!senderMsgKeys.value[`${dialogHash}_${myHash}`]) {
                 const em = EncryptionManagerPQ.getInstance();
                 const keys = await em.exportVaultKeys();
                 const signSkey = safeBase64Decode(keys.sign_skey, 'sign_skey');
@@ -163,7 +259,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 const senderMsgKey = DialogCrypto.deriveSenderMsgKey(
                     signSkey, kemSkey, keys.evm_skey, peerHash
                 );
-                senderMsgKeys.value[`${dialogHash}_${$userPQ.currentUserHash}`] = senderMsgKey;
+                senderMsgKeys.value[`${dialogHash}_${myHash}`] = senderMsgKey;
             }
         }
         return dialogHash;
@@ -239,7 +335,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 const contentJson = JSON.stringify({ type: "text", text: text });
                 const contentB64 = await DialogCrypto.encryptContent(myKey, contentJson);
 
-                const refsMap = {};
+                // Causal refs: the DAG tails observed at send time ({} only
+                // for the genesis message, when nothing is loaded yet)
+                const refsMap = await computeObservedTails(dialogHash);
                 const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
 
                 onStatus?.('syncing');
@@ -270,9 +368,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const dialogHash = await initDialogKeys(peerHash);
         const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
-        // The server-confirmed row (with its sign_hash) lives in the dialog collection
+        // The server-confirmed row (with its sign_hash) lives in the dialog
+        // collection. A preload failure is "state unknown" — it must not be
+        // collapsed into "message not found" (which would mislead the user
+        // and could mask a mere connectivity blip as a missing message).
         const msgColl = getDialogCollections(dialogHash).messages;
-        await msgColl.preload().catch(() => {});
+        await msgColl.preload();
         const current = msgColl.get(messageId) || null;
         if (!current) throw new Error('Message not found');
         if (current.sender_hash !== $userPQ.currentUserHash) {
@@ -281,9 +382,15 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
         const contentJson = JSON.stringify({ type: "text", text: newText });
         const contentB64 = await DialogCrypto.encryptContent(myKey, contentJson);
-        const refsMap = {};
+        // Refs are recomputed at edit time — the tails may have changed since
+        // the original authoring; the old refs stay archived with the old
+        // revision in dialog_messages_versions (spec: §Behavior on edit)
+        const refsMap = await computeObservedTails(dialogHash);
         const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
 
+        // An edit is an HTTP `update`: the server replaces the tip and archives
+        // the previous revision in dialog_messages_versions. The timestamp must
+        // be strictly newer than the tip's, even inside the same second.
         await pushRow('dialog_messages', {
             message_id: messageId,
             dialog_hash: dialogHash,
@@ -292,8 +399,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
             deleted_flag: false,
             refs_map_b64: refsMapB64,
             parent_sign_hash: current.sign_hash,
-            owner_timestamp: Math.floor(Date.now() / 1000),
-        });
+            owner_timestamp: nextOwnerTimestamp(current.owner_timestamp),
+        }, 'update');
 
         return messageId;
     };
@@ -323,46 +430,193 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     /**
-     * Toggle reaction (optimistic: returns immediately, syncs in background)
+     * Toggle reaction. Owns its optimistic state: computes the deterministic
+     * reaction_hash and desired end state, registers the optimistic item, and
+     * syncs in the background. `messageSignHash` must be the sign_hash of the
+     * message revision the user is looking at — reacting to an unsynced
+     * revision is an error, not a signed mutation with an empty hash.
      */
-    const toggleReaction = async (peerHash, messageId, emoji, onStatus) => {
-        (async () => {
-            onStatus?.('sending');
-            try {
-                const dialogHash = await initDialogKeys(peerHash);
-                const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
+    // Per-reaction_hash serialization with coalescing.
+    //
+    // Rapid clicks must not each derive their state from the server row: the
+    // shape has not caught up, so every click would compute the same
+    // "desiredActive" and fire duplicate inserts of one deterministic PK. The
+    // effective state is therefore server state overlaid with the latest
+    // in-flight intent, and only the FINAL intent is actually written —
+    // intermediate clicks collapse.
+    //
+    // An intent outlives its own write. Dropping it the moment the write
+    // starts left the interval between "request sent" and "shape caught up"
+    // unguarded: a click arriving there saw neither a server row nor an
+    // intent, concluded the reaction was off, and re-sent "on" — so a second
+    // click during a slow write silently repeated the first instead of
+    // undoing it. The intent is therefore cleared only once the write has
+    // settled, and `written` stops a queued duplicate from re-sending it.
+    const reactionIntents = new Map(); // reaction_hash -> { desiredActive, messageSignHash, written }
+    const reactionQueues = new Map();  // reaction_hash -> Promise
 
-                const reactionHash = DialogCrypto.computeReactionHash(
-                    myKey, messageId, $userPQ.currentUserHash, emoji
-                );
+    const runReactionWrite = async (reactionHash, ctx) => {
+        const intent = reactionIntents.get(reactionHash);
+        if (!intent || intent.written) return;
+        intent.written = true;
 
-                const dialogColls = getDialogCollections(dialogHash);
-                const messageSignHash = dialogColls.messages.get(messageId)?.sign_hash || '';
+        const { dialogHash, messageId, emoji, myKey, myHash } = ctx;
+        const dialogColls = getDialogCollections(dialogHash);
+        // Re-read after the barrier of the previous write: the row may now
+        // exist (or have moved to another revision).
+        const existing = dialogColls.reactions.get(reactionHash);
 
-                const existing = dialogColls.reactions.get(reactionHash);
-                const exists = !!existing && !existing.deleted_flag;
+        const base = {
+            reaction_hash: reactionHash,
+            dialog_hash: dialogHash,
+            message_id: messageId,
+            // A reaction belongs to a specific message revision. Reacting on a
+            // newer revision moves the row to it (product decision 2026-08-11).
+            message_sign_hash: intent.messageSignHash,
+            reactor_hash: myHash,
+        };
 
-                onStatus?.('syncing');
-                const base = {
-                    reaction_hash: reactionHash,
-                    dialog_hash: dialogHash,
-                    message_id: messageId,
-                    message_sign_hash: messageSignHash,
-                    reactor_hash: $userPQ.currentUserHash,
-                    owner_timestamp: Math.floor(Date.now() / 1000),
-                };
-                if (exists) {
-                    await pushRow('dialog_message_reactions', { ...base, type_b64: '', deleted_flag: true }, 'update');
-                } else {
-                    const typeB64 = await DialogCrypto.encryptContent(myKey, emoji);
-                    await pushRow('dialog_message_reactions', { ...base, type_b64: typeB64, deleted_flag: false });
-                }
-                onStatus?.('synced');
-            } catch (e) {
-                console.error('[dialogs] toggleReaction failed:', e);
-                onStatus?.('error');
+        const typeB64 = intent.desiredActive ? await DialogCrypto.encryptContent(myKey, emoji) : '';
+        const row = {
+            ...base,
+            type_b64: typeB64,
+            deleted_flag: !intent.desiredActive,
+            owner_timestamp: nextOwnerTimestamp(existing?.owner_timestamp ?? null),
+        };
+
+        // Existing row (even a tombstone, even on another revision) → update
+        try {
+            await pushRow('dialog_message_reactions', row, existing ? 'update' : 'insert');
+        } catch (e) {
+            // Transient: the write may still land, and the UI keeps showing the
+            // desired state, so the intent has to stay to keep the next click
+            // inverting from what the user sees. Permanent: fall through and
+            // drop it, back to server truth.
+            if (!e?.permanent && reactionIntents.get(reactionHash) === intent) {
+                intent.written = false;
             }
-        })();
+            throw e;
+        } finally {
+            // Only if nobody clicked again: a newer click replaced the entry,
+            // and that one still needs to be written.
+            if (reactionIntents.get(reactionHash) === intent && intent.written) {
+                reactionIntents.delete(reactionHash);
+            }
+        }
+    };
+
+    const toggleReaction = async (peerHash, { messageId, messageSignHash, emoji }) => {
+        if (!messageSignHash) {
+            throw new Error('Cannot react: message revision is not synced yet');
+        }
+
+        const dialogHash = await initDialogKeys(peerHash);
+        const myHash = $userPQ.currentUserHash;
+        const myKey = await getSenderMsgKey(dialogHash, myHash);
+
+        const reactionHash = DialogCrypto.computeReactionHash(myKey, messageId, myHash, emoji);
+
+        const dialogColls = getDialogCollections(dialogHash);
+        const existing = dialogColls.reactions.get(reactionHash);
+        // Active only if the row is live AND attached to the revision being
+        // displayed: after an edit the old reaction is not shown, so clicking
+        // means "react on this revision", not "remove".
+        const serverActive = !!existing
+            && !existing.deleted_flag
+            && existing.message_sign_hash === messageSignHash;
+
+        const pending = reactionIntents.get(reactionHash);
+        const effectiveActive = pending ? pending.desiredActive : serverActive;
+        const desiredActive = !effectiveActive;
+
+        reactionIntents.set(reactionHash, { desiredActive, messageSignHash, written: false });
+
+        const optimisticId = addOptimisticReaction(dialogHash, messageId, emoji, reactionHash, desiredActive);
+
+        const previous = reactionQueues.get(reactionHash) ?? Promise.resolve();
+        const ctx = { dialogHash, messageId, emoji, myKey, myHash };
+        const next = previous.then(
+            () => runReactionWrite(reactionHash, ctx),
+            () => runReactionWrite(reactionHash, ctx)
+        );
+
+        const settled = next.then(() => undefined, () => undefined);
+        reactionQueues.set(reactionHash, settled);
+        settled.then(() => {
+            if (reactionQueues.get(reactionHash) === settled) reactionQueues.delete(reactionHash);
+        });
+
+        next.then(
+            () => updateOptimisticStatus(optimisticId, 'synced'),
+            (e) => {
+                console.error('[dialogs] toggleReaction failed:', e);
+                if (e?.permanent) {
+                    // The server will never accept this toggle — roll the
+                    // optimistic state back so the UI stops showing an action
+                    // that did not happen.
+                    removeOptimisticItem(optimisticId);
+                } else {
+                    // Transient: the write may still land later, so keep it
+                    // visible — but as an explicit error, not as 'syncing'.
+                    updateOptimisticStatus(optimisticId, 'error');
+                }
+            }
+        );
+
+        updateOptimisticStatus(optimisticId, 'syncing');
+        return optimisticId;
+    };
+
+    /**
+     * Publish a "read" receipt for a specific message revision.
+     *
+     * Deliberate, never automatic: the product requires the user to confirm
+     * they have reviewed this version of the history by pressing a button, so
+     * this is NOT called on render. Receipts are irreversible by design — the
+     * table has no deleted_flag — which is exactly why the acknowledgement
+     * must be an explicit act.
+     *
+     * Bound to message_sign_hash: an edited message is a new revision and
+     * needs its own acknowledgement.
+     */
+    const sendReadReceipt = async (peerHash, { messageId, messageSignHash }) => {
+        if (!messageSignHash) {
+            throw new Error('Cannot acknowledge: message revision is not synced yet');
+        }
+
+        const dialogHash = await initDialogKeys(peerHash);
+        const myHash = $userPQ.currentUserHash;
+        const type = 'read';
+
+        const receiptHash = DialogCrypto.computeReceiptHash(messageId, messageSignHash, myHash, type);
+
+        const dialogColls = getDialogCollections(dialogHash);
+        await dialogColls.receipts.preload().catch(() => {});
+        const existing = dialogColls.receipts.get(receiptHash);
+        // Already acknowledged: the deterministic hash makes this a no-op
+        // rather than a duplicate insert the server would reject.
+        if (existing) return receiptHash;
+
+        await pushRow('dialog_message_receipts', {
+            receipt_hash: receiptHash,
+            dialog_hash: dialogHash,
+            message_id: messageId,
+            peer_hash: myHash,
+            type,
+            message_sign_hash: messageSignHash,
+            owner_timestamp: nextOwnerTimestamp(null),
+        });
+
+        return receiptHash;
+    };
+
+    /** Revisions the current user has explicitly acknowledged. */
+    const isRevisionAcknowledged = (dialogHash, messageId, messageSignHash) => {
+        if (!messageSignHash) return false;
+        const receiptHash = DialogCrypto.computeReceiptHash(
+            messageId, messageSignHash, $userPQ.currentUserHash, 'read'
+        );
+        return !!getDialogCollections(dialogHash).receipts.get(receiptHash);
     };
 
     const decryptReactionRow = async (dialogHash, row) => {
@@ -386,6 +640,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         editMessage,
         decryptMessageRow,
         toggleReaction,
+        sendReadReceipt,
+        isRevisionAcknowledged,
         decryptReactionRow,
         optimisticItems,
         addOptimisticMessage,

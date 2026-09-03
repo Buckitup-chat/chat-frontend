@@ -29,6 +29,8 @@ const encodeField = (key, value) => {
   return String(value);
 };
 
+const SIGN_HASH_RELATIONS = new Set(['dialog_messages', 'dialog_messages_versions']);
+
 const buildSignatureData = (fields) => {
   return Object.keys(fields)
     .sort()
@@ -92,8 +94,12 @@ export const api = {
     name,
     userData,
     mutationType = 'insert',
+    ownerTimestampOverride = null,
   ) => {
-    const ownerTimestamp = Math.floor(Date.now() / 1000);
+    // The server rejects a card update whose timestamp is not strictly newer
+    // than the stored one, so two edits inside a second must not collide.
+    // Callers pass nextOwnerTimestamp(serverCard?.owner_timestamp).
+    const ownerTimestamp = ownerTimestampOverride || Math.floor(Date.now() / 1000);
     const deletedFlag = false;
 
     const signatureFields = {
@@ -149,11 +155,13 @@ export const api = {
     const ts = ownerTimestamp || Math.floor(Date.now() / 1000);
     const del = isDelete || deletedFlag;
 
+    // Must mirror the server's Signable impl for UserStorage, which drops
+    // sign_b64 and sign_hash before building the payload — including
+    // sign_hash here produced "invalid_signature" on every write.
     const signatureFields = {
       deleted_flag: del,
       owner_timestamp: ts,
       parent_sign_hash: parentSignHash,
-      sign_hash: signHash,
       user_hash: userHash,
       uuid: uuid,
       value_b64: valueB64,
@@ -161,21 +169,30 @@ export const api = {
 
     const signatureData = buildSignatureData(signatureFields);
     let finalSignB64 = existingSignB64;
-    
+
     if (!finalSignB64 && signSkey) {
         const signBytes = ml_dsa87.sign(new TextEncoder().encode(signatureData), signSkey);
         finalSignB64 = encodeBase64(signBytes, true);
     }
 
+    // The server requires sign_hash: "uss_" + SHA3-512 of the raw signature
+    // bytes (same derivation dialog rows use, with their own prefix).
+    let finalSignHash = signHash;
+    if (!finalSignHash && finalSignB64) {
+      const decodedSign = Uint8Array.from(atob(finalSignB64), c => c.charCodeAt(0));
+      finalSignHash = "uss_" + bytesToHex(sha3_512(decodedSign));
+    }
+
+    // Server schema fields only — hash_b64 is a local convenience and is
+    // neither part of the server row nor of the signature payload.
     const changes = {
       user_hash: userHash,
       uuid,
       value_b64: valueB64,
-      hash_b64: hashB64,
       deleted_flag: del,
       owner_timestamp: ts,
       parent_sign_hash: parentSignHash,
-      sign_hash: signHash,
+      sign_hash: finalSignHash,
       sign_b64: finalSignB64
     };
 
@@ -218,7 +235,11 @@ export const api = {
     }
 
     const changes = { ...fieldsToSign, sign_b64: finalSignB64 };
-    if (finalSignB64) {
+    // Only dialog_messages and dialog_messages_versions carry a sign_hash
+    // column (DialogMessageSignHash, "dms_" prefix). dialog_keys, reactions
+    // and receipts are keyed by their own deterministic hash and have no such
+    // column — sending one there is a field the server schema cannot cast.
+    if (finalSignB64 && SIGN_HASH_RELATIONS.has(relation)) {
       const decodedSign = Uint8Array.from(atob(finalSignB64), c => c.charCodeAt(0));
       changes.sign_hash = "dms_" + bytesToHex(sha3_512(decodedSign));
     }

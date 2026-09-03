@@ -2,7 +2,8 @@
     <div class="h-100 w-100">
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :reactions="displayReactions" @sendMessage="handleSendMessage"
-            @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage" />
+            @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
+            @acknowledgeMessage="handleAcknowledge" />
     </div>
 </template>
 
@@ -11,7 +12,7 @@
 </style>
 
 <script setup>
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, inject } from 'vue';
 import { useRoute } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
@@ -21,6 +22,7 @@ import { useCollectionRows } from '@/lib/data/useCollection';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
+const $swal = inject('$swal');
 const $userPQ = userPQStore();
 const $dialogs = useDialogsStore();
 
@@ -54,11 +56,26 @@ const dialogCollections = computed(() => (dialogHash.value ? getDialogCollection
 // Live rows for messages (deleted rows are filtered in the decrypt pipeline)
 const { rows: rawMessages } = useCollectionRows(computed(() => dialogCollections.value?.messages ?? null));
 
+// Sender keys stream in independently of the messages they unlock: the peer
+// creates its dialog_keys row at the same moment it sends its first message,
+// so a message can arrive before the key that decrypts it.
+const { rows: rawKeys } = useCollectionRows(computed(() => dialogCollections.value?.keys ?? null));
+
 const decryptedMessages = ref([]);
 const messageCache = new Map();
 let decryptTimer = null;
 
-watch(dialogHash, () => { messageCache.clear(); });
+// Async decryption started for dialog A must never write into dialog B:
+// clearTimeout cannot cancel promises already in flight, so every async
+// continuation checks the generation it was started under.
+let dialogGeneration = 0;
+
+watch(dialogHash, () => {
+    dialogGeneration++;
+    messageCache.clear();
+    decryptedMessages.value = [];
+    reactionsByMsgId.value = {};
+});
 
 const rebuildDecryptedMessages = (newRows) => {
     const out = [];
@@ -68,6 +85,46 @@ const rebuildDecryptedMessages = (newRows) => {
         if (entry) out.push(entry);
     }
     decryptedMessages.value = out;
+};
+
+const scheduleDecrypt = (newRows) => {
+    if (decryptTimer) clearTimeout(decryptTimer);
+    const generation = dialogGeneration;
+    decryptTimer = setTimeout(async () => {
+        if (generation !== dialogGeneration) return;
+
+        const pending = [];
+        for (const row of newRows) {
+            if (row.deleted_flag) continue;
+            const cached = messageCache.get(row.message_id);
+            // Undecrypted entries are retried: their key may have arrived since.
+            if (!cached || !cached._decrypted || cached._contentB64 !== row.content_b64) pending.push(row);
+        }
+
+        if (pending.length > 0) {
+            const name = chatName.value;
+            const entries = await Promise.all(pending.map(async (row) => {
+                const decrypted = await $dialogs.decryptMessageRow(row);
+                const date = new Date(row.owner_timestamp * 1000);
+                return [row.message_id, {
+                    id: row.message_id,
+                    text: decrypted.text,
+                    authorName: decrypted.isMine ? 'Me' : name,
+                    isMine: decrypted.isMine,
+                    timestamp: `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`,
+                    _syncStatus: 'synced',
+                    _decrypted: decrypted.decrypted === true,
+                    _contentB64: row.content_b64,
+                    _raw: row
+                }];
+            }));
+            // Apply only if the user is still looking at the same dialog
+            if (generation !== dialogGeneration) return;
+            for (const [id, entry] of entries) messageCache.set(id, entry);
+        }
+
+        rebuildDecryptedMessages(newRows);
+    }, 200);
 };
 
 watch(() => rawMessages.value, (newRows, _, onCleanup) => {
@@ -82,49 +139,87 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
     }
     rebuildDecryptedMessages(newRows);
 
-    if (decryptTimer) clearTimeout(decryptTimer);
-    decryptTimer = setTimeout(async () => {
-        const pending = [];
-        for (const row of newRows) {
-            if (row.deleted_flag) continue;
-            const cached = messageCache.get(row.message_id);
-            if (!cached || cached._contentB64 !== row.content_b64) pending.push(row);
-        }
-
-        if (pending.length > 0) {
-            const name = chatName.value;
-            await Promise.all(pending.map(async (row) => {
-                const decrypted = await $dialogs.decryptMessageRow(row);
-                const date = new Date(row.owner_timestamp * 1000);
-                const syncStatus = 'synced';
-                messageCache.set(row.message_id, {
-                    id: row.message_id,
-                    text: decrypted.text,
-                    authorName: decrypted.isMine ? 'Me' : name,
-                    isMine: decrypted.isMine,
-                    timestamp: `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`,
-                    _syncStatus: syncStatus,
-                    _contentB64: row.content_b64,
-                    _raw: row
-                });
-            }));
-        }
-
-        rebuildDecryptedMessages(newRows);
-    }, 200);
+    scheduleDecrypt(newRows);
     onCleanup(() => { if (decryptTimer) { clearTimeout(decryptTimer); decryptTimer = null; } });
 }, { immediate: true });
 
+
 // Reactions (deleted rows filtered below — the shape carries the full table slice)
 const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollections.value?.reactions ?? null));
-const rawReactions = computed(() => rawAllReactions.value.filter((r) => !r.deleted_flag));
+
+// A reaction belongs to a specific message revision. Editing a message
+// produces a new revision, and reactions made on the previous one are NOT
+// carried over to it — reacting again moves the row to the new revision.
+// Messages are versioned; reactions are not.
+const currentSignHashOf = (messageId) =>
+    (rawMessages.value || []).find((m) => m.message_id === messageId)?.sign_hash;
+
+const rawReactions = computed(() =>
+    rawAllReactions.value.filter(
+        (r) => !r.deleted_flag && r.message_sign_hash === currentSignHashOf(r.message_id)
+    )
+);
+
+// Read receipts. Plaintext by design (the server answers unread counts without
+// keys), append-only, and bound to one message revision — an edited message
+// needs its own acknowledgement.
+const { rows: rawReceipts } = useCollectionRows(computed(() => dialogCollections.value?.receipts ?? null));
+
+// message_id -> { mine: bool, peers: [user_hash] } for the displayed revision
+const receiptsByMsgId = computed(() => {
+    const me = $userPQ.currentUserHash;
+    const out = {};
+    for (const r of rawReceipts.value || []) {
+        if (r.type !== 'read') continue;
+        if (r.message_sign_hash !== currentSignHashOf(r.message_id)) continue;
+        const entry = out[r.message_id] || (out[r.message_id] = { mine: false, peers: [] });
+        if (r.peer_hash === me) entry.mine = true;
+        else if (!entry.peers.includes(r.peer_hash)) entry.peers.push(r.peer_hash);
+    }
+    return out;
+});
+
+// Deliberate act, never automatic: sending is driven by a button, not by the
+// message appearing on screen. A receipt cannot be withdrawn (the table has no
+// deleted_flag), so it must not be produced as a side effect of scrolling.
+const pendingReceipts = ref(new Set());
+
+const handleAcknowledge = async (messageId) => {
+    if (!peerHash.value || !dialogHash.value) return;
+    if (pendingReceipts.value.has(messageId)) return;
+
+    const message = decryptedMessages.value.find((m) => m.id === messageId);
+    const messageSignHash = message?._raw?.sign_hash;
+    if (!messageSignHash) {
+        console.warn('[chat] receipt skipped: message not synced yet', messageId);
+        return;
+    }
+
+    pendingReceipts.value = new Set(pendingReceipts.value).add(messageId);
+    try {
+        await $dialogs.sendReadReceipt(peerHash.value, { messageId, messageSignHash });
+    } catch (e) {
+        console.error('Failed to send read receipt:', e);
+        $swal.fire({
+            icon: 'error',
+            title: 'Confirmation not sent',
+            text: e?.message || 'Could not publish the read receipt. Please try again.',
+        });
+    } finally {
+        const next = new Set(pendingReceipts.value);
+        next.delete(messageId);
+        pendingReceipts.value = next;
+    }
+};
 
 const reactionsByMsgId = ref({});
 let reactionTimer = null;
 
-watch(() => rawReactions.value, (newRows, _, onCleanup) => {
+const aggregateReactions = (newRows) => {
     if (reactionTimer) clearTimeout(reactionTimer);
+    const generation = dialogGeneration;
     reactionTimer = setTimeout(async () => {
+        if (generation !== dialogGeneration) return;
         if (!newRows) {
             reactionsByMsgId.value = {};
             return;
@@ -152,20 +247,46 @@ watch(() => rawReactions.value, (newRows, _, onCleanup) => {
             }
         }));
 
+        // The user may have switched dialogs while we were decrypting
+        if (generation !== dialogGeneration) return;
         reactionsByMsgId.value = aggregated;
 
-        // Clean up optimistic reactions whose real DB rows have arrived
+        // Reconcile optimistic reactions against server rows INCLUDING
+        // tombstones, matched by the deterministic reaction_hash: an
+        // un-react confirms as a tombstone, which carries no emoji and
+        // never appears in the active aggregate.
+        // The confirmed state must also match the revision the intent targeted:
+        // a row still pointing at the previous revision has not yet absorbed
+        // this click, even though it is live.
+        const serverRows = rawAllReactions.value;
         for (const item of $dialogs.optimisticItems.values()) {
             if (item.type !== 'reaction' || item.dialogHash !== dialogHashVal) continue;
-            if (aggregated[item.messageId]?.[item.emoji]?.hasMine) {
+            const serverRow = serverRows.find((r) => r.reaction_hash === item.reactionHash);
+            if (!serverRow) continue;
+            const confirmedActive =
+                !serverRow.deleted_flag && serverRow.message_sign_hash === currentSignHashOf(item.messageId);
+            if (confirmedActive === item.desiredActive) {
                 $dialogs.removeOptimisticItem(item.id);
             }
         }
     }, 200);
+};
+
+watch(() => rawReactions.value, (newRows, _, onCleanup) => {
+    aggregateReactions(newRows);
     onCleanup(() => { if (reactionTimer) { clearTimeout(reactionTimer); reactionTimer = null; } });
 }, { immediate: true });
 
-// Merge optimistic messages with live-query results
+// A sender key arriving after the messages it unlocks: re-run decryption for
+// everything still waiting, otherwise those messages stay on
+// "Waiting for keys..." until the page is reloaded. This is the common case
+// for the peer's first message — their key row and message land together.
+watch(() => rawKeys.value, () => {
+    scheduleDecrypt(rawMessages.value || []);
+    aggregateReactions(rawReactions.value || []);
+});
+
+// Merge optimistic messages with server rows
 const displayMessages = computed(() => {
     const dbIds = new Set((rawMessages.value || []).map(r => r.message_id));
     const decryptedIds = new Set(decryptedMessages.value.map(m => m.id));
@@ -186,7 +307,20 @@ const displayMessages = computed(() => {
         });
     }
 
-    return [...activeOptimistic, ...decryptedMessages.value].sort((a, b) => {
+    // Overlay in-flight / failed edits: show the attempted text and mark its
+    // state, so a rejected versioned edit is not indistinguishable from an
+    // accepted one.
+    const withEdits = decryptedMessages.value.map((m) => {
+        const pending = pendingEdits.value.get(m.id);
+        const base = pending ? { ...m, text: pending.text, _editStatus: pending.status } : { ...m };
+        const receipt = receiptsByMsgId.value[m.id];
+        base._acknowledgedByMe = !!receipt?.mine;
+        base._acknowledgedByPeers = receipt?.peers?.length || 0;
+        base._acknowledgePending = pendingReceipts.value.has(m.id);
+        return base;
+    });
+
+    return [...activeOptimistic, ...withEdits].sort((a, b) => {
         const aTs = a._raw?.owner_timestamp || a.ownerTimestamp || 0;
         const bTs = b._raw?.owner_timestamp || b.ownerTimestamp || 0;
         return aTs - bTs;
@@ -207,10 +341,27 @@ const displayReactions = computed(() => {
         if (item.type !== 'reaction' || item.dialogHash !== dialogHash.value) continue;
         if (!merged[item.messageId]) merged[item.messageId] = {};
         const existing = merged[item.messageId][item.emoji];
-        if (existing) {
+
+        if (item.desiredActive) {
+            if (existing) {
+                if (!existing.hasMine) {
+                    existing.count++;
+                    existing.hasMine = true;
+                }
+                existing.status = item.status;
+            } else {
+                merged[item.messageId][item.emoji] = { count: 1, hasMine: true, status: item.status };
+            }
+        } else if (existing && existing.hasMine) {
+            // Optimistic removal: my reaction disappears before the tombstone
+            // returns through the shape stream
+            existing.count = Math.max(0, existing.count - 1);
+            existing.hasMine = false;
             existing.status = item.status;
-        } else {
-            merged[item.messageId][item.emoji] = { count: 1, hasMine: true, status: item.status };
+            if (existing.count === 0) {
+                delete merged[item.messageId][item.emoji];
+                if (Object.keys(merged[item.messageId]).length === 0) delete merged[item.messageId];
+            }
         }
     }
 
@@ -219,15 +370,23 @@ const displayReactions = computed(() => {
 
 const handleToggleReaction = async (messageId, emoji) => {
     if (!peerHash.value || !dialogHash.value) return;
-    const dialogHashVal = dialogHash.value;
-    const optimisticId = $dialogs.addOptimisticReaction(dialogHashVal, messageId, emoji);
+
+    // React to the exact revision the user is looking at. A message that has
+    // not round-tripped yet has no sign_hash — reacting to it would produce a
+    // signed mutation with an invalid empty target.
+    const message = decryptedMessages.value.find((m) => m.id === messageId);
+    const messageSignHash = message?._raw?.sign_hash;
+    if (!messageSignHash) {
+        console.warn('[chat] reaction skipped: message not synced yet', messageId);
+        return;
+    }
+
     try {
-        await $dialogs.toggleReaction(peerHash.value, messageId, emoji, (status) => {
-            $dialogs.updateOptimisticStatus(optimisticId, status);
-        });
+        // The store owns the optimistic state (deterministic reaction_hash,
+        // desired end state) — see dialogs.store toggleReaction
+        await $dialogs.toggleReaction(peerHash.value, { messageId, messageSignHash, emoji });
     } catch (e) {
         console.error("Failed to toggle reaction:", e);
-        $dialogs.updateOptimisticStatus(optimisticId, 'error');
     }
 };
 
@@ -251,12 +410,34 @@ const handleSendMessage = (text) => {
     })();
 };
 
+// A versioned edit can legitimately fail (stale base tip, node unreachable).
+// The editor closes immediately on save, so without this the attempted text
+// would be indistinguishable from an accepted one — only a console line.
+const pendingEdits = ref(new Map()); // message_id -> { text, status, error }
+
 const handleEditMessage = async (messageId, newText) => {
     if (!peerHash.value || !newText.trim()) return;
+    const text = newText.trim();
+    pendingEdits.value.set(messageId, { text, status: 'syncing' });
+    pendingEdits.value = new Map(pendingEdits.value);
     try {
-        await $dialogs.editMessage(peerHash.value, messageId, newText);
+        await $dialogs.editMessage(peerHash.value, messageId, text);
+        pendingEdits.value.delete(messageId);
+        pendingEdits.value = new Map(pendingEdits.value);
     } catch (e) {
         console.error("Failed to edit message:", e);
+        pendingEdits.value.set(messageId, { text, status: 'error', error: e });
+        pendingEdits.value = new Map(pendingEdits.value);
+        $swal.fire({
+            icon: 'error',
+            title: 'Edit not saved',
+            text: 'The edited message could not be sent. The original text is still what others see.',
+        });
     }
+};
+
+const retryEdit = (messageId) => {
+    const pending = pendingEdits.value.get(messageId);
+    if (pending) handleEditMessage(messageId, pending.text);
 };
 </script>

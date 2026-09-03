@@ -7,6 +7,8 @@
 // with no subscribers stop syncing and free memory after `gcTime`.
 import { createCollection } from '@tanstack/db';
 import { electricCollectionOptions } from '@tanstack/electric-db-collection';
+import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence';
+import { getPersistence } from './persistence';
 import { alwaysActiveVisibility } from './visibility';
 import type {
 	UserCardRow,
@@ -32,16 +34,51 @@ const electricUrl = (path: string): string => {
 const parser = { int8: (v: string) => Number(v) };
 
 const DIALOG_GC_MS = 60_000; // keep closed dialogs warm for quick back-navigation
-const q = (v: string) => v.replace(/'/g, ""); // hashes are hex + prefix; strip quotes defensively
+
+// Validation, not sanitization: the dialog hash format is fixed by the
+// protocol (chat docs: pq_dialogs.md §Identifiers). Anything else is a bug at
+// the call site and must fail loudly, not be silently rewritten into a
+// different (still wrong) shape filter.
+const DIALOG_HASH_RE = /^di_[0-9a-f]{128}$/;
+const assertDialogHash = (value: string): string => {
+	if (!DIALOG_HASH_RE.test(value)) {
+		throw new Error(`Invalid dialog_hash: ${JSON.stringify(value)}`);
+	}
+	return value;
+};
 
 const shapeDefaults = { parser, runtimeVisibility: alwaysActiveVisibility };
+
+// Wrap an Electric collection config with the shared SQLite persistence when
+// it is available (initPersistence() ran and OPFS exists). Electric stores its
+// shape cursor in the persisted metadata, so a wrapped collection warm-starts
+// from disk and resumes the stream from the stored offset instead of
+// re-fetching the shape. Without persistence the config passes through
+// untouched — same in-memory behaviour as before.
+//
+// Bump SCHEMA_VERSION when a row type changes shape; mismatched local data is
+// then dropped and re-synced from the server (the server is always the source
+// of truth — local SQLite is only a cache plus outbox).
+const SCHEMA_VERSION = 1;
+
+// The wrapped config's generics survive at runtime; typing the passthrough
+// exactly would just duplicate the library's own overloads.
+const persisted = <C extends { id?: string }>(config: C): C => {
+	const persistence = getPersistence();
+	if (!persistence) return config;
+	return persistedCollectionOptions({
+		...(config as C & Parameters<typeof persistedCollectionOptions>[0]),
+		persistence,
+		schemaVersion: SCHEMA_VERSION,
+	}) as unknown as C;
+};
 
 // ---------- global collections ----------
 
 let userCards: ReturnType<typeof buildUserCards> | null = null;
 const buildUserCards = () =>
 	createCollection(
-		electricCollectionOptions<UserCardRow>({
+		persisted(electricCollectionOptions<UserCardRow>({
 			id: 'user_cards',
 			shapeOptions: {
 				// /shapes is the sanctioned endpoint going forward (backend team,
@@ -52,7 +89,7 @@ const buildUserCards = () =>
 				...shapeDefaults,
 			},
 			getKey: (r) => r.user_hash,
-		})
+		}))
 	);
 
 export function getUserCardsCollection() {
@@ -63,7 +100,7 @@ export function getUserCardsCollection() {
 let userStorage: ReturnType<typeof buildUserStorage> | null = null;
 const buildUserStorage = () =>
 	createCollection(
-		electricCollectionOptions<UserStorageRow>({
+		persisted(electricCollectionOptions<UserStorageRow>({
 			id: 'user_storage',
 			shapeOptions: {
 				url: electricUrl('/shapes'),
@@ -71,7 +108,7 @@ const buildUserStorage = () =>
 				...shapeDefaults,
 			},
 			getKey: (r) => `${r.user_hash}|${r.uuid}`,
-		})
+		}))
 	);
 
 export function getUserStorageCollection() {
@@ -91,7 +128,7 @@ export interface DialogCollections {
 
 const dialogShape = (table: string, dialogHash: string) => ({
 	url: electricUrl('/shapes'),
-	params: { table, where: `dialog_hash = '${q(dialogHash)}'` },
+	params: { table, where: `dialog_hash = '${assertDialogHash(dialogHash)}'` },
 	...shapeDefaults,
 });
 
@@ -99,57 +136,78 @@ const buildDialogCollections = (dialogHash: string) => {
 	const suffix = dialogHash.slice(0, 24);
 	return {
 		keys: createCollection(
-			electricCollectionOptions<DialogKeyRow>({
+			persisted(electricCollectionOptions<DialogKeyRow>({
 				id: `dk-${suffix}`,
 				shapeOptions: dialogShape('dialog_keys', dialogHash),
 				getKey: (r) => `${r.dialog_hash}|${r.sender_hash}`,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 		messages: createCollection(
-			electricCollectionOptions<DialogMessageRow>({
+			persisted(electricCollectionOptions<DialogMessageRow>({
 				id: `dm-${suffix}`,
 				shapeOptions: dialogShape('dialog_messages', dialogHash),
 				getKey: (r) => r.message_id,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 		versions: createCollection(
-			electricCollectionOptions<DialogMessageVersionRow>({
+			persisted(electricCollectionOptions<DialogMessageVersionRow>({
 				id: `dmv-${suffix}`,
 				shapeOptions: dialogShape('dialog_messages_versions', dialogHash),
 				getKey: (r) => `${r.message_id}|${r.sign_hash}`,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 		reactions: createCollection(
-			electricCollectionOptions<DialogMessageReactionRow>({
+			persisted(electricCollectionOptions<DialogMessageReactionRow>({
 				id: `dmr-${suffix}`,
 				shapeOptions: dialogShape('dialog_message_reactions', dialogHash),
 				getKey: (r) => r.reaction_hash,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 		receipts: createCollection(
-			electricCollectionOptions<DialogMessageReceiptRow>({
+			persisted(electricCollectionOptions<DialogMessageReceiptRow>({
 				id: `dmc-${suffix}`,
 				shapeOptions: dialogShape('dialog_message_receipts', dialogHash),
 				getKey: (r) => r.receipt_hash,
 				gcTime: DIALOG_GC_MS,
-			})
+			}))
 		),
 	};
 };
 
+// LRU: the collections themselves stop syncing once unused (gcTime), but the
+// registry would otherwise keep a strong reference to every dialog bundle
+// visited in the session. Keep the current dialog plus a small warm set for
+// quick back-navigation, and drop the rest.
+const MAX_WARM_DIALOGS = 8;
 const dialogRegistry = new Map<string, DialogCollections>();
 
 export function getDialogCollections(dialogHash: string): DialogCollections {
-	let entry = dialogRegistry.get(dialogHash);
-	if (!entry) {
-		entry = buildDialogCollections(dialogHash);
-		dialogRegistry.set(dialogHash, entry);
+	const existing = dialogRegistry.get(dialogHash);
+	if (existing) {
+		// refresh recency: re-insert moves the key to the end of Map order
+		dialogRegistry.delete(dialogHash);
+		dialogRegistry.set(dialogHash, existing);
+		return existing;
+	}
+
+	const entry = buildDialogCollections(dialogHash);
+	dialogRegistry.set(dialogHash, entry);
+
+	while (dialogRegistry.size > MAX_WARM_DIALOGS) {
+		const oldest = dialogRegistry.keys().next().value as string | undefined;
+		if (oldest === undefined) break;
+		dialogRegistry.delete(oldest);
 	}
 	return entry;
+}
+
+/** Drop a dialog's collections immediately (e.g. after deleting a dialog). */
+export function releaseDialogCollections(dialogHash: string): void {
+	dialogRegistry.delete(dialogHash);
 }
 
 /** Test/inspection helper. */
