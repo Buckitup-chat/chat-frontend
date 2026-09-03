@@ -6,13 +6,20 @@
             :downloads="downloadsByFileId" :images="imagesByFileId"
             :availability="availabilityByFileId" :videos="videosByFileId"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
-            @send-file="handleSendFile" @download-file="handleDownloadFile"
+            @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState"
             @show-image="handleShowImage" @play-video="handlePlayVideo"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge">
             <template #above-input><TransferPanel /></template>
         </ChatWindow>
+        <FileStateModal v-if="fileState" :part="fileState.part"
+            :availability="availabilityByFileId[fileState.part.fileId] || null"
+            :log="backfillLog(fileState.part.fileId)"
+            :from="fileState.msg?.isMine ? 'me' : chatName"
+            :sent-at="fileState.msg?.timestamp || ''"
+            :checking="fileStateChecking"
+            @close="fileState = null" @refresh="handleFileStateAction" />
     </div>
 </template>
 
@@ -31,6 +38,8 @@ import TransferPanel from '@/components/chat/TransferPanel.vue';
 import { getDialogCollections } from '@/lib/data/collections';
 import { useCollectionRows } from '@/lib/data/useCollection';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
+import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
+import FileStateModal from '@/components/chat/FileStateModal.vue';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { v7 as uuidv7 } from 'uuid';
 
@@ -592,9 +601,37 @@ const checkAvailability = async (fileId) => {
     try {
         const a = await $dialogs.getFileAvailability(fileId);
         availabilityByFileId.value = { ...availabilityByFileId.value, [fileId]: a };
+        // Screen 05 "Ход добора": what this client has observed, when.
+        if (!a.unknown) recordAvailability(fileId, a.present, a.total);
     } catch (e) {
         console.warn('Availability check failed for', fileId, e);
     }
+};
+
+// ---------- screen 05: file state ----------
+
+const fileState = ref(null); // { part, msg }
+const fileStateChecking = ref(false);
+
+const handleShowFileState = (part, msg) => {
+    fileState.value = { part, msg };
+    checkAvailability(part.fileId);
+};
+
+// One button, two honest meanings: complete → download; partial → re-poll
+// the counts now (the closest a client can get to "prioritize this").
+const handleFileStateAction = async () => {
+    const st = fileState.value;
+    if (!st) return;
+    const a = availabilityByFileId.value[st.part.fileId];
+    if (a && !a.unknown && a.present >= a.total) {
+        fileState.value = null;
+        await handleDownloadFile(st.part);
+        return;
+    }
+    fileStateChecking.value = true;
+    try { await checkAvailability(st.part.fileId); }
+    finally { fileStateChecking.value = false; }
 };
 
 watch(() => decryptedMessages.value, (msgs) => {

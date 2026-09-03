@@ -97,7 +97,9 @@ export const useTransfersStore = defineStore('transfers', () => {
 		const dialogs = useDialogsStore();
 		const ctrl = new AbortController();
 		aborts.set(id, ctrl);
-		const startedAt = Date.now();
+		// Windowed speed: delta over the last progress tick, lightly smoothed.
+		// An average since start would show a long stall as healthy speed.
+		let lastTick = { t: Date.now(), done: byId(id).done };
 		patch(id, { status: 'active', speed: 0 });
 
 		try {
@@ -114,11 +116,15 @@ export const useTransfersStore = defineStore('transfers', () => {
 				resuming: item.done > 0,
 				signal: ctrl.signal,
 				onProgress: (p) => {
-					const elapsed = (Date.now() - startedAt) / 1000;
+					const now = Date.now();
+					const dt = (now - lastTick.t) / 1000;
+					const instant = dt > 0 ? ((p.done - lastTick.done) * CHUNK_SIZE) / dt : 0;
+					lastTick = { t: now, done: p.done };
+					const prev = byId(id)?.speed || 0;
 					patch(id, {
 						done: p.done,
 						total: p.total,
-						speed: elapsed > 0.5 ? (p.done * CHUNK_SIZE) / elapsed : 0,
+						speed: prev ? prev * 0.6 + instant * 0.4 : instant,
 					});
 				},
 			});
@@ -255,10 +261,21 @@ export const useTransfersStore = defineStore('transfers', () => {
 		};
 	});
 
+	/** Peers with transfers still in flight — the chats list marks them (screen 11). */
+	const transferPeers = computed(() => {
+		const peers = new Set();
+		for (const it of items.value) {
+			if (it.status === 'done') continue;
+			const batch = batches.value.get(it.batchId);
+			if (batch) peers.add(batch.peerHash);
+		}
+		return peers;
+	});
+
 	const toggleCollapsed = () => { collapsed.value = !collapsed.value; };
 
 	return {
-		items, stats, collapsed,
+		items, stats, collapsed, transferPeers,
 		enqueueBatch, pause, start, startAll, cancel, cancelAll, reorder, toggleCollapsed,
 	};
 });

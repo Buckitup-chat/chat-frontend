@@ -129,7 +129,9 @@
             <template v-for="f in filesOf(msg)" :key="f.fileId">
             <div class="msg-file">
               <span class="msg-file-icon">📄</span>
-              <div class="msg-file-body">
+              <!-- Screen 05 opens from the row body; the download button keeps
+                   its own tap. -->
+              <div class="msg-file-body" role="button" @click="emit('showFileState', f, msg)">
                 <div class="msg-file-name">{{ f.name }}</div>
                 <div class="msg-file-meta">
                   <template v-if="downloads[f.fileId]?.status === 'downloading'">
@@ -386,7 +388,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'showFileState']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
