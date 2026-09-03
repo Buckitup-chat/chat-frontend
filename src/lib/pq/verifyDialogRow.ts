@@ -6,6 +6,7 @@
 // sender's verified sign_pkey (through verifyUserCard) and hands it in.
 
 import { verifyFields, deriveSignHash } from './signature';
+import { signableFields } from './schema';
 import type {
 	DialogMessageRow,
 	DialogMessageVersionRow,
@@ -15,7 +16,7 @@ import type {
 
 export type RowVerdict =
 	| { status: 'ok' }
-	| { status: 'invalid'; reason: 'missing_signature' | 'bad_signature' | 'sign_hash_mismatch' };
+	| { status: 'invalid'; reason: 'missing_signature' | 'bad_signature' | 'sign_hash_mismatch' | 'missing_fields' };
 
 /**
  * dialog_messages / dialog_messages_versions carry a sign_hash column that is
@@ -31,7 +32,9 @@ export const verifyMessageRow = (
 	if (row.sign_hash && row.sign_hash !== deriveSignHash('dms_', row.sign_b64)) {
 		return { status: 'invalid', reason: 'sign_hash_mismatch' };
 	}
-	if (!verifyFields(row as never, row.sign_b64, senderSignPkeyB64)) {
+	const fields = signableFields('dialog_messages', row as unknown as Record<string, unknown>);
+	if (!fields) return { status: 'invalid', reason: 'missing_fields' };
+	if (!verifyFields(fields as never, row.sign_b64, senderSignPkeyB64)) {
 		return { status: 'invalid', reason: 'bad_signature' };
 	}
 	return { status: 'ok' };
@@ -43,7 +46,10 @@ export const verifySideRow = (
 	authorSignPkeyB64: string,
 ): RowVerdict => {
 	if (!row.sign_b64) return { status: 'invalid', reason: 'missing_signature' };
-	if (!verifyFields(row as never, row.sign_b64, authorSignPkeyB64)) {
+	const relation = 'reaction_hash' in row ? 'dialog_message_reactions' : 'dialog_message_receipts';
+	const fields = signableFields(relation, row as unknown as Record<string, unknown>);
+	if (!fields) return { status: 'invalid', reason: 'missing_fields' };
+	if (!verifyFields(fields as never, row.sign_b64, authorSignPkeyB64)) {
 		return { status: 'invalid', reason: 'bad_signature' };
 	}
 	return { status: 'ok' };

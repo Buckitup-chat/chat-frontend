@@ -14,6 +14,7 @@ import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { verifyFields, toBytes } from './signature';
+import { signableFields } from './schema';
 import type { UserCardRow } from '@/lib/data/types';
 
 export interface VerifiedCard {
@@ -51,8 +52,12 @@ export const verifyUserCard = (row: UserCardRow): CardVerdict => {
 		return { status: 'invalid', reason: 'hash_mismatch' };
 	}
 
-	// Self-signature over every column but sign_b64 itself.
-	if (!verifyFields(row as never, row.sign_b64, signPkey)) {
+	// Self-signature over the columns the server signs — named explicitly, so
+	// a bookkeeping key added by a collection or persistence layer cannot
+	// silently change the payload.
+	const fields = signableFields('user_cards', row as unknown as Record<string, unknown>);
+	if (!fields) return { status: 'invalid', reason: 'missing_fields' };
+	if (!verifyFields(fields as never, row.sign_b64, signPkey)) {
 		return { status: 'invalid', reason: 'bad_signature' };
 	}
 
