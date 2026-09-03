@@ -6,7 +6,7 @@ import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
 import { createDialogGate } from '@/lib/data/dialogGate';
-import { verifySideRow } from '@/lib/pq/verifyDialogRow';
+import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { api } from '@/api/client';
@@ -512,6 +512,51 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     /**
+     * Version history of a message (§3.1): archived revisions from the
+     * versions shape plus the current tip, newest first.
+     *
+     * Every revision is signature-checked before its content is shown as a
+     * past version — history is cryptographic lineage, not a cache
+     * (invariants/03_data_versioning.md), and a forged "old version" planted
+     * in the feed would be the perfect place to put words in someone's mouth.
+     * Unverifiable revisions surface as such rather than being dropped:
+     * a gap in history is itself information.
+     */
+    const getMessageHistory = async (dialogHash, messageId) => {
+        const colls = getDialogCollections(dialogHash);
+        await colls.versions.preload().catch(() => {});
+        const rows = colls.versions.toArray.filter((v) => v.message_id === messageId);
+
+        const out = [];
+        for (const row of rows) {
+            const signPkey = await getVerifiedSignPkey(row.sender_hash);
+            const verified = !!signPkey && verifyMessageRow(row, signPkey).status === 'ok';
+            let text = '';
+            let decrypted = false;
+            if (verified && row.content_b64) {
+                try {
+                    const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+                    if (key) {
+                        const json = await DialogCrypto.decryptContent(key, row.content_b64);
+                        text = json ? contentToText(decodeContent(json)) : '';
+                        decrypted = true;
+                    }
+                } catch { /* rendered as undecrypted below */ }
+            }
+            out.push({
+                signHash: row.sign_hash,
+                ownerTimestamp: row.owner_timestamp,
+                deletedFlag: !!row.deleted_flag,
+                verified,
+                text: verified ? (decrypted ? text : 'Waiting for keys…') : 'Unverifiable revision',
+            });
+        }
+        // Newest first; the current tip is already on screen and is not repeated here.
+        out.sort((a, b) => b.ownerTimestamp - a.ownerTimestamp);
+        return out;
+    };
+
+    /**
      * Toggle reaction. Owns its optimistic state: computes the deterministic
      * reaction_hash and desired end state, registers the optimistic item, and
      * syncs in the background. `messageSignHash` must be the sign_hash of the
@@ -721,6 +766,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         sendMessage,
         editMessage,
         decryptMessageRow,
+        getMessageHistory,
         admitMessageRow,
         admitReactionRow,
         admitReceiptRow,

@@ -140,3 +140,56 @@ describe('§4.2 causally unplaced', () => {
 		expect(w.find('.msg-unplaced-note').exists()).toBe(false);
 	});
 });
+
+describe('§3.1 version history', () => {
+	const edited = (over = {}) =>
+		message({
+			_raw: { message_id: 'dmsg_1', sign_hash: 'dms_tip', sender_hash: PEER, parent_sign_hash: 'dms_prev' },
+			...over,
+		});
+
+	const renderWith = (messages, extra = {}) =>
+		mount(ChatWindow, {
+			props: { title: 'Ирина', myHash: MY, messages, reactions: {}, ...extra },
+			global: { stubs: { Avatar: true } },
+		});
+
+	it('the edited label carries the version count and opens history', async () => {
+		const w = renderWith([edited()], { versionCounts: { dmsg_1: 2 } });
+		const label = w.find('.msg-edited');
+		expect(label.text()).toContain('edited · 2');
+
+		await label.trigger('click');
+		expect(w.emitted('showHistory')[0]).toEqual(['dmsg_1']);
+		expect(w.find('.msg-history').exists()).toBe(true);
+	});
+
+	it('renders past revisions struck through with the historical tag', async () => {
+		const w = renderWith([edited()], {
+			versionCounts: { dmsg_1: 1 },
+			histories: { dmsg_1: [{ signHash: 'dms_prev', ownerTimestamp: 1, deletedFlag: false, verified: true, text: 'старый текст' }] },
+		});
+		await w.find('.msg-edited').trigger('click');
+		const item = w.find('.msg-history-item');
+		expect(item.find('.msg-history-tag').text()).toMatch(/historical/i);
+		expect(item.find('.msg-history-text').text()).toBe('старый текст');
+	});
+
+	// History is lineage, not a cache: a revision that fails verification is
+	// shown AS unverifiable, not silently dropped and not shown as content.
+	it('marks an unverifiable revision instead of dropping it', async () => {
+		const w = renderWith([edited()], {
+			histories: { dmsg_1: [{ signHash: 'dms_bad', ownerTimestamp: 1, deletedFlag: false, verified: false, text: 'Unverifiable revision' }] },
+		});
+		await w.find('.msg-edited').trigger('click');
+		expect(w.find('.msg-history-text._unverified').exists()).toBe(true);
+	});
+
+	it('toggles closed without re-requesting', async () => {
+		const w = renderWith([edited()], { histories: { dmsg_1: [] } });
+		await w.find('.msg-edited').trigger('click');
+		await w.find('.msg-edited').trigger('click');
+		expect(w.find('.msg-history').exists()).toBe(false);
+		expect(w.emitted('showHistory')).toHaveLength(1);
+	});
+});

@@ -1,7 +1,9 @@
 <template>
     <div class="h-100 w-100">
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
-            :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions" @sendMessage="handleSendMessage"
+            :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions"
+            :version-counts="versionCountByMsgId" :histories="historiesByMsgId"
+            @show-history="handleShowHistory" @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge" />
     </div>
@@ -194,6 +196,23 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
     onCleanup(() => { if (decryptTimer) { clearTimeout(decryptTimer); decryptTimer = null; } });
 }, { immediate: true });
 
+
+// §3.1: archived revisions per message. The count rides on the "edited"
+// label; the decrypted list loads on demand when the user opens it.
+const { rows: rawVersions } = useCollectionRows(computed(() => dialogCollections.value?.versions ?? null));
+const versionCountByMsgId = computed(() => {
+    const out = {};
+    for (const v of rawVersions.value || []) out[v.message_id] = (out[v.message_id] || 0) + 1;
+    return out;
+});
+
+const historiesByMsgId = ref({});
+const handleShowHistory = async (messageId) => {
+    if (historiesByMsgId.value[messageId]) return; // loaded; ChatWindow just toggles
+    const history = await $dialogs.getMessageHistory(dialogHash.value, messageId);
+    historiesByMsgId.value = { ...historiesByMsgId.value, [messageId]: history };
+};
+watch(dialogHash, () => { historiesByMsgId.value = {}; });
 
 // Reactions (deleted rows filtered below — the shape carries the full table slice)
 const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollections.value?.reactions ?? null));

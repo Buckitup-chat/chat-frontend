@@ -63,6 +63,16 @@
             <!-- §4.2: admitted but causally unplaced — say why, quietly. -->
             <div v-if="msg._verify === 'waiting'" class="msg-unplaced-note">waiting for earlier messages…</div>
           </div>
+          <!-- §3.1 history: struck-through past revisions, newest first. Each
+               was signature-verified upstream; an unverifiable one says so. -->
+          <div v-if="openHistories.has(msg.id)" class="msg-history">
+            <div v-if="!histories[msg.id]" class="msg-history-loading">loading…</div>
+            <div v-else-if="histories[msg.id].length === 0" class="msg-history-loading">no earlier versions synced</div>
+            <div v-else v-for="v in histories[msg.id]" :key="v.signHash" class="msg-history-item">
+              <span class="msg-history-tag">historical version</span>
+              <div class="msg-history-text" :class="{ '_unverified': !v.verified }">{{ v.deletedFlag ? 'deleted' : v.text }}</div>
+            </div>
+          </div>
           <div v-if="reactions[msg.id] && Object.keys(reactions[msg.id]).length > 0"
             class="reactions-container d-flex flex-wrap gap-1 mt-1">
             <button v-for="(data, emoji) in reactions[msg.id]" :key="emoji" type="button"
@@ -87,7 +97,9 @@
             <span v-else-if="msg._syncStatus === 'syncing'" class="sync-status pending" title="Sending…">✓</span>
             <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Accepted by server">✓</span>
             <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Rejected — not sent">!</span>
-            <span v-if="msg._raw && msg._raw.parent_sign_hash" class="msg-edited" title="This message was edited">edited</span>
+            <span v-if="msg._raw && msg._raw.parent_sign_hash" class="msg-edited" role="button"
+              :title="openHistories.has(msg.id) ? 'Hide history' : 'Show previous versions'"
+              @click.stop="toggleHistory(msg.id)">edited<template v-if="versionCountOf(msg)"> · {{ versionCountOf(msg) }}</template></span>
             <!-- A versioned edit that the server did not accept: others still
                  see the previous revision, so say so instead of showing the
                  attempted text as if it had landed. -->
@@ -184,6 +196,14 @@ const props = defineProps({
     type: String,
     default: ''
   },
+  versionCounts: {
+    type: Object,
+    default: () => ({})
+  },
+  histories: {
+    type: Object,
+    default: () => ({})
+  },
   messages: {
     type: Array,
     required: true,
@@ -198,7 +218,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -239,6 +259,19 @@ const submitMessage = () => {
     replyTo.value = null;
   }
 };
+
+// §3.1: past revisions are hidden by default and open per message.
+const openHistories = ref(new Set());
+const toggleHistory = (msgId) => {
+  const next = new Set(openHistories.value);
+  if (next.has(msgId)) next.delete(msgId);
+  else {
+    next.add(msgId);
+    emit('showHistory', msgId); // parent loads and verifies on first open
+  }
+  openHistories.value = next;
+};
+const versionCountOf = (msg) => props.versionCounts[msg.id] || 0;
 
 const quotesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'quote');
 
@@ -694,4 +727,12 @@ watch(() => props.messages, () => {
 /* ---------- §4.2: admitted but causally unplaced ---------- */
 .message-unplaced { opacity: .72; }
 .msg-unplaced-note { margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
+
+/* ---------- §3.1 version history ---------- */
+.msg-history { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+.msg-history-item { background: rgba(36, 24, 36, .06); border-radius: 9px; padding: 6px 8px; }
+.msg-history-tag { font-size: 9px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: #8f889b; }
+.msg-history-text { font-size: 12px; line-height: 1.35; color: #8f889b; text-decoration: line-through; opacity: .9; }
+.msg-history-text._unverified { text-decoration: none; font-style: italic; }
+.msg-history-loading { font-size: 11px; color: #9a9c9d; }
 </style>

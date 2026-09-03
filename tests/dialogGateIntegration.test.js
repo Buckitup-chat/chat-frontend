@@ -171,3 +171,68 @@ describe('side rows through the store', () => {
 		expect(await store.admitReactionRow(makeReaction(author))).toBe(false);
 	});
 });
+
+describe('version history through the store (§3.1)', () => {
+	beforeEach(() => {
+		setActivePinia(createPinia());
+		resetCardRegistry();
+		collections = {
+			cards: makeCollection(),
+			dialog: { keys: makeCollection(), messages: makeCollection(), versions: makeCollection(), reactions: makeCollection(), receipts: makeCollection() },
+		};
+	});
+
+	const makeVersion = (author, tweak = {}) => {
+		const fields = {
+			message_id: 'dmsg_hist',
+			dialog_hash: DIALOG,
+			sender_hash: author.userHash,
+			content_b64: toBase64(new Uint8Array([1, 2])),
+			deleted_flag: false,
+			refs_map_b64: null,
+			parent_sign_hash: null,
+			owner_timestamp: 1_700_000_100,
+		};
+		const sign_b64 = signFields(fields, author.sign.secretKey);
+		return { ...fields, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64), ...tweak };
+	};
+
+	it('verifies each archived revision against the author card', async () => {
+		const author = makeIdentity(11);
+		collections.cards.rows.set(author.userHash, author.card);
+		collections.dialog.versions.rows.set('v1', makeVersion(author));
+		const store = useDialogsStore();
+
+		const history = await store.getMessageHistory(DIALOG, 'dmsg_hist');
+		expect(history).toHaveLength(1);
+		expect(history[0].verified).toBe(true);
+		// no dialog key in the mock → content honestly pending, not fabricated
+		expect(history[0].text).toMatch(/Waiting for keys/);
+	});
+
+	// A forged "old version" planted in the feed is the perfect place to put
+	// words in someone's mouth — it must surface as unverifiable, not render.
+	it('marks a tampered revision as unverifiable instead of showing its text', async () => {
+		const author = makeIdentity(12);
+		collections.cards.rows.set(author.userHash, author.card);
+		collections.dialog.versions.rows.set('v1',
+			makeVersion(author, { content_b64: toBase64(new Uint8Array([9, 9, 9])) }));
+		const store = useDialogsStore();
+
+		const history = await store.getMessageHistory(DIALOG, 'dmsg_hist');
+		expect(history[0].verified).toBe(false);
+		expect(history[0].text).toBe('Unverifiable revision');
+	});
+
+	it('orders revisions newest first and filters by message', async () => {
+		const author = makeIdentity(13);
+		collections.cards.rows.set(author.userHash, author.card);
+		collections.dialog.versions.rows.set('a', makeVersion(author, { owner_timestamp: 100 }));
+		collections.dialog.versions.rows.set('b', makeVersion(author, { owner_timestamp: 200 }));
+		collections.dialog.versions.rows.set('other', makeVersion(author, { message_id: 'dmsg_other' }));
+		const store = useDialogsStore();
+
+		const history = await store.getMessageHistory(DIALOG, 'dmsg_hist');
+		expect(history.map((h) => h.ownerTimestamp)).toEqual([200, 100]);
+	});
+});
