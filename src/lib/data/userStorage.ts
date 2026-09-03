@@ -87,7 +87,7 @@ const getLocalEntry = async (userHash: string, uuid: string): Promise<LocalStora
 };
 
 export const getServerState = async (userHash: string, uuid: string): Promise<ServerLookup> => {
-	const coll = getUserStorageCollection();
+	const coll = getUserStorageCollection(userHash);
 	try {
 		await coll.preload();
 	} catch (error) {

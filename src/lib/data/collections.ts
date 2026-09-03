@@ -1,9 +1,9 @@
 // Electric shape → TanStack DB collection registry.
 //
-// Global tables (user_cards, user_storage) sync whole-table shapes through
-// the guarded per-table endpoints, same as the legacy PGlite engine did.
-// Dialog tables sync per-dialog filtered shapes through the client-controlled
-// /shapes endpoint, opened lazily for the dialog being viewed. Collections
+// user_cards syncs as a whole-table shape — it is the public directory and
+// every row is needed to verify anyone. Everything else is filtered to the
+// scope that needs it: user_storage to the signed-in account, dialog tables
+// to the dialog being viewed, both opened lazily. Collections
 // with no subscribers stop syncing and free memory after `gcTime`.
 import { createCollection } from '@tanstack/db';
 import { electricCollectionOptions } from '@tanstack/electric-db-collection';
@@ -43,6 +43,14 @@ const DIALOG_HASH_RE = /^di_[0-9a-f]{128}$/;
 const assertDialogHash = (value: string): string => {
 	if (!DIALOG_HASH_RE.test(value)) {
 		throw new Error(`Invalid dialog_hash: ${JSON.stringify(value)}`);
+	}
+	return value;
+};
+
+const USER_HASH_RE = /^u_[0-9a-f]{128}$/;
+const assertUserHash = (value: string): string => {
+	if (!USER_HASH_RE.test(value)) {
+		throw new Error(`Invalid user_hash: ${JSON.stringify(value)}`);
 	}
 	return value;
 };
@@ -97,23 +105,50 @@ export function getUserCardsCollection() {
 	return userCards;
 }
 
+// Scoped to one account. user_storage reads are public, so an unfiltered
+// shape streams every account's rows to every client — bandwidth we do not
+// need and metadata we should not hold. Every caller here addresses its own
+// user_hash, so the filter costs nothing. This makes the collection lazy
+// (built after login) the way the dialog collections already are.
 let userStorage: ReturnType<typeof buildUserStorage> | null = null;
-const buildUserStorage = () =>
+let userStorageOwner: string | null = null;
+
+const buildUserStorage = (userHash: string) =>
 	createCollection(
 		persisted(electricCollectionOptions<UserStorageRow>({
-			id: 'user_storage',
+			id: `us-${userHash.slice(0, 24)}`,
 			shapeOptions: {
 				url: electricUrl('/shapes'),
-				params: { table: 'user_storage' },
+				params: { table: 'user_storage', where: `user_hash = '${assertUserHash(userHash)}'` },
 				...shapeDefaults,
 			},
 			getKey: (r) => `${r.user_hash}|${r.uuid}`,
 		}))
 	);
 
-export function getUserStorageCollection() {
-	if (!userStorage) userStorage = buildUserStorage();
+/**
+ * Storage collection for the signed-in account.
+ *
+ * Requires the account: there is no meaningful account-less view of
+ * user_storage, and falling back to an unfiltered shape would quietly restore
+ * the network-wide sync this replaced.
+ */
+export function getUserStorageCollection(userHash?: string) {
+	const owner = userHash ?? userStorageOwner;
+	if (!owner) {
+		throw new Error('user_storage collection requires a user_hash; is anyone signed in?');
+	}
+	if (!userStorage || userStorageOwner !== owner) {
+		userStorage = buildUserStorage(owner);
+		userStorageOwner = owner;
+	}
 	return userStorage;
+}
+
+/** Drops the per-account collection on logout. */
+export function resetUserStorageCollection() {
+	userStorage = null;
+	userStorageOwner = null;
 }
 
 // ---------- per-dialog collections ----------

@@ -25,7 +25,7 @@ const lookup = async (relation: string, row: Record<string, unknown>): Promise<R
 			return coll.get(String(row.user_hash)) as Record<string, unknown> | undefined;
 		}
 		case 'user_storage': {
-			const coll = getUserStorageCollection();
+			const coll = getUserStorageCollection(String(row.user_hash));
 			await coll.preload();
 			return coll.get(`${row.user_hash}|${row.uuid}`) as Record<string, unknown> | undefined;
 		}
