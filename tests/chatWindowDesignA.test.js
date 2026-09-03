@@ -343,3 +343,99 @@ describe('§1.3 images', () => {
 		expect(w.find('.message-text').text()).toBe('вот схема');
 	});
 });
+
+describe('§1.6 attachment grid and carousel', () => {
+	const img = (i) => ({
+		kind: 'image', widthAspect: 1, heightAspect: 1, thumbHashB64: '',
+		name: `p${i}.png`, size: 1000, mimeType: 'image/png', createdAt: 0,
+		fileId: 'f_' + String(i).repeat(32).slice(0, 32), encSecretB64: 'AAAA',
+	});
+	const renderWith = (parts, extra = {}) =>
+		mount(ChatWindow, {
+			props: { title: 'Ирина', myHash: MY, messages: [message({ parts, text: '' })], reactions: {}, ...extra },
+			global: { stubs: { Avatar: true } },
+		});
+
+	it('lays two, three and four pictures out as a grid, not stacked', () => {
+		for (const [n, cls] of [[2, '_n2'], [3, '_n3'], [4, '_n4']]) {
+			const w = renderWith(Array.from({ length: n }, (_, i) => img(i)));
+			expect(w.find(`.msg-gallery.${cls}`).exists()).toBe(true);
+			expect(w.findAll('.msg-gallery-cell')).toHaveLength(n);
+		}
+	});
+
+	it('keeps a lone picture out of the grid', () => {
+		const w = renderWith([img(1)]);
+		expect(w.find('.msg-gallery').exists()).toBe(false);
+		expect(w.find('.msg-image').exists()).toBe(true);
+	});
+
+	// Past four, the rest hide behind a counter rather than growing the grid.
+	it('shows four tiles and a +N counter for larger sets', () => {
+		const w = renderWith(Array.from({ length: 8 }, (_, i) => img(i)));
+		expect(w.findAll('.msg-gallery-cell')).toHaveLength(4);
+		expect(w.find('.msg-gallery-more').text()).toBe('+4');
+	});
+
+	it('opens the carousel on a tile, with the counter and the strip', async () => {
+		const w = renderWith([img(1), img(2), img(3)]);
+		await w.findAll('.msg-gallery-cell')[1].trigger('click');
+		expect(w.find('.lightbox').exists()).toBe(true);
+		expect(w.find('.lightbox-count').text()).toBe('2 / 3');
+		expect(w.findAll('.lightbox-thumb')).toHaveLength(3);
+	});
+
+	it('steps through frames and wraps around', async () => {
+		const w = renderWith([img(1), img(2)]);
+		await w.findAll('.msg-gallery-cell')[0].trigger('click');
+		await w.find('.lightbox-nav._next').trigger('click');
+		expect(w.find('.lightbox-count').text()).toBe('2 / 2');
+		await w.find('.lightbox-nav._next').trigger('click');
+		expect(w.find('.lightbox-count').text()).toBe('1 / 2');
+	});
+
+	// A frame still downloading reads as dimmed, so the strip doubles as
+	// "which of these are actually here".
+	it('marks frames that have not arrived in the strip', async () => {
+		const w = renderWith([img(1), img(2)], {
+			images: { [img(1).fileId]: { status: 'done', url: 'blob:a' } },
+		});
+		await w.findAll('.msg-gallery-cell')[0].trigger('click');
+		const thumbs = w.findAll('.lightbox-thumb');
+		expect(thumbs[0].classes()).not.toContain('_pending');
+		expect(thumbs[1].classes()).toContain('_pending');
+	});
+
+	it('the +N tile opens at the first hidden frame', async () => {
+		const w = renderWith(Array.from({ length: 8 }, (_, i) => img(i)));
+		await w.findAll('.msg-gallery-cell')[3].trigger('click');
+		expect(w.find('.lightbox-count').text()).toBe('4 / 8');
+	});
+
+	it('carries the message caption under the frame', async () => {
+		const w = renderWith([img(1), img(2), { kind: 'text', text: 'вот кадры' }]);
+		await w.findAll('.msg-gallery-cell')[0].trigger('click');
+		expect(w.find('.lightbox-caption').text()).toBe('вот кадры');
+	});
+});
+
+describe('carousel asks for the frames it shows', () => {
+	const img = (i) => ({
+		kind: 'image', widthAspect: 1, heightAspect: 1, thumbHashB64: '',
+		name: `p${i}.png`, size: 1, mimeType: 'image/png', createdAt: 0,
+		fileId: 'f_' + String(i).repeat(32).slice(0, 32), encSecretB64: 'AAAA',
+	});
+	const renderWith = (parts) =>
+		mount(ChatWindow, {
+			props: { title: 'Ирина', myHash: MY, messages: [message({ parts, text: '' })], reactions: {} },
+			global: { stubs: { Avatar: true } },
+		});
+
+	it('requests the opened frame and each one stepped to', async () => {
+		const w = renderWith([img(1), img(2)]);
+		await w.findAll('.msg-gallery-cell')[0].trigger('click');
+		await w.find('.lightbox-nav._next').trigger('click');
+		const asked = w.emitted('showImage').map(([p]) => p.name);
+		expect(asked).toEqual(['p1.png', 'p2.png']);
+	});
+});

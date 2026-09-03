@@ -56,19 +56,35 @@
                 <div v-else-if="!quoteOriginalPresent(q)" class="msg-quote-note"><span class="msg-quote-dot"></span>original not synced yet</div>
               </div>
             </div>
-            <!-- §1.3: the picture's box is reserved from the aspect ratio in
-                 the message and filled with the ThumbHash blur, so the bubble
-                 does not jump when the bytes land. -->
-            <div v-for="im in imagesOf(msg)" :key="im.fileId" class="msg-image"
-              :style="{ aspectRatio: im.widthAspect + ' / ' + im.heightAspect }"
-              @click="images[im.fileId]?.url && emit('showImage', im)">
-              <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
-              <img v-if="images[im.fileId]?.url" class="msg-image-full" :src="images[im.fileId].url" :alt="im.name" />
-              <div v-if="images[im.fileId]?.status === 'downloading'" class="msg-image-progress">
-                {{ images[im.fileId].done }} / {{ images[im.fileId].total }} chunks
+            <!-- §1.3 single picture: the box is reserved from the aspect
+                 ratio in the message and filled with the ThumbHash blur, so
+                 the bubble does not jump when the bytes land. -->
+            <div v-if="imagesOf(msg).length === 1" class="msg-image"
+              :style="{ aspectRatio: imagesOf(msg)[0].widthAspect + ' / ' + imagesOf(msg)[0].heightAspect }"
+              @click="openLightbox(msg, 0)">
+              <img v-if="thumbUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbUrl(imagesOf(msg)[0])" alt="" />
+              <img v-if="images[imagesOf(msg)[0].fileId]?.url" class="msg-image-full"
+                :src="images[imagesOf(msg)[0].fileId].url" :alt="imagesOf(msg)[0].name" />
+              <div v-if="images[imagesOf(msg)[0].fileId]?.status === 'downloading'" class="msg-image-progress">
+                {{ images[imagesOf(msg)[0].fileId].done }} / {{ images[imagesOf(msg)[0].fileId].total }} chunks
               </div>
-              <div v-else-if="images[im.fileId]?.status === 'error'" class="msg-image-progress _err">
+              <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'error'" class="msg-image-progress _err">
                 image failed — tap to retry
+              </div>
+            </div>
+
+            <!-- §1.6 grid: one bubble, 3px gutters, outer corners inherit the
+                 bubble radius. Past four, the rest hide under a +N that opens
+                 the carousel. -->
+            <div v-else-if="imagesOf(msg).length > 1" class="msg-gallery"
+              :class="'_n' + Math.min(imagesOf(msg).length, 4)">
+              <div v-for="(im, i) in visibleImages(msg)" :key="im.fileId" class="msg-gallery-cell"
+                @click="openLightbox(msg, i)">
+                <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
+                <img v-if="images[im.fileId]?.url" class="msg-image-full" :src="images[im.fileId].url" :alt="im.name" />
+                <div v-if="overflowCount(msg) && i === visibleImages(msg).length - 1" class="msg-gallery-more">
+                  +{{ overflowCount(msg) }}
+                </div>
               </div>
             </div>
 
@@ -194,6 +210,36 @@
           &#10148;
         </button>
       </form>
+    </div>
+
+    <!-- Carousel (board screen 03): counter in the header, caption under the
+         frame, strip showing which frames are already here. -->
+    <div v-if="lightbox" class="lightbox" @click.self="closeLightbox">
+      <div class="lightbox-bar">
+        <span class="lightbox-count">{{ lightbox.index + 1 }} / {{ lightbox.parts.length }}</span>
+        <button type="button" class="lightbox-close" @click="closeLightbox" title="Close">✕</button>
+      </div>
+      <button v-if="lightbox.parts.length > 1" type="button" class="lightbox-nav _prev" @click.stop="stepLightbox(-1)">‹</button>
+      <div class="lightbox-frame">
+        <img v-if="images[lightbox.parts[lightbox.index].fileId]?.url"
+          :src="images[lightbox.parts[lightbox.index].fileId].url"
+          :alt="lightbox.parts[lightbox.index].name" />
+        <img v-else-if="thumbUrl(lightbox.parts[lightbox.index])" class="_blur"
+          :src="thumbUrl(lightbox.parts[lightbox.index])" alt="" />
+        <div v-if="images[lightbox.parts[lightbox.index].fileId]?.status === 'downloading'" class="msg-image-progress">
+          {{ images[lightbox.parts[lightbox.index].fileId].done }} /
+          {{ images[lightbox.parts[lightbox.index].fileId].total }} chunks
+        </div>
+      </div>
+      <button v-if="lightbox.parts.length > 1" type="button" class="lightbox-nav _next" @click.stop="stepLightbox(1)">›</button>
+      <div v-if="lightbox.caption" class="lightbox-caption">{{ lightbox.caption }}</div>
+      <div v-if="lightbox.parts.length > 1" class="lightbox-strip">
+        <button v-for="(im, i) in lightbox.parts" :key="im.fileId" type="button"
+          class="lightbox-thumb" :class="{ _active: i === lightbox.index, _pending: !images[im.fileId]?.url }"
+          @click.stop="lightbox.index = i; emit('showImage', im)">
+          <img v-if="images[im.fileId]?.url || thumbUrl(im)" :src="images[im.fileId]?.url || thumbUrl(im)" alt="" />
+        </button>
+      </div>
     </div>
 
     <!-- Context Menu -->
@@ -363,6 +409,30 @@ const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
 
 // ThumbHash decodes to a tiny data URL; cached because it is pure and the
 // list re-renders on every sync tick.
+// Past four previews the rest live behind the +N counter (§1.6).
+const MAX_TILES = 4;
+const visibleImages = (msg) => imagesOf(msg).slice(0, MAX_TILES);
+const overflowCount = (msg) => Math.max(0, imagesOf(msg).length - MAX_TILES);
+
+const lightbox = ref(null);
+const openLightbox = (msg, index) => {
+  const parts = imagesOf(msg);
+  if (!parts.length) return;
+  // The +N tile opens at the first hidden frame, not at the tile itself.
+  const start = overflowCount(msg) && index === MAX_TILES - 1 ? MAX_TILES - 1 : index;
+  lightbox.value = { parts, index: start, caption: contentToText(msg.parts || []) };
+  // The carousel asks for whatever frame it shows: one that never arrived
+  // (or failed) is fetched now instead of staying a blur.
+  emit('showImage', parts[start]);
+};
+const closeLightbox = () => { lightbox.value = null; };
+const stepLightbox = (delta) => {
+  if (!lightbox.value) return;
+  const n = lightbox.value.parts.length;
+  lightbox.value.index = (lightbox.value.index + delta + n) % n;
+  emit('showImage', lightbox.value.parts[lightbox.value.index]);
+};
+
 const thumbCache = new Map();
 const thumbUrl = (im) => {
   if (!im.thumbHashB64) return '';
@@ -501,7 +571,10 @@ const cancelEdit = () => {
 };
 
 const handleEscape = (e) => {
-  if (e.key === 'Escape') closeContextMenu();
+  if (e.key !== 'Escape') return;
+  // The carousel is on top, so it takes the key first.
+  if (lightbox.value) closeLightbox();
+  else closeContextMenu();
 };
 
 const handleResize = () => {
@@ -903,4 +976,108 @@ watch(() => props.messages, () => {
   line-height: 1.3;
 }
 .msg-image-progress._err { background: rgba(220, 53, 69, .85); }
+
+/* ---------- §1.6 attachment grid ---------- */
+.msg-gallery {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 6px;
+}
+.msg-gallery._n2 { grid-template-columns: 1fr 1fr; }
+.msg-gallery._n3 { grid-template-columns: 2fr 1fr; grid-template-rows: 1fr 1fr; }
+.msg-gallery._n4 { grid-template-columns: 1fr 1fr; }
+.msg-gallery-cell {
+  position: relative;
+  aspect-ratio: 1;
+  overflow: hidden;
+  background: rgba(36, 24, 36, .06);
+  cursor: pointer;
+  border-radius: 3px;
+}
+/* outer corners inherit the bubble's radius, inner ones stay tight */
+.msg-gallery._n2 .msg-gallery-cell:nth-child(1) { border-radius: 9px 3px 3px 9px; }
+.msg-gallery._n2 .msg-gallery-cell:nth-child(2) { border-radius: 3px 9px 9px 3px; }
+.msg-gallery._n3 .msg-gallery-cell:nth-child(1) { grid-row: span 2; aspect-ratio: auto; border-radius: 9px 3px 3px 9px; }
+.msg-gallery._n3 .msg-gallery-cell:nth-child(2) { border-radius: 3px 9px 3px 3px; }
+.msg-gallery._n3 .msg-gallery-cell:nth-child(3) { border-radius: 3px 3px 9px 3px; }
+.msg-gallery._n4 .msg-gallery-cell:nth-child(1) { border-radius: 9px 3px 3px 3px; }
+.msg-gallery._n4 .msg-gallery-cell:nth-child(2) { border-radius: 3px 9px 3px 3px; }
+.msg-gallery._n4 .msg-gallery-cell:nth-child(3) { border-radius: 3px 3px 3px 9px; }
+.msg-gallery._n4 .msg-gallery-cell:nth-child(4) { border-radius: 3px 3px 9px 3px; }
+.msg-gallery-more {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, .42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+}
+
+/* ---------- carousel ---------- */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1080;
+  background: rgba(23, 22, 26, .92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+}
+.lightbox-bar {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  color: #fff;
+}
+.lightbox-count { font-size: 13px; font-weight: 500; }
+.lightbox-close { background: none; border: none; color: #fff; font-size: 20px; line-height: 1; }
+.lightbox-frame {
+  position: relative;
+  max-width: min(92vw, 1100px);
+  max-height: 74vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lightbox-frame img { max-width: 100%; max-height: 74vh; object-fit: contain; display: block; }
+.lightbox-frame img._blur { filter: blur(8px); }
+.lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(255, 255, 255, .12);
+  border: none;
+  color: #fff;
+  font-size: 28px;
+  line-height: 1;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+.lightbox-nav._prev { left: 12px; }
+.lightbox-nav._next { right: 12px; }
+.lightbox-caption { color: #fff; font-size: 13px; max-width: min(92vw, 1100px); text-align: center; }
+.lightbox-strip { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.lightbox-thumb {
+  width: 46px; height: 46px;
+  padding: 0;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .12);
+}
+.lightbox-thumb._active { border-color: #8e2b77; }
+/* a frame still on its way reads as dimmed, so the strip doubles as a
+   "which of these are here" indicator */
+.lightbox-thumb._pending { opacity: .5; }
+.lightbox-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 </style>

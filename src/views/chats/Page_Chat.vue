@@ -594,11 +594,9 @@ watch(() => decryptedMessages.value, (msgs) => {
     }
 });
 
-const handleShowImage = (part) => {
-    const url = imagesByFileId.value[part.fileId]?.url;
-    if (url) window.open(url, '_blank');
-    else fetchImage(part); // tapping a failed image retries it
-};
+// The carousel lives in ChatWindow; the page only has to make sure the
+// frame the user opened is actually being fetched (a failed one retries).
+const handleShowImage = (part) => fetchImage(part);
 
 // Blob URLs are process-wide; leaving a dialog must not leak them.
 watch(dialogHash, () => {
