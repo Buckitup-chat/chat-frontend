@@ -30,10 +30,11 @@ vi.mock('../src/lib/data/ingest', () => ({
 	sendMutationsWithRetry: (...args: unknown[]) => sendAndAwait(...(args as [])),
 }));
 
-const { upsertStorageRow, getStorageRow, STORAGE_SLOTS } = await import('../src/lib/data/userStorage');
+const { upsertStorageRow, getStorageRow } = await import('../src/lib/data/userStorage');
 
 const USER = 'u_' + 'ab'.repeat(64);
-const SLOT = STORAGE_SLOTS.profile;
+// Slot addresses are per-account now, so any valid uuid stands in here.
+const SLOT = '85da8ea0-5bc8-856e-83e7-db7b542a1a58';
 const signSkey = new Uint8Array(32).fill(7);
 
 // The signing helper is exercised elsewhere; here we only care about which

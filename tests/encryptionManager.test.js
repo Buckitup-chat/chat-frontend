@@ -42,6 +42,7 @@ vi.mock('@lo-fi/local-vault/adapter/idb', () => ({}));
 vi.mock('@lo-fi/local-data-lock', () => ({ removeLocalAccount: async () => {} }));
 
 vi.mock('@/lib/data/collections', () => ({
+	resetUserStorageCollection: () => {},
 	getUserCardsCollection: () => ({
 		async preload() {},
 		get: (k) => cardRows.get(k),
@@ -58,7 +59,6 @@ vi.mock('@/lib/data/ingest', () => ({
 }));
 
 vi.mock('@/lib/data/userStorage', () => ({
-	STORAGE_SLOTS: { profile: 'uuid-profile', contacts: 'uuid-contacts' },
 	getStorageRow: async () => null,
 	upsertStorageRow: async () => {
 		order.push('user_storage');

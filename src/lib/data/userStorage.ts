@@ -21,20 +21,9 @@ import { nextOwnerTimestamp } from './time';
 import { api } from '@/api/client';
 import type { UserStorageRow } from './types';
 
-// The user_storage.uuid column is a real Ecto.UUID server-side, so the
-// well-known slots need actual UUIDs rather than labels. The primary key is
-// (user_hash, uuid), so one fixed UUID per slot is safe across all users.
-export const STORAGE_SLOTS = {
-	profile: '00000000-0000-4000-8000-000000000001',
-	contacts: '00000000-0000-4000-8000-000000000002',
-} as const;
-
-// Labels these slots used before the fix — rows written then still sit in the
-// local KV store under the old key and must stay readable.
-const LEGACY_LABELS: Record<string, string> = {
-	[STORAGE_SLOTS.profile]: 'profile',
-	[STORAGE_SLOTS.contacts]: 'contacts',
-};
+// Slot addresses are not constants here: reads are public, so a fixed uuid
+// per slot would be the same address on every account. See lib/pq/slotId for
+// the derived root address and lib/data/slots for the map of the rest.
 
 export type StorageSyncStatus = 'synced' | 'syncing' | 'failed';
 
@@ -75,16 +64,8 @@ const normalizeEntry = (v: unknown): LocalStorageEntry | undefined => {
 	};
 };
 
-const getLocalEntry = async (userHash: string, uuid: string): Promise<LocalStorageEntry | undefined> => {
-	const direct = normalizeEntry(await kvGet(kvKey(userHash, uuid)).catch(() => undefined));
-	if (direct) return direct;
-
-	const legacy = LEGACY_LABELS[uuid];
-	if (legacy) {
-		return normalizeEntry(await kvGet(kvKey(userHash, legacy)).catch(() => undefined));
-	}
-	return undefined;
-};
+const getLocalEntry = async (userHash: string, uuid: string): Promise<LocalStorageEntry | undefined> =>
+	normalizeEntry(await kvGet(kvKey(userHash, uuid)).catch(() => undefined));
 
 export const getServerState = async (userHash: string, uuid: string): Promise<ServerLookup> => {
 	const coll = getUserStorageCollection(userHash);
