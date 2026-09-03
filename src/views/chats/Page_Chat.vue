@@ -3,7 +3,7 @@
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId" :histories="historiesByMsgId"
-            @show-history="handleShowHistory" @sendMessage="handleSendMessage"
+            @show-history="handleShowHistory" @delete-message="handleDeleteMessage" @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge" />
     </div>
@@ -486,6 +486,14 @@ const handleToggleReaction = async (messageId, emoji) => {
         await $dialogs.toggleReaction(peerHash.value, { messageId, messageSignHash, emoji });
     } catch (e) {
         console.error("Failed to toggle reaction:", e);
+    }
+};
+
+const handleDeleteMessage = async (messageId) => {
+    try {
+        await $dialogs.deleteMessage(peerHash.value, messageId);
+    } catch (e) {
+        console.error('Failed to delete message:', e);
     }
 };
 

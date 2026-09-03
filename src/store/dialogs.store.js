@@ -480,6 +480,40 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     /**
+     * Deletes own message (§3.2): a new signed revision with deleted_flag and
+     * empty content — the empty plaintext IS the tombstone (07: an empty
+     * content_b64 is only valid alongside deleted_flag). The previous
+     * revision is archived server-side like any edit; refs are recomputed at
+     * deletion time per pq_dialogs §dialog_messages.
+     */
+    const deleteMessage = async (peerHash, messageId) => {
+        const dialogHash = await initDialogKeys(peerHash);
+        const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
+
+        const msgColl = getDialogCollections(dialogHash).messages;
+        await msgColl.preload();
+        const current = msgColl.get(messageId) || null;
+        if (!current) throw new Error('Message not found');
+        if (current.sender_hash !== $userPQ.currentUserHash) {
+            throw new Error('Cannot delete: not owner');
+        }
+
+        const refsMap = await computeObservedTails(dialogHash);
+        const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
+
+        await pushRow('dialog_messages', {
+            message_id: messageId,
+            dialog_hash: dialogHash,
+            sender_hash: $userPQ.currentUserHash,
+            content_b64: '',
+            deleted_flag: true,
+            refs_map_b64: refsMapB64,
+            parent_sign_hash: current.sign_hash,
+            owner_timestamp: nextOwnerTimestamp(current.owner_timestamp),
+        }, 'update');
+    };
+
+    /**
      * Decrypt a message row
      */
     const decryptMessageRow = async (row) => {
@@ -766,6 +800,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         sendMessage,
         editMessage,
         decryptMessageRow,
+        deleteMessage,
         getMessageHistory,
         admitMessageRow,
         admitReactionRow,

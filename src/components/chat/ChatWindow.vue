@@ -159,6 +159,10 @@
         @click="acknowledgeFromContext">
         <i class="bi bi-eye me-2"></i>Confirm read
       </button>
+      <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !contextMenuMsg._deleted"
+        type="button" class="context-menu-action context-menu-danger" @click="deleteFromContext">
+        <i class="bi bi-trash me-2"></i>Delete
+      </button>
       <button type="button" class="context-menu-action" @click="copyMessageText">
         <i class="bi bi-clipboard me-2"></i>Copy text
       </button>
@@ -218,7 +222,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -251,6 +255,15 @@ const startReply = (msg) => {
 };
 
 const cancelReply = () => { replyTo.value = null; };
+
+const deleteFromContext = () => {
+  const msg = contextMenuMsg.value;
+  closeContextMenu();
+  // Deletion is a signed revision others will sync — worth one explicit check.
+  if (msg && window.confirm('Delete this message? Peers will see it was deleted.')) {
+    emit('deleteMessage', msg.id);
+  }
+};
 
 const submitMessage = () => {
   if (newMessage.value.trim() !== '') {
@@ -727,6 +740,8 @@ watch(() => props.messages, () => {
 /* ---------- §4.2: admitted but causally unplaced ---------- */
 .message-unplaced { opacity: .72; }
 .msg-unplaced-note { margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
+
+.context-menu-danger { color: #dc3545; }
 
 /* ---------- §3.1 version history ---------- */
 .msg-history { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }

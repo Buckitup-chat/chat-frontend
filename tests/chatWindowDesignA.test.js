@@ -193,3 +193,33 @@ describe('§3.1 version history', () => {
 		expect(w.emitted('showHistory')).toHaveLength(1);
 	});
 });
+
+describe('§3.2 delete action', () => {
+	it('offers Delete only on own synced messages and emits after confirm', async () => {
+		const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+		const w = render([message({ isMine: true, _syncStatus: 'synced' })]);
+		await w.findAll('.message-bubble')[0].trigger('contextmenu');
+		const del = w.findAll('.context-menu-action').find((b) => b.text().includes('Delete'));
+		expect(del).toBeTruthy();
+		await del.trigger('click');
+		expect(w.emitted('deleteMessage')[0]).toEqual(['dmsg_1']);
+		confirmSpy.mockRestore();
+	});
+
+	it('does not emit when the confirm is declined', async () => {
+		const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+		const w = render([message({ isMine: true, _syncStatus: 'synced' })]);
+		await w.findAll('.message-bubble')[0].trigger('contextmenu');
+		await w.findAll('.context-menu-action').find((b) => b.text().includes('Delete')).trigger('click');
+		expect(w.emitted('deleteMessage')).toBeFalsy();
+		confirmSpy.mockRestore();
+	});
+
+	it('offers no Delete on peer messages or tombstones', async () => {
+		for (const msg of [message({ isMine: false }), message({ isMine: true, _deleted: true })]) {
+			const w = render([msg]);
+			await w.findAll('.message-bubble')[0].trigger('contextmenu');
+			expect(w.findAll('.context-menu-action').find((b) => b.text().includes('Delete'))).toBeFalsy();
+		}
+	});
+});

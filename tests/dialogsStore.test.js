@@ -414,3 +414,38 @@ describe('read receipts', () => {
 		).rejects.toThrow(/not synced/);
 	});
 });
+
+describe('deleteMessage (§3.2)', () => {
+	// Deletion is a signed revision, never a server-side removal: empty
+	// content + deleted_flag, chained to the tip like any edit.
+	it('writes an update tombstone chained to the current tip', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		collections.dialog.messages.rows.set(MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'x', deleted_flag: false, sign_hash: SIGN_HASH, owner_timestamp: 100,
+		});
+
+		await store.deleteMessage(PEER_HASH, MSG_ID);
+
+		const row = collections.dialog.messages.rows.get(MSG_ID);
+		expect(row.deleted_flag).toBe(true);
+		expect(row.content_b64).toBe('');
+		expect(row.parent_sign_hash).toBe(SIGN_HASH);
+		expect(row.owner_timestamp).toBeGreaterThan(100);
+	});
+
+	it('refuses to delete a peer message', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		collections.dialog.messages.rows.set(MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: PEER_HASH,
+			content_b64: 'x', deleted_flag: false, sign_hash: SIGN_HASH, owner_timestamp: 100,
+		});
+		await expect(store.deleteMessage(PEER_HASH, MSG_ID)).rejects.toThrow(/not owner/);
+	});
+});
