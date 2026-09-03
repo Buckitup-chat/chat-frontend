@@ -90,7 +90,8 @@
 
             <!-- §1.5 file row: icon — name — size/state — action. Progress is
                  chunks, never guessed percentages (§2.1). -->
-            <div v-for="f in filesOf(msg)" :key="f.fileId" class="msg-file">
+            <template v-for="f in filesOf(msg)" :key="f.fileId">
+            <div class="msg-file">
               <span class="msg-file-icon">📄</span>
               <div class="msg-file-body">
                 <div class="msg-file-name">{{ f.name }}</div>
@@ -112,6 +113,23 @@
                 :title="downloads[f.fileId]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
               <span v-else class="msg-file-spinner"></span>
             </div>
+
+            <!-- §2.4 availability. Partial is a normal state in a network with
+                 no internet, so: no red, no warning icon, and the wording says
+                 the rest is coming rather than that the file is unavailable. -->
+            <div v-if="partial(f)" class="msg-availability">
+              <div class="msg-chunks">
+                <span v-for="i in partial(f).total" :key="i" class="msg-chunk"
+                  :class="{ _have: i <= partial(f).present }"></span>
+              </div>
+              <div class="msg-availability-foot">
+                <span class="msg-availability-note">
+                  {{ partial(f).present }} of {{ partial(f).total }} chunks here · arrives later
+                </span>
+                <button type="button" class="msg-availability-btn" @click="emit('downloadFile', f)">Try again</button>
+              </div>
+            </div>
+            </template>
             <div v-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
             <div v-else class="message-text text-break">
               {{ msg.text }}
@@ -325,6 +343,10 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
+  availability: {
+    type: Object,
+    default: () => ({})
+  },
   messages: {
     type: Array,
     required: true,
@@ -405,6 +427,14 @@ const versionCountOf = (msg) => props.versionCounts[msg.id] || 0;
 
 const quotesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'quote');
 const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
+
+/** Availability only shows while it is genuinely partial — a complete file
+ *  needs no explanation, and an unknown manifest is not a claim to make. */
+const partial = (part) => {
+  const a = props.availability[part.fileId];
+  if (!a || a.unknown || a.deleted || !a.total) return null;
+  return a.present < a.total ? a : null;
+};
 const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
 
 // ThumbHash decodes to a tiny data URL; cached because it is pure and the
@@ -1080,4 +1110,23 @@ watch(() => props.messages, () => {
    "which of these are here" indicator */
 .lightbox-thumb._pending { opacity: .5; }
 .lightbox-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* ---------- §2.4 availability ---------- */
+.msg-availability { margin: -2px 0 6px; display: flex; flex-direction: column; gap: 6px; }
+.msg-chunks { display: flex; gap: 3px; }
+.msg-chunk { flex: 1; height: 6px; border-radius: 2px; background: #e6e6ea; }
+.msg-chunk._have { background: #8e2b77; }
+.msg-availability-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* deliberately neutral: partial availability is progress, not failure */
+.msg-availability-note { font-size: 11px; line-height: 1.3; color: #7a7a7a; }
+.msg-availability-btn {
+  border: 1px solid #8e2b77;
+  background: #fff;
+  color: #8e2b77;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
 </style>

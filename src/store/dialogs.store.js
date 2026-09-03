@@ -8,7 +8,7 @@ import { computeTails } from '@/lib/data/refs';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
-import { prepareUpload, uploadFile, downloadFile } from '@/lib/data/fileTransfer';
+import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
 import { buildImagePreview, isImageMime } from '@/lib/data/imageMeta';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { api } from '@/api/client';
@@ -544,6 +544,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return up.fileId;
     };
 
+    /** How much of an attachment this node can serve (§2.4). */
+    const getFileAvailability = (fileId) => fileAvailability(fileId);
+
     /** Downloads and decrypts an attachment; progress in chunks (§2.3). */
     const fetchFile = (filePart, { onProgress, signal } = {}) =>
         downloadFile({ fileId: filePart.fileId, encSecretB64: filePart.encSecretB64, onProgress, signal });
@@ -872,6 +875,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         deleteMessage,
         sendFileMessage,
         fetchFile,
+        getFileAvailability,
         getMessageHistory,
         admitMessageRow,
         isMessageAdmitted,

@@ -203,6 +203,45 @@ export const uploadFile = async (opts: {
 	return { fileId, encSecretB64: opts.encSecretB64, size: bytes.length, chunkCount: total };
 };
 
+export interface FileAvailability {
+	/** Chunks this node can already serve. */
+	present: number;
+	/** Chunks the signed manifest says the file has. */
+	total: number;
+	/** The manifest itself has not arrived — nothing is known about the file. */
+	unknown: boolean;
+	deleted: boolean;
+}
+
+/**
+ * How much of a file this node can serve right now (§2.4).
+ *
+ * Partial availability is a normal state in a network without internet, not
+ * an error: manifests replicate ahead of bytes, and the missing chunks come
+ * on their own. The counts come from the same rows the sync protocol uses —
+ * the signed manifest for the total, the chunk rows for what is here.
+ */
+export const fileAvailability = async (fileId: string): Promise<FileAvailability> => {
+	const salt = `${Date.now() % 100000}=${Date.now() % 100000}`;
+	const manifests = await fetch(
+		`${ELECTRIC_API_URL}/shapes?table=files&where=${encodeURIComponent(`file_id='${fileId}' AND ${salt}`)}&offset=-1`,
+	)
+		.then((r) => (r.ok ? r.json() : []))
+		.catch(() => []);
+	const manifest = (manifests as Array<{ value?: Record<string, unknown> }>)
+		.map((m) => m.value)
+		.find((v) => v && v.file_id === fileId);
+	if (!manifest) return { present: 0, total: 0, unknown: true, deleted: false };
+
+	const chunks = await existingChunks(fileId);
+	return {
+		present: chunks.size,
+		total: Number(manifest.chunk_count) || 0,
+		unknown: false,
+		deleted: manifest.deleted_flag === true || manifest.deleted_flag === 'true',
+	};
+};
+
 export interface DownloadProgress {
 	fileId: string;
 	done: number;

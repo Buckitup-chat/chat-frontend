@@ -4,6 +4,7 @@
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId" :histories="historiesByMsgId"
             :uploads="activeUploads" :downloads="downloadsByFileId" :images="imagesByFileId"
+            :availability="availabilityByFileId"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @cancel-upload="handleCancelUpload" @download-file="handleDownloadFile"
             @show-image="handleShowImage"
@@ -605,6 +606,37 @@ watch(dialogHash, () => {
     imagesByFileId.value = {};
 });
 
+// §2.4: how much of each attachment this node can serve. Checked once per
+// attachment when it first appears — the answer only changes as chunks
+// arrive, and a download attempt refreshes it.
+const availabilityByFileId = ref({});
+const availabilityAsked = new Set();
+
+const checkAvailability = async (fileId) => {
+    try {
+        const a = await $dialogs.getFileAvailability(fileId);
+        availabilityByFileId.value = { ...availabilityByFileId.value, [fileId]: a };
+    } catch (e) {
+        console.warn('Availability check failed for', fileId, e);
+    }
+};
+
+watch(() => decryptedMessages.value, (msgs) => {
+    for (const m of msgs || []) {
+        for (const p of m.parts || []) {
+            if ((p.kind === 'file' || p.kind === 'image') && !availabilityAsked.has(p.fileId)) {
+                availabilityAsked.add(p.fileId);
+                checkAvailability(p.fileId);
+            }
+        }
+    }
+});
+
+watch(dialogHash, () => {
+    availabilityByFileId.value = {};
+    availabilityAsked.clear();
+});
+
 const downloadsByFileId = ref({});
 
 const handleDownloadFile = async (filePart) => {
@@ -628,6 +660,9 @@ const handleDownloadFile = async (filePart) => {
     } catch (e) {
         console.error('Download failed:', e);
         downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'error' } };
+        // A failure usually means chunks are still travelling — re-read the
+        // counts so the row can say how far along it is instead of just "failed".
+        checkAvailability(fileId);
     }
 };
 

@@ -439,3 +439,52 @@ describe('carousel asks for the frames it shows', () => {
 		expect(asked).toEqual(['p1.png', 'p2.png']);
 	});
 });
+
+describe('§2.4 file availability', () => {
+	const filePart = {
+		kind: 'file', name: 'mesh-dump.tar', size: 64_700_000, mimeType: 'application/x-tar',
+		createdAt: 0, fileId: 'f_' + 'd'.repeat(32), encSecretB64: 'AAAA',
+	};
+	const renderWith = (availability) =>
+		mount(ChatWindow, {
+			props: {
+				title: 'Ирина', myHash: MY, reactions: {},
+				messages: [message({ parts: [filePart], text: '' })],
+				availability,
+			},
+			global: { stubs: { Avatar: true } },
+		});
+
+	it('shows a chunk strip with the ones that are here filled', () => {
+		const w = renderWith({ [filePart.fileId]: { present: 5, total: 12, unknown: false, deleted: false } });
+		const chunks = w.findAll('.msg-chunk');
+		expect(chunks).toHaveLength(12);
+		expect(chunks.filter((c) => c.classes().includes('_have'))).toHaveLength(5);
+		expect(w.find('.msg-availability-note').text()).toContain('5 of 12 chunks here');
+	});
+
+	// Partial availability is progress, not failure: the design forbids red
+	// and warning icons, and words it as "arrives later".
+	it('words partial availability as arriving, not as unavailable', () => {
+		const w = renderWith({ [filePart.fileId]: { present: 5, total: 12, unknown: false, deleted: false } });
+		const note = w.find('.msg-availability-note');
+		expect(note.text()).toMatch(/arrives later/);
+		expect(note.text()).not.toMatch(/unavailable|failed|error/i);
+	});
+
+	it('says nothing when the whole file is here', () => {
+		const w = renderWith({ [filePart.fileId]: { present: 12, total: 12, unknown: false, deleted: false } });
+		expect(w.find('.msg-availability').exists()).toBe(false);
+	});
+
+	it('claims nothing while the manifest is unknown', () => {
+		const w = renderWith({ [filePart.fileId]: { present: 0, total: 0, unknown: true, deleted: false } });
+		expect(w.find('.msg-availability').exists()).toBe(false);
+	});
+
+	it('offers a retry that asks for the file again', async () => {
+		const w = renderWith({ [filePart.fileId]: { present: 5, total: 12, unknown: false, deleted: false } });
+		await w.find('.msg-availability-btn').trigger('click');
+		expect(w.emitted('downloadFile')[0][0]).toMatchObject({ fileId: filePart.fileId });
+	});
+});
