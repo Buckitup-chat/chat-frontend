@@ -56,6 +56,30 @@
                 <div v-else-if="!quoteOriginalPresent(q)" class="msg-quote-note"><span class="msg-quote-dot"></span>original not synced yet</div>
               </div>
             </div>
+            <!-- §1.5 file row: icon — name — size/state — action. Progress is
+                 chunks, never guessed percentages (§2.1). -->
+            <div v-for="f in filesOf(msg)" :key="f.fileId" class="msg-file">
+              <span class="msg-file-icon">📄</span>
+              <div class="msg-file-body">
+                <div class="msg-file-name">{{ f.name }}</div>
+                <div class="msg-file-meta">
+                  <template v-if="downloads[f.fileId]?.status === 'downloading'">
+                    {{ fmtSize(f.size) }} · chunk {{ downloads[f.fileId].done }} of {{ downloads[f.fileId].total }}
+                  </template>
+                  <template v-else-if="downloads[f.fileId]?.status === 'error'">
+                    {{ fmtSize(f.size) }} · <span class="msg-file-err">download failed — tap to retry</span>
+                  </template>
+                  <template v-else-if="downloads[f.fileId]?.status === 'done'">
+                    {{ fmtSize(f.size) }} · saved
+                  </template>
+                  <template v-else>{{ fmtSize(f.size) }}</template>
+                </div>
+              </div>
+              <button v-if="downloads[f.fileId]?.status !== 'downloading'" type="button"
+                class="msg-file-action" @click="emit('downloadFile', f)"
+                :title="downloads[f.fileId]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
+              <span v-else class="msg-file-spinner"></span>
+            </div>
             <div v-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
             <div v-else class="message-text text-break">
               {{ msg.text }}
@@ -120,6 +144,20 @@
 
     <!-- Footer / Input -->
     <div class="chat-footer p-2 border-top">
+      <!-- §2.1 upload strip: name, chunk progress, cancel. Colour lives in
+           the caption, not the button. -->
+      <div v-for="u in uploads" :key="u.id" class="upload-strip d-flex align-items-center gap-2 mb-1 px-2 py-1">
+        <span class="msg-file-icon">📄</span>
+        <div class="flex-grow-1" style="min-width:0">
+          <div class="msg-file-name">{{ u.name }}</div>
+          <div class="msg-file-meta" :class="{ 'msg-file-err': u.status === 'error' }">
+            <template v-if="u.status === 'error'">upload failed</template>
+            <template v-else-if="u.total">sending · chunk {{ u.done }} of {{ u.total }}</template>
+            <template v-else>encrypting…</template>
+          </div>
+        </div>
+        <button type="button" class="btn btn-sm btn-light rounded-circle" @click="emit('cancelUpload', u.id)" title="Cancel">✕</button>
+      </div>
       <div v-if="replyTo" class="reply-preview d-flex align-items-center gap-2 mb-1 px-2 py-1">
         <div class="msg-quote-bar"></div>
         <div class="flex-grow-1" style="min-width:0">
@@ -129,8 +167,11 @@
         <button type="button" class="btn btn-sm btn-light rounded-circle" @click="cancelReply" title="Cancel reply">✕</button>
       </div>
       <form @submit.prevent="submitMessage" class="d-flex align-items-center m-0">
+        <input ref="fileInput" type="file" class="d-none" @change="onFilePicked" />
+        <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
+          style="width: 40px; height: 40px; padding: 0;" title="Attach a file" @click="fileInput?.click()">📎</button>
         <input type="text" class="form-control me-2 rounded-pill px-3" v-model="newMessage"
-          placeholder="Type a message..." required />
+          placeholder="Type a message..." />
         <button type="submit"
           class="btn btn-primary rounded-circle d-flex align-items-center justify-content-center border-0"
           style="width: 40px; height: 40px; padding: 0;">
@@ -208,6 +249,14 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
+  uploads: {
+    type: Array,
+    default: () => []
+  },
+  downloads: {
+    type: Object,
+    default: () => ({})
+  },
   messages: {
     type: Array,
     required: true,
@@ -222,7 +271,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'cancelUpload', 'downloadFile']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -287,6 +336,24 @@ const toggleHistory = (msgId) => {
 const versionCountOf = (msg) => props.versionCounts[msg.id] || 0;
 
 const quotesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'quote');
+const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
+
+const fmtSize = (n) => {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
+};
+
+const fileInput = ref(null);
+const onFilePicked = (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  // The caption is whatever sits in the input — one composed message
+  // (board screen 02: "подпись набирается в том же поле").
+  emit('sendFile', file, newMessage.value.trim());
+  newMessage.value = '';
+};
 
 // 1:1 dialog: the only two authors are me and the peer the window shows.
 const quoteAuthorName = (hash) => (hash === props.myHash ? 'Me' : props.title);
@@ -750,4 +817,16 @@ watch(() => props.messages, () => {
 .msg-history-text { font-size: 12px; line-height: 1.35; color: #8f889b; text-decoration: line-through; opacity: .9; }
 .msg-history-text._unverified { text-decoration: none; font-style: italic; }
 .msg-history-loading { font-size: 11px; color: #9a9c9d; }
+
+/* ---------- §1.5 / §2.1 files ---------- */
+.msg-file { display: flex; align-items: center; gap: 8px; background: rgba(36, 24, 36, .06); border-radius: 9px; padding: 6px 8px; margin-bottom: 6px; }
+.msg-file-icon { font-size: 18px; flex-shrink: 0; }
+.msg-file-body { min-width: 0; flex-grow: 1; }
+.msg-file-name { font-size: 12px; font-weight: 600; color: #241824; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-file-meta { font-size: 10px; color: #6b6875; }
+.msg-file-err { color: #dc3545; }
+.msg-file-action { border: none; background: #241824; color: #fff; border-radius: 999px; width: 26px; height: 26px; font-size: 13px; line-height: 1; flex-shrink: 0; }
+.msg-file-spinner { width: 16px; height: 16px; border: 2px solid rgba(36,24,36,.2); border-top-color: #8e2b77; border-radius: 50%; flex-shrink: 0; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.upload-strip { background: rgba(36, 24, 36, .06); border-radius: 9px; }
 </style>

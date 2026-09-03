@@ -28,15 +28,21 @@ describe('T-CONTENT-02: legacy text stays readable', () => {
 });
 
 describe('T-CONTENT-03: composed messages', () => {
-	it('round-trips a text-plus-typed composition', () => {
+	it('round-trips a text-plus-file composition', () => {
 		const wire = encodeContent([
 			{ kind: 'text', text: 'вот файл' },
-			{ kind: 'unknown', type: 'file', value: ['doc.pdf', 1048576, 'application/pdf', 1715000000, 'f_1', 'AAAA'] },
+			{ kind: 'file', name: 'doc.pdf', size: 1048576, mimeType: 'application/pdf', createdAt: 1715000000, fileId: 'f_' + '1'.repeat(32), encSecretB64: 'AAAA' },
 		]);
 		const parts = decodeContent(wire);
 		expect(parts).toHaveLength(2);
 		expect(parts[0]).toEqual({ kind: 'text', text: 'вот файл' });
-		expect(parts[1]).toMatchObject({ kind: 'unknown', type: 'file' });
+		expect(parts[1]).toMatchObject({ kind: 'file', name: 'doc.pdf', fileId: 'f_' + '1'.repeat(32) });
+		// and the wire stays the canonical positional array
+		expect(wire).toContain('"file":["doc.pdf",1048576');
+	});
+
+	it('rejects a malformed file envelope', () => {
+		expect(() => decodeContent('{"file":["only-name"]}')).toThrow(ContentDecodeError);
 	});
 
 	it('flattens nested grouping arrays for a vertical render', () => {

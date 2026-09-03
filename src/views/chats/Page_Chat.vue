@@ -3,7 +3,10 @@
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId" :histories="historiesByMsgId"
-            @show-history="handleShowHistory" @delete-message="handleDeleteMessage" @sendMessage="handleSendMessage"
+            :uploads="activeUploads" :downloads="downloadsByFileId"
+            @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
+            @send-file="handleSendFile" @cancel-upload="handleCancelUpload" @download-file="handleDownloadFile"
+            @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge" />
     </div>
@@ -486,6 +489,78 @@ const handleToggleReaction = async (messageId, emoji) => {
         await $dialogs.toggleReaction(peerHash.value, { messageId, messageSignHash, emoji });
     } catch (e) {
         console.error("Failed to toggle reaction:", e);
+    }
+};
+
+// ---------- §2.1 uploads / §2.3 downloads ----------
+
+const activeUploads = ref([]);
+const uploadAborts = new Map();
+let uploadSeq = 0;
+
+const patchUpload = (id, patch) => {
+    activeUploads.value = activeUploads.value.map((u) => (u.id === id ? { ...u, ...patch } : u));
+};
+
+const handleSendFile = async (file, caption) => {
+    const id = `up_${++uploadSeq}`;
+    const ctrl = new AbortController();
+    uploadAborts.set(id, ctrl);
+    activeUploads.value = [...activeUploads.value, { id, name: file.name, done: 0, total: 0, status: 'encrypting' }];
+    try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        await $dialogs.sendFileMessage(peerHash.value, {
+            name: file.name,
+            mimeType: file.type,
+            bytes,
+            createdAt: Math.floor((file.lastModified || Date.now()) / 1000),
+        }, {
+            caption,
+            signal: ctrl.signal,
+            onProgress: (p) => patchUpload(id, { done: p.done, total: p.total, status: 'uploading' }),
+        });
+        activeUploads.value = activeUploads.value.filter((u) => u.id !== id);
+    } catch (e) {
+        if (ctrl.signal.aborted) {
+            activeUploads.value = activeUploads.value.filter((u) => u.id !== id);
+        } else {
+            console.error('File send failed:', e);
+            patchUpload(id, { status: 'error' });
+        }
+    } finally {
+        uploadAborts.delete(id);
+    }
+};
+
+const handleCancelUpload = (id) => {
+    uploadAborts.get(id)?.abort();
+    // an errored strip is dismissed by the same ✕
+    activeUploads.value = activeUploads.value.filter((u) => u.id !== id || u.status !== 'error');
+};
+
+const downloadsByFileId = ref({});
+
+const handleDownloadFile = async (filePart) => {
+    const fileId = filePart.fileId;
+    downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'downloading', done: 0, total: 0 } };
+    try {
+        const bytes = await $dialogs.fetchFile(filePart, {
+            onProgress: (p) => {
+                downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'downloading', done: p.done, total: p.total } };
+            },
+        });
+        // Decrypted client-side; hand the plaintext to the browser's save flow.
+        const blob = new Blob([bytes], { type: filePart.mimeType || 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filePart.name || 'file';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'done' } };
+    } catch (e) {
+        console.error('Download failed:', e);
+        downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'error' } };
     }
 };
 

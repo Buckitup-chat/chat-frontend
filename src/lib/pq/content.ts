@@ -34,6 +34,18 @@ export interface QuotePart {
 	snapshot: ContentPart[];
 }
 
+/** Out-of-band file attachment (07 §"file"): the bytes live as encrypted
+ * chunks on the device; the envelope carries the reference and the key. */
+export interface FilePart {
+	kind: 'file';
+	name: string;
+	size: number;
+	mimeType: string;
+	createdAt: number;
+	fileId: string;
+	encSecretB64: string;
+}
+
 /** A typed value this build does not render yet (e.g. "image" before the
  * file transport lands). Preserved verbatim so re-encoding loses nothing. */
 export interface UnknownPart {
@@ -42,7 +54,7 @@ export interface UnknownPart {
 	value: unknown;
 }
 
-export type ContentPart = TextPart | QuotePart | UnknownPart;
+export type ContentPart = TextPart | QuotePart | FilePart | UnknownPart;
 
 export class ContentDecodeError extends Error {}
 
@@ -52,6 +64,8 @@ const encodePart = (part: ContentPart): unknown => {
 			return part.text;
 		case 'quote':
 			return { quote: [part.authorHash, part.messageId, part.signHash, encodeValue(part.snapshot)] };
+		case 'file':
+			return { file: [part.name, part.size, part.mimeType, part.createdAt, part.fileId, part.encSecretB64] };
 		case 'unknown':
 			return { [part.type]: part.value };
 	}
@@ -104,6 +118,21 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					snapshot: decodeValue(q[3]),
 				}];
 			}
+			if (type === 'file') {
+				const f = obj.file;
+				if (!Array.isArray(f) || f.length < 6 || typeof f[4] !== 'string' || typeof f[5] !== 'string') {
+					throw new ContentDecodeError('malformed file envelope');
+				}
+				return [{
+					kind: 'file',
+					name: String(f[0]),
+					size: Number(f[1]),
+					mimeType: String(f[2]),
+					createdAt: Number(f[3]),
+					fileId: f[4],
+					encSecretB64: f[5],
+				}];
+			}
 			return [{ kind: 'unknown', type, value: obj[type] }];
 		}
 	}
@@ -128,6 +157,7 @@ export const contentToText = (parts: ContentPart[]): string =>
 		.map((p) => {
 			if (p.kind === 'text') return p.text;
 			if (p.kind === 'quote') return ''; // the quote is context, not the author's words
+			if (p.kind === 'file') return `📄 ${p.name}`;
 			return `[${p.type}]`;
 		})
 		.filter(Boolean)

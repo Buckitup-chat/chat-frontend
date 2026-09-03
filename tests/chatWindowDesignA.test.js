@@ -223,3 +223,57 @@ describe('§3.2 delete action', () => {
 		}
 	});
 });
+
+describe('§1.5 file attachments', () => {
+	const filePart = (over = {}) => ({
+		kind: 'file', name: 'act-2026-08.pdf', size: 64_700_000, mimeType: 'application/pdf',
+		createdAt: 1715000000, fileId: 'f_' + 'a'.repeat(32), encSecretB64: 'AAAA', ...over,
+	});
+	const renderWith = (messages, extra = {}) =>
+		mount(ChatWindow, {
+			props: { title: 'Ирина', myHash: MY, messages, reactions: {}, ...extra },
+			global: { stubs: { Avatar: true } },
+		});
+
+	it('renders the file row with name and human size', () => {
+		const w = renderWith([message({ parts: [filePart()], text: '' })]);
+		const row = w.find('.msg-file');
+		expect(row.find('.msg-file-name').text()).toBe('act-2026-08.pdf');
+		expect(row.find('.msg-file-meta').text()).toContain('61.7 MB');
+	});
+
+	it('shows chunk progress while downloading — chunks, not percentages', () => {
+		const w = renderWith([message({ parts: [filePart()], text: '' })], {
+			downloads: { ['f_' + 'a'.repeat(32)]: { status: 'downloading', done: 5, total: 12 } },
+		});
+		expect(w.find('.msg-file-meta').text()).toContain('chunk 5 of 12');
+		expect(w.find('.msg-file-spinner').exists()).toBe(true);
+	});
+
+	it('emits downloadFile with the part on tap', async () => {
+		const w = renderWith([message({ parts: [filePart()], text: '' })]);
+		await w.find('.msg-file-action').trigger('click');
+		expect(w.emitted('downloadFile')[0][0]).toMatchObject({ fileId: 'f_' + 'a'.repeat(32) });
+	});
+
+	it('upload strip shows chunk progress and cancels', async () => {
+		const w = renderWith([], { uploads: [{ id: 'up_1', name: 'mesh-dump.tar', done: 9, total: 14, status: 'uploading' }] });
+		const strip = w.find('.upload-strip');
+		expect(strip.text()).toContain('chunk 9 of 14');
+		await strip.find('button').trigger('click');
+		expect(w.emitted('cancelUpload')[0]).toEqual(['up_1']);
+	});
+
+	it('attach button emits the picked file with the caption from the input', async () => {
+		const w = renderWith([]);
+		await w.find('input[type="text"]').setValue('вот акт');
+		const file = new File([new Uint8Array([1, 2, 3])], 'act.pdf', { type: 'application/pdf' });
+		const input = w.find('input[type="file"]');
+		Object.defineProperty(input.element, 'files', { value: [file] });
+		await input.trigger('change');
+		const [emitted, caption] = w.emitted('sendFile')[0];
+		expect(emitted.name).toBe('act.pdf');
+		expect(caption).toBe('вот акт');
+		expect(w.find('input[type="text"]').element.value).toBe('');
+	});
+});

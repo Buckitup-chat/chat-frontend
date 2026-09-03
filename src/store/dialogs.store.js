@@ -8,6 +8,7 @@ import { computeTails } from '@/lib/data/refs';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
+import { prepareUpload, uploadFile, downloadFile } from '@/lib/data/fileTransfer';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
@@ -479,6 +480,62 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return messageId;
     };
 
+    // ---------- file transport (§1.5, §2.1–2.3) ----------
+
+    // §4.1: file_id + enc_secret persist BEFORE the first PUT — file_id alone
+    // cannot resume, since a fresh secret would make re-sent chunks
+    // undecryptable next to the ones already stored.
+    const pendingUploadKey = (fileId) => `bkp:pending-upload:${fileId}`;
+
+    /**
+     * Uploads a file and sends the message referencing it. Progress is in
+     * chunks (§2.1 — "куски, а не проценты-догадки"). Returns the fileId.
+     */
+    const sendFileMessage = async (peerHash, fileMeta, { caption = '', onProgress, onStatus, signal } = {}) => {
+        const { name, mimeType, bytes, createdAt } = fileMeta;
+        const uploaderHash = $userPQ.currentUserHash;
+        const signSkey = await getSignSkeyBytes();
+
+        const { v7 } = await import('uuid');
+        const prepared = prepareUpload(v7());
+        try {
+            localStorage.setItem(pendingUploadKey(prepared.fileId), JSON.stringify({
+                encSecretB64: prepared.encSecretB64, name, size: bytes.length,
+            }));
+        } catch { /* private mode: resume across reloads degrades, upload still works */ }
+
+        onStatus?.('uploading');
+        const up = await uploadFile({
+            bytes, uploaderHash, signSkey, ...prepared, onProgress, signal,
+        });
+
+        const parts = [{
+            kind: 'file',
+            name,
+            size: bytes.length,
+            mimeType: mimeType || 'application/octet-stream',
+            createdAt: createdAt || Math.floor(Date.now() / 1000),
+            fileId: up.fileId,
+            encSecretB64: up.encSecretB64,
+        }];
+        if (caption.trim()) parts.push({ kind: 'text', text: caption.trim() });
+
+        await new Promise((resolve, reject) => {
+            sendMessage(peerHash, parts, (status) => {
+                onStatus?.(status);
+                if (status === 'synced') resolve();
+                if (status === 'error') reject(new Error('message send failed'));
+            });
+        });
+
+        try { localStorage.removeItem(pendingUploadKey(up.fileId)); } catch { /* already best-effort */ }
+        return up.fileId;
+    };
+
+    /** Downloads and decrypts an attachment; progress in chunks (§2.3). */
+    const fetchFile = (filePart, { onProgress, signal } = {}) =>
+        downloadFile({ fileId: filePart.fileId, encSecretB64: filePart.encSecretB64, onProgress, signal });
+
     /**
      * Deletes own message (§3.2): a new signed revision with deleted_flag and
      * empty content — the empty plaintext IS the tombstone (07: an empty
@@ -801,6 +858,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         editMessage,
         decryptMessageRow,
         deleteMessage,
+        sendFileMessage,
+        fetchFile,
         getMessageHistory,
         admitMessageRow,
         admitReactionRow,
