@@ -27,6 +27,10 @@ if (!fs.existsSync(`${CERT_DIR}/cert.pem`)) {
 const VITE = { host: '127.0.0.1', port: 5174 };
 const API = { host: 'buckitup.xyz', prefix: '/electric/v1' };
 
+// The TLS server does not own the port: a front socket sniffs the first byte
+// so that http://localhost:5173 answers with a redirect instead of dying as
+// "ERR_CONNECTION_CLOSED" (plain HTTP spoken at a TLS socket). Whichever URL
+// is typed or restored from a tab, it lands in the right place.
 const server = http2.createSecureServer({
 	key: fs.readFileSync(`${CERT_DIR}/key.pem`),
 	cert: fs.readFileSync(`${CERT_DIR}/cert.pem`),
@@ -80,6 +84,36 @@ server.on('upgrade', (req, socket, head) => {
 	target.on('error', () => socket.destroy());
 });
 
-server.listen(5173, '0.0.0.0', () => {
-	console.log('h2 dev proxy on https://localhost:5173 → vite :5174, /api → ' + API.host + API.prefix);
+server.on('tlsClientError', (e) => console.log('[tls error]', e.message));
+server.on('sessionError', (e) => console.log('[session error]', e.message));
+
+// Both real servers listen on loopback; the public port is a byte-sniffing
+// front that *pipes* to whichever applies. Piping rather than handing the
+// socket over: re-emitting 'connection' on a TLS server after unshifting the
+// peeked byte loses the rest of the ClientHello and the handshake times out.
+const TLS_PORT = 5175;
+const REDIRECT_PORT = 5176;
+
+server.listen(TLS_PORT, '127.0.0.1');
+
+http.createServer((req, res) => {
+	res.writeHead(301, { Location: `https://localhost:5173${req.url}` });
+	res.end('dev stand is https (HTTP/2)\n');
+}).listen(REDIRECT_PORT, '127.0.0.1');
+
+net.createServer((socket) => {
+	socket.once('readable', () => {
+		const first = socket.read();
+		if (!first) return socket.destroy();
+		// 0x16 is the TLS handshake record type; anything else is plain HTTP,
+		// which gets redirected instead of dying as ERR_CONNECTION_CLOSED.
+		const target = net.connect(first[0] === 0x16 ? TLS_PORT : REDIRECT_PORT, '127.0.0.1', () => {
+			target.write(first);
+			socket.pipe(target).pipe(socket);
+		});
+		target.on('error', () => socket.destroy());
+	});
+	socket.on('error', () => socket.destroy());
+}).listen(5173, '0.0.0.0', () => {
+	console.log('dev stand on https://localhost:5173 (http:// redirects) → vite :5174, /api → ' + API.host + API.prefix);
 });
