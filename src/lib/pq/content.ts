@@ -65,6 +65,14 @@ export interface ImagePart {
 	encSecretB64: string;
 }
 
+/** Out-of-band video (07 §"video"). Same shape as an image — the preview
+ * frame's ThumbHash and the aspect ratio — because the player needs to lay
+ * the frame out before it can stream anything. Always out-of-band: there is
+ * no inline variant. */
+export interface VideoPart extends Omit<ImagePart, 'kind'> {
+	kind: 'video';
+}
+
 /** A typed value this build does not render yet (e.g. "image" before the
  * file transport lands). Preserved verbatim so re-encoding loses nothing. */
 export interface UnknownPart {
@@ -73,7 +81,7 @@ export interface UnknownPart {
 	value: unknown;
 }
 
-export type ContentPart = TextPart | QuotePart | FilePart | ImagePart | UnknownPart;
+export type ContentPart = TextPart | QuotePart | FilePart | ImagePart | VideoPart | UnknownPart;
 
 export class ContentDecodeError extends Error {}
 
@@ -85,9 +93,10 @@ const encodePart = (part: ContentPart): unknown => {
 			return { quote: [part.authorHash, part.messageId, part.signHash, encodeValue(part.snapshot)] };
 		case 'file':
 			return { file: [part.name, part.size, part.mimeType, part.createdAt, part.fileId, part.encSecretB64] };
+		case 'video':
 		case 'image':
 			return {
-				image: [
+				[part.kind]: [
 					part.widthAspect, part.heightAspect, part.thumbHashB64, part.name, part.size,
 					part.mimeType, part.createdAt, part.fileId, part.encSecretB64,
 				],
@@ -144,13 +153,13 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					snapshot: decodeValue(q[3]),
 				}];
 			}
-			if (type === 'image') {
-				const im = obj.image;
+			if (type === 'image' || type === 'video') {
+				const im = obj[type];
 				if (!Array.isArray(im) || im.length < 9 || typeof im[7] !== 'string' || typeof im[8] !== 'string') {
-					throw new ContentDecodeError('malformed image envelope');
+					throw new ContentDecodeError(`malformed ${type} envelope`);
 				}
 				return [{
-					kind: 'image',
+					kind: type,
 					widthAspect: Number(im[0]) || 1,
 					heightAspect: Number(im[1]) || 1,
 					thumbHashB64: String(im[2] ?? ''),
@@ -207,7 +216,7 @@ export const contentToText = (parts: ContentPart[]): string =>
 			if (p.kind === 'quote') return ''; // the quote is context, not the author's words
 			// Attachments render as their own element in the bubble; naming them
 			// here too would print the filename twice under the picture.
-			if (p.kind === 'file' || p.kind === 'image') return '';
+			if (p.kind === 'file' || p.kind === 'image' || p.kind === 'video') return '';
 			return `[${p.type}]`;
 		})
 		.filter(Boolean)
@@ -217,7 +226,10 @@ export const contentToText = (parts: ContentPart[]): string =>
 export const previewText = (parts: ContentPart[]): string => {
 	const text = contentToText(parts);
 	if (text) return text;
-	const media = parts.find((p) => p.kind === 'image' || p.kind === 'file');
-	if (media) return media.kind === 'image' ? `🖼 ${media.name}` : `📄 ${media.name}`;
+	const media = parts.find((p) => p.kind === 'image' || p.kind === 'video' || p.kind === 'file');
+	if (media) {
+		const icon = media.kind === 'image' ? '🖼' : media.kind === 'video' ? '🎬' : '📄';
+		return `${icon} ${media.name}`;
+	}
 	return '';
 };
