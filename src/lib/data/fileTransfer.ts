@@ -59,8 +59,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const existingChunks = async (fileId: string): Promise<Map<number, { sign_b64: string }>> => {
 	const out = new Map<number, { sign_b64: string }>();
 	try {
+		// The where clause carries a random no-op condition on purpose: shapes
+		// are cached per (table, where), and a shape with no live subscriber
+		// does not advance its log — a plain snapshot re-read can miss rows
+		// committed seconds earlier (verified against staging: a same-where
+		// read missed a fresh insert for 30s+ while a fresh-where read saw it
+		// instantly). A unique where forces a fresh snapshot.
+		const salt = `${Date.now() % 100000}=${Date.now() % 100000}`;
 		const r = await fetch(
-			`${ELECTRIC_API_URL}/shapes?table=file_chunks&where=file_id='${fileId}'&offset=-1`,
+			`${ELECTRIC_API_URL}/shapes?table=file_chunks&where=${encodeURIComponent(`file_id='${fileId}' AND ${salt}`)}&offset=-1`,
 		);
 		if (!r.ok) return out;
 		for (const m of (await r.json()) as Array<{ value?: { chunk_index: number | string; sign_b64: string } }>) {
@@ -123,19 +130,9 @@ export const uploadFile = async (opts: {
 	const ownerTimestamp = Math.floor(Date.now() / 1000);
 	const chunkSignHashes: string[] = [];
 
-	let already = new Map<number, { sign_b64: string }>();
-	if (opts.resuming) {
-		// Read until two consecutive snapshots agree — the shape trails the
-		// device's commits, and skipping this wait recreates the split-brain
-		// described on the `resuming` option.
-		let prevSize = -1;
-		for (let i = 0; i < 5; i++) {
-			already = await existingChunks(fileId);
-			if (already.size === prevSize) break;
-			prevSize = already.size;
-			await sleep(1500);
-		}
-	}
+	// A fresh-where snapshot (see existingChunks) reflects the device's actual
+	// state, so one read suffices for both the fresh and the resume path.
+	const already = opts.resuming ? await existingChunks(fileId) : new Map<number, { sign_b64: string }>();
 
 	for (let i = 0; i < total; i++) {
 		signal?.throwIfAborted();
