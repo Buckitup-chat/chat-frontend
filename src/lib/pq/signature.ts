@@ -52,12 +52,38 @@ export const padBase64 = (b64: string): string => b64 + '='.repeat((4 - (b64.len
 export const fromBase64 = (b64: string): Uint8Array =>
 	Uint8Array.from(atob(padBase64(b64)), (c) => c.charCodeAt(0));
 
+const fromHex = (hex: string): Uint8Array => {
+	const out = new Uint8Array(hex.length / 2);
+	for (let i = 0; i < hex.length; i += 2) out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+	return out;
+};
+
+/**
+ * Bytes out of whatever a binary column arrives as.
+ *
+ * One value takes three shapes on the way to this module: base64 from the
+ * shape endpoint, PostgreSQL '\x' hex, and raw Uint8Array once a row has
+ * been through local persistence. The app has always had to cope with this
+ * (libs/enigma decodeHexOrBase64); the protocol layer must too, or a card
+ * that verifies from the network fails after a reload.
+ */
+export const toBytes = (value: string | Uint8Array): Uint8Array => {
+	if (value instanceof Uint8Array) return value;
+	if (ArrayBuffer.isView(value)) return new Uint8Array((value as ArrayBufferView).buffer);
+	if (typeof value === 'string') return value.startsWith('\\x') ? fromHex(value.slice(2)) : fromBase64(value);
+	throw new TypeError('unsupported binary field encoding');
+};
+
 const encodeBase64Value = (value: SignableValue): string => {
 	if (value === null || value === undefined) return 'null';
 	// Rows carry these already base64-encoded; raw bytes appear only when
 	// signing a value that has not been through the wire yet. Padding is
-	// normalized because the read path serves it stripped (see padBase64).
-	if (typeof value === 'string') return padBase64(value);
+	// normalized because the read path serves it stripped (see padBase64),
+	// and '\x' hex is re-encoded — the canonical payload is base64 of the
+	// bytes, whatever transport handed them over.
+	if (typeof value === 'string') {
+		return value.startsWith('\\x') ? toBase64(fromHex(value.slice(2))) : padBase64(value);
+	}
 	return toBase64(value as Uint8Array);
 };
 
@@ -139,8 +165,8 @@ export const verifyFields = (
 ): boolean => {
 	if (!signB64 || !signPkey) return false;
 	try {
-		const signature = typeof signB64 === 'string' ? fromBase64(signB64) : signB64;
-		const pkey = typeof signPkey === 'string' ? fromBase64(signPkey) : signPkey;
+		const signature = toBytes(signB64);
+		const pkey = toBytes(signPkey);
 		return ml_dsa87.verify(signature, payloadBytes(fields), pkey);
 	} catch {
 		return false;
@@ -152,7 +178,5 @@ export const verifyFields = (
  * Callers pass the row type's prefix — "dms_" for dialog message revisions,
  * "uss_" for user storage (invariants/03_data_versioning.md).
  */
-export const deriveSignHash = (prefix: string, signB64: string | Uint8Array): string => {
-	const bytes = typeof signB64 === 'string' ? fromBase64(signB64) : signB64;
-	return prefix + bytesToHex(sha3_512(bytes));
-};
+export const deriveSignHash = (prefix: string, signB64: string | Uint8Array): string =>
+	prefix + bytesToHex(sha3_512(toBytes(signB64)));

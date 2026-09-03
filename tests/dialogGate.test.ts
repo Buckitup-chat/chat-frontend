@@ -4,7 +4,7 @@ import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
+import { signFields, deriveSignHash, toBase64, fromBase64 } from '@/lib/pq/signature';
 import { verifyUserCard } from '@/lib/pq/verifyCard';
 import { createDialogGate, type MessageLike } from '@/lib/data/dialogGate';
 import type { UserCardRow } from '@/lib/data/types';
@@ -250,5 +250,41 @@ describe('dialog gate — cards and keys as dependencies', () => {
 			refsOf: new Map([[g.row.message_id, 'error']]),
 		});
 		expect(await gate.admit(g.row)).toMatchObject({ status: 'invalid', reason: 'refs_decrypt_failed' });
+	});
+});
+
+// The failure this reproduces: cards verified fine straight off the network
+// but not after a reload, when persistence hands binary columns back in a
+// different encoding. resolveSignPkey then returned null for every author and
+// every message parked as "waiting" — including a genesis message, whose refs
+// map is empty and which therefore cannot be waiting on anything causal.
+describe('author cards in a different binary encoding', () => {
+	const hexOf = (b: Uint8Array) => '\\x' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+
+	it('verifies a card whose binary columns arrived as postgres hex', () => {
+		const hexCard = {
+			...alice.card,
+			sign_pkey: hexOf(alice.sign.publicKey),
+			crypt_pkey: hexOf(fromBase64(alice.card.crypt_pkey as string)),
+			crypt_cert: hexOf(fromBase64(alice.card.crypt_cert as string)),
+			contact_pkey: hexOf(fromBase64(alice.card.contact_pkey as string)),
+			contact_cert: hexOf(fromBase64(alice.card.contact_cert as string)),
+			sign_b64: hexOf(fromBase64(alice.card.sign_b64 as string)),
+		};
+		expect(verifyUserCard(hexCard as never).status).toBe('verified');
+	});
+
+	it('admits a genesis message when the author card came back as hex', async () => {
+		const g = makeMessage(alice, {});
+		const verdict = verifyUserCard({
+			...alice.card,
+			sign_pkey: hexOf(alice.sign.publicKey),
+		} as never);
+		expect(verdict.status).toBe('verified');
+		const gate = makeGate({
+			cards: { [alice.userHash]: (verdict as { card: { signPkeyB64: string } }).card.signPkeyB64 },
+			refsOf: new Map([[g.row.message_id, {}]]),
+		});
+		expect(await gate.admit(g.row)).toMatchObject({ status: 'verified', isGenesis: true });
 	});
 });

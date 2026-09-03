@@ -29,6 +29,12 @@ export const getVerifiedSignPkey = async (userHash: string): Promise<string | nu
 
 	const verdict = verifyUserCard(row);
 	if (verdict.status !== 'verified') {
+		// Loud on purpose: an unverifiable card silently parks every message
+		// from that author in the gate, which surfaces to the user as
+		// "waiting for earlier messages" with no hint of the real cause.
+		if (rejected.get(userHash) !== verdict.reason) {
+			console.warn('[cards] rejected', userHash.slice(0, 12), '—', verdict.reason);
+		}
 		// Remembered for diagnostics, not as a verdict — a valid re-signed
 		// card (e.g. after a rename) must get a fresh check.
 		rejected.set(userHash, verdict.reason);

@@ -10,6 +10,7 @@ import {
 	deriveSignHash,
 	toBase64,
 	padBase64,
+	fromBase64,
 } from '@/lib/pq/signature';
 
 // The payload is a wire contract with the Elixir server
@@ -176,5 +177,41 @@ describe('base64 padding on the read path', () => {
 			owner_timestamp: 1,
 		};
 		expect(verifyFields(asServed, signB64.replace(/=+$/, ''), toBase64(keys.publicKey).replace(/=+$/, ''))).toBe(true);
+	});
+});
+
+// One binary value reaches this module three ways: base64 from the shape
+// endpoint, PostgreSQL '\x' hex, and a raw Uint8Array once a row has been
+// through local persistence. All three must produce the same payload and the
+// same verdict — otherwise a card that verifies from the network stops
+// verifying after a reload, and every message from that author parks in the
+// gate as "waiting for its author's card".
+describe('binary columns arriving in different encodings', () => {
+	const blob = new Uint8Array([171, 205, 1, 2, 255, 0, 7]);
+	const asB64 = toBase64(blob);
+	const asHex = '\\x' + Array.from(blob, (b) => b.toString(16).padStart(2, '0')).join('');
+
+	it('encodes hex, base64 and raw bytes to the same payload', () => {
+		const fromBytes = encodeField('sign_pkey', blob);
+		expect(encodeField('sign_pkey', asB64)).toBe(fromBytes);
+		expect(encodeField('sign_pkey', asHex)).toBe(fromBytes);
+	});
+
+	it('verifies a row whose binary columns arrived as hex', () => {
+		const keys = ml_dsa87.keygen(new Uint8Array(32).fill(11));
+		const signed = { user_hash: 'u_ab', crypt_pkey: blob, owner_timestamp: 1 };
+		const signB64 = signFields(signed, keys.secretKey);
+
+		const asServed = { user_hash: 'u_ab', crypt_pkey: asHex, owner_timestamp: 1 };
+		expect(verifyFields(asServed, signB64, keys.publicKey)).toBe(true);
+		// and with the signature and key themselves in hex form
+		const hexOf = (b: Uint8Array) => '\\x' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+		expect(verifyFields(asServed, hexOf(fromBase64(signB64)), hexOf(keys.publicKey))).toBe(true);
+	});
+
+	it('derives the same sign_hash from hex, base64 and bytes', () => {
+		const b64 = toBase64(blob);
+		expect(deriveSignHash('dms_', asHex)).toBe(deriveSignHash('dms_', b64));
+		expect(deriveSignHash('dms_', blob)).toBe(deriveSignHash('dms_', b64));
 	});
 });

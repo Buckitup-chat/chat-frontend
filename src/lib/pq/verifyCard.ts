@@ -13,7 +13,7 @@
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { verifyFields, fromBase64 } from './signature';
+import { verifyFields, toBytes } from './signature';
 import type { UserCardRow } from '@/lib/data/types';
 
 export interface VerifiedCard {
@@ -41,7 +41,7 @@ export const verifyUserCard = (row: UserCardRow): CardVerdict => {
 
 	let signPkey: Uint8Array;
 	try {
-		signPkey = fromBase64(row.sign_pkey);
+		signPkey = toBytes(row.sign_pkey);
 	} catch {
 		return { status: 'invalid', reason: 'missing_fields' };
 	}
@@ -67,7 +67,7 @@ export const verifyUserCard = (row: UserCardRow): CardVerdict => {
 			const key = row[keyField];
 			const cert = row[certField];
 			if (!key || !cert) return { status: 'invalid', reason: 'missing_fields' };
-			if (!ml_dsa87.verify(fromBase64(cert), fromBase64(key), signPkey)) {
+			if (!ml_dsa87.verify(toBytes(cert), toBytes(key), signPkey)) {
 				return { status: 'invalid', reason: 'bad_cert' };
 			}
 		}
