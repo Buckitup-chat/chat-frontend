@@ -9,6 +9,7 @@ import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
 import { prepareUpload, uploadFile, downloadFile } from '@/lib/data/fileTransfer';
+import { buildImagePreview, isImageMime } from '@/lib/data/imageMeta';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
@@ -499,7 +500,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * chunks (§2.1 — "куски, а не проценты-догадки"). Returns the fileId.
      */
     const sendFileMessage = async (peerHash, fileMeta, { caption = '', onProgress, onStatus, signal } = {}) => {
-        const { name, mimeType, bytes, createdAt } = fileMeta;
+        const { name, mimeType, bytes, createdAt, blob } = fileMeta;
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
 
@@ -516,15 +517,19 @@ export const useDialogsStore = defineStore('dialogs', () => {
             bytes, uploaderHash, signSkey, ...prepared, onProgress, signal,
         });
 
-        const parts = [{
-            kind: 'file',
+        const common = {
             name,
             size: bytes.length,
             mimeType: mimeType || 'application/octet-stream',
             createdAt: createdAt || Math.floor(Date.now() / 1000),
             fileId: up.fileId,
             encSecretB64: up.encSecretB64,
-        }];
+        };
+        // An image announces its shape so the receiver can lay it out before
+        // downloading; anything that will not decode travels as a plain file
+        // rather than claiming a preview it does not have.
+        const preview = blob && isImageMime(mimeType) ? await buildImagePreview(blob).catch(() => null) : null;
+        const parts = [preview ? { kind: 'image', ...preview, ...common } : { kind: 'file', ...common }];
         if (caption.trim()) parts.push({ kind: 'text', text: caption.trim() });
 
         await new Promise((resolve, reject) => {

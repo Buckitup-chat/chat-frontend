@@ -56,6 +56,22 @@
                 <div v-else-if="!quoteOriginalPresent(q)" class="msg-quote-note"><span class="msg-quote-dot"></span>original not synced yet</div>
               </div>
             </div>
+            <!-- §1.3: the picture's box is reserved from the aspect ratio in
+                 the message and filled with the ThumbHash blur, so the bubble
+                 does not jump when the bytes land. -->
+            <div v-for="im in imagesOf(msg)" :key="im.fileId" class="msg-image"
+              :style="{ aspectRatio: im.widthAspect + ' / ' + im.heightAspect }"
+              @click="images[im.fileId]?.url && emit('showImage', im)">
+              <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
+              <img v-if="images[im.fileId]?.url" class="msg-image-full" :src="images[im.fileId].url" :alt="im.name" />
+              <div v-if="images[im.fileId]?.status === 'downloading'" class="msg-image-progress">
+                {{ images[im.fileId].done }} / {{ images[im.fileId].total }} chunks
+              </div>
+              <div v-else-if="images[im.fileId]?.status === 'error'" class="msg-image-progress _err">
+                image failed — tap to retry
+              </div>
+            </div>
+
             <!-- §1.5 file row: icon — name — size/state — action. Progress is
                  chunks, never guessed percentages (§2.1). -->
             <div v-for="f in filesOf(msg)" :key="f.fileId" class="msg-file">
@@ -214,6 +230,8 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { contentToText } from '@/lib/pq/content';
+import { thumbHashToDataURL } from 'thumbhash';
+import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { useMenu } from '@/composables/useMenu';
 import Avatar from 'vue-boring-avatars';
@@ -257,6 +275,10 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
+  images: {
+    type: Object,
+    default: () => ({})
+  },
   messages: {
     type: Array,
     required: true,
@@ -271,7 +293,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'cancelUpload', 'downloadFile']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'cancelUpload', 'downloadFile', 'showImage']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -337,6 +359,21 @@ const versionCountOf = (msg) => props.versionCounts[msg.id] || 0;
 
 const quotesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'quote');
 const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
+const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
+
+// ThumbHash decodes to a tiny data URL; cached because it is pure and the
+// list re-renders on every sync tick.
+const thumbCache = new Map();
+const thumbUrl = (im) => {
+  if (!im.thumbHashB64) return '';
+  if (thumbCache.has(im.fileId)) return thumbCache.get(im.fileId);
+  let url = '';
+  try {
+    url = thumbHashToDataURL(fromBase64(im.thumbHashB64));
+  } catch { /* a malformed hash just means no blur */ }
+  thumbCache.set(im.fileId, url);
+  return url;
+};
 
 const fmtSize = (n) => {
   if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -829,4 +866,41 @@ watch(() => props.messages, () => {
 .msg-file-spinner { width: 16px; height: 16px; border: 2px solid rgba(36,24,36,.2); border-top-color: #8e2b77; border-radius: 50%; flex-shrink: 0; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .upload-strip { background: rgba(36, 24, 36, .06); border-radius: 9px; }
+
+/* ---------- §1.3 images ---------- */
+.msg-image {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 6px;
+  max-height: 340px;
+  background: rgba(36, 24, 36, .06);
+  cursor: pointer;
+}
+.msg-image-blur,
+.msg-image-full {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* the blur sits underneath and is simply covered when the real image loads */
+.msg-image-blur { filter: blur(6px); transform: scale(1.06); }
+.msg-image-full { animation: msg-image-in .18s ease-out; }
+@keyframes msg-image-in { from { opacity: 0 } to { opacity: 1 } }
+.msg-image-progress {
+  position: absolute;
+  left: 6px; right: 6px; bottom: 6px;
+  margin: 0 auto;
+  width: fit-content;
+  background: rgba(0, 0, 0, .45);
+  color: #fff;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  line-height: 1.3;
+}
+.msg-image-progress._err { background: rgba(220, 53, 69, .85); }
 </style>

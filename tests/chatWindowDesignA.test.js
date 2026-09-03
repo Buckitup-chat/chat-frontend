@@ -277,3 +277,69 @@ describe('§1.5 file attachments', () => {
 		expect(w.find('input[type="text"]').element.value).toBe('');
 	});
 });
+
+describe('§1.3 images', () => {
+	const imagePart = (over = {}) => ({
+		kind: 'image', widthAspect: 3, heightAspect: 4, thumbHashB64: '',
+		name: 'shot.png', size: 121_000, mimeType: 'image/png',
+		createdAt: 1715000000, fileId: 'f_' + 'c'.repeat(32), encSecretB64: 'AAAA', ...over,
+	});
+	const renderWith = (messages, extra = {}) =>
+		mount(ChatWindow, {
+			props: { title: 'Ирина', myHash: MY, messages, reactions: {}, ...extra },
+			global: { stubs: { Avatar: true } },
+		});
+
+	// The bubble must not jump when the bytes land, so the box is reserved
+	// from the aspect ratio the message carries.
+	it('reserves the picture box from the declared aspect ratio', () => {
+		const w = renderWith([message({ parts: [imagePart()], text: '' })]);
+		const box = w.find('.msg-image');
+		expect(box.exists()).toBe(true);
+		expect(box.attributes('style')).toContain('aspect-ratio: 3 / 4');
+	});
+
+	it('shows chunk progress over the placeholder while fetching', () => {
+		const w = renderWith([message({ parts: [imagePart()], text: '' })], {
+			images: { ['f_' + 'c'.repeat(32)]: { status: 'downloading', done: 3, total: 8 } },
+		});
+		expect(w.find('.msg-image-progress').text()).toBe('3 / 8 chunks');
+		expect(w.find('.msg-image-full').exists()).toBe(false);
+	});
+
+	it('renders the decrypted image once it is there', () => {
+		const w = renderWith([message({ parts: [imagePart()], text: '' })], {
+			images: { ['f_' + 'c'.repeat(32)]: { status: 'done', url: 'blob:x' } },
+		});
+		const img = w.find('.msg-image-full');
+		expect(img.attributes('src')).toBe('blob:x');
+		expect(img.attributes('alt')).toBe('shot.png');
+	});
+
+	it('offers a retry when the image failed', () => {
+		const w = renderWith([message({ parts: [imagePart()], text: '' })], {
+			images: { ['f_' + 'c'.repeat(32)]: { status: 'error' } },
+		});
+		expect(w.find('.msg-image-progress._err').text()).toMatch(/tap to retry/);
+	});
+
+	it('renders an image as a picture, not as a file row', () => {
+		const w = renderWith([message({ parts: [imagePart()], text: '' })]);
+		expect(w.find('.msg-image').exists()).toBe(true);
+		expect(w.find('.msg-file').exists()).toBe(false);
+	});
+
+	// The filename used to be printed under the attachment as body text.
+	it('does not repeat the filename as message text', () => {
+		const w = renderWith([message({ parts: [imagePart()], text: '' })]);
+		expect(w.find('.message-text').text()).toBe('');
+	});
+
+	it('keeps a real caption next to the picture', () => {
+		const w = renderWith([message({
+			parts: [imagePart(), { kind: 'text', text: 'вот схема' }], text: 'вот схема',
+		})]);
+		expect(w.find('.msg-image').exists()).toBe(true);
+		expect(w.find('.message-text').text()).toBe('вот схема');
+	});
+});

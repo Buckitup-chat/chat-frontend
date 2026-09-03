@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
+import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError } from '@/lib/pq/content';
 
 // Wire-format contract with every other client (07_content_polymorphism.md).
 // The acceptance names follow the review's T-CONTENT set.
@@ -117,5 +117,37 @@ describe('contentToText', () => {
 				{ kind: 'unknown', type: 'image', value: [] },
 			]),
 		).toBe('смотри\n[image]');
+	});
+});
+
+describe('image envelope (§1.3)', () => {
+	const image = {
+		kind: 'image' as const,
+		widthAspect: 16, heightAspect: 9, thumbHashB64: 'YTg4', name: 'shot.png',
+		size: 5_242_880, mimeType: 'image/png', createdAt: 1715000000,
+		fileId: 'f_' + '1'.repeat(32), encSecretB64: 'c2VjcmV0',
+	};
+
+	it('round-trips in the canonical positional order', () => {
+		const wire = encodeContent([image]);
+		expect(wire).toContain('"image":[16,9,"YTg4","shot.png",5242880');
+		expect(decodeContent(wire)[0]).toEqual(image);
+	});
+
+	it('rejects a malformed image envelope', () => {
+		expect(() => decodeContent('{"image":[16,9]}')).toThrow(ContentDecodeError);
+	});
+
+	// The picture renders as its own element; naming it as body text printed
+	// the filename twice under the image.
+	it('contributes no body text', () => {
+		expect(contentToText([image, { kind: 'text', text: 'вот схема' }])).toBe('вот схема');
+		expect(contentToText([image])).toBe('');
+	});
+
+	it('previewText still labels an attachment-only message', () => {
+		expect(previewText([image])).toBe('🖼 shot.png');
+		expect(previewText([{ kind: 'file', name: 'a.pdf', size: 1, mimeType: 'application/pdf', createdAt: 0, fileId: 'f_1', encSecretB64: 'x' }])).toBe('📄 a.pdf');
+		expect(previewText([image, { kind: 'text', text: 'подпись' }])).toBe('подпись');
 	});
 });

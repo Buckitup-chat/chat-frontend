@@ -46,6 +46,25 @@ export interface FilePart {
 	encSecretB64: string;
 }
 
+/**
+ * Out-of-band image (07 §"image"). Extends the file reference with what the
+ * UI needs to lay the picture out before a single byte arrives: the aspect
+ * ratio and a ThumbHash to blur in behind it, so the bubble does not jump
+ * when the real image lands.
+ */
+export interface ImagePart {
+	kind: 'image';
+	widthAspect: number;
+	heightAspect: number;
+	thumbHashB64: string;
+	name: string;
+	size: number;
+	mimeType: string;
+	createdAt: number;
+	fileId: string;
+	encSecretB64: string;
+}
+
 /** A typed value this build does not render yet (e.g. "image" before the
  * file transport lands). Preserved verbatim so re-encoding loses nothing. */
 export interface UnknownPart {
@@ -54,7 +73,7 @@ export interface UnknownPart {
 	value: unknown;
 }
 
-export type ContentPart = TextPart | QuotePart | FilePart | UnknownPart;
+export type ContentPart = TextPart | QuotePart | FilePart | ImagePart | UnknownPart;
 
 export class ContentDecodeError extends Error {}
 
@@ -66,6 +85,13 @@ const encodePart = (part: ContentPart): unknown => {
 			return { quote: [part.authorHash, part.messageId, part.signHash, encodeValue(part.snapshot)] };
 		case 'file':
 			return { file: [part.name, part.size, part.mimeType, part.createdAt, part.fileId, part.encSecretB64] };
+		case 'image':
+			return {
+				image: [
+					part.widthAspect, part.heightAspect, part.thumbHashB64, part.name, part.size,
+					part.mimeType, part.createdAt, part.fileId, part.encSecretB64,
+				],
+			};
 		case 'unknown':
 			return { [part.type]: part.value };
 	}
@@ -118,6 +144,24 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					snapshot: decodeValue(q[3]),
 				}];
 			}
+			if (type === 'image') {
+				const im = obj.image;
+				if (!Array.isArray(im) || im.length < 9 || typeof im[7] !== 'string' || typeof im[8] !== 'string') {
+					throw new ContentDecodeError('malformed image envelope');
+				}
+				return [{
+					kind: 'image',
+					widthAspect: Number(im[0]) || 1,
+					heightAspect: Number(im[1]) || 1,
+					thumbHashB64: String(im[2] ?? ''),
+					name: String(im[3]),
+					size: Number(im[4]),
+					mimeType: String(im[5]),
+					createdAt: Number(im[6]),
+					fileId: im[7],
+					encSecretB64: im[8],
+				}];
+			}
 			if (type === 'file') {
 				const f = obj.file;
 				if (!Array.isArray(f) || f.length < 6 || typeof f[4] !== 'string' || typeof f[5] !== 'string') {
@@ -151,14 +195,29 @@ export const decodeContent = (json: string): ContentPart[] => {
 	return decodeValue(value);
 };
 
-/** Flat text of a message — what previews, quotes-of-quotes and search see. */
+/**
+ * Flat text of a message. Attachments contribute nothing: they render as
+ * their own element in the bubble, and repeating the filename as body text
+ * printed it twice. Use attachmentLabel for previews that need a word.
+ */
 export const contentToText = (parts: ContentPart[]): string =>
 	parts
 		.map((p) => {
 			if (p.kind === 'text') return p.text;
 			if (p.kind === 'quote') return ''; // the quote is context, not the author's words
-			if (p.kind === 'file') return `📄 ${p.name}`;
+			// Attachments render as their own element in the bubble; naming them
+			// here too would print the filename twice under the picture.
+			if (p.kind === 'file' || p.kind === 'image') return '';
 			return `[${p.type}]`;
 		})
 		.filter(Boolean)
 		.join('\n');
+
+/** One-line label for a message in a preview (reply strip, quote, chat list). */
+export const previewText = (parts: ContentPart[]): string => {
+	const text = contentToText(parts);
+	if (text) return text;
+	const media = parts.find((p) => p.kind === 'image' || p.kind === 'file');
+	if (media) return media.kind === 'image' ? `🖼 ${media.name}` : `📄 ${media.name}`;
+	return '';
+};

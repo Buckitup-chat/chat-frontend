@@ -3,9 +3,10 @@
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId" :histories="historiesByMsgId"
-            :uploads="activeUploads" :downloads="downloadsByFileId"
+            :uploads="activeUploads" :downloads="downloadsByFileId" :images="imagesByFileId"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @cancel-upload="handleCancelUpload" @download-file="handleDownloadFile"
+            @show-image="handleShowImage"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge" />
@@ -531,6 +532,7 @@ const handleSendFile = async (file, caption) => {
             name: file.name,
             mimeType: file.type,
             bytes,
+            blob: file,
             createdAt: Math.floor((file.lastModified || Date.now()) / 1000),
         }, {
             caption,
@@ -555,6 +557,55 @@ const handleCancelUpload = (id) => {
     // an errored strip is dismissed by the same ✕
     activeUploads.value = activeUploads.value.filter((u) => u.id !== id || u.status !== 'error');
 };
+
+// §1.3: images fetch themselves — the picture IS the message, so waiting for
+// a tap would leave the bubble showing a blur nobody asked to resolve.
+const imagesByFileId = ref({});
+const imageObjectUrls = new Map();
+
+const fetchImage = async (part) => {
+    const id = part.fileId;
+    if (imagesByFileId.value[id]?.url || imagesByFileId.value[id]?.status === 'downloading') return;
+    imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'downloading', done: 0, total: 0 } };
+    try {
+        const bytes = await $dialogs.fetchFile(part, {
+            onProgress: (p) => {
+                const cur = imagesByFileId.value[id];
+                if (cur?.status === 'downloading') {
+                    imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'downloading', done: p.done, total: p.total } };
+                }
+            },
+        });
+        const url = URL.createObjectURL(new Blob([bytes], { type: part.mimeType || 'image/*' }));
+        imageObjectUrls.set(id, url);
+        imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'done', url } };
+    } catch (e) {
+        console.error('Image download failed:', e);
+        imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'error' } };
+    }
+};
+
+// Kick off fetches for images that appeared in the rendered list.
+watch(() => decryptedMessages.value, (msgs) => {
+    for (const m of msgs || []) {
+        for (const p of m.parts || []) {
+            if (p.kind === 'image') fetchImage(p);
+        }
+    }
+});
+
+const handleShowImage = (part) => {
+    const url = imagesByFileId.value[part.fileId]?.url;
+    if (url) window.open(url, '_blank');
+    else fetchImage(part); // tapping a failed image retries it
+};
+
+// Blob URLs are process-wide; leaving a dialog must not leak them.
+watch(dialogHash, () => {
+    for (const url of imageObjectUrls.values()) URL.revokeObjectURL(url);
+    imageObjectUrls.clear();
+    imagesByFileId.value = {};
+});
 
 const downloadsByFileId = ref({});
 
