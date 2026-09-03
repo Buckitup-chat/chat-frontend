@@ -106,16 +106,41 @@ describe('user_storage slot addressing', () => {
 		expect(await em.loadUserProfile()).toMatchObject({ name: 'Renamed', notes: 'n' });
 	});
 
-	// Fresh device: the account exists but nothing has been stored yet, so
-	// the root record has to be materialized before any slot can be recorded.
-	it('creates the root record on the first profile read', async () => {
+	// Reading must not write. On a second device the shape has not delivered
+	// the existing row yet, so an empty root written here would carry a fresh
+	// owner_timestamp and beat the real profile under last-write-wins —
+	// silently destroying it.
+	it('creates nothing when the profile is read on an account that has none', async () => {
 		const em = await login();
 		rows = new Map();
 		expect(await em.loadUserProfile()).toBe(null);
-		expect(rows.size).toBe(1);
-		// and it is usable straight away
+		expect(rows.size).toBe(0);
+	});
+
+	it('creates the root record on the write path instead', async () => {
+		const em = await login();
+		rows = new Map();
 		await em.updateContacts([{ hash: 'peer' }]);
+		// the contacts row and the root record holding its address
+		expect(rows.size).toBe(2);
 		expect(await em.loadContacts()).toEqual([{ hash: 'peer' }]);
+	});
+
+	// EncryptionManagerPQ is a singleton, so the resolver cache outlives a
+	// session. Signing in as someone else without logging out first must not
+	// resolve this account's slot names against the previous account's
+	// addresses — that would write contacts into a stranger's row.
+	it('does not carry slot addresses across an account switch', async () => {
+		const first = await login();
+		await first.updateContacts([{ hash: 'first-peer' }]);
+		const firstAddresses = new Set(rows.keys());
+
+		rows = new Map();
+		const second = await login();
+		await second.updateContacts([{ hash: 'second-peer' }]);
+
+		for (const uuid of rows.keys()) expect(firstAddresses.has(uuid)).toBe(false);
+		expect(await second.loadContacts()).toEqual([{ hash: 'second-peer' }]);
 	});
 
 	it('writes contacts once and reuses that address on later saves', async () => {

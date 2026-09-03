@@ -127,10 +127,12 @@ export interface UpsertOptions {
 	valueB64: string;
 	hashB64: string | null;
 	signSkey: Uint8Array | null;
+	/** Signed tombstone. Deletion is a new signed revision, never a server-side op. */
+	deletedFlag?: boolean;
 }
 
 async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult> {
-	const { userHash, uuid, valueB64, hashB64, signSkey } = opts;
+	const { userHash, uuid, valueB64, hashB64, signSkey, deletedFlag = false } = opts;
 	const key = kvKey(userHash, uuid);
 
 	const [local, server] = await Promise.all([getLocalEntry(userHash, uuid), getServerState(userHash, uuid)]);
@@ -148,7 +150,7 @@ async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult
 			user_hash: userHash,
 			uuid,
 			value_b64: valueB64,
-			deleted_flag: false,
+			deleted_flag: deletedFlag,
 			parent_sign_hash: local?.row.parent_sign_hash ?? null,
 			sign_hash: null,
 			owner_timestamp: nextOwnerTimestamp(tsOf(local?.row)),
@@ -168,7 +170,7 @@ async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult
 
 	const mutation = api.createStorageMutation(
 		userHash, uuid, valueB64, null, 0, ownerTimestamp,
-		signSkey, false, false, parentSignHash, null, null, mutationType
+		signSkey, false, deletedFlag, parentSignHash, null, null, mutationType
 	);
 	const wire = (mutation.type === 'insert' ? mutation.modified : mutation.changes) as Record<string, unknown>;
 
@@ -176,7 +178,7 @@ async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult
 		user_hash: userHash,
 		uuid,
 		value_b64: valueB64,
-		deleted_flag: false,
+		deleted_flag: deletedFlag,
 		parent_sign_hash: parentSignHash,
 		sign_hash: (wire.sign_hash as string) ?? null,
 		owner_timestamp: ownerTimestamp,

@@ -53,36 +53,46 @@ export function createSlotResolver(access: RootAccess) {
 	};
 
 	/**
-	 * Address of a slot, creating it on first use.
+	 * Writes to a named slot, creating it on first use.
 	 *
-	 * Two tabs can reach this at the same moment and both see the slot
-	 * missing. Writes are serialized in-process, but a second tab is a
-	 * separate process: after writing we re-read the map, and if another
-	 * writer won we adopt their uuid and report ours as orphaned rather than
-	 * letting the two tabs address different rows.
+	 * The slot row is written before the map entry, and the caller's write is
+	 * awaited through the shape barrier. The map must never name a row that
+	 * does not exist: a reader that resolves an address and finds nothing has
+	 * to treat it as corruption, so a crash between the two writes would turn
+	 * into a hard error. The other order leaves an unreferenced row instead —
+	 * invisible and collectable.
+	 *
+	 * Two clients can both find the slot missing and mint different uuids.
+	 * Writes serialize in-process only, so after committing the map we re-read
+	 * it; if another writer won, we adopt their address and hand ours back as
+	 * orphaned for the caller to tombstone.
 	 */
 	const ensureSlotUuid = async (
 		name: string,
-		mintUuid: () => string,
+		{ mint, writeRow }: { mint: () => string; writeRow: (uuid: string) => Promise<void> },
 	): Promise<{ uuid: string; created: boolean; orphaned?: string }> =>
 		serialize(async () => {
-			const existing = (await loadMap())[name];
-			if (existing) return { uuid: existing, created: false };
+			const known = (await loadMap())[name];
+			if (known) {
+				await writeRow(known);
+				return { uuid: known, created: false };
+			}
 
 			const root = (await access.read()) ?? {};
 			const beforeWrite = root.slots?.[name];
 			if (beforeWrite) {
 				cached = root.slots ?? {};
+				await writeRow(beforeWrite);
 				return { uuid: beforeWrite, created: false };
 			}
 
-			const uuid = mintUuid();
+			const uuid = mint();
+			await writeRow(uuid);
+
 			const nextSlots = { ...(root.slots ?? {}), [name]: uuid };
 			await access.write({ ...root, slots: nextSlots });
 			cached = nextSlots;
 
-			// Re-read through the write barrier: another tab may have committed
-			// its own uuid for this name in the meantime.
 			const confirmed = (await access.read())?.slots?.[name];
 			if (confirmed && confirmed !== uuid) {
 				cached = { ...nextSlots, [name]: confirmed };
