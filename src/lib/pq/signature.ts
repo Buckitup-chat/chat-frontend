@@ -36,14 +36,28 @@ export const toBase64 = (bytes: Uint8Array): string => {
 	return btoa(binary);
 };
 
+/**
+ * Restores stripped '=' padding.
+ *
+ * The canonical payload uses padded base64 (the server builds it with
+ * Elixir's Base.encode64/1), but the Electric shape endpoint serves binary
+ * columns unpadded. Verified against buckitup.xyz: of 30 live user_cards,
+ * none verify as served and all 30 verify once repadded — the only row that
+ * actually differs is one whose byte length is not a multiple of 3, e.g.
+ * ML-KEM-1024 crypt_pkey at 1568 bytes. Normalizing here means a caller
+ * cannot forget it on the receive path.
+ */
+export const padBase64 = (b64: string): string => b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+
 export const fromBase64 = (b64: string): Uint8Array =>
-	Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+	Uint8Array.from(atob(padBase64(b64)), (c) => c.charCodeAt(0));
 
 const encodeBase64Value = (value: SignableValue): string => {
 	if (value === null || value === undefined) return 'null';
-	// Rows carry these already base64-encoded (padded); raw bytes appear only
-	// when signing a value that has not been through the wire yet.
-	if (typeof value === 'string') return value;
+	// Rows carry these already base64-encoded; raw bytes appear only when
+	// signing a value that has not been through the wire yet. Padding is
+	// normalized because the read path serves it stripped (see padBase64).
+	if (typeof value === 'string') return padBase64(value);
 	return toBase64(value as Uint8Array);
 };
 

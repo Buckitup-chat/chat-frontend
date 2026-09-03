@@ -9,6 +9,7 @@ import {
 	verifyFields,
 	deriveSignHash,
 	toBase64,
+	padBase64,
 } from '@/lib/pq/signature';
 
 // The payload is a wire contract with the Elixir server
@@ -144,5 +145,36 @@ describe('deriveSignHash', () => {
 	it('produces the shape the server CHECK constraint enforces', () => {
 		expect(deriveSignHash('dms_', signB64)).toMatch(/^dms_[a-f0-9]{128}$/);
 		expect(deriveSignHash('uss_', signB64)).toMatch(/^uss_[a-f0-9]{128}$/);
+	});
+});
+
+// The Electric shape endpoint serves binary columns as unpadded base64 while
+// the payload the server signed used padded base64. Confirmed against
+// buckitup.xyz: 30 of 30 live user_cards fail verification as served and pass
+// once repadded. Without normalization every replicated row would look forged.
+describe('base64 padding on the read path', () => {
+	it('restores stripped padding', () => {
+		expect(padBase64('q80BAg')).toBe('q80BAg==');
+		expect(padBase64('q80B')).toBe('q80B');
+		expect(padBase64('q80=')).toBe('q80=');
+	});
+
+	it('encodes a stripped and a padded binary column identically', () => {
+		expect(encodeField('crypt_pkey', 'q80BAg')).toBe(encodeField('crypt_pkey', 'q80BAg=='));
+	});
+
+	it('verifies a row whose binary columns arrived unpadded', () => {
+		const keys = ml_dsa87.keygen(new Uint8Array(32).fill(3));
+		// 4 bytes -> base64 with padding; the wire form drops it
+		const blob = new Uint8Array([171, 205, 1, 2]);
+		const signed = { user_hash: 'u_ab', crypt_pkey: blob, owner_timestamp: 1 };
+		const signB64 = signFields(signed, keys.secretKey);
+
+		const asServed = {
+			user_hash: 'u_ab',
+			crypt_pkey: toBase64(blob).replace(/=+$/, ''),
+			owner_timestamp: 1,
+		};
+		expect(verifyFields(asServed, signB64.replace(/=+$/, ''), toBase64(keys.publicKey).replace(/=+$/, ''))).toBe(true);
 	});
 });
