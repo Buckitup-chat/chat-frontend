@@ -58,14 +58,17 @@ const makeMessage = (author: typeof alice, refs: Record<string, string>, tweak: 
 };
 
 /** Gate wired to plaintext refs carried beside each row (no AES in these tests). */
+// refs are keyed by REVISION: two revisions of one message (an edit) carry
+// different refs maps, and keying by message_id would hand every revision the
+// last one's map.
 const makeGate = (opts: { cards?: Record<string, string>; refsOf: Map<string, Record<string, string> | 'no_key' | 'error'> }) =>
 	createDialogGate({
 		resolveSignPkey: async (userHash) => opts.cards?.[userHash] ?? null,
-		decryptRefs: async (row) => opts.refsOf.get(row.message_id) ?? {},
+		decryptRefs: async (row) => opts.refsOf.get(row.sign_hash ?? row.message_id) ?? {},
 	});
 
 const gateWith = (...msgs: ReturnType<typeof makeMessage>[]) => {
-	const refsOf = new Map(msgs.map((m) => [m.row.message_id, m.refs] as const));
+	const refsOf = new Map(msgs.map((m) => [m.row.sign_hash!, m.refs] as const));
 	return makeGate({
 		cards: { [alice.userHash]: alice.signPkeyB64, [bob.userHash]: bob.signPkeyB64 },
 		refsOf,
@@ -124,7 +127,7 @@ describe('dialog gate — signature admission (T-INTEGRITY)', () => {
 		const g = makeMessage(alice, {});
 		const gate = makeGate({
 			cards: { [alice.userHash]: bob.signPkeyB64 },
-			refsOf: new Map([[g.row.message_id, {}]]),
+			refsOf: new Map([[g.row.sign_hash!, {}]]),
 		});
 		expect(await gate.admit(g.row)).toMatchObject({ status: 'invalid', reason: 'bad_signature' });
 	});
@@ -181,13 +184,35 @@ describe('dialog gate — causal rules (T-DAG)', () => {
 		const parent = makeMessage(alice, {});
 		const child = makeMessage(bob, { [parent.row.message_id]: parent.row.sign_hash! });
 		const refsOf = new Map<string, Record<string, string> | 'no_key' | 'error'>([
-			[parent.row.message_id, 'no_key'],
-			[child.row.message_id, child.refs],
+			[parent.row.sign_hash!, 'no_key'],
+			[child.row.sign_hash!, child.refs],
 		]);
 		const gate = makeGate({ cards: { [alice.userHash]: alice.signPkeyB64, [bob.userHash]: bob.signPkeyB64 }, refsOf });
 		expect((await gate.admit(child.row)).status).toBe('waiting');
 		expect((await gate.admit(parent.row)).status).toBe('verified');
 		expect(gate.isAdmitted(child.row.message_id, child.row.sign_hash!)).toBe(true);
+	});
+
+	// The live bug: an edit archives the old revision into
+	// dialog_messages_versions and the tip carries a new sign_hash — every
+	// message whose refs pinned the pre-edit revision then waits forever
+	// unless archived revisions count as known.
+	it('resolves refs against an archived revision fed from the versions shape', async () => {
+		const original = makeMessage(alice, {});                     // genesis, later edited
+		const reply = makeMessage(bob, { [original.row.message_id]: original.row.sign_hash! });
+		// the edited tip: same message_id, new sign_hash, refs recomputed
+		const edited = makeMessage(alice, { [reply.row.message_id]: reply.row.sign_hash! },
+			{ message_id: original.row.message_id, parent_sign_hash: original.row.sign_hash! });
+		const gate = gateWith(original, reply, edited);
+
+		// tips arriving: only the edited revision and the reply exist as tips
+		expect((await gate.admit(reply.row)).status).toBe('waiting');   // pins the archived revision
+		expect((await gate.admit(edited.row)).status).toBe('waiting');  // pins the reply
+
+		// the versions shape delivers the archived revision → the chain drains
+		expect((await gate.admit(original.row)).status).toBe('verified');
+		expect(gate.isAdmitted(reply.row.message_id, reply.row.sign_hash!)).toBe(true);
+		expect(gate.isAdmitted(edited.row.message_id, edited.row.sign_hash!)).toBe(true);
 	});
 
 	it('drains a whole chain delivered in reverse order', async () => {
@@ -223,7 +248,7 @@ describe('dialog gate — cards and keys as dependencies', () => {
 	it('parks a message until its author card verifies, then admits it', async () => {
 		const g = makeMessage(alice, {});
 		const cards: Record<string, string> = {};
-		const gate = makeGate({ cards, refsOf: new Map([[g.row.message_id, {}]]) });
+		const gate = makeGate({ cards, refsOf: new Map([[g.row.sign_hash!, {}]]) });
 
 		expect(await gate.admit(g.row)).toMatchObject({ status: 'waiting', missingCard: alice.userHash });
 
@@ -238,7 +263,7 @@ describe('dialog gate — cards and keys as dependencies', () => {
 		const g = makeMessage(alice, {});
 		const gate = makeGate({
 			cards: { [alice.userHash]: alice.signPkeyB64 },
-			refsOf: new Map([[g.row.message_id, 'no_key']]),
+			refsOf: new Map([[g.row.sign_hash!, 'no_key']]),
 		});
 		expect(await gate.admit(g.row)).toMatchObject({ status: 'verified', dagVerified: false });
 	});
@@ -247,7 +272,7 @@ describe('dialog gate — cards and keys as dependencies', () => {
 		const g = makeMessage(alice, {});
 		const gate = makeGate({
 			cards: { [alice.userHash]: alice.signPkeyB64 },
-			refsOf: new Map([[g.row.message_id, 'error']]),
+			refsOf: new Map([[g.row.sign_hash!, 'error']]),
 		});
 		expect(await gate.admit(g.row)).toMatchObject({ status: 'invalid', reason: 'refs_decrypt_failed' });
 	});
@@ -283,7 +308,7 @@ describe('author cards in a different binary encoding', () => {
 		expect(verdict.status).toBe('verified');
 		const gate = makeGate({
 			cards: { [alice.userHash]: (verdict as { card: { signPkeyB64: string } }).card.signPkeyB64 },
-			refsOf: new Map([[g.row.message_id, {}]]),
+			refsOf: new Map([[g.row.sign_hash!, {}]]),
 		});
 		expect(await gate.admit(g.row)).toMatchObject({ status: 'verified', isGenesis: true });
 	});

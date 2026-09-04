@@ -245,6 +245,21 @@ const versionCountByMsgId = computed(() => {
     return out;
 });
 
+// Archived revisions are known revisions. An edit moves the old revision
+// into the versions table and gives the tip a new sign_hash — refs that
+// pinned the pre-edit revision would otherwise wait forever for a row that
+// no longer exists among the tips. Feeding versions through the gate lets
+// those refs resolve and drains whatever was parked on them; the decrypt
+// pass then reconciles any entry still marked waiting.
+watch(() => rawVersions.value, async (rows) => {
+    if (!rows?.length) return;
+    for (const row of rows) {
+        try { await $dialogs.admitMessageRow(row); }
+        catch (e) { console.warn('Version admission failed:', row.message_id, e); }
+    }
+    if (rawMessages.value?.length) scheduleDecrypt(rawMessages.value);
+}, { immediate: true });
+
 const historiesByMsgId = ref({});
 const handleShowHistory = async (messageId) => {
     if (historiesByMsgId.value[messageId]) return; // loaded; ChatWindow just toggles
