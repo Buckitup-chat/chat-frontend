@@ -1,9 +1,10 @@
 import { createCollection, localOnlyCollectionOptions } from "@tanstack/db";
 import type { ChangeMessage, WithVirtualProps } from "@tanstack/db";
 import { electricCollectionOptions } from "@tanstack/electric-db-collection";
+import { electricPersistenceReady, withElectricPersistence } from "./electricPersistence";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
-import type { UserCardFields, UserStorageFields, QueueEntry } from "./userQueue";
+import type { UserCardFields, UserStorageFields } from "./userQueue";
 
 type UserCardRow = UserCardFields & Record<string, unknown>;
 type UserStorageRow = UserStorageFields & Record<string, unknown>;
@@ -55,26 +56,32 @@ export function deriveStorageUuid(logicalUuid: string) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
+await electricPersistenceReady;
+
 export const userCardsCollection = createCollection(
-  electricCollectionOptions<UserCardRow>({
-    id: "user_cards",
-    shapeOptions: {
-      url: absUrl("/user_card"),
-      params: { table: "user_cards" },
-    },
-    getKey: (item) => item.user_hash,
-  })
+  withElectricPersistence(
+    electricCollectionOptions<UserCardRow>({
+      id: "user_cards",
+      shapeOptions: {
+        url: absUrl("/user_card"),
+        params: { table: "user_cards" },
+      },
+      getKey: (item) => item.user_hash,
+    })
+  )
 );
 
 export const userStorageCollection = createCollection(
-  electricCollectionOptions<UserStorageRow>({
-    id: "user_storage",
-    shapeOptions: {
-      url: absUrl("/user_storage"),
-      params: { table: "user_storage" },
-    },
-    getKey: (item) => storageKey(item.user_hash, item.uuid),
-  })
+  withElectricPersistence(
+    electricCollectionOptions<UserStorageRow>({
+      id: "user_storage",
+      shapeOptions: {
+        url: absUrl("/user_storage"),
+        params: { table: "user_storage" },
+      },
+      getKey: (item) => storageKey(item.user_hash, item.uuid),
+    })
+  )
 );
 
 export const previewUserCardsCollection = createCollection(
