@@ -1,6 +1,7 @@
 import { createCollection, localOnlyCollectionOptions } from "@tanstack/db";
 import type { ChangeMessage, WithVirtualProps } from "@tanstack/db";
 import { electricCollectionOptions } from "@tanstack/electric-db-collection";
+import { electricPersistenceReady, withElectricPersistence } from "./electricPersistence";
 import type { DialogKeysFields, DialogMessageFields, DialogReactionFields, DialogReceiptFields } from "./dialogQueue";
 import {
   pendingDialogKeysCollection,
@@ -47,9 +48,23 @@ import {
   compareByOwnerTimestamp,
   formatMessageTime,
   preferAckedCache,
+  getDialogMessageCreatedAtMs,
+  getDialogMessageDisplayTimestamp,
+  isDialogMessageEdited,
 } from "./dialogDisplay";
 
-export { mergeDialogMessagesForDisplay, mergeDialogReactionsForDisplay, isDialogMessagePending, shouldRedecryptMessage, compareByOwnerTimestamp, formatMessageTime, preferAckedCache };
+export {
+  mergeDialogMessagesForDisplay,
+  mergeDialogReactionsForDisplay,
+  isDialogMessagePending,
+  shouldRedecryptMessage,
+  compareByOwnerTimestamp,
+  formatMessageTime,
+  preferAckedCache,
+  getDialogMessageCreatedAtMs,
+  getDialogMessageDisplayTimestamp,
+  isDialogMessageEdited,
+};
 
 type DialogKeysRow = DialogKeysFields & Record<string, unknown>;
 type DialogMessageRow = DialogMessageFields & Record<string, unknown>;
@@ -69,44 +84,54 @@ function shapeErrorHandler(table: string) {
 
 const dialogSyncDisabled = isDialogShapeSyncDisabled();
 
+if (!dialogSyncDisabled) await electricPersistenceReady;
+
 export const dialogKeysCollection = dialogSyncDisabled
   ? createCollection(localOnlyCollectionOptions<DialogKeysRow>({ id: "dialog_keys", getKey: (item) => `${item.dialog_hash}:${item.sender_hash}` }))
   : createCollection(
-      electricCollectionOptions<DialogKeysRow>({
-        id: "dialog_keys",
-        shapeOptions: { url: absUrl("/dialog_key"), params: { table: "dialog_keys" }, onError: shapeErrorHandler("dialog_keys") },
-        getKey: (item) => `${item.dialog_hash}:${item.sender_hash}`,
-      })
+      withElectricPersistence(
+        electricCollectionOptions<DialogKeysRow>({
+          id: "dialog_keys",
+          shapeOptions: { url: absUrl("/dialog_key"), params: { table: "dialog_keys" }, onError: shapeErrorHandler("dialog_keys") },
+          getKey: (item) => `${item.dialog_hash}:${item.sender_hash}`,
+        })
+      )
     );
 
 export const dialogMessagesCollection = dialogSyncDisabled
   ? createCollection(localOnlyCollectionOptions<DialogMessageRow>({ id: "dialog_messages", getKey: (item) => item.message_id }))
   : createCollection(
-      electricCollectionOptions<DialogMessageRow>({
-        id: "dialog_messages",
-        shapeOptions: { url: absUrl("/dialog_message"), params: { table: "dialog_messages" }, onError: shapeErrorHandler("dialog_messages") },
-        getKey: (item) => item.message_id,
-      })
+      withElectricPersistence(
+        electricCollectionOptions<DialogMessageRow>({
+          id: "dialog_messages",
+          shapeOptions: { url: absUrl("/dialog_message"), params: { table: "dialog_messages" }, onError: shapeErrorHandler("dialog_messages") },
+          getKey: (item) => item.message_id,
+        })
+      )
     );
 
 export const dialogMessageReactionsCollection = dialogSyncDisabled
   ? createCollection(localOnlyCollectionOptions<DialogReactionRow>({ id: "dialog_message_reactions", getKey: (item) => item.reaction_hash }))
   : createCollection(
-      electricCollectionOptions<DialogReactionRow>({
-        id: "dialog_message_reactions",
-        shapeOptions: { url: absUrl("/dialog_message_reaction"), params: { table: "dialog_message_reactions" }, onError: shapeErrorHandler("dialog_message_reactions") },
-        getKey: (item) => item.reaction_hash,
-      })
+      withElectricPersistence(
+        electricCollectionOptions<DialogReactionRow>({
+          id: "dialog_message_reactions",
+          shapeOptions: { url: absUrl("/dialog_message_reaction"), params: { table: "dialog_message_reactions" }, onError: shapeErrorHandler("dialog_message_reactions") },
+          getKey: (item) => item.reaction_hash,
+        })
+      )
     );
 
 export const dialogMessageReceiptsCollection = dialogSyncDisabled
   ? createCollection(localOnlyCollectionOptions<DialogReceiptRow>({ id: "dialog_message_receipts", getKey: (item) => item.receipt_hash }))
   : createCollection(
-      electricCollectionOptions<DialogReceiptRow>({
-        id: "dialog_message_receipts",
-        shapeOptions: { url: absUrl("/dialog_message_receipt"), params: { table: "dialog_message_receipts" }, onError: shapeErrorHandler("dialog_message_receipts") },
-        getKey: (item) => item.receipt_hash,
-      })
+      withElectricPersistence(
+        electricCollectionOptions<DialogReceiptRow>({
+          id: "dialog_message_receipts",
+          shapeOptions: { url: absUrl("/dialog_message_receipt"), params: { table: "dialog_message_receipts" }, onError: shapeErrorHandler("dialog_message_receipts") },
+          getKey: (item) => item.receipt_hash,
+        })
+      )
     );
 
 setSyncedRecorder(recordSynced);

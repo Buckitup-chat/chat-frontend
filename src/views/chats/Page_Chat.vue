@@ -31,8 +31,11 @@ import {
     shouldRedecryptMessage,
     compareByOwnerTimestamp,
     formatMessageTime,
+    getDialogMessageDisplayTimestamp,
+    isDialogMessageEdited,
 } from '@/utils/db/tanstack/dialog';
 import { v7 as uuidv7 } from 'uuid';
+import { createCoalescingRunScheduler } from '@/composables/useCoalescingRunScheduler';
 
 ensureDialogReady();
 
@@ -76,7 +79,6 @@ const syncStatusFor = (messageId) => (isDialogMessagePending(messageId, pendingM
 
 const decryptedMessages = ref([]);
 const messageCache = new Map();
-let decryptTimer = null;
 
 watch(dialogHash, () => { messageCache.clear(); });
 
@@ -90,48 +92,57 @@ const rebuildDecryptedMessages = (newRows) => {
     decryptedMessages.value = out;
 };
 
-watch(() => rawMessages.value, (newRows, _, onCleanup) => {
-    if (!newRows) return;
+const decryptScheduler = createCoalescingRunScheduler(runDecryptPass, { delayMs: 200 });
 
-    // Update sync status on cached entries immediately, re-render
+async function runDecryptPass() {
+    const newRows = rawMessages.value;
+    if (!newRows) return;
+    const runDialogHash = dialogHash.value;
+
+    const pending = [];
+    for (const row of newRows) {
+        if (row.deleted_flag) continue;
+        const cached = messageCache.get(row.message_id);
+        if (shouldRedecryptMessage(cached, row)) pending.push(row);
+    }
+
+    if (pending.length > 0) {
+        const name = chatName.value;
+        await Promise.all(pending.map(async (row) => {
+            const decrypted = await $dialogs.decryptMessageRow(row);
+            const syncStatus = syncStatusFor(row.message_id);
+            messageCache.set(row.message_id, {
+                id: row.message_id,
+                text: decrypted.text,
+                authorName: decrypted.isMine ? 'Me' : name,
+                isMine: decrypted.isMine,
+                timestamp: formatMessageTime(getDialogMessageDisplayTimestamp(row)),
+                isEdited: isDialogMessageEdited(row),
+                _syncStatus: syncStatus,
+                _contentB64: row.content_b64,
+                _raw: row
+            });
+        }));
+    }
+
+    if (dialogHash.value !== runDialogHash) return;
+
+    rebuildDecryptedMessages(newRows);
+}
+
+watch(() => rawMessages.value, (newRows) => {
+    if (!newRows) return;
+    
     for (const row of newRows) {
         const cached = messageCache.get(row.message_id);
         if (cached) {
             cached._syncStatus = syncStatusFor(row.message_id);
+            cached.isEdited = isDialogMessageEdited(row);
         }
     }
     rebuildDecryptedMessages(newRows);
 
-    if (decryptTimer) clearTimeout(decryptTimer);
-    decryptTimer = setTimeout(async () => {
-        const pending = [];
-        for (const row of newRows) {
-            if (row.deleted_flag) continue;
-            const cached = messageCache.get(row.message_id);
-            if (shouldRedecryptMessage(cached, row)) pending.push(row);
-        }
-
-        if (pending.length > 0) {
-            const name = chatName.value;
-            await Promise.all(pending.map(async (row) => {
-                const decrypted = await $dialogs.decryptMessageRow(row);
-                const syncStatus = syncStatusFor(row.message_id);
-                messageCache.set(row.message_id, {
-                    id: row.message_id,
-                    text: decrypted.text,
-                    authorName: decrypted.isMine ? 'Me' : name,
-                    isMine: decrypted.isMine,
-                    timestamp: formatMessageTime(row.owner_timestamp),
-                    _syncStatus: syncStatus,
-                    _contentB64: row.content_b64,
-                    _raw: row
-                });
-            }));
-        }
-
-        rebuildDecryptedMessages(newRows);
-    }, 200);
-    onCleanup(() => { if (decryptTimer) { clearTimeout(decryptTimer); decryptTimer = null; } });
+    decryptScheduler.schedule();
 }, { immediate: true });
 
 const { data: networkReactions } = useLiveQuery(dialogMessageReactionsCollection);

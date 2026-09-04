@@ -347,6 +347,16 @@ async function putPending(
 
   const { current: existing, outcome } = await atomicMutate(id, (existing) => {
     const revision = (existing?.revision || 0) + 1;
+
+    let incomingRecord = record;
+    if (table === "dialog_messages" && existing?.status === "pending" && existing.record.parent_sign_hash) {
+      incomingRecord = {
+        ...record,
+        parent_sign_hash: existing.record.parent_sign_hash,
+        owner_timestamp: existing.record.owner_timestamp,
+      };
+    }
+
     return {
       action: "put",
       entry: {
@@ -354,8 +364,8 @@ async function putPending(
         table,
         key,
         ownerUserHash,
-        record: { ...existing?.record, ...record },
-        patch: { ...existing?.patch, ...(patch ?? record) },
+        record: { ...existing?.record, ...incomingRecord },
+        patch: { ...existing?.patch, ...(patch ?? incomingRecord) },
         status: "pending",
         revision,
         sentSnapshot: existing?.sentSnapshot ?? null,
@@ -422,22 +432,46 @@ export function setSyncedRecorder(recorder: SyncedRecorder | null) {
   syncedRecorder = recorder;
 }
 
-export async function markSynced(entry: QueueEntry, ignoreEchoSignHash?: string) {
+export async function markSynced(entry: QueueEntry, ignoreEchoSignHash?: string, confirmedSnapshot?: DialogRecordFields) {
   const current = await dbGet(entry.id);
   if (!current) return;
-  await syncedRecorder?.(current.table, current.key, localSnapshotOf(current), true, ignoreEchoSignHash);
-
   const { outcome } = await atomicMutate(entry.id, (c) => {
     if (!c) return { action: "noop" };
+    if (c.revision !== entry.revision) {
+      if (entry.table === "dialog_messages" && c.status === "pending" && c.record.parent_sign_hash && confirmedSnapshot?.sign_hash) {
+        const confirmedTs = Number(confirmedSnapshot.owner_timestamp ?? 0);
+        const rebasedRecord: DialogRecordFields = {
+          ...c.record,
+          parent_sign_hash: confirmedSnapshot.sign_hash,
+          owner_timestamp: Math.max(Number(c.record.owner_timestamp ?? 0), confirmedTs + 1),
+        };
+        return {
+          action: "put",
+          entry: {
+            ...c,
+            record: rebasedRecord,
+            patch: { ...c.patch, parent_sign_hash: rebasedRecord.parent_sign_hash, owner_timestamp: rebasedRecord.owner_timestamp },
+          },
+        };
+      }
+      return { action: "noop" };
+    }
     return { action: "delete" };
   });
+
+  if (outcome.action === "put") {
+    applyToOverlay(entry.table, outcome.entry.record);
+    return;
+  }
   if (outcome.action !== "delete") return;
+
+  await syncedRecorder?.(current.table, current.key, localSnapshotOf(current), true, ignoreEchoSignHash);
   transitionStatus(current.status, null);
   removeFromOverlay(current.table, current.key);
 }
 
 function localSnapshotOf(current: QueueEntry): DialogRecordFields {
-  const resolved = resolvePendingDialogRecord(current.patch ?? current.record, current.sentSnapshot);
+  const resolved = resolvePendingDialogRecord(current.table, current.patch ?? current.record, current.sentSnapshot);
   return {
     ...resolved.record,
     sign_b64: resolved.record.sign_b64 ?? null,
@@ -467,11 +501,14 @@ export function computeLocalSignHash(record: { sign_hash?: string | null; sign_b
 export type ResolvedPendingDialogRecord = { ready: true; record: DialogRecordFields; mutationType: MutationType };
 
 export function resolvePendingDialogRecord(
+  table: DialogTable,
   patch: Partial<DialogRecordFields>,
   priorConfirmed: DialogRecordFields | null | undefined
 ): ResolvedPendingDialogRecord {
   const record: DialogRecordFields = { ...priorConfirmed, ...patch };
-  return { ready: true, record, mutationType: record.deleted_flag ? "update" : "insert" };
+  const mutationType: MutationType =
+    table === "dialog_messages" ? (record.parent_sign_hash ? "update" : "insert") : record.deleted_flag ? "update" : "insert";
+  return { ready: true, record, mutationType };
 }
 
 interface ValidationResult {
@@ -554,12 +591,23 @@ function protocolFieldsFor(table: DialogTable): readonly string[] {
   }
 }
 
+function normalizeProtocolValue(field: string, value: unknown): unknown {
+  if (field === "owner_timestamp" && typeof value === "bigint") {
+    const normalized = Number(value);
+    if (!Number.isSafeInteger(normalized)) {
+      throw new Error(`[dialogQueue] owner_timestamp is outside JSON-safe integer range: ${value}`);
+    }
+    return normalized;
+  }
+  return value;
+}
+
 export function toProtocolRecord(table: DialogTable, record: DialogRecordFields): DialogRecordFields {
   const fields = protocolFieldsFor(table);
   const clean: Record<string, unknown> = {};
   const source = record as unknown as Record<string, unknown>;
   for (const field of fields) {
-    if (field in source) clean[field] = source[field];
+    if (field in source) clean[field] = normalizeProtocolValue(field, source[field]);
   }
   return clean as DialogRecordFields;
 }
@@ -614,17 +662,18 @@ export function withLockedFields(base: DialogRecordFields | null | undefined, me
 }
 
 async function quarantine(entry: QueueEntry, reason: string) {
-  const current = await dbGet(entry.id);
-  if (!current) return;
-  await syncedRecorder?.(current.table, current.key, localSnapshotOf(current), true);
-
-  const { outcome } = await atomicMutate(entry.id, (c) => {
-    if (!c) return { action: "noop" };
+  const { current, outcome } = await atomicMutate(entry.id, (c) => {
+    if (!c || c.revision !== entry.revision) return { action: "noop" };
     return { action: "put", entry: { ...c, status: "quarantined", lastError: reason } };
   });
-  if (outcome.action !== "put") return;
+  if (outcome.action !== "put" || !current) return;
+  const isRejectedDialogMessageEdit = entry.table === "dialog_messages" && Boolean(current.record.parent_sign_hash);
+  if (!isRejectedDialogMessageEdit) {
+    await syncedRecorder?.(entry.table, entry.key, localSnapshotOf(current), true);
+  }
+
   transitionStatus(current.status, "quarantined");
-  removeFromOverlay(current.table, current.key);
+  removeFromOverlay(entry.table, entry.key);
 }
 
 let failStreak = 0;
@@ -661,13 +710,14 @@ export async function flushPendingDialogChanges(signSkey: Uint8Array | null | un
   try {
     const mutations: ApiMutation[] = [];
     const mutationEntries: QueueEntry[] = [];
+    const mutationSentSnapshots: DialogRecordFields[] = [];
 
     let mutationCount = 0;
 
     for (const entry of entries) {
       if (++mutationCount % 50 === 0) await new Promise((r) => setTimeout(r, 0));
 
-      const resolved = resolvePendingDialogRecord(entry.patch ?? entry.record, entry.sentSnapshot);
+      const resolved = resolvePendingDialogRecord(entry.table, entry.patch ?? entry.record, entry.sentSnapshot);
 
       const v = validateDialogRecord(entry.table, resolved.record);
       if (!v.ok) {
@@ -675,9 +725,10 @@ export async function flushPendingDialogChanges(signSkey: Uint8Array | null | un
         await quarantine(entry, v.reason || "invalid");
         continue;
       }
-      const { mutation } = buildDialogMutation(entry.table, resolved.record, resolved.mutationType, signSkey);
+      const { mutation, sentSnapshot } = buildDialogMutation(entry.table, resolved.record, resolved.mutationType, signSkey);
       mutations.push(mutation);
       mutationEntries.push(entry);
+      mutationSentSnapshots.push(sentSnapshot);
     }
 
     if (mutations.length === 0) return;
@@ -696,28 +747,32 @@ export async function flushPendingDialogChanges(signSkey: Uint8Array | null | un
       return { retryAfterMs: nextBackoffDelay() };
     }
 
-    if (body.results.every((r) => r.status === "ok")) {
-      const currentlyPending = (await dbGetAll()).filter((e) => e.status === "pending" && e.ownerUserHash === ownerUserHash);
-      for (const entry of currentlyPending) {
-        await markSynced(entry);
-      }
-      resetBackoff();
-      return;
-    }
-
-    let toRetry = 0;
+     let toRetry = 0;
 
     for (const r of body.results) {
-      const entry = mutationEntries[r?.index as number];
+      const index = r?.index as number;
+      const entry = mutationEntries[index];
       if (!entry) continue;
+      const sentSnapshot = mutationSentSnapshots[index];
 
       if (r.status === "ok") {
-        await markSynced(entry);
+        await markSynced(entry, undefined, sentSnapshot);
       } else if (isAlreadyExistsError(r)) {
-        const parentSignHash = entry.table === "dialog_messages" ? resolvePendingDialogRecord(entry.patch ?? entry.record, entry.sentSnapshot).record.parent_sign_hash : null;
-        await markSynced(entry, parentSignHash ?? undefined);
+        const parentSignHash = entry.table === "dialog_messages" ? resolvePendingDialogRecord(entry.table, entry.patch ?? entry.record, entry.sentSnapshot).record.parent_sign_hash : null;
+        await markSynced(entry, parentSignHash ?? undefined, sentSnapshot);
       } else if (r.error === "validation_failed") {
         console.error(`[dialogQueue] Mutation for ${entry.table} ${entry.key} permanently rejected, quarantined locally:`, JSON.stringify(r.details || r));
+        if (import.meta.env.DEV && entry.table === "dialog_messages") {
+          const rejected = resolvePendingDialogRecord(entry.table, entry.patch ?? entry.record, entry.sentSnapshot).record;
+          const parentPrefix = typeof rejected.parent_sign_hash === "string" ? rejected.parent_sign_hash.slice(0, 12) : rejected.parent_sign_hash;
+          console.error("[dialogQueue][dev] rejected dialog_messages edit:", {
+            message_id: entry.key,
+            revision: entry.revision,
+            owner_timestamp: rejected.owner_timestamp,
+            parent_sign_hash_prefix: parentPrefix,
+            backend_details: r.details ?? r.error,
+          });
+        }
         await quarantine(entry, r.error);
       } else {
         toRetry++;
@@ -754,9 +809,13 @@ export function createFlushScheduler(
   let running = false;
   let backoffUntil = 0;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let rerunRequested = false;
 
   async function attempt(): Promise<void> {
-    if (running) return;
+    if (running) {
+      rerunRequested = true;
+      return;
+    }
     if (backoffUntil - now() > 0) return;
     running = true;
     try {
@@ -764,6 +823,10 @@ export function createFlushScheduler(
       backoffUntil = "retryAfterMs" in result && result.retryAfterMs ? now() + result.retryAfterMs : 0;
     } finally {
       running = false;
+      if (rerunRequested) {
+        rerunRequested = false;
+        void attempt();
+      }
     }
   }
 

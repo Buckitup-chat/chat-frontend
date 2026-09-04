@@ -97,6 +97,8 @@ export default defineConfig(({ command }) => {
 			},
 			exclude: [
 				'@lo-fi/webauthn-local-client',
+				'@tanstack/browser-db-sqlite-persistence',
+				'@tanstack/db-sqlite-persistence-core',
 			],
 			include: [
 				'@noble/hashes',

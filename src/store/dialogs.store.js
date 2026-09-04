@@ -251,11 +251,21 @@ export const useDialogsStore = defineStore('dialogs', () => {
         if (message.sender_hash !== $userPQ.currentUserHash) {
             throw new Error('Cannot edit: not owner');
         }
+        if (message.owner_timestamp === null || message.owner_timestamp === undefined) {
+            throw new Error(`Cannot edit: message ${messageId} is missing owner_timestamp (data integrity issue)`);
+        }
+        const previousTimestamp = Number(message.owner_timestamp);
+        if (!Number.isSafeInteger(previousTimestamp)) {
+            throw new Error(`Cannot edit: message ${messageId} owner_timestamp is not a safe integer (${message.owner_timestamp})`);
+        }
 
         const contentJson = JSON.stringify({ type: "text", text: newText });
         const contentB64 = await DialogCrypto.encryptContent(myKey, contentJson);
         const refsMap = {};
         const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
+
+        const nowSec = Math.floor(Date.now() / 1000);
+        const nextOwnerTimestamp = Math.max(nowSec, previousTimestamp + 1);
 
         await upsertDialogMessage({
             message_id: messageId,
@@ -265,7 +275,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             deleted_flag: false,
             refs_map_b64: refsMapB64,
             parent_sign_hash: message.sign_hash,
-            owner_timestamp: Math.floor(Date.now() / 1000),
+            owner_timestamp: nextOwnerTimestamp,
             sign_b64: null,
             sign_hash: null,
             ownerUserHash: $userPQ.currentUserHash,
