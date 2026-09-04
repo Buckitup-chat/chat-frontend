@@ -33,7 +33,7 @@ export function collectionForRelation(
 		case 'user_cards':
 			return getUserCardsCollection();
 		case 'user_storage':
-			return getUserStorageCollection();
+			return getUserStorageCollection(String(row?.user_hash || ''));
 		case 'dialog_keys':
 		case 'dialog_messages':
 		case 'dialog_message_reactions':

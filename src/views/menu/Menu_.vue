@@ -90,6 +90,8 @@
 			<div class="px-2" v-if="component">
 				<component :is="component"></component>
 			</div>
+			<!-- Screen 11: the queue follows the user out of the dialog. -->
+			<TransferDock v-if="menu === 'chats'" />
 		</div>
 	</div>
 </template>
@@ -330,6 +332,7 @@
 </style>
 
 <script setup>
+import TransferDock from '@/components/chat/TransferDock.vue';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 
 

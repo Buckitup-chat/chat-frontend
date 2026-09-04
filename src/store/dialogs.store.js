@@ -5,6 +5,13 @@ import { getUserCardsCollection, getDialogCollections } from '@/lib/data/collect
 import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
+import { createDialogGate } from '@/lib/data/dialogGate';
+import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
+import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
+import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
+import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
+import { openVideo } from '@/lib/data/videoStream';
+import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
@@ -80,6 +87,78 @@ export const useDialogsStore = defineStore('dialogs', () => {
             console.warn('[dialogs] refs decrypt failed for', row.message_id, e);
             return null;
         }
+    };
+
+    // ---------- receive verification gate ----------
+    //
+    // A replicated row is not a message until it verifies (lib/data/dialogGate):
+    // author card resolves, signature holds, causal refs admit. One gate per
+    // dialog; verdicts feed the render path, which shows unverified rows as
+    // such instead of trusting whatever Electric delivered.
+
+    const dialogGates = new Map(); // dialogHash -> gate
+
+    // The gate distinguishes "no key yet" (normal right after joining) from
+    // "key present but the blob will not decrypt" (only reachable through a
+    // sender bug, since the signature covers the ciphertext).
+    const decryptRefsVerdict = async (row) => {
+        const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+        if (!key) return 'no_key';
+        const refs = await decryptRefsOf(row);
+        return refs === null ? 'error' : refs;
+    };
+
+    const gateFor = (dialogHash) => {
+        let gate = dialogGates.get(dialogHash);
+        if (!gate) {
+            gate = createDialogGate({
+                resolveSignPkey: (userHash) => getVerifiedSignPkey(userHash),
+                decryptRefs: decryptRefsVerdict,
+            });
+            dialogGates.set(dialogHash, gate);
+        }
+        return gate;
+    };
+
+    /** Gate verdict for a replicated message row. See dialogGate for shapes. */
+    const admitMessageRow = (row) => gateFor(row.dialog_hash).admit(row);
+
+    // Reactions and receipts are signed rows too (invariants/02): a forged
+    // reaction under a peer's name is the same attack as a forged message.
+    // Verdicts are cached by (PK, owner_timestamp) — a re-signed update gets
+    // a fresh check, an unchanged row does not re-run ML-DSA on every render.
+    const sideRowVerdicts = new Map();
+
+    const admitSideRow = async (row, authorField, pkField) => {
+        const cacheKey = `${row[pkField]}|${row.owner_timestamp}`;
+        const cached = sideRowVerdicts.get(cacheKey);
+        if (cached !== undefined) return cached;
+
+        const authorHash = row[authorField];
+        const signPkey = await getVerifiedSignPkey(authorHash);
+        if (!signPkey) return false; // card not here yet — retried, not cached
+
+        const ok = verifySideRow(row, signPkey).status === 'ok';
+        sideRowVerdicts.set(cacheKey, ok);
+        return ok;
+    };
+
+    /** True only for a reaction whose signature verifies against its reactor. */
+    const admitReactionRow = (row) => admitSideRow(row, 'reactor_hash', 'reaction_hash');
+
+    /** True only for a receipt whose signature verifies against its peer. */
+    const admitReceiptRow = (row) => admitSideRow(row, 'peer_hash', 'receipt_hash');
+
+    /** True when the gate has already admitted this exact revision — used by
+     * the render path to reconcile a stale 'waiting' snapshot after a batch:
+     * a child admitted before its parent parks, the parent's arrival drains
+     * it inside the gate, and the UI entry written earlier must catch up. */
+    const isMessageAdmitted = (dialogHash, messageId, signHash) =>
+        dialogGates.get(dialogHash)?.isAdmitted(messageId, signHash) ?? false;
+
+    /** Re-checks rows parked on absent author cards; call when user_cards sync. */
+    const retryCardAdmissions = async () => {
+        for (const gate of dialogGates.values()) await gate.retryAwaitingCards();
     };
 
     // The tails the current user observes right now — the refs_map plaintext
@@ -318,7 +397,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
     /**
      * Send a message (optimistic: returns immediately, syncs in background)
      */
-    const sendMessage = async (peerHash, text, onStatus, messageId = null, ownerTimestamp = null) => {
+    // `content` is a plain string (text message) or ContentPart[] — a reply
+    // is [quotePart, textPart], per the composed-message convention.
+    const sendMessage = async (peerHash, content, onStatus, messageId = null, ownerTimestamp = null) => {
+        const parts = typeof content === 'string' ? [{ kind: 'text', text: content }] : content;
         if (!messageId) {
             const { v7 } = await import('uuid');
             messageId = "dmsg_" + v7();
@@ -332,8 +414,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 const dialogHash = await initDialogKeys(peerHash);
                 const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
-                const contentJson = JSON.stringify({ type: "text", text: text });
-                const contentB64 = await DialogCrypto.encryptContent(myKey, contentJson);
+                // Canonical wire form (07_content_polymorphism.md): bare
+                // string for text, array for composed — never the legacy
+                // {"type":"text"} shape this client used to emit.
+                const contentB64 = await DialogCrypto.encryptContent(myKey, encodeContent(parts));
 
                 // Causal refs: the DAG tails observed at send time ({} only
                 // for the genesis message, when nothing is loaded yet)
@@ -380,8 +464,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
             throw new Error('Cannot edit: not owner');
         }
 
-        const contentJson = JSON.stringify({ type: "text", text: newText });
-        const contentB64 = await DialogCrypto.encryptContent(myKey, contentJson);
+        const newParts = typeof newText === 'string' ? [{ kind: 'text', text: newText }] : newText;
+        const contentB64 = await DialogCrypto.encryptContent(myKey, encodeContent(newParts));
         // Refs are recomputed at edit time — the tails may have changed since
         // the original authoring; the old refs stay archived with the old
         // revision in dialog_messages_versions (spec: §Behavior on edit)
@@ -405,6 +489,108 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return messageId;
     };
 
+    // ---------- file transport (§1.5, §2.1–2.3) ----------
+
+    // §4.1: file_id + enc_secret persist BEFORE the first PUT — file_id alone
+    // cannot resume, since a fresh secret would make re-sent chunks
+    // undecryptable next to the ones already stored.
+    const pendingUploadKey = (fileId) => `bkp:pending-upload:${fileId}`;
+
+    /**
+     * Uploads a file and sends the message referencing it. Progress is in
+     * chunks (§2.1 — "куски, а не проценты-догадки"). Returns the fileId.
+     */
+    /**
+     * Uploads one attachment and returns its content part.
+     *
+     * An image or video announces its shape (aspect ratio + ThumbHash) so
+     * the receiver lays it out before downloading; anything that will not
+     * decode travels as a plain file rather than claiming a preview it does
+     * not have. Previews are computed here, from the plaintext — the device
+     * never sees it, so nowhere else can compute them.
+     */
+    const uploadAttachment = async (fileMeta, { onProgress, signal, prepared: preparedIn, resuming = false } = {}) => {
+        const { name, mimeType, bytes, createdAt, blob } = fileMeta;
+        const uploaderHash = $userPQ.currentUserHash;
+        const signSkey = await getSignSkeyBytes();
+
+        // The queue mints the pair up front so pause/resume re-enter with the
+        // same file_id + enc_secret; a direct call mints its own.
+        const prepared = preparedIn ?? prepareUpload((await import('uuid')).v7());
+        try {
+            localStorage.setItem(pendingUploadKey(prepared.fileId), JSON.stringify({
+                encSecretB64: prepared.encSecretB64, name, size: bytes.length,
+            }));
+        } catch { /* private mode: resume across reloads degrades, upload still works */ }
+
+        const up = await uploadFile({
+            bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,
+        });
+
+        const common = {
+            name,
+            size: bytes.length,
+            mimeType: mimeType || 'application/octet-stream',
+            createdAt: createdAt || Math.floor(Date.now() / 1000),
+            fileId: up.fileId,
+            encSecretB64: up.encSecretB64,
+        };
+        const video = blob && isVideoMime(mimeType);
+        const preview = blob && (isImageMime(mimeType) || video)
+            ? await (video ? buildVideoPreview(blob) : buildImagePreview(blob)).catch(() => null)
+            : null;
+        return preview
+            ? { kind: video ? 'video' : 'image', ...preview, ...common }
+            : { kind: 'file', ...common };
+    };
+
+    /** Playable source for a video part; streams when a worker is available. */
+    const openVideoSource = (part, opts) => openVideo(part, opts);
+
+    /** How much of an attachment this node can serve (§2.4). */
+    const getFileAvailability = (fileId) => fileAvailability(fileId);
+
+    /** Downloads and decrypts an attachment; progress in chunks (§2.3). */
+    const fetchFile = (filePart, { onProgress, signal } = {}) =>
+        downloadFile({ fileId: filePart.fileId, encSecretB64: filePart.encSecretB64, onProgress, signal });
+
+    /**
+     * Deletes own message (§3.2): a new signed revision with deleted_flag and
+     * empty content — the empty plaintext IS the tombstone (07: an empty
+     * content_b64 is only valid alongside deleted_flag). The previous
+     * revision is archived server-side like any edit; refs are recomputed at
+     * deletion time per pq_dialogs §dialog_messages.
+     */
+    const deleteMessage = async (peerHash, messageId) => {
+        const dialogHash = await initDialogKeys(peerHash);
+        const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
+
+        const msgColl = getDialogCollections(dialogHash).messages;
+        await msgColl.preload();
+        const current = msgColl.get(messageId) || null;
+        if (!current) throw new Error('Message not found');
+        if (current.sender_hash !== $userPQ.currentUserHash) {
+            throw new Error('Cannot delete: not owner');
+        }
+
+        const refsMap = await computeObservedTails(dialogHash);
+        const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
+
+        await pushRow('dialog_messages', {
+            message_id: messageId,
+            dialog_hash: dialogHash,
+            sender_hash: $userPQ.currentUserHash,
+            // null, not '': Ecto casts an empty string to nil, so the server
+            // signs "null" where '' was signed — verified live, '' gets 422
+            // invalid_signature while null is accepted.
+            content_b64: null,
+            deleted_flag: true,
+            refs_map_b64: refsMapB64,
+            parent_sign_hash: current.sign_hash,
+            owner_timestamp: nextOwnerTimestamp(current.owner_timestamp),
+        }, 'update');
+    };
+
     /**
      * Decrypt a message row
      */
@@ -414,19 +600,72 @@ export const useDialogsStore = defineStore('dialogs', () => {
             if (!key) return { ...row, decrypted: false, text: "Waiting for keys..." };
 
             const jsonStr = await DialogCrypto.decryptContent(key, row.content_b64);
-            const parsed = jsonStr ? JSON.parse(jsonStr) : { text: "" };
-            
+            // Deletion tombstones carry empty content by design (07: an empty
+            // content_b64 is only valid alongside deleted_flag) — not a format error.
+            const parts = jsonStr ? decodeContent(jsonStr) : [];
+
             return {
                 ...row,
                 decrypted: true,
-                text: parsed.text || "",
-                type: parsed.type || "text",
+                parts,
+                text: contentToText(parts),
                 isMine: row.sender_hash === $userPQ.currentUserHash
             };
         } catch (e) {
-            console.error("Decrypt error", e);
-            return { ...row, decrypted: false, text: "Decryption failed" };
+            const unsupported = e instanceof ContentDecodeError;
+            if (!unsupported) console.error("Decrypt error", e);
+            return {
+                ...row,
+                decrypted: false,
+                parts: [],
+                text: unsupported ? "Unsupported message format" : "Decryption failed",
+            };
         }
+    };
+
+    /**
+     * Version history of a message (§3.1): archived revisions from the
+     * versions shape plus the current tip, newest first.
+     *
+     * Every revision is signature-checked before its content is shown as a
+     * past version — history is cryptographic lineage, not a cache
+     * (invariants/03_data_versioning.md), and a forged "old version" planted
+     * in the feed would be the perfect place to put words in someone's mouth.
+     * Unverifiable revisions surface as such rather than being dropped:
+     * a gap in history is itself information.
+     */
+    const getMessageHistory = async (dialogHash, messageId) => {
+        const colls = getDialogCollections(dialogHash);
+        await colls.versions.preload().catch(() => {});
+        const rows = colls.versions.toArray.filter((v) => v.message_id === messageId);
+
+        const out = [];
+        for (const row of rows) {
+            const signPkey = await getVerifiedSignPkey(row.sender_hash);
+            const verified = !!signPkey && verifyMessageRow(row, signPkey).status === 'ok';
+            let text = '';
+            let decrypted = false;
+            if (verified && row.content_b64) {
+                try {
+                    const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+                    if (key) {
+                        const json = await DialogCrypto.decryptContent(key, row.content_b64);
+                        text = json ? contentToText(decodeContent(json)) : '';
+                        decrypted = true;
+                    }
+                } catch { /* rendered as undecrypted below */ }
+            }
+            out.push({
+                signHash: row.sign_hash,
+                ownerTimestamp: row.owner_timestamp,
+                deletedFlag: !!row.deleted_flag,
+                verified,
+                text: verified ? (decrypted ? text : 'Waiting for keys…') : 'Unverifiable revision',
+            });
+        }
+        // Newest first; the current tip is already on screen and is not repeated here.
+        out.sort((a, b) => b.ownerTimestamp - a.ownerTimestamp);
+        return out;
     };
 
     /**
@@ -579,14 +818,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * Bound to message_sign_hash: an edited message is a new revision and
      * needs its own acknowledgement.
      */
-    const sendReadReceipt = async (peerHash, { messageId, messageSignHash }) => {
+    const sendReceipt = async (peerHash, { messageId, messageSignHash }, type) => {
         if (!messageSignHash) {
             throw new Error('Cannot acknowledge: message revision is not synced yet');
         }
 
         const dialogHash = await initDialogKeys(peerHash);
         const myHash = $userPQ.currentUserHash;
-        const type = 'read';
 
         const receiptHash = DialogCrypto.computeReceiptHash(messageId, messageSignHash, myHash, type);
 
@@ -609,6 +847,20 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
         return receiptHash;
     };
+
+    const sendReadReceipt = (peerHash, ref) => sendReceipt(peerHash, ref, 'read');
+
+    /**
+     * §4.3: "delivered" is a fact about arrival, so unlike "read" it goes out
+     * automatically — the moment a verified message lands on this device.
+     * The deterministic receipt hash makes repeats no-ops.
+     */
+    const sendDeliveredReceipt = (peerHash, ref) =>
+        sendReceipt(peerHash, ref, 'delivered').catch((e) => {
+            // Delivery acknowledgement is best-effort background traffic;
+            // failing it must not surface as a user-facing error.
+            console.warn('[dialogs] delivered receipt failed:', e?.message || e);
+        });
 
     /** Revisions the current user has explicitly acknowledged. */
     const isRevisionAcknowledged = (dialogHash, messageId, messageSignHash) => {
@@ -639,8 +891,20 @@ export const useDialogsStore = defineStore('dialogs', () => {
         sendMessage,
         editMessage,
         decryptMessageRow,
+        deleteMessage,
+        uploadAttachment,
+        fetchFile,
+        getFileAvailability,
+        openVideoSource,
+        getMessageHistory,
+        admitMessageRow,
+        isMessageAdmitted,
+        admitReactionRow,
+        admitReceiptRow,
+        retryCardAdmissions,
         toggleReaction,
         sendReadReceipt,
+        sendDeliveredReceipt,
         isRevisionAcknowledged,
         decryptReactionRow,
         optimisticItems,

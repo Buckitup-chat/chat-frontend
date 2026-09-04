@@ -1,42 +1,20 @@
 import { ml_dsa87 } from "@noble/post-quantum/ml-dsa.js";
-import { sha3_512 } from "@noble/hashes/sha3";
-import { bytesToHex } from "@noble/hashes/utils";
+import {
+  signFields,
+  deriveSignHash,
+  toBase64,
+} from "@/lib/pq/signature";
 
+// Challenge signatures travel unpadded; row columns are padded base64. The
+// canonical payload builder and the padded encoder both live in the protocol
+// module — see src/lib/pq/signature.ts.
 const encodeBase64 = (bytes, padded = false) => {
   if (!bytes) return "";
-  let binary = "";
-  bytes.forEach((b) => (binary += String.fromCharCode(b)));
-  const result = btoa(binary);
+  const result = toBase64(bytes);
   return padded ? result : result.replace(/=+$/, "");
 };
 
-const encodeField = (key, value) => {
-  if (value === null) return "null";
-  if (key.endsWith("_cert") || key.endsWith("_pkey")) {
-    return encodeBase64(value, true);
-  }
-  if (key.endsWith("_b64")) {
-    return typeof value === 'string' ? value : encodeBase64(value, true);
-  }
-  if (key.endsWith("_hash")) {
-    return value;
-  }
-  if (value === true) return "true";
-  if (value === false) return "false";
-  if (value === null) return "null";
-  if (typeof value === "number") return value.toString();
-  if (typeof value === "string") return value;
-  return String(value);
-};
-
 const SIGN_HASH_RELATIONS = new Set(['dialog_messages', 'dialog_messages_versions']);
-
-const buildSignatureData = (fields) => {
-  return Object.keys(fields)
-    .sort()
-    .map((key) => encodeField(key, fields[key]))
-    .join("");
-};
 
 export const api = {
   ingest: (mutations) => {
@@ -114,8 +92,7 @@ export const api = {
       user_hash: userData.user_hash,
     };
 
-    const signatureData = buildSignatureData(signatureFields);
-    const signB64 = ml_dsa87.sign(new TextEncoder().encode(signatureData), userData.sign_skey);
+    const signB64Str = signFields(signatureFields, userData.sign_skey);
 
     const modified = {
       user_hash: userData.user_hash,
@@ -127,7 +104,7 @@ export const api = {
       name,
       deleted_flag: deletedFlag,
       owner_timestamp: ownerTimestamp,
-      sign_b64: encodeBase64(signB64, true),
+      sign_b64: signB64Str,
     };
 
     const mutation = mutationType === 'insert'
@@ -167,20 +144,17 @@ export const api = {
       value_b64: valueB64,
     };
 
-    const signatureData = buildSignatureData(signatureFields);
     let finalSignB64 = existingSignB64;
 
     if (!finalSignB64 && signSkey) {
-        const signBytes = ml_dsa87.sign(new TextEncoder().encode(signatureData), signSkey);
-        finalSignB64 = encodeBase64(signBytes, true);
+        finalSignB64 = signFields(signatureFields, signSkey);
     }
 
     // The server requires sign_hash: "uss_" + SHA3-512 of the raw signature
     // bytes (same derivation dialog rows use, with their own prefix).
     let finalSignHash = signHash;
     if (!finalSignHash && finalSignB64) {
-      const decodedSign = Uint8Array.from(atob(finalSignB64), c => c.charCodeAt(0));
-      finalSignHash = "uss_" + bytesToHex(sha3_512(decodedSign));
+      finalSignHash = deriveSignHash("uss_", finalSignB64);
     }
 
     // Server schema fields only — hash_b64 is a local convenience and is
@@ -229,9 +203,7 @@ export const api = {
 
     let finalSignB64 = row.sign_b64;
     if (signSkey) {
-      const signatureData = buildSignatureData(fieldsToSign);
-      const signBytes = ml_dsa87.sign(new TextEncoder().encode(signatureData), signSkey);
-      finalSignB64 = encodeBase64(signBytes, true);
+      finalSignB64 = signFields(fieldsToSign, signSkey);
     }
 
     const changes = { ...fieldsToSign, sign_b64: finalSignB64 };
@@ -240,8 +212,7 @@ export const api = {
     // and receipts are keyed by their own deterministic hash and have no such
     // column — sending one there is a field the server schema cannot cast.
     if (finalSignB64 && SIGN_HASH_RELATIONS.has(relation)) {
-      const decodedSign = Uint8Array.from(atob(finalSignB64), c => c.charCodeAt(0));
-      changes.sign_hash = "dms_" + bytesToHex(sha3_512(decodedSign));
+      changes.sign_hash = deriveSignHash("dms_", finalSignB64);
     }
 
     if (mutationType === 'insert') {

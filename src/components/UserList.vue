@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useTransfersStore } from '@/store/transfers.store';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue'
 import SyncStatus from './SyncStatus.vue'
 import { ref, computed } from 'vue'
@@ -41,6 +42,7 @@ const filtered = computed(() => {
   }
   return list
 })
+const $transfers = useTransfersStore();
 </script>
 
 <template>
@@ -63,6 +65,10 @@ const filtered = computed(() => {
     <div class="_list">
       <div class="_user" @click="select(user.user_hash)" v-for="user in filtered" :class="{ _selected: isSelected(user.user_hash) }">
         <Account_Item_PQ :account="user" class="w-100" />
+        <!-- Screen 11: the dialog a transfer is going to is marked. -->
+        <span v-if="$transfers.transferPeers.has(user.user_hash)" class="_transfer_dot" title="Transfer in progress">
+          <span class="_transfer_dot_mark"></span>передача
+        </span>
       </div>
     </div>
   </div>
@@ -104,4 +110,22 @@ const filtered = computed(() => {
     }
   }
 }
+
+._transfer_dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: #8e2b77;
+  flex-shrink: 0;
+  padding-left: 6px;
+}
+._transfer_dot_mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #8e2b77;
+  animation: transfer-pulse 1.6s ease-in-out infinite;
+}
+@keyframes transfer-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 </style>

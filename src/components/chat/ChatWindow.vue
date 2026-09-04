@@ -23,8 +23,15 @@
         <div v-for="msg in messages" :key="msg.id" class="message-wrapper d-flex mb-3"
         :class="msg.isMine ? 'justify-content-end' : 'justify-content-start'">
         <div class="message-bubble p-2 rounded-3 shadow-sm"
-          :class="[msg.isMine ? 'message-mine' : 'message-peer', { 'message-pending': msg._syncStatus && msg._syncStatus !== 'synced' }]"
-          style="max-width: 75%; min-width: 150px;" @contextmenu.prevent="openContextMenu($event, msg)">
+          :data-msg-id="msg.id"
+          :class="[msg.isMine ? 'message-mine' : 'message-peer', {
+            'message-pending': msg._syncStatus && msg._syncStatus !== 'synced' && msg._syncStatus !== 'error',
+            'message-error': msg._syncStatus === 'error',
+            'message-unplaced': msg._verify === 'waiting',
+          }]"
+          style="max-width: 75%; min-width: 150px;" @contextmenu.prevent="openContextMenu($event, msg)"
+          @touchstart="startLongPress($event, msg)" @touchend="cancelLongPress"
+          @touchmove="cancelLongPress" @touchcancel="cancelLongPress">
           <div v-if="!msg.isMine && showAuthorName" class="fw-bold text-muted mb-1" style="font-size: 0.8rem;">
             {{ msg.authorName }}
           </div>
@@ -36,8 +43,156 @@
               <button type="button" class="btn btn-sm btn-primary" @click="saveEdit">Save</button>
             </div>
           </div>
-          <div v-else class="message-text text-break">
-            {{ msg.text }}
+          <div v-else>
+            <!-- Quotes render from their own snapshot (the reply carries the
+                 cited content), so they work even when the original never
+                 arrived or was deleted — the jump just degrades honestly. -->
+            <div v-for="(q, qi) in quotesOf(msg)" :key="qi" class="msg-quote"
+              :class="{ '_historic': quoteOriginalDeleted(q) }">
+              <div class="msg-quote-bar"></div>
+              <div class="msg-quote-body">
+                <div role="button" @click="jumpToMessage(q.messageId)">
+                  <div class="msg-quote-author">{{ quoteAuthorName(q.authorHash) }}</div>
+                  <div class="msg-quote-text">{{ quotePreview(q) }}</div>
+                </div>
+                <div v-if="quoteOriginalDeleted(q)" class="msg-quote-note">original deleted by author</div>
+                <div v-else-if="!quoteOriginalPresent(q)" class="msg-quote-note"><span class="msg-quote-dot"></span>original not synced yet</div>
+                <!-- card 4: nearest quote only, the rest behind a counter -->
+                <div v-if="nestedCount(q) && !expandedQuotes.has(quoteKey(msg, qi))"
+                  class="msg-quote-nested-note" role="button" @click.stop="toggleQuoteChain(msg, qi)">
+                  ⤷ {{ nestedCount(q) }} more {{ nestedCount(q) === 1 ? 'quote' : 'quotes' }} inside
+                </div>
+                <template v-else-if="nestedCount(q)">
+                  <div v-for="(link, depth) in quoteChain(q).slice(1, MAX_QUOTE_DEPTH)" :key="depth"
+                    class="msg-quote-level" :class="'_d' + (depth + 2)" role="button"
+                    @click.stop="jumpToMessage(link.messageId)">
+                    <div class="msg-quote-level-bar"></div>
+                    <div>
+                      <div class="msg-quote-author">{{ quoteAuthorName(link.authorHash) }}</div>
+                      <div class="msg-quote-text">{{ quotePreview(link) }}</div>
+                    </div>
+                  </div>
+                  <div v-if="quoteChain(q).length > MAX_QUOTE_DEPTH" class="msg-quote-nested-note">
+                    …{{ quoteChain(q).length - MAX_QUOTE_DEPTH }} deeper
+                  </div>
+                  <div class="msg-quote-nested-note" role="button" @click.stop="toggleQuoteChain(msg, qi)">collapse</div>
+                </template>
+              </div>
+            </div>
+            <!-- §1.4 video: ThumbHash frame with a play button; playback
+                 starts on the first chunk. The bar underneath is two-layer —
+                 played over the buffer the browser has actually decrypted. -->
+            <div v-for="v in videosOf(msg)" :key="v.fileId" class="msg-video">
+              <div class="msg-video-frame" :style="{ aspectRatio: v.widthAspect + ' / ' + v.heightAspect }"
+                :role="videos[v.fileId]?.url ? undefined : 'button'"
+                @click="!videos[v.fileId]?.url && videos[v.fileId]?.status !== 'opening' && emit('playVideo', v)">
+                <img v-if="thumbUrl(v)" class="msg-image-blur" :src="thumbUrl(v)" alt="" />
+                <video v-if="videos[v.fileId]?.url" class="msg-video-el"
+                  :src="videos[v.fileId].url" controls playsinline
+                  @loadedmetadata="restoreVideoPosition(v.fileId, $event)"
+                  @timeupdate="onVideoTime(v.fileId, $event)"
+                  @progress="onVideoTime(v.fileId, $event)"></video>
+                <div v-else-if="videos[v.fileId]?.status === 'opening'" class="msg-video-play" aria-hidden="true">
+                  <span class="msg-video-spinner"></span>
+                </div>
+                <div v-else class="msg-video-play" aria-hidden="true">
+                  <span class="msg-video-triangle"></span>
+                </div>
+                <div v-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
+                  video failed — tap to retry
+                </div>
+              </div>
+              <!-- ONE bar, one meaning: download progress. It appears on tap,
+                   grows with the chunks regardless of playback (the player's
+                   own controls already show the timeline), and leaves at
+                   100%. -->
+              <div v-if="downloadingVideo(videos[v.fileId])" class="msg-video-load">
+                <div class="msg-video-load-fill" :style="{ width: loadPercent(videos[v.fileId]) + '%' }"></div>
+              </div>
+            </div>
+
+            <!-- §1.3 single picture: the box is reserved from the aspect
+                 ratio in the message and filled with the ThumbHash blur, so
+                 the bubble does not jump when the bytes land. -->
+            <div v-if="imagesOf(msg).length === 1" class="msg-image"
+              :style="{ aspectRatio: imagesOf(msg)[0].widthAspect + ' / ' + imagesOf(msg)[0].heightAspect }"
+              @click="openLightbox(msg, 0)">
+              <img v-if="thumbUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbUrl(imagesOf(msg)[0])" alt="" />
+              <img v-if="images[imagesOf(msg)[0].fileId]?.url" class="msg-image-full"
+                :src="images[imagesOf(msg)[0].fileId].url" :alt="imagesOf(msg)[0].name" />
+              <div v-if="images[imagesOf(msg)[0].fileId]?.status === 'downloading'" class="msg-image-progress">
+                {{ images[imagesOf(msg)[0].fileId].done }} / {{ images[imagesOf(msg)[0].fileId].total }} chunks
+              </div>
+              <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'error'" class="msg-image-progress _err">
+                image failed — tap to retry
+              </div>
+            </div>
+
+            <!-- §1.6 grid: one bubble, 3px gutters, outer corners inherit the
+                 bubble radius. Past four, the rest hide under a +N that opens
+                 the carousel. -->
+            <div v-else-if="imagesOf(msg).length > 1" class="msg-gallery"
+              :class="'_n' + Math.min(imagesOf(msg).length, 4)">
+              <div v-for="(im, i) in visibleImages(msg)" :key="im.fileId" class="msg-gallery-cell"
+                @click="openLightbox(msg, i)">
+                <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
+                <img v-if="images[im.fileId]?.url" class="msg-image-full" :src="images[im.fileId].url" :alt="im.name" />
+                <div v-if="overflowCount(msg) && i === visibleImages(msg).length - 1" class="msg-gallery-more">
+                  +{{ overflowCount(msg) }}
+                </div>
+              </div>
+            </div>
+
+            <!-- §1.5 file row: icon — name — size/state — action. Progress is
+                 chunks, never guessed percentages (§2.1). -->
+            <template v-for="f in filesOf(msg)" :key="f.fileId">
+            <div class="msg-file">
+              <span class="msg-file-icon">📄</span>
+              <!-- Screen 05 opens from the row body; the download button keeps
+                   its own tap. -->
+              <div class="msg-file-body" role="button" @click="emit('showFileState', f, msg)">
+                <div class="msg-file-name">{{ f.name }}</div>
+                <div class="msg-file-meta">
+                  <template v-if="downloads[f.fileId]?.status === 'downloading'">
+                    {{ fmtSize(f.size) }} · chunk {{ downloads[f.fileId].done }} of {{ downloads[f.fileId].total }}
+                  </template>
+                  <template v-else-if="downloads[f.fileId]?.status === 'error'">
+                    {{ fmtSize(f.size) }} · <span class="msg-file-err">download failed — tap to retry</span>
+                  </template>
+                  <template v-else-if="downloads[f.fileId]?.status === 'done'">
+                    {{ fmtSize(f.size) }} · saved
+                  </template>
+                  <template v-else>{{ fmtSize(f.size) }}</template>
+                </div>
+              </div>
+              <button v-if="downloads[f.fileId]?.status !== 'downloading'" type="button"
+                class="msg-file-action" @click="emit('downloadFile', f)"
+                :title="downloads[f.fileId]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
+              <span v-else class="msg-file-spinner"></span>
+            </div>
+
+            <!-- §2.4 availability. Partial is a normal state in a network with
+                 no internet, so: no red, no warning icon, and the wording says
+                 the rest is coming rather than that the file is unavailable. -->
+            <div v-if="partial(f)" class="msg-availability">
+              <div class="msg-chunks">
+                <span v-for="i in partial(f).total" :key="i" class="msg-chunk"
+                  :class="{ _have: i <= partial(f).present }"></span>
+              </div>
+              <div class="msg-availability-foot">
+                <span class="msg-availability-note">
+                  {{ partial(f).present }} of {{ partial(f).total }} chunks here · arrives later
+                </span>
+                <button type="button" class="msg-availability-btn" @click="emit('downloadFile', f)">Try again</button>
+              </div>
+            </div>
+            </template>
+            <div v-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
+            <div v-else class="message-text text-break">
+              {{ msg.text }}
+            </div>
+            <!-- §4.2: admitted but causally unplaced — say why, quietly. -->
+            <div v-if="msg._verify === 'waiting'" class="msg-unplaced-note">waiting for earlier messages…</div>
           </div>
           <div v-if="reactions[msg.id] && Object.keys(reactions[msg.id]).length > 0"
             class="reactions-container d-flex flex-wrap gap-1 mt-1">
@@ -56,9 +211,17 @@
           </div>
           <div class="message-time text-end mt-1" :class="msg.isMine ? 'text-dark' : 'text-muted'">
             {{ msg.timestamp }}
-            <span v-if="msg._syncStatus === 'sending' || msg._syncStatus === 'syncing'" class="sync-status pending" title="Syncing...">✓</span>
-            <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Synced">✓</span>
-            <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Failed to sync">!</span>
+            <!-- §4.3: ◌ stored locally → pale ✓ in flight → ✓ server-accepted.
+                 (✓✓ delivered needs delivery receipts; ↻ auto-retry needs the
+                 outbox hook — both arrive with their transports.) -->
+            <span v-if="msg._syncStatus === 'sending'" class="sync-status local" title="Saved locally">◌</span>
+            <span v-else-if="msg._syncStatus === 'syncing'" class="sync-status pending" title="Sending…">✓</span>
+            <span v-else-if="msg._syncStatus === 'synced' && msg._deliveredToPeers" class="sync-status delivered" title="Delivered to the recipient">✓✓</span>
+            <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Accepted by server">✓</span>
+            <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Rejected — not sent">!</span>
+            <span v-if="msg._raw && msg._raw.parent_sign_hash" class="msg-edited" role="button"
+              title="Show edit history"
+              @click.stop="emit('showHistory', msg.id)">edited<template v-if="versionCountOf(msg)"> · {{ versionCountOf(msg) }}</template></span>
             <!-- A versioned edit that the server did not accept: others still
                  see the previous revision, so say so instead of showing the
                  attempted text as if it had landed. -->
@@ -79,15 +242,59 @@
 
     <!-- Footer / Input -->
     <div class="chat-footer p-2 border-top">
+      <!-- The transfer panel (screen 10) mounts here from the page, so the
+           queue sits where the board puts it: above the input, inside the
+           dialog. -->
+      <slot name="above-input"></slot>
+      <div v-if="replyTo" class="reply-preview d-flex align-items-center gap-2 mb-1 px-2 py-1">
+        <div class="msg-quote-bar"></div>
+        <div class="flex-grow-1" style="min-width:0">
+          <div class="msg-quote-author">{{ quoteAuthorName(replyTo.authorHash) }}</div>
+          <div class="msg-quote-text">{{ replyTo.previewText }}</div>
+        </div>
+        <button type="button" class="btn btn-sm btn-light rounded-circle" @click="cancelReply" title="Cancel reply">✕</button>
+      </div>
       <form @submit.prevent="submitMessage" class="d-flex align-items-center m-0">
+        <input ref="fileInput" type="file" multiple class="d-none" @change="onFilePicked" />
+        <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
+          style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;" title="Attach a file" @click="fileInput?.click()">📎</button>
         <input type="text" class="form-control me-2 rounded-pill px-3" v-model="newMessage"
-          placeholder="Type a message..." required />
+          placeholder="Type a message..." />
         <button type="submit"
           class="btn btn-primary rounded-circle d-flex align-items-center justify-content-center border-0"
-          style="width: 40px; height: 40px; padding: 0;">
+          style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;">
           &#10148;
         </button>
       </form>
+    </div>
+
+    <!-- Carousel (board screen 03): counter in the header, caption under the
+         frame, a strip of every picture in the dialog in feed order — frames
+         still on their way read as dimmed. Arrows walk past message
+         boundaries; the strip doubles as "which of these are here". -->
+    <div v-if="lightbox && currentFrame" class="lightbox" @click.self="closeLightbox">
+      <div class="lightbox-bar">
+        <span class="lightbox-count">{{ lightbox.index + 1 }} / {{ allDialogImages.length }}</span>
+        <button type="button" class="lightbox-close" @click="closeLightbox" title="Close">✕</button>
+      </div>
+      <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _prev" @click.stop="stepLightbox(-1)">‹</button>
+      <div class="lightbox-frame">
+        <img v-if="images[currentFrame.part.fileId]?.url"
+          :src="images[currentFrame.part.fileId].url" :alt="currentFrame.part.name" />
+        <img v-else-if="thumbUrl(currentFrame.part)" class="_blur" :src="thumbUrl(currentFrame.part)" alt="" />
+        <div v-if="images[currentFrame.part.fileId]?.status === 'downloading'" class="msg-image-progress">
+          {{ images[currentFrame.part.fileId].done }} / {{ images[currentFrame.part.fileId].total }} chunks
+        </div>
+      </div>
+      <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _next" @click.stop="stepLightbox(1)">›</button>
+      <div v-if="currentFrame.caption" class="lightbox-caption">{{ currentFrame.caption }}</div>
+      <div v-if="allDialogImages.length > 1" class="lightbox-strip">
+        <button v-for="(it, i) in allDialogImages" :key="it.part.fileId" type="button"
+          class="lightbox-thumb" :class="{ _active: i === lightbox.index, _pending: !images[it.part.fileId]?.url }"
+          @click.stop="jumpLightbox(i)">
+          <img v-if="images[it.part.fileId]?.url || thumbUrl(it.part)" :src="images[it.part.fileId]?.url || thumbUrl(it.part)" alt="" />
+        </button>
+      </div>
     </div>
 
     <!-- Context Menu -->
@@ -98,6 +305,10 @@
           @click="selectEmojiFromContext(emoji)">{{ emoji }}</button>
       </div>
       <div class="context-menu-divider"></div>
+      <button v-if="contextMenuMsg && contextMenuMsg._raw && contextMenuMsg._raw.sign_hash && !contextMenuMsg._deleted"
+        type="button" class="context-menu-action" @click="startReply(contextMenuMsg)">
+        <i class="bi bi-reply me-2"></i>Reply
+      </button>
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced'" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
         <i class="bi bi-pencil me-2"></i>Edit
@@ -105,6 +316,15 @@
       <button v-if="canAcknowledge" type="button" class="context-menu-action"
         @click="acknowledgeFromContext">
         <i class="bi bi-eye me-2"></i>Confirm read
+      </button>
+      <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !contextMenuMsg._deleted"
+        type="button" class="context-menu-action context-menu-danger" @click="deleteFromContext">
+        <i class="bi bi-trash me-2"></i>Delete
+      </button>
+      <!-- §4.3 "!": rejected outright — the action is to discard the local copy -->
+      <button v-if="contextMenuMsg && contextMenuMsg._optimistic && contextMenuMsg._syncStatus === 'error'"
+        type="button" class="context-menu-action context-menu-danger" @click="discardFromContext">
+        <i class="bi bi-trash me-2"></i>Discard failed message
       </button>
       <button type="button" class="context-menu-action" @click="copyMessageText">
         <i class="bi bi-clipboard me-2"></i>Copy text
@@ -115,6 +335,9 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { contentToText } from '@/lib/pq/content';
+import { thumbHashToDataURL } from 'thumbhash';
+import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { useMenu } from '@/composables/useMenu';
 import Avatar from 'vue-boring-avatars';
@@ -138,6 +361,30 @@ const props = defineProps({
     type: String,
     default: ''
   },
+  myHash: {
+    type: String,
+    default: ''
+  },
+  versionCounts: {
+    type: Object,
+    default: () => ({})
+  },
+  downloads: {
+    type: Object,
+    default: () => ({})
+  },
+  images: {
+    type: Object,
+    default: () => ({})
+  },
+  availability: {
+    type: Object,
+    default: () => ({})
+  },
+  videos: {
+    type: Object,
+    default: () => ({})
+  },
   messages: {
     type: Array,
     required: true,
@@ -152,7 +399,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'showFileState', 'discardMessage']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -167,11 +414,216 @@ const contextMenuMsg = computed(() => {
   return props.messages.find((m) => m.id === contextMenu.value.msgId) || null;
 });
 
+// ---------- reply / quotes (design board §1.2) ----------
+
+const replyTo = ref(null); // { messageId, signHash, authorHash, snapshot, previewText }
+
+const startReply = (msg) => {
+  // The snapshot travels inside the reply, frozen at citation time — the
+  // quote must render even if the original later edits away or deletes.
+  replyTo.value = {
+    messageId: msg._raw.message_id,
+    signHash: msg._raw.sign_hash,
+    authorHash: msg._raw.sender_hash,
+    snapshot: msg.parts && msg.parts.length ? msg.parts : [{ kind: 'text', text: msg.text }],
+    previewText: msg.text || '…',
+  };
+  closeContextMenu();
+};
+
+const cancelReply = () => { replyTo.value = null; };
+
+const discardFromContext = () => {
+  const msg = contextMenuMsg.value;
+  closeContextMenu();
+  if (msg) emit('discardMessage', msg.id);
+};
+
+const deleteFromContext = () => {
+  const msg = contextMenuMsg.value;
+  closeContextMenu();
+  // Deletion is a signed revision others will sync — worth one explicit check.
+  if (msg && window.confirm('Delete this message? Peers will see it was deleted.')) {
+    emit('deleteMessage', msg.id);
+  }
+};
+
 const submitMessage = () => {
   if (newMessage.value.trim() !== '') {
-    emit('sendMessage', newMessage.value.trim());
+    emit('sendMessage', newMessage.value.trim(), replyTo.value);
     newMessage.value = '';
+    replyTo.value = null;
   }
+};
+
+const versionCountOf = (msg) => props.versionCounts[msg.id] || 0;
+
+const quotesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'quote');
+
+// ---------- nested quotes (board §1.2, card 4) ----------
+// The feed shows only the nearest quote plus "N more inside"; the chain
+// expands inside the same bubble, levels marked by a thinner, lighter bar
+// and a step-smaller font. Never auto-expanded — the feed must not turn
+// into an email thread.
+
+/** The chain of quotes under q: [q, inner, inner-inner, …]. */
+const quoteChain = (q) => {
+  const chain = [q];
+  let cur = q;
+  for (;;) {
+    const inner = (cur.snapshot || []).find((p) => p.kind === 'quote');
+    if (!inner) break;
+    chain.push(inner);
+    cur = inner;
+  }
+  return chain;
+};
+const nestedCount = (q) => quoteChain(q).length - 1;
+
+const MAX_QUOTE_DEPTH = 3;
+const expandedQuotes = ref(new Set());
+const quoteKey = (msg, qi) => `${msg.id}|${qi}`;
+const toggleQuoteChain = (msg, qi) => {
+  const next = new Set(expandedQuotes.value);
+  const key = quoteKey(msg, qi);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  expandedQuotes.value = next;
+};
+const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
+
+/** Availability only shows while it is genuinely partial — a complete file
+ *  needs no explanation, and an unknown manifest is not a claim to make. */
+const partial = (part) => {
+  const a = props.availability[part.fileId];
+  if (!a || a.unknown || a.deleted || !a.total) return null;
+  return a.present < a.total ? a : null;
+};
+const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
+const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
+
+// Two layers, both read off the element itself: how far playback got, and
+// how much the browser actually holds decrypted.
+const videoState = ref({});
+const loadPercent = (v) => (v?.total ? Math.round((v.done / v.total) * 100) : 0);
+// Visible from the tap until the whole file is here; playback state is none
+// of this bar's business.
+const downloadingVideo = (v) => !!v && (v.status === 'opening' || (v.partial && (!v.total || v.done < v.total)));
+
+// When the full file replaces a playing prefix, the element reloads — put the
+// viewer back where they were instead of restarting the clip.
+const restoreVideoPosition = (fileId, event) => {
+  const el = event.target;
+  const saved = videoState.value[fileId]?.lastTime;
+  if (saved && el.duration && saved < el.duration) {
+    el.currentTime = saved;
+    if (videoState.value[fileId]?.wasPlaying) el.play().catch(() => {});
+  }
+  onVideoTime(fileId, event);
+};
+
+const onVideoTime = (fileId, event) => {
+  const el = event.target;
+  if (!el?.duration || !isFinite(el.duration)) return;
+  // Only the position survives here — it is what the src swap restores.
+  videoState.value = {
+    ...videoState.value,
+    [fileId]: { lastTime: el.currentTime, wasPlaying: !el.paused },
+  };
+};
+
+
+
+// ThumbHash decodes to a tiny data URL; cached because it is pure and the
+// list re-renders on every sync tick.
+// Past four previews the rest live behind the +N counter (§1.6).
+const MAX_TILES = 4;
+const visibleImages = (msg) => imagesOf(msg).slice(0, MAX_TILES);
+const overflowCount = (msg) => Math.max(0, imagesOf(msg).length - MAX_TILES);
+
+// Every picture in the dialog, in feed order — the carousel walks this, so
+// stepping continues into neighbouring messages instead of stopping at the
+// bubble's edge. Computed off the live message list: frames that arrive
+// while the carousel is open join it.
+const allDialogImages = computed(() =>
+  props.messages.flatMap((m) =>
+    imagesOf(m).map((part) => ({ part, caption: contentToText(m.parts || []) }))),
+);
+
+const lightbox = ref(null); // { index } into allDialogImages
+const currentFrame = computed(() =>
+  lightbox.value ? allDialogImages.value[lightbox.value.index] ?? null : null);
+
+const openLightbox = (msg, localIndex) => {
+  const parts = imagesOf(msg);
+  if (!parts.length) return;
+  const target = parts[Math.min(localIndex, parts.length - 1)];
+  const globalIndex = allDialogImages.value.findIndex((it) => it.part.fileId === target.fileId);
+  if (globalIndex < 0) return;
+  lightbox.value = { index: globalIndex };
+  // The carousel asks for whatever frame it shows: one that never arrived
+  // (or failed) is fetched now instead of staying a blur.
+  emit('showImage', target);
+};
+const closeLightbox = () => { lightbox.value = null; };
+const stepLightbox = (delta) => {
+  if (!lightbox.value) return;
+  const total = allDialogImages.value.length;
+  if (!total) return closeLightbox();
+  lightbox.value.index = (lightbox.value.index + delta + total) % total;
+  emit('showImage', allDialogImages.value[lightbox.value.index].part);
+};
+const jumpLightbox = (index) => {
+  if (!lightbox.value) return;
+  lightbox.value.index = index;
+  emit('showImage', allDialogImages.value[index].part);
+};
+
+const thumbCache = new Map();
+const thumbUrl = (im) => {
+  if (!im.thumbHashB64) return '';
+  if (thumbCache.has(im.fileId)) return thumbCache.get(im.fileId);
+  let url = '';
+  try {
+    url = thumbHashToDataURL(fromBase64(im.thumbHashB64));
+  } catch { /* a malformed hash just means no blur */ }
+  thumbCache.set(im.fileId, url);
+  return url;
+};
+
+const fmtSize = (n) => {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
+};
+
+const fileInput = ref(null);
+const onFilePicked = (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (!files.length) return;
+  // Everything picked travels as ONE composed message, captioned by whatever
+  // sits in the input (board screen 02: "подпись набирается в том же поле").
+  emit('sendFile', files, newMessage.value.trim());
+  newMessage.value = '';
+};
+
+// 1:1 dialog: the only two authors are me and the peer the window shows.
+const quoteAuthorName = (hash) => (hash === props.myHash ? 'Me' : props.title);
+
+const quotePreview = (q) => contentToText(q.snapshot) || '…';
+
+const findOriginal = (q) => props.messages.find((m) => m.id === q.messageId);
+const quoteOriginalPresent = (q) => !!findOriginal(q);
+const quoteOriginalDeleted = (q) => !!findOriginal(q)?._deleted;
+
+// §1.2 "Ссылка и переход": scroll to the original, highlight for 1.5s.
+const jumpToMessage = (messageId) => {
+  const el = messagesContainer.value?.querySelector(`[data-msg-id="${messageId}"]`);
+  if (!el) return; // original not synced yet — the note under the quote says so
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('msg-jump-highlight');
+  setTimeout(() => el.classList.remove('msg-jump-highlight'), 1500);
 };
 
 const handleReactionClick = (messageId, emoji) => {
@@ -200,6 +652,30 @@ const openContextMenu = async (event, msg) => {
 
 const closeContextMenu = () => {
   contextMenu.value = null;
+};
+
+// Touch browsers don't fire contextmenu on a long press (iOS never does), so
+// the press itself is the gesture: half a second of a steady finger opens
+// the menu at the touch point; any movement or release first cancels — a
+// scroll must never pop a menu.
+let longPressTimer = null;
+const startLongPress = (event, msg) => {
+  cancelLongPress();
+  const touch = event.touches?.[0];
+  if (!touch) return;
+  const at = { clientX: touch.clientX, clientY: touch.clientY };
+  longPressTimer = setTimeout(async () => {
+    longPressTimer = null;
+    contextMenu.value = { msgId: msg.id, x: at.clientX, y: at.clientY };
+    await nextTick();
+    clampContextMenuPosition();
+  }, 500);
+};
+const cancelLongPress = () => {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
 };
 
 const handleDocumentClick = (event) => {
@@ -265,7 +741,10 @@ const cancelEdit = () => {
 };
 
 const handleEscape = (e) => {
-  if (e.key === 'Escape') closeContextMenu();
+  if (e.key !== 'Escape') return;
+  // The carousel is on top, so it takes the key first.
+  if (lightbox.value) closeLightbox();
+  else closeContextMenu();
 };
 
 const handleResize = () => {
@@ -560,4 +1039,297 @@ watch(() => props.messages, () => {
     }
   }
 }
+
+/* ---------- design board: quotes (§1.2) ---------- */
+.msg-quote {
+  display: flex;
+  gap: 8px;
+  background: rgba(36, 24, 36, .06);
+  border-radius: 9px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+.msg-quote-bar {
+  width: 3px;
+  border-radius: 999px;
+  background: #8e2b77;
+  flex-shrink: 0;
+}
+.msg-quote-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.msg-quote-author { font-size: 11px; line-height: 1.3; font-weight: 600; color: #8e2b77; }
+.msg-quote-text {
+  font-size: 12px;
+  line-height: 1.35;
+  color: #4a4750;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* original deleted: the quote turns historical — struck through, muted */
+.msg-quote._historic .msg-quote-text { color: #8f889b; text-decoration: line-through; opacity: .9; }
+.msg-quote-note { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
+.msg-quote-nested-note { margin-top: 3px; font-size: 10px; line-height: 1.3; font-weight: 500; color: #8e2b77; cursor: pointer; }
+/* each level: a thinner, lighter bar and a step-smaller font (board card 4) */
+.msg-quote-level { display: flex; gap: 7px; margin-top: 5px; cursor: pointer; }
+.msg-quote-level-bar { flex-shrink: 0; border-radius: 999px; }
+.msg-quote-level._d2 .msg-quote-level-bar { width: 2px; background: rgba(142, 43, 119, .55); }
+.msg-quote-level._d2 .msg-quote-text { font-size: 11px; }
+.msg-quote-level._d2 .msg-quote-author { font-size: 10px; }
+.msg-quote-level._d3 .msg-quote-level-bar { width: 2px; background: rgba(142, 43, 119, .3); }
+.msg-quote-level._d3 .msg-quote-text { font-size: 10px; }
+.msg-quote-level._d3 .msg-quote-author { font-size: 9px; }
+.msg-quote-dot { width: 5px; height: 5px; border-radius: 50%; background: #c2c2c6; }
+
+.reply-preview { background: rgba(36, 24, 36, .06); border-radius: 9px; }
+
+/* §1.2 jump: outline + halo for 1.5s on the original bubble */
+.msg-jump-highlight { outline: 1.5px solid #8e2b77; box-shadow: 0 0 0 4px rgba(142, 43, 119, .22) !important; }
+
+/* ---------- design board: send states (§4.3) ---------- */
+.sync-status.local { color: #9a9c9d; }        /* ◌ stored locally */
+.sync-status.delivered { color: #2e7d32; letter-spacing: -2px; } /* ✓✓ green per board */
+.sync-status.pending { opacity: .45; }         /* pale ✓ in flight */
+/* rejected outright: red frame on the bubble itself, not just the glyph */
+.message-error { border: 1.5px solid #dc3545; }
+.msg-edited { margin-left: 4px; font-size: 10px; color: #8e2b77; cursor: default; }
+
+/* ---------- §4.2: admitted but causally unplaced ---------- */
+.message-unplaced { opacity: .72; }
+.msg-unplaced-note { margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
+
+.context-menu-danger { color: #dc3545; }
+
+
+/* ---------- §1.5 / §2.1 files ---------- */
+.msg-file { display: flex; align-items: center; gap: 8px; background: rgba(36, 24, 36, .06); border-radius: 9px; padding: 6px 8px; margin-bottom: 6px; }
+.msg-file-icon { font-size: 18px; flex-shrink: 0; }
+.msg-file-body { min-width: 0; flex-grow: 1; }
+.msg-file-name { font-size: 12px; font-weight: 600; color: #241824; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-file-meta { font-size: 10px; color: #6b6875; }
+.msg-file-err { color: #dc3545; }
+.msg-file-action { border: none; background: #241824; color: #fff; border-radius: 999px; width: 26px; height: 26px; font-size: 13px; line-height: 1; flex-shrink: 0; }
+.msg-file-spinner { width: 16px; height: 16px; border: 2px solid rgba(36,24,36,.2); border-top-color: #8e2b77; border-radius: 50%; flex-shrink: 0; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- §1.3 images ---------- */
+.msg-image {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 6px;
+  /* board §1.3: media fills the bubble; without an intrinsic width the
+     bubble collapses to its 150px minimum and previews shrink with it */
+  width: 320px;
+  max-width: 100%;
+  max-height: 340px;
+  background: rgba(36, 24, 36, .06);
+  cursor: pointer;
+}
+.msg-image-blur,
+.msg-image-full {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* the blur sits underneath and is simply covered when the real image loads */
+.msg-image-blur { filter: blur(6px); transform: scale(1.06); }
+.msg-image-full { animation: msg-image-in .18s ease-out; }
+@keyframes msg-image-in { from { opacity: 0 } to { opacity: 1 } }
+.msg-image-progress {
+  position: absolute;
+  left: 6px; right: 6px; bottom: 6px;
+  margin: 0 auto;
+  width: fit-content;
+  background: rgba(0, 0, 0, .45);
+  color: #fff;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  line-height: 1.3;
+}
+.msg-image-progress._err { background: rgba(220, 53, 69, .85); }
+
+/* ---------- §1.6 attachment grid ---------- */
+.msg-gallery {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 6px;
+  width: 320px;
+  max-width: 100%;
+}
+.msg-gallery._n2 { grid-template-columns: 1fr 1fr; }
+.msg-gallery._n3 { grid-template-columns: 2fr 1fr; grid-template-rows: 1fr 1fr; }
+.msg-gallery._n4 { grid-template-columns: 1fr 1fr; }
+.msg-gallery-cell {
+  position: relative;
+  aspect-ratio: 1;
+  overflow: hidden;
+  background: rgba(36, 24, 36, .06);
+  cursor: pointer;
+  border-radius: 3px;
+}
+/* outer corners inherit the bubble's radius, inner ones stay tight */
+.msg-gallery._n2 .msg-gallery-cell:nth-child(1) { border-radius: 9px 3px 3px 9px; }
+.msg-gallery._n2 .msg-gallery-cell:nth-child(2) { border-radius: 3px 9px 9px 3px; }
+.msg-gallery._n3 .msg-gallery-cell:nth-child(1) { grid-row: span 2; aspect-ratio: auto; border-radius: 9px 3px 3px 9px; }
+.msg-gallery._n3 .msg-gallery-cell:nth-child(2) { border-radius: 3px 9px 3px 3px; }
+.msg-gallery._n3 .msg-gallery-cell:nth-child(3) { border-radius: 3px 3px 9px 3px; }
+.msg-gallery._n4 .msg-gallery-cell:nth-child(1) { border-radius: 9px 3px 3px 3px; }
+.msg-gallery._n4 .msg-gallery-cell:nth-child(2) { border-radius: 3px 9px 3px 3px; }
+.msg-gallery._n4 .msg-gallery-cell:nth-child(3) { border-radius: 3px 3px 3px 9px; }
+.msg-gallery._n4 .msg-gallery-cell:nth-child(4) { border-radius: 3px 3px 9px 3px; }
+.msg-gallery-more {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, .42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+}
+
+/* ---------- carousel ---------- */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1080;
+  background: rgba(23, 22, 26, .92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+}
+.lightbox-bar {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  color: #fff;
+}
+.lightbox-count { font-size: 13px; font-weight: 500; }
+.lightbox-close { background: none; border: none; color: #fff; font-size: 20px; line-height: 1; }
+.lightbox-frame {
+  position: relative;
+  max-width: min(92vw, 1100px);
+  max-height: 74vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lightbox-frame img { max-width: 100%; max-height: 74vh; object-fit: contain; display: block; }
+.lightbox-frame img._blur { filter: blur(8px); }
+.lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(255, 255, 255, .12);
+  border: none;
+  color: #fff;
+  font-size: 28px;
+  line-height: 1;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+.lightbox-nav._prev { left: 12px; }
+.lightbox-nav._next { right: 12px; }
+.lightbox-caption { color: #fff; font-size: 13px; max-width: min(92vw, 1100px); text-align: center; }
+.lightbox-strip {
+  display: flex;
+  gap: 6px;
+  max-width: min(92vw, 1100px);
+  overflow-x: auto;
+  padding: 2px;
+}
+.lightbox-thumb { flex-shrink: 0; }
+.lightbox-thumb {
+  width: 46px; height: 46px;
+  padding: 0;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .12);
+}
+.lightbox-thumb._active { border-color: #8e2b77; }
+/* a frame still on its way reads as dimmed, so the strip doubles as a
+   "which of these are here" indicator */
+.lightbox-thumb._pending { opacity: .5; }
+.lightbox-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* ---------- §2.4 availability ---------- */
+.msg-availability { margin: -2px 0 6px; display: flex; flex-direction: column; gap: 6px; }
+.msg-chunks { display: flex; gap: 3px; }
+.msg-chunk { flex: 1; height: 6px; border-radius: 2px; background: #e6e6ea; }
+.msg-chunk._have { background: #8e2b77; }
+.msg-availability-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* deliberately neutral: partial availability is progress, not failure */
+.msg-availability-note { font-size: 11px; line-height: 1.3; color: #7a7a7a; }
+.msg-availability-btn {
+  border: 1px solid #8e2b77;
+  background: #fff;
+  color: #8e2b77;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+/* ---------- §1.4 video ---------- */
+.msg-video { margin-bottom: 6px; }
+.msg-video-frame {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #2d2450;
+  width: 320px;
+  max-width: 100%;
+  max-height: 340px;
+}
+.msg-video-el { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.msg-video-frame[role="button"] { cursor: pointer; }
+.msg-video-play {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 3px;
+}
+.msg-video-triangle {
+  width: 0; height: 0;
+  border-left: 14px solid #241824;
+  border-top: 9px solid transparent;
+  border-bottom: 9px solid transparent;
+}
+.msg-video-spinner {
+  width: 22px; height: 22px;
+  border: 2.6px solid rgba(36, 24, 36, .25);
+  border-top-color: #241824;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+.msg-video-load {
+  height: 4px;
+  border-radius: 999px;
+  background: #e6e6ea;
+  overflow: hidden;
+  margin-top: 5px;
+}
+.msg-video-load-fill { height: 100%; background: #8e2b77; transition: width .3s ease; }
 </style>
