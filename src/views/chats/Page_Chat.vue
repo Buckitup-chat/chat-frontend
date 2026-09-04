@@ -38,6 +38,7 @@ import TransferPanel from '@/components/chat/TransferPanel.vue';
 import { getDialogCollections } from '@/lib/data/collections';
 import { useCollectionRows } from '@/lib/data/useCollection';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
+import { feedOrderKey } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
 import { getUserCardsCollection } from '@/lib/data/collections';
@@ -457,11 +458,12 @@ const displayMessages = computed(() => {
         return base;
     });
 
-    return [...activeOptimistic, ...withEdits].sort((a, b) => {
-        const aTs = a._raw?.owner_timestamp || a.ownerTimestamp || 0;
-        const bTs = b._raw?.owner_timestamp || b.ownerTimestamp || 0;
-        return aTs - bTs;
-    });
+    // Ordered by AUTHORING time (the UUIDv7 inside message_id), not by
+    // owner_timestamp: that is the revision counter, an edit must raise it,
+    // and sorting by it teleported edited messages to the end of the feed.
+    return [...activeOptimistic, ...withEdits].sort((a, b) =>
+        feedOrderKey(a.id, a._raw?.owner_timestamp || a.ownerTimestamp || 0)
+        - feedOrderKey(b.id, b._raw?.owner_timestamp || b.ownerTimestamp || 0));
 });
 
 // Merge optimistic reactions with aggregated reactions
