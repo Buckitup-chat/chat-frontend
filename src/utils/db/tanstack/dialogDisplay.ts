@@ -47,12 +47,17 @@ export function isDialogMessagePending(messageId: string, pending: DialogMessage
 }
 
 export function compareByOwnerTimestamp(
-	a: { _raw?: { owner_timestamp?: unknown }; ownerTimestamp?: unknown },
-	b: { _raw?: { owner_timestamp?: unknown }; ownerTimestamp?: unknown }
+	a: { id?: string; message_id?: string; _raw?: { owner_timestamp?: unknown }; ownerTimestamp?: unknown },
+	b: { id?: string; message_id?: string; _raw?: { owner_timestamp?: unknown }; ownerTimestamp?: unknown }
 ): number {
 	const aTs = Number(a._raw?.owner_timestamp ?? a.ownerTimestamp ?? 0);
 	const bTs = Number(b._raw?.owner_timestamp ?? b.ownerTimestamp ?? 0);
-	return aTs - bTs;
+	const timeDiff = aTs - bTs;
+	if (timeDiff !== 0) return timeDiff;
+
+	const aId = String(a.message_id ?? a.id ?? "");
+	const bId = String(b.message_id ?? b.id ?? "");
+	return aId.localeCompare(bId);
 }
 
 export function formatMessageTime(ownerTimestamp: unknown): string {
