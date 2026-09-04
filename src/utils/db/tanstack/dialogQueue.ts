@@ -425,13 +425,13 @@ export function setSyncedRecorder(recorder: SyncedRecorder | null) {
 export async function markSynced(entry: QueueEntry, ignoreEchoSignHash?: string) {
   const current = await dbGet(entry.id);
   if (!current) return;
-  await syncedRecorder?.(current.table, current.key, localSnapshotOf(current), true, ignoreEchoSignHash);
-
   const { outcome } = await atomicMutate(entry.id, (c) => {
-    if (!c) return { action: "noop" };
+    if (!c || c.revision !== entry.revision) return { action: "noop" };
     return { action: "delete" };
   });
   if (outcome.action !== "delete") return;
+
+  await syncedRecorder?.(current.table, current.key, localSnapshotOf(current), true, ignoreEchoSignHash);
   transitionStatus(current.status, null);
   removeFromOverlay(current.table, current.key);
 }
@@ -699,16 +699,7 @@ export async function flushPendingDialogChanges(signSkey: Uint8Array | null | un
       return { retryAfterMs: nextBackoffDelay() };
     }
 
-    if (body.results.every((r) => r.status === "ok")) {
-      const currentlyPending = (await dbGetAll()).filter((e) => e.status === "pending" && e.ownerUserHash === ownerUserHash);
-      for (const entry of currentlyPending) {
-        await markSynced(entry);
-      }
-      resetBackoff();
-      return;
-    }
-
-    let toRetry = 0;
+     let toRetry = 0;
 
     for (const r of body.results) {
       const entry = mutationEntries[r?.index as number];
@@ -757,9 +748,13 @@ export function createFlushScheduler(
   let running = false;
   let backoffUntil = 0;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let rerunRequested = false;
 
   async function attempt(): Promise<void> {
-    if (running) return;
+    if (running) {
+      rerunRequested = true;
+      return;
+    }
     if (backoffUntil - now() > 0) return;
     running = true;
     try {
@@ -767,6 +762,10 @@ export function createFlushScheduler(
       backoffUntil = "retryAfterMs" in result && result.retryAfterMs ? now() + result.retryAfterMs : 0;
     } finally {
       running = false;
+      if (rerunRequested) {
+        rerunRequested = false;
+        void attempt();
+      }
     }
   }
 

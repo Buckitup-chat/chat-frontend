@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { v7 as uuidv7 } from 'uuid';
 import {
 	mergeDialogMessagesForDisplay,
 	mergeDialogReactionsForDisplay,
@@ -164,6 +165,60 @@ describe('compareByOwnerTimestamp — deterministic ordering', () => {
 	it('missing timestamps are treated as 0, not a crash', () => {
 		expect(() => compareByOwnerTimestamp({}, {})).not.toThrow();
 		expect(compareByOwnerTimestamp({}, {})).toBe(0);
+	});
+});
+
+describe('compareByOwnerTimestamp — deterministic secondary tie-break (burst-send ordering fix)', () => {
+	it('Test F: timestamp primary ordering is unchanged when timestamps differ', () => {
+		const a = { ownerTimestamp: 100, message_id: 'dmsg_zzz' };
+		const b = { ownerTimestamp: 200, message_id: 'dmsg_aaa' };
+
+		expect(compareByOwnerTimestamp(a, b)).toBeLessThan(0);
+		expect(compareByOwnerTimestamp(b, a)).toBeGreaterThan(0);
+	});
+
+	it('Test G: equal timestamp is resolved deterministically by message_id, regardless of input order', () => {
+		const a = { ownerTimestamp: 100, message_id: 'dmsg_bbbbbbbb' };
+		const b = { ownerTimestamp: 100, message_id: 'dmsg_aaaaaaaa' };
+
+		const sortedBA = [b, a].sort(compareByOwnerTimestamp).map((m) => m.message_id);
+		const sortedAB = [a, b].sort(compareByOwnerTimestamp).map((m) => m.message_id);
+
+		expect(sortedBA).toEqual(sortedAB);
+		expect(sortedBA).toEqual(['dmsg_aaaaaaaa', 'dmsg_bbbbbbbb']);
+		expect(compareByOwnerTimestamp(a, b)).not.toBe(0);
+	});
+
+	it('Test H: same-timestamp group sorts identically regardless of pre-sort (arrival vs. reload/cache-hydration) order', () => {
+		const A = { ownerTimestamp: 100, message_id: 'dmsg_A' };
+		const B = { ownerTimestamp: 100, message_id: 'dmsg_B' };
+		const C = { ownerTimestamp: 100, message_id: 'dmsg_C' };
+		const D = { ownerTimestamp: 100, message_id: 'dmsg_D' };
+
+		const liveArrivalOrder = [A, B, C, D];
+		const hydratedCacheOrder = [C, A, D, B];
+
+		const sortedLive = [...liveArrivalOrder].sort(compareByOwnerTimestamp).map((m) => m.message_id);
+		const sortedHydrated = [...hydratedCacheOrder].sort(compareByOwnerTimestamp).map((m) => m.message_id);
+
+		expect(sortedHydrated).toEqual(sortedLive);
+	});
+
+	it('Test I: real uuid@14 v7() ids — lexical order matches call/creation order, including multiple calls within the same millisecond', () => {
+		const ids = Array.from({ length: 20 }, () => 'dmsg_' + uuidv7());
+		const messages = ids.map((message_id) => ({ ownerTimestamp: 100, message_id }));
+
+		const shuffled = [...messages].reverse();
+		const sorted = shuffled.sort(compareByOwnerTimestamp).map((m) => m.message_id);
+
+		expect(sorted).toEqual(ids);
+		expect(new Set(ids).size).toBe(ids.length);
+	});
+
+	it('documents the limitation: message_id ordering is not authoritative across different senders/devices (client clock skew)', () => {
+		const laterWallClockButSkewedBehindDevice = { ownerTimestamp: 100, message_id: 'dmsg_' + '0'.repeat(8) };
+		const earlierWallClockButSkewedAheadDevice = { ownerTimestamp: 100, message_id: 'dmsg_' + 'f'.repeat(8) };
+		expect(compareByOwnerTimestamp(laterWallClockButSkewedBehindDevice, earlierWallClockButSkewedAheadDevice)).toBeLessThan(0);
 	});
 });
 
