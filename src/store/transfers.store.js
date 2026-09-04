@@ -51,6 +51,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 			newItems.push({
 				id: `tr_${++seq}`,
 				batchId,
+				peerHash,
 				name: file.name,
 				size: file.size,
 				mimeType: file.type,

@@ -11,7 +11,7 @@
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge">
-            <template #above-input><TransferPanel /></template>
+            <template #above-input><TransferPanel :current-peer="peerHash" /></template>
         </ChatWindow>
         <FileStateModal v-if="fileState" :part="fileState.part"
             :availability="availabilityByFileId[fileState.part.fileId] || null"
@@ -676,12 +676,9 @@ const handlePlayVideo = async (part) => {
     }
 };
 
-// Sessions and blob URLs are process-wide; leaving the dialog releases them.
-watch(dialogHash, () => {
-    for (const s of videoSources.values()) s.release();
-    videoSources.clear();
-    videosByFileId.value = {};
-});
+// Video state survives dialog switches on purpose: streaming sessions are a
+// map entry in the worker, downloaded videos live in the media cache — both
+// cheap to keep, and re-entering the chat replays without re-fetching.
 
 const downloadsByFileId = ref({});
 

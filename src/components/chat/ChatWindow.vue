@@ -29,7 +29,9 @@
             'message-error': msg._syncStatus === 'error',
             'message-unplaced': msg._verify === 'waiting',
           }]"
-          style="max-width: 75%; min-width: 150px;" @contextmenu.prevent="openContextMenu($event, msg)">
+          style="max-width: 75%; min-width: 150px;" @contextmenu.prevent="openContextMenu($event, msg)"
+          @touchstart="startLongPress($event, msg)" @touchend="cancelLongPress"
+          @touchmove="cancelLongPress" @touchcancel="cancelLongPress">
           <div v-if="!msg.isMine && showAuthorName" class="fw-bold text-muted mb-1" style="font-size: 0.8rem;">
             {{ msg.authorName }}
           </div>
@@ -45,15 +47,36 @@
             <!-- Quotes render from their own snapshot (the reply carries the
                  cited content), so they work even when the original never
                  arrived or was deleted — the jump just degrades honestly. -->
-            <div v-for="(q, qi) in quotesOf(msg)" :key="qi" class="msg-quote" role="button"
-              :class="{ '_historic': quoteOriginalDeleted(q) }"
-              @click="jumpToMessage(q.messageId)">
+            <div v-for="(q, qi) in quotesOf(msg)" :key="qi" class="msg-quote"
+              :class="{ '_historic': quoteOriginalDeleted(q) }">
               <div class="msg-quote-bar"></div>
               <div class="msg-quote-body">
-                <div class="msg-quote-author">{{ quoteAuthorName(q.authorHash) }}</div>
-                <div class="msg-quote-text">{{ quotePreview(q) }}</div>
+                <div role="button" @click="jumpToMessage(q.messageId)">
+                  <div class="msg-quote-author">{{ quoteAuthorName(q.authorHash) }}</div>
+                  <div class="msg-quote-text">{{ quotePreview(q) }}</div>
+                </div>
                 <div v-if="quoteOriginalDeleted(q)" class="msg-quote-note">original deleted by author</div>
                 <div v-else-if="!quoteOriginalPresent(q)" class="msg-quote-note"><span class="msg-quote-dot"></span>original not synced yet</div>
+                <!-- card 4: nearest quote only, the rest behind a counter -->
+                <div v-if="nestedCount(q) && !expandedQuotes.has(quoteKey(msg, qi))"
+                  class="msg-quote-nested-note" role="button" @click.stop="toggleQuoteChain(msg, qi)">
+                  ⤷ {{ nestedCount(q) }} more {{ nestedCount(q) === 1 ? 'quote' : 'quotes' }} inside
+                </div>
+                <template v-else-if="nestedCount(q)">
+                  <div v-for="(link, depth) in quoteChain(q).slice(1, MAX_QUOTE_DEPTH)" :key="depth"
+                    class="msg-quote-level" :class="'_d' + (depth + 2)" role="button"
+                    @click.stop="jumpToMessage(link.messageId)">
+                    <div class="msg-quote-level-bar"></div>
+                    <div>
+                      <div class="msg-quote-author">{{ quoteAuthorName(link.authorHash) }}</div>
+                      <div class="msg-quote-text">{{ quotePreview(link) }}</div>
+                    </div>
+                  </div>
+                  <div v-if="quoteChain(q).length > MAX_QUOTE_DEPTH" class="msg-quote-nested-note">
+                    …{{ quoteChain(q).length - MAX_QUOTE_DEPTH }} deeper
+                  </div>
+                  <div class="msg-quote-nested-note" role="button" @click.stop="toggleQuoteChain(msg, qi)">collapse</div>
+                </template>
               </div>
             </div>
             <!-- §1.4 video: ThumbHash frame with a play button; playback
@@ -247,12 +270,12 @@
       <form @submit.prevent="submitMessage" class="d-flex align-items-center m-0">
         <input ref="fileInput" type="file" multiple class="d-none" @change="onFilePicked" />
         <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
-          style="width: 40px; height: 40px; padding: 0;" title="Attach a file" @click="fileInput?.click()">📎</button>
+          style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;" title="Attach a file" @click="fileInput?.click()">📎</button>
         <input type="text" class="form-control me-2 rounded-pill px-3" v-model="newMessage"
           placeholder="Type a message..." />
         <button type="submit"
           class="btn btn-primary rounded-circle d-flex align-items-center justify-content-center border-0"
-          style="width: 40px; height: 40px; padding: 0;">
+          style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;">
           &#10148;
         </button>
       </form>
@@ -453,6 +476,37 @@ const toggleHistory = (msgId) => {
 const versionCountOf = (msg) => props.versionCounts[msg.id] || 0;
 
 const quotesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'quote');
+
+// ---------- nested quotes (board §1.2, card 4) ----------
+// The feed shows only the nearest quote plus "N more inside"; the chain
+// expands inside the same bubble, levels marked by a thinner, lighter bar
+// and a step-smaller font. Never auto-expanded — the feed must not turn
+// into an email thread.
+
+/** The chain of quotes under q: [q, inner, inner-inner, …]. */
+const quoteChain = (q) => {
+  const chain = [q];
+  let cur = q;
+  for (;;) {
+    const inner = (cur.snapshot || []).find((p) => p.kind === 'quote');
+    if (!inner) break;
+    chain.push(inner);
+    cur = inner;
+  }
+  return chain;
+};
+const nestedCount = (q) => quoteChain(q).length - 1;
+
+const MAX_QUOTE_DEPTH = 3;
+const expandedQuotes = ref(new Set());
+const quoteKey = (msg, qi) => `${msg.id}|${qi}`;
+const toggleQuoteChain = (msg, qi) => {
+  const next = new Set(expandedQuotes.value);
+  const key = quoteKey(msg, qi);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  expandedQuotes.value = next;
+};
 const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
 
 /** Availability only shows while it is genuinely partial — a complete file
@@ -604,6 +658,30 @@ const openContextMenu = async (event, msg) => {
 
 const closeContextMenu = () => {
   contextMenu.value = null;
+};
+
+// Touch browsers don't fire contextmenu on a long press (iOS never does), so
+// the press itself is the gesture: half a second of a steady finger opens
+// the menu at the touch point; any movement or release first cancels — a
+// scroll must never pop a menu.
+let longPressTimer = null;
+const startLongPress = (event, msg) => {
+  cancelLongPress();
+  const touch = event.touches?.[0];
+  if (!touch) return;
+  const at = { clientX: touch.clientX, clientY: touch.clientY };
+  longPressTimer = setTimeout(async () => {
+    longPressTimer = null;
+    contextMenu.value = { msgId: msg.id, x: at.clientX, y: at.clientY };
+    await nextTick();
+    clampContextMenuPosition();
+  }, 500);
+};
+const cancelLongPress = () => {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
 };
 
 const handleDocumentClick = (event) => {
@@ -998,6 +1076,16 @@ watch(() => props.messages, () => {
 /* original deleted: the quote turns historical — struck through, muted */
 .msg-quote._historic .msg-quote-text { color: #8f889b; text-decoration: line-through; opacity: .9; }
 .msg-quote-note { display: flex; align-items: center; gap: 5px; margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
+.msg-quote-nested-note { margin-top: 3px; font-size: 10px; line-height: 1.3; font-weight: 500; color: #8e2b77; cursor: pointer; }
+/* each level: a thinner, lighter bar and a step-smaller font (board card 4) */
+.msg-quote-level { display: flex; gap: 7px; margin-top: 5px; cursor: pointer; }
+.msg-quote-level-bar { flex-shrink: 0; border-radius: 999px; }
+.msg-quote-level._d2 .msg-quote-level-bar { width: 2px; background: rgba(142, 43, 119, .55); }
+.msg-quote-level._d2 .msg-quote-text { font-size: 11px; }
+.msg-quote-level._d2 .msg-quote-author { font-size: 10px; }
+.msg-quote-level._d3 .msg-quote-level-bar { width: 2px; background: rgba(142, 43, 119, .3); }
+.msg-quote-level._d3 .msg-quote-text { font-size: 10px; }
+.msg-quote-level._d3 .msg-quote-author { font-size: 9px; }
 .msg-quote-dot { width: 5px; height: 5px; border-radius: 50%; background: #c2c2c6; }
 
 .reply-preview { background: rgba(36, 24, 36, .06); border-radius: 9px; }
@@ -1043,6 +1131,10 @@ watch(() => props.messages, () => {
   border-radius: 10px;
   overflow: hidden;
   margin-bottom: 6px;
+  /* board §1.3: media fills the bubble; without an intrinsic width the
+     bubble collapses to its 150px minimum and previews shrink with it */
+  width: 320px;
+  max-width: 100%;
   max-height: 340px;
   background: rgba(36, 24, 36, .06);
   cursor: pointer;
@@ -1079,6 +1171,8 @@ watch(() => props.messages, () => {
   display: grid;
   gap: 3px;
   margin-bottom: 6px;
+  width: 320px;
+  max-width: 100%;
 }
 .msg-gallery._n2 { grid-template-columns: 1fr 1fr; }
 .msg-gallery._n3 { grid-template-columns: 2fr 1fr; grid-template-rows: 1fr 1fr; }
@@ -1211,6 +1305,8 @@ watch(() => props.messages, () => {
   border-radius: 10px;
   overflow: hidden;
   background: #2d2450;
+  width: 320px;
+  max-width: 100%;
   max-height: 340px;
 }
 .msg-video-el { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }

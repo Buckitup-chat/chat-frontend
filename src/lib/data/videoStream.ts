@@ -16,6 +16,7 @@
 import { fromBase64 } from '@/lib/pq/signature';
 import { CHUNK_SIZE } from '@/lib/pq/fileCrypto';
 import { downloadFile, type DownloadProgress } from './fileTransfer';
+import { getCachedMedia, putCachedMedia } from './mediaCache';
 
 declare const ELECTRIC_API_URL: string;
 
@@ -120,12 +121,19 @@ export const openVideo = async (
 		};
 	}
 
+	// Chunks are immutable, so a downloaded video never goes stale — the
+	// media cache keeps it across dialog switches, and re-entering the chat
+	// replays without downloading again. The cache owns the URL; release is
+	// a no-op on this path.
+	const cached = getCachedMedia(video.fileId);
+	if (cached) return { url: cached, streaming: false, release: () => {} };
+
 	const bytes = await downloadFile({
 		fileId: video.fileId,
 		encSecretB64: video.encSecretB64,
 		onProgress: opts.onProgress,
 		signal: opts.signal,
 	});
-	const url = URL.createObjectURL(new Blob([bytes as unknown as globalThis.BlobPart], { type: video.mimeType || 'video/mp4' }));
-	return { url, streaming: false, release: () => URL.revokeObjectURL(url) };
+	const url = putCachedMedia(video.fileId, bytes, video.mimeType || 'video/mp4');
+	return { url, streaming: false, release: () => {} };
 };

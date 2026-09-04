@@ -27,7 +27,7 @@
 
       <div class="transfer-list">
         <div v-for="(it, i) in visibleItems" :key="it.id" class="transfer-row"
-          :class="{ '_active': it.status === 'active', '_paused': it.status === 'paused', '_error': it.status === 'error' }"
+          :class="{ '_active': it.status === 'active', '_paused': it.status === 'paused', '_error': it.status === 'error', '_foreign': isForeign(it) }"
           draggable="true"
           @dragstart="dragFrom = i" @dragover.prevent @drop.prevent="onDrop(i)">
           <!-- Board: one geometry for every state — handle, name, bar,
@@ -35,7 +35,9 @@
                the bar, never in the button. -->
           <span class="transfer-handle" title="Drag to reorder">⋮⋮</span>
           <div class="transfer-body">
-            <div class="transfer-name">{{ it.name }}</div>
+            <div class="transfer-name">
+              <span v-if="isForeign(it)" class="transfer-elsewhere" title="Uploading to another dialog">↗</span>{{ it.name }}
+            </div>
             <div class="transfer-bar">
               <div class="transfer-bar-fill" :style="{ width: percentOf(it) + '%' }"></div>
             </div>
@@ -58,7 +60,13 @@
 import { ref, computed } from 'vue';
 import { useTransfersStore } from '@/store/transfers.store';
 
+const props = defineProps({
+  /** Peer of the dialog the panel is shown in; rows going elsewhere dim. */
+  currentPeer: { type: String, default: '' },
+});
+
 const $transfers = useTransfersStore();
+const isForeign = (it) => !!props.currentPeer && it.peerHash && it.peerHash !== props.currentPeer;
 
 const MAX_ROWS = 4;
 const expanded = ref(false);
@@ -162,6 +170,10 @@ const applyAction = (it) => {
   padding: 6px 12px;
 }
 .transfer-row._active { background: #f9edf6; }
+/* rows bound for another dialog: visibly not this conversation's traffic */
+.transfer-row._foreign { opacity: .55; }
+.transfer-row._foreign .transfer-bar-fill { background: #9a9c9d; }
+.transfer-elsewhere { color: #8e2b77; margin-right: 4px; font-size: 11px; }
 .transfer-handle { color: #c2c2c6; cursor: grab; font-size: 12px; letter-spacing: -2px; }
 .transfer-body { flex: 1; min-width: 0; }
 .transfer-name {

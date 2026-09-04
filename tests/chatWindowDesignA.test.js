@@ -608,3 +608,89 @@ describe('carousel walks the whole dialog', () => {
 		expect(w.findAll('.lightbox-thumb')).toHaveLength(3);
 	});
 });
+
+describe('nested quotes (board card 4)', () => {
+	const inner = {
+		kind: 'quote', authorHash: PEER, messageId: 'dmsg_root', signHash: 'dms_r',
+		snapshot: [{ kind: 'text', text: 'Схему пришли до четверга' }],
+	};
+	const outer = {
+		kind: 'quote', authorHash: MY, messageId: 'dmsg_mid', signHash: 'dms_m',
+		snapshot: [inner, { kind: 'text', text: 'Уже в очереди' }],
+	};
+	const renderReply = () =>
+		mount(ChatWindow, {
+			props: {
+				title: 'Ирина', myHash: MY, reactions: {},
+				messages: [message({ parts: [outer, { kind: 'text', text: 'ок, жду' }], text: 'ок, жду' })],
+			},
+			global: { stubs: { Avatar: true } },
+		});
+
+	it('shows the nearest quote and a counter, never the whole thread', () => {
+		const w = renderReply();
+		expect(w.find('.msg-quote-text').text()).toBe('Уже в очереди');
+		expect(w.find('.msg-quote-nested-note').text()).toContain('1 more quote inside');
+		expect(w.find('.msg-quote-level').exists()).toBe(false);
+	});
+
+	it('expands the chain inside the bubble and collapses back', async () => {
+		const w = renderReply();
+		await w.find('.msg-quote-nested-note').trigger('click');
+		const level = w.find('.msg-quote-level._d2');
+		expect(level.exists()).toBe(true);
+		expect(level.find('.msg-quote-text').text()).toBe('Схему пришли до четверга');
+		expect(level.find('.msg-quote-author').text()).toBe('Ирина');
+
+		const collapse = w.findAll('.msg-quote-nested-note').find((el) => el.text() === 'collapse');
+		await collapse.trigger('click');
+		expect(w.find('.msg-quote-level').exists()).toBe(false);
+	});
+
+	it('caps rendered depth and admits the remainder', async () => {
+		const deep = { ...inner };
+		const l2 = { kind: 'quote', authorHash: PEER, messageId: 'd2', signHash: 's2', snapshot: [deep, { kind: 'text', text: 'l2' }] };
+		const l3 = { kind: 'quote', authorHash: MY, messageId: 'd3', signHash: 's3', snapshot: [l2, { kind: 'text', text: 'l3' }] };
+		const l4 = { kind: 'quote', authorHash: PEER, messageId: 'd4', signHash: 's4', snapshot: [l3, { kind: 'text', text: 'l4' }] };
+		const w = mount(ChatWindow, {
+			props: {
+				title: 'Ирина', myHash: MY, reactions: {},
+				messages: [message({ parts: [l4, { kind: 'text', text: 'top' }], text: 'top' })],
+			},
+			global: { stubs: { Avatar: true } },
+		});
+		await w.find('.msg-quote-nested-note').trigger('click');
+		expect(w.findAll('.msg-quote-level')).toHaveLength(2); // depths 2 and 3
+		const notes = w.findAll('.msg-quote-nested-note').map((el) => el.text());
+		expect(notes.some((t) => t.includes('deeper'))).toBe(true);
+	});
+});
+
+describe('mobile long press', () => {
+	it('opens the context menu after half a second of a steady finger', async () => {
+		vi.useFakeTimers();
+		try {
+			const w = render([message()]);
+			await w.find('.message-bubble').trigger('touchstart', { touches: [{ clientX: 50, clientY: 60 }] });
+			await vi.advanceTimersByTimeAsync(600);
+			expect(w.find('.context-menu').exists()).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// A scroll must never pop a menu.
+	it('cancels on movement before the timer fires', async () => {
+		vi.useFakeTimers();
+		try {
+			const w = render([message()]);
+			await w.find('.message-bubble').trigger('touchstart', { touches: [{ clientX: 50, clientY: 60 }] });
+			await vi.advanceTimersByTimeAsync(200);
+			await w.find('.message-bubble').trigger('touchmove');
+			await vi.advanceTimersByTimeAsync(600);
+			expect(w.find('.context-menu').exists()).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
