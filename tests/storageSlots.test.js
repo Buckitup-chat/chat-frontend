@@ -31,6 +31,7 @@ vi.mock('@/lib/data/collections', () => ({
 vi.mock('@/lib/data/ingest', () => ({
 	sendMutationsAndAwaitShape: async () => ({ ok: true }),
 	drainPendingWrites: async () => {},
+	stopDrainLoop: () => {},
 }));
 vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async (_userHash, uuid) =>

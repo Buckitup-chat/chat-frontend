@@ -93,7 +93,9 @@ describe('writing with no network', () => {
 		expect(await pendingEntries(MY_HASH)).toHaveLength(2);
 
 		online = true;
-		await drainPendingWrites(MY_HASH, SKEY);
+		// The drain loop is fire-and-forget now; give its first pass a beat.
+		drainPendingWrites(MY_HASH, SKEY);
+		await vi.waitFor(async () => expect(await pendingEntries(MY_HASH)).toHaveLength(0));
 
 		// Oldest first: a message must not overtake the one typed before it.
 		expect(sent).toHaveLength(2);
@@ -105,7 +107,10 @@ describe('writing with no network', () => {
 	it('keeps the queue intact when the network is still down at drain time', async () => {
 		await sendMutationsAndAwaitShape([message('x')], SKEY, { retries: 0 }).catch(() => {});
 
-		await drainPendingWrites(MY_HASH, SKEY);
+		drainPendingWrites(MY_HASH, SKEY);
+		await new Promise((r) => setTimeout(r, 50));
+		const { stopDrainLoop } = await import('@/lib/data/outbox');
+		stopDrainLoop(); // the loop would keep retrying on its timer — that is its job
 
 		expect(sent).toHaveLength(0);
 		expect(await pendingEntries(MY_HASH)).toHaveLength(1);
@@ -118,5 +123,40 @@ describe('writing with no network', () => {
 
 		expect(sent).toHaveLength(1);
 		expect(await pendingEntries(MY_HASH)).toHaveLength(0);
+	});
+});
+
+// ADR §11: when durable storage refuses the write, a user-visible mutation
+// fails visibly. A best-effort network send that looks identical to success
+// is the one state the interface must never claim.
+describe('durability is part of message acceptance', () => {
+	const brokenStorage = {
+		async get(): Promise<string | null> { throw new Error('private mode'); },
+		async set(): Promise<void> { throw new Error('private mode'); },
+		async delete(): Promise<void> {},
+		async keys(): Promise<string[]> { throw new Error('private mode'); },
+		async clear(): Promise<void> {},
+	};
+
+	beforeEach(() => {
+		online = true;
+		sent.length = 0;
+		_setStorageForTests(brokenStorage);
+	});
+
+	it('fails visibly before the network when the queue cannot store the write', async () => {
+		await expect(
+			sendMutationsAndAwaitShape([message('x')], SKEY, { retries: 0 })
+		).rejects.toMatchObject({ name: 'DurabilityError' });
+		expect(sent).toHaveLength(0); // nothing left the device
+	});
+
+	it('still sends when a caller explicitly opts into best-effort', async () => {
+		const result = await sendMutationsAndAwaitShape([message('x')], SKEY, {
+			retries: 0,
+			durability: 'best-effort',
+		});
+		expect(result).toBeTruthy();
+		expect(sent).toHaveLength(1);
 	});
 });
