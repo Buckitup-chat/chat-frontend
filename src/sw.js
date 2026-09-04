@@ -1,23 +1,38 @@
-// Progressive playback of encrypted video (chat docs: reqs/pq_video_streaming.md).
+// The app's one service worker (a scope allows only one): the offline shell
+// and the encrypted-video streamer live together here.
 //
-// The browser's own <video> stack drives everything: it issues range
-// requests, this worker answers them. Each range maps to the chunks covering
-// it; chunks are fetched from the device, decrypted here with AES-256-GCM,
-// and the requested bytes are streamed back. The device only ever serves
-// ciphertext, and seeking works because the media stack may ask for any
-// range it likes.
+// Shell: every build asset is precached, navigations fall back to the cached
+// index.html — the app opens and runs on a device with no reachable backend
+// at all (offline-first: vault login, persisted shapes, chunk cache and the
+// outbox are all local). `/api` is deliberately untouched: Electric
+// long-polls and ingest must never be served from a cache.
 //
-// Standalone by necessity: a worker cannot import from the app bundle, so
-// the range arithmetic mirrors src/lib/pq/videoRange.ts (tested there) and
-// the decrypt mirrors the chunk format in src/lib/pq/fileCrypto.ts. Change
-// one, change the other.
+// Video (chat docs: reqs/pq_video_streaming.md): the browser's <video> stack
+// issues range requests against /encrypted-video/<session>; each range maps
+// to chunks, fetched as ciphertext and decrypted here with AES-256-GCM. This
+// file is bundled, so the range arithmetic is imported from videoRange.ts —
+// the same code the unit tests pin.
+import { precacheAndRoute, createHandlerBoundToURL, cleanupOutdatedCaches } from 'workbox-precaching';
+import { NavigationRoute, registerRoute } from 'workbox-routing';
+import { parseRange, planChunks } from '@/lib/pq/videoRange';
+
+self.skipWaiting();
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+
+// ---------- offline shell ----------
+
+cleanupOutdatedCaches();
+precacheAndRoute(self.__WB_MANIFEST);
+
+registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html'), {
+	denylist: [/\/encrypted-video\//, /\/api\//],
+}));
+
+// ---------- encrypted video streaming ----------
 
 const sessions = new Map();
 const MAX_CHUNKS_PER_RESPONSE = 4;
 const CACHE_LIMIT = 8; // decrypted chunks; 8 × 4 MiB = 32 MiB ceiling
-
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
 self.addEventListener('message', (event) => {
 	const msg = event.data || {};
@@ -80,32 +95,6 @@ const getChunk = async (session, index) => {
 		session.cache.delete(session.cache.keys().next().value);
 	}
 	return plain;
-};
-
-// --- mirrors src/lib/pq/videoRange.ts ---
-const parseRange = (header, totalSize) => {
-	if (!header) return null;
-	const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
-	if (!m) return null;
-	const [, rawStart, rawEnd] = m;
-	if (rawStart === '' && rawEnd === '') return null;
-	if (rawStart === '') {
-		const len = Number(rawEnd);
-		if (!len) return null;
-		return { start: Math.max(0, totalSize - len), end: totalSize - 1 };
-	}
-	const start = Number(rawStart);
-	if (start >= totalSize) return null;
-	const end = rawEnd === '' ? totalSize - 1 : Math.min(Number(rawEnd), totalSize - 1);
-	return end < start ? null : { start, end };
-};
-
-const planChunks = (range, chunkSize, totalSize, maxChunks) => {
-	const firstChunk = Math.floor(range.start / chunkSize);
-	const wantedLast = Math.floor(Math.min(range.end, totalSize - 1) / chunkSize);
-	const lastChunk = Math.min(wantedLast, firstChunk + maxChunks - 1);
-	const servedEnd = Math.min(range.end, (lastChunk + 1) * chunkSize - 1, totalSize - 1);
-	return { firstChunk, lastChunk, offsetInFirst: range.start - firstChunk * chunkSize, served: { start: range.start, end: servedEnd } };
 };
 
 /**

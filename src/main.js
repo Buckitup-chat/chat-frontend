@@ -96,3 +96,14 @@ app.component('InfoTooltip', InfoTooltip);
 // tab is no different from a second device, which the protocol must survive
 // anyway — signed rows, monotonic owner_timestamps, idempotent replays.
 app.mount('#app');
+
+// Offline shell: precached build + encrypted-video streaming (src/sw.js).
+// virtual:pwa-register resolves to a no-op module in dev, where the
+// self-signed stand cannot register workers anyway.
+import('virtual:pwa-register')
+	.then(({ registerSW }) => registerSW({ immediate: true }))
+	.catch(() => { /* dev server without the PWA virtual module */ });
+
+// Everything offline-first lives in browser storage (vault, shapes, chunk
+// cache, outbox, drafts) — ask the browser not to evict it under pressure.
+navigator.storage?.persist?.().catch(() => { });

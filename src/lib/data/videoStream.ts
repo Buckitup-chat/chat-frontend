@@ -66,7 +66,10 @@ const ensureWorker = (): Promise<boolean> => {
 	workerReady = (async () => {
 		if (!('serviceWorker' in navigator) || !window.isSecureContext) return false;
 		try {
-			await navigator.serviceWorker.register('/video-sw.js');
+			// The app worker (src/sw.js, registered from main.js) hosts the video
+			// streamer; when it is absent — dev stand, PWA disabled — this path
+			// reports no worker and openVideo takes the download fallback.
+			if (!(await navigator.serviceWorker.getRegistration())) return false;
 			await navigator.serviceWorker.ready;
 			if (!navigator.serviceWorker.controller) {
 				await new Promise<void>((resolve) => {
