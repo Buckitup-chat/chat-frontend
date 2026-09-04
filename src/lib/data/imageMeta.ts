@@ -14,6 +14,11 @@ export interface ImagePreview {
 	thumbHashB64: string;
 }
 
+export interface VideoPreview extends ImagePreview {
+	/** Whole seconds; 0 when the metadata does not say (e.g. a live stream). */
+	durationSeconds: number;
+}
+
 export const isImageMime = (mime: string): boolean =>
 	/^image\/(png|jpe?g|gif|webp|avif|bmp)$/i.test(mime || '');
 
@@ -70,14 +75,14 @@ export const buildImagePreview = async (blob: Blob): Promise<ImagePreview | null
  * `seeked` — `loadeddata` can fire for frame zero before the seek applies,
  * which would grab exactly the frame being avoided.
  */
-export const buildVideoPreview = (blob: Blob): Promise<ImagePreview | null> =>
+export const buildVideoPreview = (blob: Blob): Promise<VideoPreview | null> =>
 	new Promise((resolve) => {
 		const url = URL.createObjectURL(blob);
 		const video = document.createElement('video');
 		let settled = false;
 		// A stream that never yields a frame must not hang the send.
 		const timer = setTimeout(() => finish(null), 8000);
-		const finish = (result: ImagePreview | null) => {
+		const finish = (result: VideoPreview | null) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
@@ -108,6 +113,8 @@ export const buildVideoPreview = (blob: Blob): Promise<ImagePreview | null> =>
 					widthAspect,
 					heightAspect,
 					thumbHashB64: toBase64(new Uint8Array(rgbaToThumbHash(canvas.width, canvas.height, data))),
+					// NaN/Infinity for streams without a declared length → unknown
+					durationSeconds: Number.isFinite(video.duration) ? Math.max(0, Math.round(video.duration)) : 0,
 				});
 			} catch {
 				finish(null);

@@ -465,6 +465,7 @@ describe('§1.4 video', () => {
 		kind: 'video', widthAspect: 4, heightAspect: 3, thumbHashB64: '',
 		name: 'clip.mp4', size: 52_428_800, mimeType: 'video/mp4',
 		createdAt: 0, fileId: 'f_' + 'e'.repeat(32), encSecretB64: 'AAAA',
+		durationSeconds: 127,
 	};
 	const renderWith = (videos = {}) =>
 		mount(ChatWindow, {
@@ -513,6 +514,40 @@ describe('§1.4 video', () => {
 		expect(w.find('.msg-image-progress._err').text()).toMatch(/tap to retry/);
 		await w.find('.msg-video-frame').trigger('click');
 		expect(w.emitted('playVideo')[0][0]).toMatchObject({ fileId: videoPart.fileId });
+	});
+
+	// Duration comes from the envelope (07 §"video" pos 9) — visible before
+	// any chunk arrives, gone once the player's own controls take over.
+	it('shows the duration badge on the preview frame', () => {
+		const w = renderWith();
+		expect(w.find('.msg-video-duration').text()).toBe('2:07');
+	});
+
+	it('formats hour-long durations as h:mm:ss', () => {
+		const w = mount(ChatWindow, {
+			props: {
+				title: 'Ирина', myHash: MY, reactions: {},
+				messages: [message({ parts: [{ ...videoPart, durationSeconds: 3661 }], text: '' })],
+				videos: {},
+			},
+			global: { stubs: { Avatar: true } },
+		});
+		expect(w.find('.msg-video-duration').text()).toBe('1:01:01');
+	});
+
+	it('hides the badge while playing and when the duration is unknown', () => {
+		const playing = renderWith({ [videoPart.fileId]: { status: 'ready', url: '/encrypted-video/abc' } });
+		expect(playing.find('.msg-video-duration').exists()).toBe(false);
+
+		const unknown = mount(ChatWindow, {
+			props: {
+				title: 'Ирина', myHash: MY, reactions: {},
+				messages: [message({ parts: [{ ...videoPart, durationSeconds: 0 }], text: '' })],
+				videos: {},
+			},
+			global: { stubs: { Avatar: true } },
+		});
+		expect(unknown.find('.msg-video-duration').exists()).toBe(false);
 	});
 });
 

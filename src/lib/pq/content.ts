@@ -67,10 +67,13 @@ export interface ImagePart {
 
 /** Out-of-band video (07 §"video"). Same shape as an image — the preview
  * frame's ThumbHash and the aspect ratio — because the player needs to lay
- * the frame out before it can stream anything. Always out-of-band: there is
- * no inline variant. */
+ * the frame out before it can stream anything, plus the playback duration so
+ * the preview can carry its badge before a single chunk arrives. Always
+ * out-of-band: there is no inline variant. */
 export interface VideoPart extends Omit<ImagePart, 'kind'> {
 	kind: 'video';
+	/** Whole seconds; 0 when the sender could not determine it. */
+	durationSeconds: number;
 }
 
 /** A typed value this build does not render yet (e.g. "image" before the
@@ -93,12 +96,19 @@ const encodePart = (part: ContentPart): unknown => {
 			return { quote: [part.authorHash, part.messageId, part.signHash, encodeValue(part.snapshot)] };
 		case 'file':
 			return { file: [part.name, part.size, part.mimeType, part.createdAt, part.fileId, part.encSecretB64] };
-		case 'video':
 		case 'image':
 			return {
-				[part.kind]: [
+				image: [
 					part.widthAspect, part.heightAspect, part.thumbHashB64, part.name, part.size,
 					part.mimeType, part.createdAt, part.fileId, part.encSecretB64,
+				],
+			};
+		case 'video':
+			return {
+				video: [
+					part.widthAspect, part.heightAspect, part.thumbHashB64, part.name, part.size,
+					part.mimeType, part.createdAt, part.fileId, part.encSecretB64,
+					part.durationSeconds || 0,
 				],
 			};
 		case 'unknown':
@@ -158,8 +168,7 @@ const decodeValue = (value: unknown): ContentPart[] => {
 				if (!Array.isArray(im) || im.length < 9 || typeof im[7] !== 'string' || typeof im[8] !== 'string') {
 					throw new ContentDecodeError(`malformed ${type} envelope`);
 				}
-				return [{
-					kind: type,
+				const media = {
 					widthAspect: Number(im[0]) || 1,
 					heightAspect: Number(im[1]) || 1,
 					thumbHashB64: String(im[2] ?? ''),
@@ -169,7 +178,10 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					createdAt: Number(im[6]),
 					fileId: im[7],
 					encSecretB64: im[8],
-				}];
+				};
+				return type === 'video'
+					? [{ kind: 'video', ...media, durationSeconds: Math.max(0, Math.round(Number(im[9]))) || 0 }]
+					: [{ kind: 'image', ...media }];
 			}
 			if (type === 'file') {
 				const f = obj.file;

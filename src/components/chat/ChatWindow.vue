@@ -101,6 +101,12 @@
                 <div v-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
                   video failed — tap to retry
                 </div>
+                <!-- Duration travels in the envelope (07 §"video" pos 9), so the
+                     badge shows before any chunk arrives; while playing the
+                     native controls own the timeline. -->
+                <span v-if="!videos[v.fileId]?.url && v.durationSeconds" class="msg-video-duration">
+                  {{ fmtDuration(v.durationSeconds) }}
+                </span>
               </div>
               <!-- ONE bar, one meaning: download progress. It appears on tap,
                    grows with the chunks regardless of playback (the player's
@@ -505,6 +511,13 @@ const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 // Two layers, both read off the element itself: how far playback got, and
 // how much the browser actually holds decrypted.
 const videoState = ref({});
+const fmtDuration = (seconds) => {
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+};
 const loadPercent = (v) => (v?.total ? Math.round((v.done / v.total) * 100) : 0);
 // Visible from the tap until the whole file is here; playback state is none
 // of this bar's business.
@@ -1332,4 +1345,16 @@ watch(() => props.messages, () => {
   margin-top: 5px;
 }
 .msg-video-load-fill { height: 100%; background: #8e2b77; transition: width .3s ease; }
+.msg-video-duration {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(23, 22, 26, .72);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  pointer-events: none;
+}
 </style>

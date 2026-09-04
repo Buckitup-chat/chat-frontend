@@ -151,3 +151,29 @@ describe('image envelope (§1.3)', () => {
 		expect(previewText([image, { kind: 'text', text: 'подпись' }])).toBe('подпись');
 	});
 });
+
+describe('video envelope (§1.4)', () => {
+	const video = {
+		kind: 'video' as const,
+		widthAspect: 16, heightAspect: 9, thumbHashB64: 'YTg4', name: 'clip.mp4',
+		size: 52_428_800, mimeType: 'video/mp4', createdAt: 1715000000,
+		fileId: 'f_' + '2'.repeat(32), encSecretB64: 'c2VjcmV0',
+		durationSeconds: 127,
+	};
+
+	it('round-trips duration at position 9', () => {
+		const wire = encodeContent([video]);
+		expect(wire).toContain('"c2VjcmV0",127]');
+		expect(decodeContent(wire)[0]).toEqual(video);
+	});
+
+	it('reads an envelope without position 9 as unknown duration', () => {
+		const nine = `{"video":[16,9,"YTg4","clip.mp4",52428800,"video/mp4",1715000000,"${video.fileId}","c2VjcmV0"]}`;
+		expect(decodeContent(nine)[0]).toEqual({ ...video, durationSeconds: 0 });
+	});
+
+	it('an unknown duration encodes as 0, not undefined', () => {
+		const wire = encodeContent([{ ...video, durationSeconds: 0 }]);
+		expect(wire).toContain('"c2VjcmV0",0]');
+	});
+});
