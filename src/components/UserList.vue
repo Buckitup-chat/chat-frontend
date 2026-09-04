@@ -40,7 +40,10 @@ const filtered = computed(() => {
   }
   if (search.value) {
     const term = search.value.toLowerCase()
-    list = list.filter((u) => u.name?.toLowerCase().includes(term))
+    list = list.filter((u) =>
+      u.name?.toLowerCase().includes(term) ||
+      u.user_hash?.slice(2, 8).toLowerCase().includes(term)
+    )
   }
   return list
 })
