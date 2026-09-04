@@ -346,6 +346,7 @@ import { thumbHashToDataURL } from 'thumbhash';
 import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { useMenu } from '@/composables/useMenu';
+import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
 import Avatar from 'vue-boring-avatars';
 
 const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
@@ -368,6 +369,11 @@ const props = defineProps({
     default: ''
   },
   myHash: {
+    type: String,
+    default: ''
+  },
+  /** Peer hash of the open dialog; with myHash it addresses the input draft. */
+  peerHash: {
     type: String,
     default: ''
   },
@@ -459,8 +465,64 @@ const submitMessage = () => {
     emit('sendMessage', newMessage.value.trim(), replyTo.value);
     newMessage.value = '';
     replyTo.value = null;
+    dropDraft();
   }
 };
+
+// ---------- drafts: unsent input survives reloads and dialog switches ----------
+// Saves are debounced off the keystroke and encrypted at rest (drafts.ts);
+// switching dialogs flushes the outgoing dialog's draft before restoring the
+// incoming one's.
+
+const DRAFT_DEBOUNCE_MS = 300;
+let draftTimer = null;
+// Blocks saves until the stored draft has been restored, so an in-flight load
+// cannot be overwritten by a save of the still-empty input.
+let draftRestored = false;
+
+const persistDraft = (userHash, peerHash) => {
+  saveDraft(userHash, peerHash, { text: newMessage.value, replyTo: replyTo.value, savedAt: Date.now() });
+};
+
+const flushDraft = (userHash = props.myHash, peerHash = props.peerHash) => {
+  clearTimeout(draftTimer);
+  if (draftRestored) persistDraft(userHash, peerHash);
+};
+
+const dropDraft = () => {
+  clearTimeout(draftTimer);
+  clearDraft(props.myHash, props.peerHash);
+};
+
+const restoreDraft = async () => {
+  draftRestored = false;
+  const forPeer = props.peerHash;
+  const typedBefore = newMessage.value;
+  const draft = await loadDraft(props.myHash, forPeer);
+  if (forPeer !== props.peerHash) return; // dialog changed under the await
+  draftRestored = true;
+  // Keystrokes that landed while the load was in flight beat the stored copy
+  // — a restore must never eat live typing.
+  if (newMessage.value !== typedBefore) return;
+  newMessage.value = draft?.text ?? '';
+  replyTo.value = draft?.replyTo ?? null;
+};
+
+watch([newMessage, replyTo], () => {
+  if (!draftRestored) return;
+  clearTimeout(draftTimer);
+  const [userHash, peerHash] = [props.myHash, props.peerHash];
+  draftTimer = setTimeout(() => persistDraft(userHash, peerHash), DRAFT_DEBOUNCE_MS);
+});
+
+watch(() => [props.myHash, props.peerHash], (_now, [oldUser, oldPeer]) => {
+  flushDraft(oldUser, oldPeer);
+  restoreDraft();
+});
+
+// A hard unload gives no time for the debounce; fire the write and let the
+// browser finish what it can — at worst one debounce window is lost.
+const flushDraftOnUnload = () => flushDraft();
 
 const versionCountOf = (msg) => props.versionCounts[msg.id] || 0;
 
@@ -619,6 +681,7 @@ const onFilePicked = (e) => {
   // sits in the input (board screen 02: "подпись набирается в том же поле").
   emit('sendFile', files, newMessage.value.trim());
   newMessage.value = '';
+  dropDraft();
 };
 
 // 1:1 dialog: the only two authors are me and the peer the window shows.
@@ -769,12 +832,16 @@ onMounted(() => {
   document.addEventListener('click', handleDocumentClick);
   document.addEventListener('keydown', handleEscape);
   window.addEventListener('resize', handleResize);
+  window.addEventListener('beforeunload', flushDraftOnUnload);
+  restoreDraft();
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick);
   document.removeEventListener('keydown', handleEscape);
   window.removeEventListener('resize', handleResize);
+  window.removeEventListener('beforeunload', flushDraftOnUnload);
+  flushDraft();
 });
 
 const scrollToBottom = async () => {

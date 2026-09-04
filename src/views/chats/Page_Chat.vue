@@ -1,7 +1,7 @@
 <template>
     <div class="h-100 w-100">
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
-            :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions"
+            :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :peer-hash="peerHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId"
             :downloads="downloadsByFileId" :images="imagesByFileId"
             :availability="availabilityByFileId" :videos="videosByFileId"
