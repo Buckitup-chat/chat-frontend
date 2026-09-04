@@ -11,7 +11,7 @@
 import { api } from '@/api/client';
 import { mutationAppliedOnServer } from './confirm';
 import { awaitShapeVisibility, collectionForRelation } from './barrier';
-import { enqueue, resolveEntry, recordFailure, drainOutbox } from './outbox';
+import { enqueue, resolveEntry, recordFailure, ensureDrainLoop, stopDrainLoop } from './outbox';
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
@@ -214,15 +214,31 @@ const ownerOf = (mutations: unknown[]): string => {
 	return typeof value === 'string' ? value : '';
 };
 
+/** Durable storage refused the write — the mutation was NOT sent. */
+export class DurabilityError extends Error {
+	constructor() {
+		super('This message could not be stored for sending. Nothing was sent — try again.');
+		this.name = 'DurabilityError';
+	}
+}
+
 export async function sendMutationsAndAwaitShape(
 	mutations: unknown[],
 	signSkey: Uint8Array,
-	opts: RetryOptions = {}
+	opts: RetryOptions & { durability?: 'required' | 'best-effort' } = {}
 ): Promise<SendResult> {
 	// Durability first: the signed mutations hit IndexedDB before the network,
 	// so a reload or crash mid-send replays them on the next login instead of
 	// losing them. The entry is removed only after the server confirms.
 	const outboxId = await enqueue(mutations, ownerOf(mutations));
+
+	// ADR §11: when durable storage is unavailable, a user-visible mutation
+	// fails visibly — a best-effort network send that looks identical to
+	// success is the one state the interface must never claim. Callers that
+	// legitimately run before the vault unlocks opt out per call.
+	if (outboxId === null && (opts.durability ?? 'required') === 'required') {
+		throw new DurabilityError();
+	}
 
 	let result: SendResult;
 	try {
@@ -250,17 +266,13 @@ export async function sendMutationsAndAwaitShape(
  * became available) and on reconnect. The mutations were signed when created,
  * so they replay verbatim; only the auth challenge needs the live key.
  */
-export async function drainPendingWrites(userHash: string, signSkey: Uint8Array): Promise<void> {
-	try {
-		const result = await drainOutbox(userHash, (mutations) =>
-			sendMutationsWithRetry(mutations, signSkey, { retries: 1 })
-		);
-		if (result.sent > 0 || result.dropped > 0) {
-			console.log(
-				`[outbox] drained: ${result.sent} delivered, ${result.dropped} dropped, ${result.remaining} left`
-			);
-		}
-	} catch (e) {
-		console.warn('[outbox] drain failed, will retry on next trigger:', e);
-	}
+export function drainPendingWrites(userHash: string, signSkey: Uint8Array): void {
+	// The loop owns pacing from here: it drains now and keeps its own timer
+	// until the queue empties, so a 503 with no connectivity change cannot
+	// strand the queue until the next login (ADR §5).
+	ensureDrainLoop(userHash, (mutations) =>
+		sendMutationsWithRetry(mutations, signSkey, { retries: 1 })
+	);
 }
+
+export { stopDrainLoop };

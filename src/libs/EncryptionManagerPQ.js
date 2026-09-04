@@ -10,7 +10,7 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { api } from '@/api/client';
-import { sendMutationsAndAwaitShape, drainPendingWrites } from '@/lib/data/ingest';
+import { sendMutationsAndAwaitShape, drainPendingWrites, stopDrainLoop } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { getStorageRow, upsertStorageRow } from '@/lib/data/userStorage';
@@ -91,7 +91,10 @@ export class EncryptionManagerPQ extends EventTarget {
       }, isUpdate ? 'update' : 'insert', ownerTimestamp);
 
       // Barrier included: the next card update reads this row as its base.
-      return sendMutationsAndAwaitShape([mutation], key);
+      // Best-effort durability: card publication runs while the vault may
+      // still be locked (no key to encrypt the outbox with), and a lost card
+      // write is recoverable — the identity republishes on the next login.
+      return sendMutationsAndAwaitShape([mutation], key, { durability: 'best-effort' });
     };
 
     const next = previous.then(run, run);
@@ -290,6 +293,7 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   #stopOutboxDrain() {
+    stopDrainLoop();
     if (this.#outboxOnlineListener && typeof window !== 'undefined') {
       window.removeEventListener('online', this.#outboxOnlineListener);
     }

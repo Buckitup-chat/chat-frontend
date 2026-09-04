@@ -41,6 +41,14 @@ export interface OutboxEntry {
 	createdAt: number;
 	attempts: number;
 	lastError: string | null;
+	/**
+	 * ADR states. `pending` replays; `quarantined` is a permanent rejection
+	 * kept so the user's action is not silently lost — it leaves only by an
+	 * explicit requeue (the state it depended on changed) or discard.
+	 * Entries written before this field exist are pending.
+	 */
+	status?: 'pending' | 'quarantined';
+	quarantinedAt?: number;
 }
 
 /**
@@ -140,21 +148,26 @@ export async function resolveEntry(id: string | null): Promise<void> {
 	await storage.delete(id).catch(() => {});
 }
 
-/** Delivery failed. Permanent failures die here; transient ones stay. */
+/**
+ * Delivery failed. A permanent rejection quarantines the entry — kept with
+ * its signed mutations and the server's verdict, out of the replay path, so
+ * the user's action survives for diagnosis or an explicit retry (ADR §5:
+ * user-visible mutations must not be silently deleted). Transient failures
+ * stay pending with the attempt counted.
+ */
 export async function recordFailure(id: string | null, error: unknown): Promise<void> {
 	if (!id) return;
 	try {
-		if (error instanceof IngestError && error.permanent) {
-			// The server will never accept this mutation; replaying it forever
-			// would block every entry behind it in the FIFO drain.
-			await storage.delete(id);
-			return;
-		}
 		const result = await readEntry(id);
 		if (result.kind !== 'entry') return;
 		const entry = result.entry;
 		entry.attempts += 1;
 		entry.lastError = error instanceof Error ? error.message : String(error);
+		if (error instanceof IngestError && error.permanent) {
+			entry.status = 'quarantined';
+			entry.quarantinedAt = Date.now();
+			console.warn(`[outbox] quarantined ${entry.relation} entry ${id}: ${entry.lastError}`);
+		}
 		await storage.set(id, JSON.stringify(entry));
 	} catch {
 		/* diagnostics only — never let bookkeeping break the send path */
@@ -218,7 +231,7 @@ async function rewriteEncrypted(key: string, entry: OutboxEntry): Promise<void> 
 	}
 }
 
-export async function pendingEntries(userHash: string): Promise<OutboxEntry[]> {
+async function entriesOf(userHash: string): Promise<OutboxEntry[]> {
 	try {
 		const keys = await storage.keys();
 		const entries: OutboxEntry[] = [];
@@ -237,6 +250,32 @@ export async function pendingEntries(userHash: string): Promise<OutboxEntry[]> {
 	} catch {
 		return [];
 	}
+}
+
+export async function pendingEntries(userHash: string): Promise<OutboxEntry[]> {
+	return (await entriesOf(userHash)).filter((e) => e.status !== 'quarantined');
+}
+
+export async function quarantinedEntries(userHash: string): Promise<OutboxEntry[]> {
+	return (await entriesOf(userHash)).filter((e) => e.status === 'quarantined');
+}
+
+/**
+ * Back into the replay path — the caller believes the state this write failed
+ * against has changed. History (attempts, last verdict) stays on the entry.
+ */
+export async function requeueEntry(id: string): Promise<void> {
+	const result = await readEntry(id);
+	if (result.kind !== 'entry') return;
+	const entry = result.entry;
+	entry.status = 'pending';
+	delete entry.quarantinedAt;
+	await storage.set(id, JSON.stringify(entry));
+}
+
+/** The explicit user decision that ends a quarantined entry's life. */
+export async function discardEntry(id: string): Promise<void> {
+	await storage.delete(id).catch(() => {});
 }
 
 export async function pendingCount(userHash: string): Promise<number> {
@@ -292,8 +331,9 @@ export async function drainOutbox(
 				sent++;
 			} catch (e) {
 				if (e instanceof IngestError && e.permanent) {
-					console.warn(`[outbox] dropping ${entry.relation} entry ${entry.id}: ${e.message}`);
-					await resolveEntry(entry.id);
+					// Out of the replay path but never silently gone: the entry
+					// keeps its signed mutations and the server's verdict.
+					await recordFailure(entry.id, e);
 					dropped++;
 					continue;
 				}
@@ -310,6 +350,71 @@ export async function drainOutbox(
 		return { sent, dropped, remaining: 0, stoppedEarly: false, wasLeader: true };
 	} finally {
 		if (WebLocksLeader.isSupported()) leader.releaseLeadership();
+	}
+}
+
+// ---------- timed retry loop (ADR §5: RETRYABLE_FAILURE carries a time for
+// the next attempt; relying only on login/'online' does not conform — a
+// server can answer 5xx while connectivity never changes, and the queue
+// would never move again) ----------
+
+let loopTimer: ReturnType<typeof setTimeout> | null = null;
+let loopFailures = 0;
+
+const RETRY_BASE_MS = 5_000;
+const RETRY_MAX_MS = 5 * 60_000;
+
+const nextDelay = (): number => {
+	const backoff = Math.min(RETRY_BASE_MS * 2 ** loopFailures, RETRY_MAX_MS);
+	return backoff + Math.floor(Math.random() * 1_000); // jitter breaks tab lockstep
+};
+
+/**
+ * Drains now, and keeps draining on its own timer until the queue is empty.
+ *
+ * External triggers (login, 'online') call this too — they reset the loop and
+ * fire immediately, so a real connectivity change is never held hostage to a
+ * backoff scheduled before it.
+ */
+export function ensureDrainLoop(
+	userHash: string,
+	send: (mutations: unknown[]) => Promise<unknown>,
+): void {
+	stopDrainLoop();
+	loopFailures = 0;
+	void runLoopOnce(userHash, send);
+}
+
+async function runLoopOnce(
+	userHash: string,
+	send: (mutations: unknown[]) => Promise<unknown>,
+): Promise<void> {
+	let result: DrainResult;
+	try {
+		result = await drainOutbox(userHash, send);
+	} catch {
+		result = { sent: 0, dropped: 0, remaining: 1, stoppedEarly: true, wasLeader: true };
+	}
+
+	if (!result.wasLeader) {
+		// Another tab is draining. Check back lazily: that tab may close with
+		// entries still queued, and someone has to pick them up.
+		loopTimer = setTimeout(() => void runLoopOnce(userHash, send), 30_000);
+		return;
+	}
+	if (result.remaining === 0) {
+		loopFailures = 0;
+		return; // queue is empty — the next external trigger restarts the loop
+	}
+	loopFailures = result.stoppedEarly ? loopFailures + 1 : 0;
+	loopTimer = setTimeout(() => void runLoopOnce(userHash, send), nextDelay());
+}
+
+/** Call on logout: another account's entries are not this session's to send. */
+export function stopDrainLoop(): void {
+	if (loopTimer) {
+		clearTimeout(loopTimer);
+		loopTimer = null;
 	}
 }
 
