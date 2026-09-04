@@ -283,6 +283,15 @@ describe('flushPendingDialogChanges — owner isolation', () => {
 	});
 });
 
+describe('resolvePendingDialogRecord — mutationType', () => {
+	it('dialog_messages keys off parent_sign_hash (editing keeps deleted_flag false); other tables keep the deleted_flag rule', async () => {
+		const q = await freshQueue();
+		expect(q.resolvePendingDialogRecord('dialog_messages', { message_id: 'm', parent_sign_hash: null }, null).mutationType).toBe('insert');
+		expect(q.resolvePendingDialogRecord('dialog_messages', { message_id: 'm', parent_sign_hash: 'dms_x' }, null).mutationType).toBe('update');
+		expect(q.resolvePendingDialogRecord('dialog_message_reactions', { deleted_flag: true }, null).mutationType).toBe('update');
+	});
+});
+
 describe('validateDialogRecord — per-table normal validators', () => {
 	it('dialog_keys requires both wrapped-key fields', async () => {
 		const q = await freshQueue();

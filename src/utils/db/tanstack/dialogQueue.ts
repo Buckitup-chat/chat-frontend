@@ -437,7 +437,7 @@ export async function markSynced(entry: QueueEntry, ignoreEchoSignHash?: string)
 }
 
 function localSnapshotOf(current: QueueEntry): DialogRecordFields {
-  const resolved = resolvePendingDialogRecord(current.patch ?? current.record, current.sentSnapshot);
+  const resolved = resolvePendingDialogRecord(current.table, current.patch ?? current.record, current.sentSnapshot);
   return {
     ...resolved.record,
     sign_b64: resolved.record.sign_b64 ?? null,
@@ -467,11 +467,14 @@ export function computeLocalSignHash(record: { sign_hash?: string | null; sign_b
 export type ResolvedPendingDialogRecord = { ready: true; record: DialogRecordFields; mutationType: MutationType };
 
 export function resolvePendingDialogRecord(
+  table: DialogTable,
   patch: Partial<DialogRecordFields>,
   priorConfirmed: DialogRecordFields | null | undefined
 ): ResolvedPendingDialogRecord {
   const record: DialogRecordFields = { ...priorConfirmed, ...patch };
-  return { ready: true, record, mutationType: record.deleted_flag ? "update" : "insert" };
+  const mutationType: MutationType =
+    table === "dialog_messages" ? (record.parent_sign_hash ? "update" : "insert") : record.deleted_flag ? "update" : "insert";
+  return { ready: true, record, mutationType };
 }
 
 interface ValidationResult {
@@ -667,7 +670,7 @@ export async function flushPendingDialogChanges(signSkey: Uint8Array | null | un
     for (const entry of entries) {
       if (++mutationCount % 50 === 0) await new Promise((r) => setTimeout(r, 0));
 
-      const resolved = resolvePendingDialogRecord(entry.patch ?? entry.record, entry.sentSnapshot);
+      const resolved = resolvePendingDialogRecord(entry.table, entry.patch ?? entry.record, entry.sentSnapshot);
 
       const v = validateDialogRecord(entry.table, resolved.record);
       if (!v.ok) {
@@ -714,7 +717,7 @@ export async function flushPendingDialogChanges(signSkey: Uint8Array | null | un
       if (r.status === "ok") {
         await markSynced(entry);
       } else if (isAlreadyExistsError(r)) {
-        const parentSignHash = entry.table === "dialog_messages" ? resolvePendingDialogRecord(entry.patch ?? entry.record, entry.sentSnapshot).record.parent_sign_hash : null;
+        const parentSignHash = entry.table === "dialog_messages" ? resolvePendingDialogRecord(entry.table, entry.patch ?? entry.record, entry.sentSnapshot).record.parent_sign_hash : null;
         await markSynced(entry, parentSignHash ?? undefined);
       } else if (r.error === "validation_failed") {
         console.error(`[dialogQueue] Mutation for ${entry.table} ${entry.key} permanently rejected, quarantined locally:`, JSON.stringify(r.details || r));
