@@ -23,6 +23,7 @@ import {
 	newFileId,
 } from '@/lib/pq/fileCrypto';
 import { api } from '@/api/client';
+import { getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 
 declare const ELECTRIC_API_URL: string;
 
@@ -173,6 +174,10 @@ export const uploadFile = async (opts: {
 			'x-owner-timestamp': String(ownerTimestamp),
 			'x-signature': signB64,
 		}, signal);
+		// Seed the local chunk cache: the sender should never re-download
+		// bytes it just encrypted. Fire-and-forget — caching must not slow
+		// or fail the upload.
+		void putCachedChunk(fileId, i, encrypted);
 		onProgress?.({ fileId, done: i + 1, total });
 	}
 
@@ -273,13 +278,25 @@ export const downloadFile = async (opts: {
 	}
 	const total = Number(manifest.chunk_count);
 
+	requestPersistentStorage();
 	const parts: Uint8Array[] = [];
 	let size = 0;
 	for (let i = 0; i < total; i++) {
 		signal?.throwIfAborted();
-		const r = await fetch(`${ELECTRIC_API_URL}/file_chunk/${fileId}/${i}`, { signal });
-		if (!r.ok) throw new Error(`chunk ${i} unavailable: HTTP ${r.status}`);
-		const plain = await decryptChunk(secret, new Uint8Array(await r.arrayBuffer()));
+		// Disk before network: chunks are immutable, so a cached one is
+		// exactly the one the device would serve — a reload or a lost uplink
+		// reassembles from here.
+		let encrypted = await getCachedChunk(fileId, i);
+		const fromCache = !!encrypted;
+		if (!encrypted) {
+			const r = await fetch(`${ELECTRIC_API_URL}/file_chunk/${fileId}/${i}`, { signal });
+			if (!r.ok) throw new Error(`chunk ${i} unavailable: HTTP ${r.status}`);
+			encrypted = new Uint8Array(await r.arrayBuffer());
+		}
+		const plain = await decryptChunk(secret, encrypted);
+		// Cache only what decrypted: GCM passing is the integrity check, and
+		// a corrupt fetch must not poison future loads.
+		if (!fromCache) void putCachedChunk(fileId, i, encrypted);
 		parts.push(plain);
 		size += plain.length;
 		onProgress?.({ fileId, done: i + 1, total });
