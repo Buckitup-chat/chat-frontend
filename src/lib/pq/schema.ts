@@ -7,57 +7,13 @@
 // bookkeeping keys, drop nulls, or round-trip a boolean as 0/1. Any of those
 // silently changes a payload built by enumeration, and the row then fails
 // verification for a reason that looks like forgery.
+//
+// The lists themselves are generated from the backend Ecto schemas — see
+// scripts/gen-pq-schema.mjs — so the contract has one source of truth.
 
-export type FieldType = 'text' | 'int' | 'bool' | 'binary';
+import { SIGNABLE, type FieldType, type SignableSchema } from './schema.generated';
 
-/** Column name → type. sign_b64 and sign_hash are never signable. */
-export type SignableSchema = Record<string, FieldType>;
-
-const MESSAGE_FIELDS: SignableSchema = {
-	message_id: 'text',
-	dialog_hash: 'text',
-	sender_hash: 'text',
-	content_b64: 'binary',
-	deleted_flag: 'bool',
-	refs_map_b64: 'binary',
-	parent_sign_hash: 'text',
-	owner_timestamp: 'int',
-};
-
-export const SIGNABLE: Record<string, SignableSchema> = {
-	user_cards: {
-		user_hash: 'text',
-		sign_pkey: 'binary',
-		contact_pkey: 'binary',
-		contact_cert: 'binary',
-		crypt_pkey: 'binary',
-		crypt_cert: 'binary',
-		name: 'text',
-		deleted_flag: 'bool',
-		owner_timestamp: 'int',
-	},
-	dialog_messages: MESSAGE_FIELDS,
-	dialog_messages_versions: MESSAGE_FIELDS,
-	dialog_message_reactions: {
-		reaction_hash: 'text',
-		dialog_hash: 'text',
-		message_id: 'text',
-		message_sign_hash: 'text',
-		reactor_hash: 'text',
-		type_b64: 'binary',
-		deleted_flag: 'bool',
-		owner_timestamp: 'int',
-	},
-	dialog_message_receipts: {
-		receipt_hash: 'text',
-		dialog_hash: 'text',
-		message_id: 'text',
-		peer_hash: 'text',
-		type: 'text',
-		message_sign_hash: 'text',
-		owner_timestamp: 'int',
-	},
-};
+export { SIGNABLE, type FieldType, type SignableSchema };
 
 /**
  * Coerces a value back to what the column means.
