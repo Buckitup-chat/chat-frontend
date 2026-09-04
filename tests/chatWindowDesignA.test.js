@@ -493,22 +493,17 @@ describe('§1.4 video', () => {
 		const w = renderWith({ [videoPart.fileId]: { status: 'opening' } });
 		await w.find('.msg-video-frame').trigger('click');
 		expect(w.emitted('playVideo')).toBeFalsy();
-		expect(w.find('.msg-video-ring').exists()).toBe(true);
+		expect(w.find('.msg-video-spinner').exists()).toBe(true);
 	});
 
-	it('shows an empty ring before the first chunk lands', () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'opening' } });
-		expect(w.find('.msg-video-ring-label').text()).toBe('0%');
-	});
 
 	it('mounts the player once the source is ready', () => {
 		const w = renderWith({ [videoPart.fileId]: { status: 'ready', url: '/encrypted-video/abc', streaming: true } });
 		const el = w.find('video');
 		expect(el.attributes('src')).toBe('/encrypted-video/abc');
 		expect(w.find('.msg-video-triangle').exists()).toBe(false);
-		// two-layer bar: played over decrypted buffer
-		expect(w.find('.msg-video-buffered').exists()).toBe(true);
-		expect(w.find('.msg-video-played').exists()).toBe(true);
+		// no download bar for a fully streamed source
+		expect(w.find('.msg-video-load').exists()).toBe(false);
 	});
 
 	// The failure text says "tap to retry", so the frame must actually take
@@ -691,7 +686,7 @@ describe('§4.3 delivered and rejected', () => {
 	});
 });
 
-describe('§1.4 graphic download progress', () => {
+describe('§1.4 download progress bar', () => {
 	const videoPart = {
 		kind: 'video', widthAspect: 4, heightAspect: 3, thumbHashB64: '',
 		name: 'clip.mp4', size: 52_428_800, mimeType: 'video/mp4',
@@ -705,17 +700,29 @@ describe('§1.4 graphic download progress', () => {
 			},
 			global: { stubs: { Avatar: true } },
 		});
+	const barWidth = (w) => w.find('.msg-video-load-fill').attributes('style');
 
-	it('draws the progress ring with the percent inside', () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'opening', done: 7, total: 13 } });
-		expect(w.find('.msg-video-ring').exists()).toBe(true);
-		expect(w.find('.msg-video-ring-label').text()).toBe('54%');
+	it('appears at 0% the moment the tap lands', () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'opening' } });
+		expect(w.find('.msg-video-load').exists()).toBe(true);
+		expect(barWidth(w)).toContain('width: 0%');
 	});
 
-	// §1.4: play starts on the first chunk; the rest downloads behind it.
-	it('mounts the player over a partial prefix and admits the rest is coming', () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'ready', url: 'blob:p', partial: true, done: 3, total: 13 } });
+	it('grows with the chunks, not with playback', () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'opening', done: 5, total: 13 } });
+		expect(barWidth(w)).toContain('width: 38%');
+	});
+
+	// §1.4: play starts on the first chunk; the bar keeps tracking the
+	// DOWNLOAD while the prefix already plays.
+	it('keeps growing behind a playing prefix', () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'ready', url: 'blob:p', partial: true, done: 8, total: 13 } });
 		expect(w.find('video').attributes('src')).toBe('blob:p');
-		expect(w.find('.msg-video-buffering').text()).toContain('chunk 3 of 13');
+		expect(barWidth(w)).toContain('width: 62%');
+	});
+
+	it('leaves once the whole file is here', () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'ready', url: 'blob:full', partial: false, done: 13, total: 13 } });
+		expect(w.find('.msg-video-load').exists()).toBe(false);
 	});
 });

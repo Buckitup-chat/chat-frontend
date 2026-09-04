@@ -92,30 +92,22 @@
                   @loadedmetadata="restoreVideoPosition(v.fileId, $event)"
                   @timeupdate="onVideoTime(v.fileId, $event)"
                   @progress="onVideoTime(v.fileId, $event)"></video>
-                <!-- graphic download progress: the ring IS the state (board
-                     §1.5's ring, applied to the video preview) -->
                 <div v-else-if="videos[v.fileId]?.status === 'opening'" class="msg-video-play" aria-hidden="true">
-                  <svg class="msg-video-ring" viewBox="0 0 44 44">
-                    <circle class="msg-video-ring-track" cx="22" cy="22" r="19" />
-                    <circle class="msg-video-ring-fill" cx="22" cy="22" r="19"
-                      :stroke-dashoffset="ringOffset(videos[v.fileId])" />
-                  </svg>
-                  <span class="msg-video-ring-label">{{ ringPercent(videos[v.fileId]) }}%</span>
+                  <span class="msg-video-spinner"></span>
                 </div>
                 <div v-else class="msg-video-play" aria-hidden="true">
                   <span class="msg-video-triangle"></span>
                 </div>
-                <!-- still downloading behind a playing prefix -->
-                <span v-if="videos[v.fileId]?.partial && videos[v.fileId]?.total" class="msg-video-buffering">
-                  downloading · chunk {{ videos[v.fileId].done }} of {{ videos[v.fileId].total }}
-                </span>
                 <div v-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
                   video failed — tap to retry
                 </div>
               </div>
-              <div v-if="videos[v.fileId]?.url" class="msg-video-bar">
-                <div class="msg-video-buffered" :style="{ width: (videoState[v.fileId]?.buffered || 0) + '%' }"></div>
-                <div class="msg-video-played" :style="{ width: (videoState[v.fileId]?.played || 0) + '%' }"></div>
+              <!-- ONE bar, one meaning: download progress. It appears on tap,
+                   grows with the chunks regardless of playback (the player's
+                   own controls already show the timeline), and leaves at
+                   100%. -->
+              <div v-if="downloadingVideo(videos[v.fileId])" class="msg-video-load">
+                <div class="msg-video-load-fill" :style="{ width: loadPercent(videos[v.fileId]) + '%' }"></div>
               </div>
             </div>
 
@@ -513,10 +505,10 @@ const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 // Two layers, both read off the element itself: how far playback got, and
 // how much the browser actually holds decrypted.
 const videoState = ref({});
-// The ring: circumference of r=19 is ~119.4; the offset is the unfilled part.
-const RING_LEN = 2 * Math.PI * 19;
-const ringPercent = (v) => (v?.total ? Math.round((v.done / v.total) * 100) : 0);
-const ringOffset = (v) => RING_LEN * (1 - (v?.total ? v.done / v.total : 0));
+const loadPercent = (v) => (v?.total ? Math.round((v.done / v.total) * 100) : 0);
+// Visible from the tap until the whole file is here; playback state is none
+// of this bar's business.
+const downloadingVideo = (v) => !!v && (v.status === 'opening' || (v.partial && (!v.total || v.done < v.total)));
 
 // When the full file replaces a playing prefix, the element reloads — put the
 // viewer back where they were instead of restarting the clip.
@@ -533,18 +525,10 @@ const restoreVideoPosition = (fileId, event) => {
 const onVideoTime = (fileId, event) => {
   const el = event.target;
   if (!el?.duration || !isFinite(el.duration)) return;
-  let buffered = 0;
-  for (let i = 0; i < el.buffered.length; i++) {
-    if (el.buffered.start(i) <= el.currentTime) buffered = Math.max(buffered, el.buffered.end(i));
-  }
+  // Only the position survives here — it is what the src swap restores.
   videoState.value = {
     ...videoState.value,
-    [fileId]: {
-      played: Math.min(100, (el.currentTime / el.duration) * 100),
-      buffered: Math.min(100, (buffered / el.duration) * 100),
-      lastTime: el.currentTime,
-      wasPlaying: !el.paused,
-    },
+    [fileId]: { lastTime: el.currentTime, wasPlaying: !el.paused },
   };
 };
 
@@ -1333,34 +1317,19 @@ watch(() => props.messages, () => {
   border-top: 9px solid transparent;
   border-bottom: 9px solid transparent;
 }
-.msg-video-ring { position: absolute; inset: 0; width: 44px; height: 44px; transform: rotate(-90deg); }
-.msg-video-ring-track { fill: none; stroke: rgba(36, 24, 36, .15); stroke-width: 3.5; }
-.msg-video-ring-fill {
-  fill: none;
-  stroke: #8e2b77;
-  stroke-width: 3.5;
-  stroke-linecap: round;
-  stroke-dasharray: 119.4;
-  transition: stroke-dashoffset .3s ease;
+.msg-video-spinner {
+  width: 22px; height: 22px;
+  border: 2.6px solid rgba(36, 24, 36, .25);
+  border-top-color: #241824;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
 }
-.msg-video-ring-label { position: relative; font-size: 10px; font-weight: 600; color: #241824; }
-.msg-video-buffering {
-  position: absolute;
-  left: 6px; bottom: 6px;
-  color: #fff;
-  font-size: 10px;
-  line-height: 1.3;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, .5);
-}
-.msg-video-bar {
-  position: relative;
-  height: 3px;
+.msg-video-load {
+  height: 4px;
   border-radius: 999px;
   background: #e6e6ea;
   overflow: hidden;
   margin-top: 5px;
 }
-/* light = decrypted buffer, dark = played */
-.msg-video-buffered { position: absolute; inset: 0 auto 0 0; background: #c8bcd4; }
-.msg-video-played { position: absolute; inset: 0 auto 0 0; background: #8e2b77; }
+.msg-video-load-fill { height: 100%; background: #8e2b77; transition: width .3s ease; }
 </style>
