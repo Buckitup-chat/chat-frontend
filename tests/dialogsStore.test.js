@@ -432,7 +432,7 @@ describe('deleteMessage (§3.2)', () => {
 
 		const row = collections.dialog.messages.rows.get(MSG_ID);
 		expect(row.deleted_flag).toBe(true);
-		expect(row.content_b64).toBe('');
+		expect(row.content_b64).toBe(null);
 		expect(row.parent_sign_hash).toBe(SIGN_HASH);
 		expect(row.owner_timestamp).toBeGreaterThan(100);
 	});

@@ -101,10 +101,12 @@ const createAccount = async (name: string): Promise<Account> => {
 const sendDialogMessage = async (
 	author: Account, dialogHash: string, msgKey: Uint8Array,
 	parts: ContentPart[], refs: Record<string, string>,
-	overrides: Partial<{ message_id: string; parent_sign_hash: string; owner_timestamp: number; deleted_flag: boolean; content: string }> = {},
+	overrides: Partial<{ message_id: string; parent_sign_hash: string; owner_timestamp: number; deleted_flag: boolean; content: string | null }> = {},
 ) => {
 	const messageId = overrides.message_id ?? 'dmsg_' + uuidv7();
-	const contentB64 = overrides.content ?? await DialogCrypto.encryptContent(msgKey, encodeContent(parts));
+	const contentB64 = overrides.content !== undefined
+		? overrides.content
+		: await DialogCrypto.encryptContent(msgKey, encodeContent(parts));
 	const refsMapB64 = await DialogCrypto.encryptContent(msgKey, JSON.stringify(refs));
 	const fields = {
 		message_id: messageId,
@@ -263,6 +265,16 @@ runIf('E2E: two accounts hold a conversation on staging', () => {
 			encSecretB64: (filePart as { encSecretB64: string }).encSecretB64,
 		});
 		expect(bytesToHex(sha3_512(downloaded))).toBe(bytesToHex(sha3_512(fileBytes)));
+
+		// ---- 8. Alice deletes her edited message: a signed tombstone ----
+		const tomb = await sendDialogMessage(alice, dialogHash, aliceKey, [], { [reply.message_id]: reply.sign_hash },
+			{ message_id: m1.message_id, parent_sign_hash: edited.sign_hash,
+				owner_timestamp: edited.owner_timestamp + 1, deleted_flag: true, content: null });
+		const tombRow = (await waitRows('dialog_messages', `message_id='${m1.message_id}'`,
+			(rs) => rs.some((r) => String(r.deleted_flag) === 'true')))
+			.find((r) => String(r.deleted_flag) === 'true')!;
+		expect(tombRow.content_b64 ?? '').toBe('');
+		console.log('tombstone accepted:', tomb.sign_hash.slice(0, 16));
 
 		console.log('E2E OK:', {
 			dialog: dialogHash.slice(0, 16) + '…',

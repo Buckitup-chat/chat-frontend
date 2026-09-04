@@ -29,7 +29,8 @@
         <div v-for="(it, i) in visibleItems" :key="it.id" class="transfer-row"
           :class="{ '_active': it.status === 'active', '_paused': it.status === 'paused', '_error': it.status === 'error', '_foreign': isForeign(it) }"
           draggable="true"
-          @dragstart="dragFrom = i" @dragover.prevent @drop.prevent="onDrop(i)">
+          @dragstart="onDragStart($event, i)" @dragend="dragFrom = null"
+          @dragenter.prevent @dragover.prevent="onDragOver($event)" @drop.prevent="onDrop(i)">
           <!-- Board: one geometry for every state — handle, name, bar,
                caption, action, quiet cancel. Colour lives in the caption and
                the bar, never in the button. -->
@@ -77,6 +78,16 @@ const hasStartable = computed(() =>
   $transfers.items.some((it) => it.status === 'paused' || it.status === 'error'));
 
 const dragFrom = ref(null);
+// The full HTML5 recipe: without setData some engines cancel the drag on the
+// first move, and without dropEffect the row shows the "no drop" cursor.
+const onDragStart = (event, i) => {
+  dragFrom.value = i;
+  event.dataTransfer?.setData('text/plain', String(i));
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+};
+const onDragOver = (event) => {
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+};
 const onDrop = (toVisibleIndex) => {
   if (dragFrom.value === null) return;
   // Visible indexes equal real indexes while the list is truncated from the top.

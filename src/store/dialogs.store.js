@@ -580,7 +580,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
             message_id: messageId,
             dialog_hash: dialogHash,
             sender_hash: $userPQ.currentUserHash,
-            content_b64: '',
+            // null, not '': Ecto casts an empty string to nil, so the server
+            // signs "null" where '' was signed — verified live, '' gets 422
+            // invalid_signature while null is accepted.
+            content_b64: null,
             deleted_flag: true,
             refs_map_b64: refsMapB64,
             parent_sign_hash: current.sign_hash,
