@@ -31,6 +31,8 @@ import {
     shouldRedecryptMessage,
     compareByOwnerTimestamp,
     formatMessageTime,
+    getDialogMessageDisplayTimestamp,
+    isDialogMessageEdited,
 } from '@/utils/db/tanstack/dialog';
 import { v7 as uuidv7 } from 'uuid';
 import { createCoalescingRunScheduler } from '@/composables/useCoalescingRunScheduler';
@@ -114,7 +116,8 @@ async function runDecryptPass() {
                 text: decrypted.text,
                 authorName: decrypted.isMine ? 'Me' : name,
                 isMine: decrypted.isMine,
-                timestamp: formatMessageTime(row.owner_timestamp),
+                timestamp: formatMessageTime(getDialogMessageDisplayTimestamp(row)),
+                isEdited: isDialogMessageEdited(row),
                 _syncStatus: syncStatus,
                 _contentB64: row.content_b64,
                 _raw: row
@@ -134,6 +137,7 @@ watch(() => rawMessages.value, (newRows) => {
         const cached = messageCache.get(row.message_id);
         if (cached) {
             cached._syncStatus = syncStatusFor(row.message_id);
+            cached.isEdited = isDialogMessageEdited(row);
         }
     }
     rebuildDecryptedMessages(newRows);

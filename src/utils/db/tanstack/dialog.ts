@@ -48,9 +48,23 @@ import {
   compareByOwnerTimestamp,
   formatMessageTime,
   preferAckedCache,
+  getDialogMessageCreatedAtMs,
+  getDialogMessageDisplayTimestamp,
+  isDialogMessageEdited,
 } from "./dialogDisplay";
 
-export { mergeDialogMessagesForDisplay, mergeDialogReactionsForDisplay, isDialogMessagePending, shouldRedecryptMessage, compareByOwnerTimestamp, formatMessageTime, preferAckedCache };
+export {
+  mergeDialogMessagesForDisplay,
+  mergeDialogReactionsForDisplay,
+  isDialogMessagePending,
+  shouldRedecryptMessage,
+  compareByOwnerTimestamp,
+  formatMessageTime,
+  preferAckedCache,
+  getDialogMessageCreatedAtMs,
+  getDialogMessageDisplayTimestamp,
+  isDialogMessageEdited,
+};
 
 type DialogKeysRow = DialogKeysFields & Record<string, unknown>;
 type DialogMessageRow = DialogMessageFields & Record<string, unknown>;
