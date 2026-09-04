@@ -95,7 +95,17 @@ const ensureWorker = (): Promise<boolean> => {
  */
 export const openVideo = async (
 	video: VideoRef,
-	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal } = {},
+	opts: {
+		onProgress?: (p: DownloadProgress) => void;
+		/**
+		 * Fallback path only: a playable URL over the prefix downloaded so
+		 * far, delivered once after the first chunk. Faststart encodings play
+		 * from it immediately; the rest keeps downloading behind the scenes,
+		 * and the resolved full URL replaces it at the end.
+		 */
+		onPartial?: (url: string) => void;
+		signal?: AbortSignal;
+	} = {},
 ): Promise<VideoSource> => {
 	if (await ensureWorker()) {
 		const sessionId = crypto.randomUUID();
@@ -128,12 +138,24 @@ export const openVideo = async (
 	const cached = getCachedMedia(video.fileId);
 	if (cached) return { url: cached, streaming: false, release: () => {} };
 
+	const prefix: Uint8Array[] = [];
+	let partialUrl: string | null = null;
 	const bytes = await downloadFile({
 		fileId: video.fileId,
 		encSecretB64: video.encSecretB64,
 		onProgress: opts.onProgress,
+		onChunk: (index, plain) => {
+			prefix.push(plain);
+			// One partial after the first chunk: replacing the src per chunk
+			// would restart the element more than it plays.
+			if (index === 0 && opts.onPartial) {
+				partialUrl = URL.createObjectURL(new Blob(prefix as unknown as globalThis.BlobPart[], { type: video.mimeType || 'video/mp4' }));
+				opts.onPartial(partialUrl);
+			}
+		},
 		signal: opts.signal,
 	});
 	const url = putCachedMedia(video.fileId, bytes, video.mimeType || 'video/mp4');
+	if (partialUrl) URL.revokeObjectURL(partialUrl);
 	return { url, streaming: false, release: () => {} };
 };

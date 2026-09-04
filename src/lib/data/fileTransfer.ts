@@ -262,6 +262,8 @@ export const downloadFile = async (opts: {
 	fileId: string;
 	encSecretB64: string;
 	onProgress?: (p: DownloadProgress) => void;
+	/** Each decrypted chunk as it lands — lets a consumer start before the end. */
+	onChunk?: (index: number, plain: Uint8Array) => void;
 	signal?: AbortSignal;
 }): Promise<Uint8Array> => {
 	const { fileId, encSecretB64, onProgress, signal } = opts;
@@ -299,6 +301,7 @@ export const downloadFile = async (opts: {
 		if (!fromCache) void putCachedChunk(fileId, i, encrypted);
 		parts.push(plain);
 		size += plain.length;
+		opts.onChunk?.(i, plain);
 		onProgress?.({ fileId, done: i + 1, total });
 	}
 

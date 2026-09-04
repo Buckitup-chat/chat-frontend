@@ -89,21 +89,25 @@
                 <img v-if="thumbUrl(v)" class="msg-image-blur" :src="thumbUrl(v)" alt="" />
                 <video v-if="videos[v.fileId]?.url" class="msg-video-el"
                   :src="videos[v.fileId].url" controls playsinline
-                  @loadedmetadata="onVideoTime(v.fileId, $event)"
+                  @loadedmetadata="restoreVideoPosition(v.fileId, $event)"
                   @timeupdate="onVideoTime(v.fileId, $event)"
                   @progress="onVideoTime(v.fileId, $event)"></video>
+                <!-- graphic download progress: the ring IS the state (board
+                     §1.5's ring, applied to the video preview) -->
                 <div v-else-if="videos[v.fileId]?.status === 'opening'" class="msg-video-play" aria-hidden="true">
-                  <span class="msg-video-spinner"></span>
+                  <svg class="msg-video-ring" viewBox="0 0 44 44">
+                    <circle class="msg-video-ring-track" cx="22" cy="22" r="19" />
+                    <circle class="msg-video-ring-fill" cx="22" cy="22" r="19"
+                      :stroke-dashoffset="ringOffset(videos[v.fileId])" />
+                  </svg>
+                  <span class="msg-video-ring-label">{{ ringPercent(videos[v.fileId]) }}%</span>
                 </div>
                 <div v-else class="msg-video-play" aria-hidden="true">
                   <span class="msg-video-triangle"></span>
                 </div>
-                <!-- The fallback path downloads before playing and reports
-                     chunks; the streaming path buffers silently, so the label
-                     carries whichever truth exists. -->
-                <span v-if="videos[v.fileId]?.status === 'opening'" class="msg-video-buffering">
-                  <template v-if="videos[v.fileId]?.total">buffering · chunk {{ videos[v.fileId].done }} of {{ videos[v.fileId].total }}</template>
-                  <template v-else>buffering</template>
+                <!-- still downloading behind a playing prefix -->
+                <span v-if="videos[v.fileId]?.partial && videos[v.fileId]?.total" class="msg-video-buffering">
+                  downloading · chunk {{ videos[v.fileId].done }} of {{ videos[v.fileId].total }}
                 </span>
                 <div v-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
                   video failed — tap to retry
@@ -198,16 +202,6 @@
             <!-- §4.2: admitted but causally unplaced — say why, quietly. -->
             <div v-if="msg._verify === 'waiting'" class="msg-unplaced-note">waiting for earlier messages…</div>
           </div>
-          <!-- §3.1 history: struck-through past revisions, newest first. Each
-               was signature-verified upstream; an unverifiable one says so. -->
-          <div v-if="openHistories.has(msg.id)" class="msg-history">
-            <div v-if="!histories[msg.id]" class="msg-history-loading">loading…</div>
-            <div v-else-if="histories[msg.id].length === 0" class="msg-history-loading">no earlier versions synced</div>
-            <div v-else v-for="v in histories[msg.id]" :key="v.signHash" class="msg-history-item">
-              <span class="msg-history-tag">historical version</span>
-              <div class="msg-history-text" :class="{ '_unverified': !v.verified }">{{ v.deletedFlag ? 'deleted' : v.text }}</div>
-            </div>
-          </div>
           <div v-if="reactions[msg.id] && Object.keys(reactions[msg.id]).length > 0"
             class="reactions-container d-flex flex-wrap gap-1 mt-1">
             <button v-for="(data, emoji) in reactions[msg.id]" :key="emoji" type="button"
@@ -230,11 +224,12 @@
                  outbox hook — both arrive with their transports.) -->
             <span v-if="msg._syncStatus === 'sending'" class="sync-status local" title="Saved locally">◌</span>
             <span v-else-if="msg._syncStatus === 'syncing'" class="sync-status pending" title="Sending…">✓</span>
+            <span v-else-if="msg._syncStatus === 'synced' && msg._deliveredToPeers" class="sync-status delivered" title="Delivered to the recipient">✓✓</span>
             <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Accepted by server">✓</span>
             <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Rejected — not sent">!</span>
             <span v-if="msg._raw && msg._raw.parent_sign_hash" class="msg-edited" role="button"
-              :title="openHistories.has(msg.id) ? 'Hide history' : 'Show previous versions'"
-              @click.stop="toggleHistory(msg.id)">edited<template v-if="versionCountOf(msg)"> · {{ versionCountOf(msg) }}</template></span>
+              title="Show edit history"
+              @click.stop="emit('showHistory', msg.id)">edited<template v-if="versionCountOf(msg)"> · {{ versionCountOf(msg) }}</template></span>
             <!-- A versioned edit that the server did not accept: others still
                  see the previous revision, so say so instead of showing the
                  attempted text as if it had landed. -->
@@ -334,6 +329,11 @@
         type="button" class="context-menu-action context-menu-danger" @click="deleteFromContext">
         <i class="bi bi-trash me-2"></i>Delete
       </button>
+      <!-- §4.3 "!": rejected outright — the action is to discard the local copy -->
+      <button v-if="contextMenuMsg && contextMenuMsg._optimistic && contextMenuMsg._syncStatus === 'error'"
+        type="button" class="context-menu-action context-menu-danger" @click="discardFromContext">
+        <i class="bi bi-trash me-2"></i>Discard failed message
+      </button>
       <button type="button" class="context-menu-action" @click="copyMessageText">
         <i class="bi bi-clipboard me-2"></i>Copy text
       </button>
@@ -377,10 +377,6 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
-  histories: {
-    type: Object,
-    default: () => ({})
-  },
   downloads: {
     type: Object,
     default: () => ({})
@@ -411,7 +407,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'showFileState']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'showFileState', 'discardMessage']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -445,6 +441,12 @@ const startReply = (msg) => {
 
 const cancelReply = () => { replyTo.value = null; };
 
+const discardFromContext = () => {
+  const msg = contextMenuMsg.value;
+  closeContextMenu();
+  if (msg) emit('discardMessage', msg.id);
+};
+
 const deleteFromContext = () => {
   const msg = contextMenuMsg.value;
   closeContextMenu();
@@ -462,17 +464,6 @@ const submitMessage = () => {
   }
 };
 
-// §3.1: past revisions are hidden by default and open per message.
-const openHistories = ref(new Set());
-const toggleHistory = (msgId) => {
-  const next = new Set(openHistories.value);
-  if (next.has(msgId)) next.delete(msgId);
-  else {
-    next.add(msgId);
-    emit('showHistory', msgId); // parent loads and verifies on first open
-  }
-  openHistories.value = next;
-};
 const versionCountOf = (msg) => props.versionCounts[msg.id] || 0;
 
 const quotesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'quote');
@@ -522,6 +513,23 @@ const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 // Two layers, both read off the element itself: how far playback got, and
 // how much the browser actually holds decrypted.
 const videoState = ref({});
+// The ring: circumference of r=19 is ~119.4; the offset is the unfilled part.
+const RING_LEN = 2 * Math.PI * 19;
+const ringPercent = (v) => (v?.total ? Math.round((v.done / v.total) * 100) : 0);
+const ringOffset = (v) => RING_LEN * (1 - (v?.total ? v.done / v.total : 0));
+
+// When the full file replaces a playing prefix, the element reloads — put the
+// viewer back where they were instead of restarting the clip.
+const restoreVideoPosition = (fileId, event) => {
+  const el = event.target;
+  const saved = videoState.value[fileId]?.lastTime;
+  if (saved && el.duration && saved < el.duration) {
+    el.currentTime = saved;
+    if (videoState.value[fileId]?.wasPlaying) el.play().catch(() => {});
+  }
+  onVideoTime(fileId, event);
+};
+
 const onVideoTime = (fileId, event) => {
   const el = event.target;
   if (!el?.duration || !isFinite(el.duration)) return;
@@ -534,6 +542,8 @@ const onVideoTime = (fileId, event) => {
     [fileId]: {
       played: Math.min(100, (el.currentTime / el.duration) * 100),
       buffered: Math.min(100, (buffered / el.duration) * 100),
+      lastTime: el.currentTime,
+      wasPlaying: !el.paused,
     },
   };
 };
@@ -1095,6 +1105,7 @@ watch(() => props.messages, () => {
 
 /* ---------- design board: send states (§4.3) ---------- */
 .sync-status.local { color: #9a9c9d; }        /* ◌ stored locally */
+.sync-status.delivered { color: #2e7d32; letter-spacing: -2px; } /* ✓✓ green per board */
 .sync-status.pending { opacity: .45; }         /* pale ✓ in flight */
 /* rejected outright: red frame on the bubble itself, not just the glyph */
 .message-error { border: 1.5px solid #dc3545; }
@@ -1106,13 +1117,6 @@ watch(() => props.messages, () => {
 
 .context-menu-danger { color: #dc3545; }
 
-/* ---------- §3.1 version history ---------- */
-.msg-history { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
-.msg-history-item { background: rgba(36, 24, 36, .06); border-radius: 9px; padding: 6px 8px; }
-.msg-history-tag { font-size: 9px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: #8f889b; }
-.msg-history-text { font-size: 12px; line-height: 1.35; color: #8f889b; text-decoration: line-through; opacity: .9; }
-.msg-history-text._unverified { text-decoration: none; font-style: italic; }
-.msg-history-loading { font-size: 11px; color: #9a9c9d; }
 
 /* ---------- §1.5 / §2.1 files ---------- */
 .msg-file { display: flex; align-items: center; gap: 8px; background: rgba(36, 24, 36, .06); border-radius: 9px; padding: 6px 8px; margin-bottom: 6px; }
@@ -1329,13 +1333,17 @@ watch(() => props.messages, () => {
   border-top: 9px solid transparent;
   border-bottom: 9px solid transparent;
 }
-.msg-video-spinner {
-  width: 22px; height: 22px;
-  border: 2.6px solid rgba(36, 24, 36, .25);
-  border-top-color: #241824;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
+.msg-video-ring { position: absolute; inset: 0; width: 44px; height: 44px; transform: rotate(-90deg); }
+.msg-video-ring-track { fill: none; stroke: rgba(36, 24, 36, .15); stroke-width: 3.5; }
+.msg-video-ring-fill {
+  fill: none;
+  stroke: #8e2b77;
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-dasharray: 119.4;
+  transition: stroke-dashoffset .3s ease;
 }
+.msg-video-ring-label { position: relative; font-size: 10px; font-weight: 600; color: #241824; }
 .msg-video-buffering {
   position: absolute;
   left: 6px; bottom: 6px;

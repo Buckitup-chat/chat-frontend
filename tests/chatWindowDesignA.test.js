@@ -141,56 +141,29 @@ describe('§4.2 causally unplaced', () => {
 	});
 });
 
-describe('§3.1 version history', () => {
+describe('§3.1 version history entry point', () => {
 	const edited = (over = {}) =>
 		message({
 			_raw: { message_id: 'dmsg_1', sign_hash: 'dms_tip', sender_hash: PEER, parent_sign_hash: 'dms_prev' },
 			...over,
 		});
-
 	const renderWith = (messages, extra = {}) =>
 		mount(ChatWindow, {
 			props: { title: 'Ирина', myHash: MY, messages, reactions: {}, ...extra },
 			global: { stubs: { Avatar: true } },
 		});
 
-	it('the edited label carries the version count and opens history', async () => {
+	it('the edited label carries the version count and asks for the history view', async () => {
 		const w = renderWith([edited()], { versionCounts: { dmsg_1: 2 } });
 		const label = w.find('.msg-edited');
 		expect(label.text()).toContain('edited · 2');
-
 		await label.trigger('click');
 		expect(w.emitted('showHistory')[0]).toEqual(['dmsg_1']);
-		expect(w.find('.msg-history').exists()).toBe(true);
 	});
 
-	it('renders past revisions struck through with the historical tag', async () => {
-		const w = renderWith([edited()], {
-			versionCounts: { dmsg_1: 1 },
-			histories: { dmsg_1: [{ signHash: 'dms_prev', ownerTimestamp: 1, deletedFlag: false, verified: true, text: 'старый текст' }] },
-		});
-		await w.find('.msg-edited').trigger('click');
-		const item = w.find('.msg-history-item');
-		expect(item.find('.msg-history-tag').text()).toMatch(/historical/i);
-		expect(item.find('.msg-history-text').text()).toBe('старый текст');
-	});
-
-	// History is lineage, not a cache: a revision that fails verification is
-	// shown AS unverifiable, not silently dropped and not shown as content.
-	it('marks an unverifiable revision instead of dropping it', async () => {
-		const w = renderWith([edited()], {
-			histories: { dmsg_1: [{ signHash: 'dms_bad', ownerTimestamp: 1, deletedFlag: false, verified: false, text: 'Unverifiable revision' }] },
-		});
-		await w.find('.msg-edited').trigger('click');
-		expect(w.find('.msg-history-text._unverified').exists()).toBe(true);
-	});
-
-	it('toggles closed without re-requesting', async () => {
-		const w = renderWith([edited()], { histories: { dmsg_1: [] } });
-		await w.find('.msg-edited').trigger('click');
-		await w.find('.msg-edited').trigger('click');
-		expect(w.find('.msg-history').exists()).toBe(false);
-		expect(w.emitted('showHistory')).toHaveLength(1);
+	it('shows no label on an unedited message', () => {
+		const w = renderWith([message()]);
+		expect(w.find('.msg-edited').exists()).toBe(false);
 	});
 });
 
@@ -520,14 +493,12 @@ describe('§1.4 video', () => {
 		const w = renderWith({ [videoPart.fileId]: { status: 'opening' } });
 		await w.find('.msg-video-frame').trigger('click');
 		expect(w.emitted('playVideo')).toBeFalsy();
-		expect(w.find('.msg-video-spinner').exists()).toBe(true);
+		expect(w.find('.msg-video-ring').exists()).toBe(true);
 	});
 
-	it('says it is buffering, with chunk progress when the fallback reports it', () => {
-		expect(renderWith({ [videoPart.fileId]: { status: 'opening' } })
-			.find('.msg-video-buffering').text()).toBe('buffering');
-		expect(renderWith({ [videoPart.fileId]: { status: 'opening', done: 3, total: 13 } })
-			.find('.msg-video-buffering').text()).toContain('chunk 3 of 13');
+	it('shows an empty ring before the first chunk lands', () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'opening' } });
+		expect(w.find('.msg-video-ring-label').text()).toBe('0%');
 	});
 
 	it('mounts the player once the source is ready', () => {
@@ -692,5 +663,59 @@ describe('mobile long press', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe('§4.3 delivered and rejected', () => {
+	it('shows the green double check once the peer device confirmed arrival', () => {
+		const w = render([message({ isMine: true, _syncStatus: 'synced', _deliveredToPeers: 1 })]);
+		const badge = w.find('.sync-status.delivered');
+		expect(badge.text()).toBe('✓✓');
+		expect(w.find('.sync-status.synced').exists()).toBe(false);
+	});
+
+	it('keeps the single check while nothing confirmed arrival', () => {
+		const w = render([message({ isMine: true, _syncStatus: 'synced', _deliveredToPeers: 0 })]);
+		expect(w.find('.sync-status.synced').exists()).toBe(true);
+		expect(w.find('.sync-status.delivered').exists()).toBe(false);
+	});
+
+	// Board: "! Отклонено окончательно — красная рамка и действие «удалить»".
+	it('offers to discard a rejected local message', async () => {
+		const w = render([message({ isMine: true, _optimistic: true, _syncStatus: 'error', _raw: null })]);
+		await w.find('.message-bubble').trigger('contextmenu');
+		const discard = w.findAll('.context-menu-action').find((b) => b.text().includes('Discard'));
+		expect(discard).toBeTruthy();
+		await discard.trigger('click');
+		expect(w.emitted('discardMessage')[0]).toEqual(['dmsg_1']);
+	});
+});
+
+describe('§1.4 graphic download progress', () => {
+	const videoPart = {
+		kind: 'video', widthAspect: 4, heightAspect: 3, thumbHashB64: '',
+		name: 'clip.mp4', size: 52_428_800, mimeType: 'video/mp4',
+		createdAt: 0, fileId: 'f_' + 'e'.repeat(32), encSecretB64: 'AAAA',
+	};
+	const renderWith = (videos = {}) =>
+		mount(ChatWindow, {
+			props: {
+				title: 'Ирина', myHash: MY, reactions: {},
+				messages: [message({ parts: [videoPart], text: '' })], videos,
+			},
+			global: { stubs: { Avatar: true } },
+		});
+
+	it('draws the progress ring with the percent inside', () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'opening', done: 7, total: 13 } });
+		expect(w.find('.msg-video-ring').exists()).toBe(true);
+		expect(w.find('.msg-video-ring-label').text()).toBe('54%');
+	});
+
+	// §1.4: play starts on the first chunk; the rest downloads behind it.
+	it('mounts the player over a partial prefix and admits the rest is coming', () => {
+		const w = renderWith({ [videoPart.fileId]: { status: 'ready', url: 'blob:p', partial: true, done: 3, total: 13 } });
+		expect(w.find('video').attributes('src')).toBe('blob:p');
+		expect(w.find('.msg-video-buffering').text()).toContain('chunk 3 of 13');
 	});
 });

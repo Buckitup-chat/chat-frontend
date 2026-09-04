@@ -815,14 +815,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * Bound to message_sign_hash: an edited message is a new revision and
      * needs its own acknowledgement.
      */
-    const sendReadReceipt = async (peerHash, { messageId, messageSignHash }) => {
+    const sendReceipt = async (peerHash, { messageId, messageSignHash }, type) => {
         if (!messageSignHash) {
             throw new Error('Cannot acknowledge: message revision is not synced yet');
         }
 
         const dialogHash = await initDialogKeys(peerHash);
         const myHash = $userPQ.currentUserHash;
-        const type = 'read';
 
         const receiptHash = DialogCrypto.computeReceiptHash(messageId, messageSignHash, myHash, type);
 
@@ -845,6 +844,20 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
         return receiptHash;
     };
+
+    const sendReadReceipt = (peerHash, ref) => sendReceipt(peerHash, ref, 'read');
+
+    /**
+     * §4.3: "delivered" is a fact about arrival, so unlike "read" it goes out
+     * automatically — the moment a verified message lands on this device.
+     * The deterministic receipt hash makes repeats no-ops.
+     */
+    const sendDeliveredReceipt = (peerHash, ref) =>
+        sendReceipt(peerHash, ref, 'delivered').catch((e) => {
+            // Delivery acknowledgement is best-effort background traffic;
+            // failing it must not surface as a user-facing error.
+            console.warn('[dialogs] delivered receipt failed:', e?.message || e);
+        });
 
     /** Revisions the current user has explicitly acknowledged. */
     const isRevisionAcknowledged = (dialogHash, messageId, messageSignHash) => {
@@ -888,6 +901,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         retryCardAdmissions,
         toggleReaction,
         sendReadReceipt,
+        sendDeliveredReceipt,
         isRevisionAcknowledged,
         decryptReactionRow,
         optimisticItems,

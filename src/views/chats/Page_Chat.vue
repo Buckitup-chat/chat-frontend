@@ -2,17 +2,24 @@
     <div class="h-100 w-100">
         <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :reactions="displayReactions"
-            :version-counts="versionCountByMsgId" :histories="historiesByMsgId"
+            :version-counts="versionCountByMsgId"
             :downloads="downloadsByFileId" :images="imagesByFileId"
             :availability="availabilityByFileId" :videos="videosByFileId"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
-            @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState"
+            @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.removeOptimisticItem(id)"
             @show-image="handleShowImage" @play-video="handlePlayVideo"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge">
             <template #above-input><TransferPanel :current-peer="peerHash" /></template>
         </ChatWindow>
+        <EditHistoryModal v-if="editHistory"
+            :current-text="editHistory.msg.text"
+            :current-sign-hash="editHistory.msg._raw?.sign_hash || ''"
+            :current-time="editHistory.msg.timestamp"
+            :history="editHistory.history"
+            :reactions-by-version="editHistory.reactionsByVersion"
+            @close="editHistory = null" />
         <FileStateModal v-if="fileState" :part="fileState.part"
             :availability="availabilityByFileId[fileState.part.fileId] || null"
             :log="backfillLog(fileState.part.fileId)"
@@ -41,6 +48,7 @@ import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
+import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { v7 as uuidv7 } from 'uuid';
 
@@ -168,6 +176,14 @@ const scheduleDecrypt = (newRows) => {
                 // showing attacker-supplied text under a peer's name is the
                 // exact failure the gate exists to stop.
                 const verdict = await $dialogs.admitMessageRow(row);
+                // §4.3 ✓✓: arrival is a fact, so the delivered receipt goes
+                // out automatically once the row verifies — unlike "read",
+                // which stays a deliberate act.
+                if (verdict.status === 'verified' && row.sender_hash !== $userPQ.currentUserHash && row.sign_hash) {
+                    $dialogs.sendDeliveredReceipt(peerHash.value, {
+                        messageId: row.message_id, messageSignHash: row.sign_hash,
+                    });
+                }
                 const date = new Date(row.owner_timestamp * 1000);
                 const timestamp = `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
                 const base = {
@@ -260,13 +276,34 @@ watch(() => rawVersions.value, async (rows) => {
     if (rawMessages.value?.length) scheduleDecrypt(rawMessages.value);
 }, { immediate: true });
 
-const historiesByMsgId = ref({});
-const handleShowHistory = async (messageId) => {
-    if (historiesByMsgId.value[messageId]) return; // loaded; ChatWindow just toggles
-    const history = await $dialogs.getMessageHistory(dialogHash.value, messageId);
-    historiesByMsgId.value = { ...historiesByMsgId.value, [messageId]: history };
+// Screen 06: the edit history opens as its own view, differences highlighted
+// inside the text, reactions pinned to the exact version they were made on.
+const editHistory = ref(null); // { msg, history, reactionsByVersion }
+
+const fmtClock = (unixSec) => {
+    const d = new Date(unixSec * 1000);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
-watch(dialogHash, () => { historiesByMsgId.value = {}; });
+
+const handleShowHistory = async (messageId) => {
+    const msg = decryptedMessages.value.find((m) => m.id === messageId);
+    if (!msg) return;
+    const history = (await $dialogs.getMessageHistory(dialogHash.value, messageId))
+        .map((v) => ({ ...v, time: v.ownerTimestamp ? fmtClock(v.ownerTimestamp) : '' }));
+
+    // Reactions belong to the exact version: group verified ones by the
+    // message_sign_hash they were made against, historical revisions included.
+    const reactionsByVersion = {};
+    for (const r of rawAllReactions.value || []) {
+        if (r.message_id !== messageId || r.deleted_flag) continue;
+        if (!verifiedReactionKeys.value.has(`${r.reaction_hash}|${r.owner_timestamp}`)) continue;
+        // the emoji itself is encrypted; the aggregated view already decrypts
+        // current-revision ones — for history the count is what matters
+        (reactionsByVersion[r.message_sign_hash] ??= []).push('•');
+    }
+    editHistory.value = { msg, history, reactionsByVersion };
+};
+watch(dialogHash, () => { editHistory.value = null; });
 
 // Reactions (deleted rows filtered below — the shape carries the full table slice)
 const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollections.value?.reactions ?? null));
@@ -322,10 +359,14 @@ const receiptsByMsgId = computed(() => {
     const me = $userPQ.currentUserHash;
     const out = {};
     for (const r of rawReceipts.value || []) {
-        if (r.type !== 'read') continue;
         if (!verifiedReceiptKeys.value.has(`${r.receipt_hash}|${r.owner_timestamp}`)) continue;
         if (r.message_sign_hash !== currentSignHashOf(r.message_id)) continue;
-        const entry = out[r.message_id] || (out[r.message_id] = { mine: false, peers: [] });
+        const entry = out[r.message_id] || (out[r.message_id] = { mine: false, peers: [], deliveredPeers: [] });
+        if (r.type === 'delivered') {
+            if (r.peer_hash !== me && !entry.deliveredPeers.includes(r.peer_hash)) entry.deliveredPeers.push(r.peer_hash);
+            continue;
+        }
+        if (r.type !== 'read') continue;
         if (r.peer_hash === me) entry.mine = true;
         else if (!entry.peers.includes(r.peer_hash)) entry.peers.push(r.peer_hash);
     }
@@ -469,6 +510,7 @@ const displayMessages = computed(() => {
         const receipt = receiptsByMsgId.value[m.id];
         base._acknowledgedByMe = !!receipt?.mine;
         base._acknowledgedByPeers = receipt?.peers?.length || 0;
+        base._deliveredToPeers = receipt?.deliveredPeers?.length || 0;
         base._acknowledgePending = pendingReceipts.value.has(m.id);
         return base;
     });
@@ -679,14 +721,26 @@ const handlePlayVideo = async (part) => {
     try {
         const source = await $dialogs.openVideoSource(part, {
             onProgress: (p) => {
+                const cur = videosByFileId.value[id] || {};
                 videosByFileId.value = {
                     ...videosByFileId.value,
-                    [id]: { status: 'opening', done: p.done, total: p.total },
+                    [id]: { ...cur, status: cur.url ? cur.status : 'opening', done: p.done, total: p.total },
+                };
+            },
+            // §1.4 "играть можно с первого куска": the prefix becomes a
+            // playable src immediately; the full file replaces it when done.
+            onPartial: (url) => {
+                videosByFileId.value = {
+                    ...videosByFileId.value,
+                    [id]: { ...videosByFileId.value[id], status: 'ready', url, partial: true },
                 };
             },
         });
         videoSources.set(id, source);
-        videosByFileId.value = { ...videosByFileId.value, [id]: { status: 'ready', url: source.url, streaming: source.streaming } };
+        videosByFileId.value = {
+            ...videosByFileId.value,
+            [id]: { status: 'ready', url: source.url, streaming: source.streaming, partial: false },
+        };
     } catch (e) {
         console.error('Video open failed:', e);
         videosByFileId.value = { ...videosByFileId.value, [id]: { status: 'error' } };
