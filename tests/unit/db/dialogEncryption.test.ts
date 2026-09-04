@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import 'fake-indexeddb/auto';
 import { createPinia, setActivePinia } from 'pinia';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import { readAllFromIndexedDB } from '../testHelpers';
+import { readAllFromIndexedDB, deleteFromIndexedDB } from '../testHelpers';
 
 type DialogModule = typeof import('@/utils/db/tanstack/dialog');
 type DialogsStoreModule = typeof import('@/store/dialogs.store');
@@ -36,6 +36,36 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 vi.mock('@/utils/db/tanstack/user', () => ({
 	getUser: async (userHash: string) => (userHash === 'u_peer' ? { user_hash: 'u_peer', crypt_pkey: peerCryptPkeyB64 } : null),
 }));
+
+function createArrivalBarrier(expectedArrivals: number): { arrive: () => Promise<void> } {
+	let arrived = 0;
+	let release: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	return {
+		arrive: async () => {
+			arrived += 1;
+			if (arrived >= expectedArrivals) release();
+			await gate;
+		},
+	};
+}
+
+async function runConcurrentEdits<T>(calls: Array<() => Promise<T>>): Promise<PromiseSettledResult<T>[]> {
+	const { DialogCrypto } = await import('@/libs/DialogCrypto');
+	const realEncryptContent = DialogCrypto.encryptContent.bind(DialogCrypto);
+	const barrier = createArrivalBarrier(calls.length);
+	const spy = vi.spyOn(DialogCrypto, 'encryptContent').mockImplementation(async (key, plaintext) => {
+		await barrier.arrive();
+		return realEncryptContent(key, plaintext);
+	});
+	try {
+		return await Promise.allSettled(calls.map((call) => call()));
+	} finally {
+		spy.mockRestore();
+	}
+}
 
 async function freshStore(): Promise<{ store: DialogsStore; dialog: DialogModule }> {
 	vi.resetModules();
@@ -76,6 +106,7 @@ interface RawQueueEntry {
 	key: string;
 	record?: Record<string, unknown>;
 	patch?: Record<string, unknown>;
+	revision?: number;
 }
 
 async function readRawPendingEntry(table: string, key: string): Promise<RawQueueEntry | undefined> {
@@ -101,8 +132,23 @@ async function createSyncedMessageWithSignHash(dialogHash: string | null, messag
 	});
 }
 
+async function createSyncedOwnMessage(dialogHash: string | null, messageId: string, ownerTimestamp: number | bigint, signHash: string): Promise<void> {
+	if (!dialogHash) throw new Error('expected getDialogHash(...) to be non-null');
+	const { recordSynced } = await import('@/utils/db/tanstack/dialogCache');
+	await recordSynced('dialog_messages', messageId, {
+		message_id: messageId,
+		dialog_hash: dialogHash,
+		sender_hash: 'u_me',
+		content_b64: 'synced-ciphertext-for-' + signHash,
+		deleted_flag: false,
+		owner_timestamp: ownerTimestamp,
+		sign_hash: signHash,
+	});
+}
+
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
 });
 
 describe('message content — plaintext never persisted', () => {
@@ -176,6 +222,235 @@ describe('message content — plaintext never persisted', () => {
 		expect(a).not.toBe(b);
 		expect(await DialogCrypto.decryptContent(key, a)).toBe(SECURITY_TEST_MESSAGE_CANARY);
 		expect(await DialogCrypto.decryptContent(key, b)).toBe(SECURITY_TEST_MESSAGE_CANARY);
+	});
+});
+
+describe('editMessage — owner_timestamp is a strictly monotonic protocol version marker (BUG 3 / backend 422 "timestamp not newer" fix)', () => {
+	it('Test A: owner_timestamp advances to "now" when now is later than the previous version; identity/chain/mutationType preserved', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+		const messageId = 'dmsg_edit_advances_to_now';
+		const originalTimestamp = 100;
+		const originalSignHash = 'dms_' + 'a'.repeat(128);
+		await createSyncedOwnMessage(dialogHash, messageId, originalTimestamp, originalSignHash);
+
+		vi.spyOn(Date, 'now').mockReturnValue(500_000); // Date.now() -> 500s
+
+		await store.editMessage('u_peer', messageId, 'edited text');
+
+		const record = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(record.message_id).toBe(messageId);
+		expect(Number(record.owner_timestamp)).toBe(500);
+		expect(Number(record.owner_timestamp)).toBeGreaterThan(originalTimestamp);
+		expect(record.parent_sign_hash).toBe(originalSignHash);
+
+		const { resolvePendingDialogRecord } = await import('@/utils/db/tanstack/dialogQueue');
+		expect(resolvePendingDialogRecord('dialog_messages', record, null).mutationType).toBe('update');
+	});
+
+	it('Test B: two edits in the same unsent round (before either is confirmed) coalesce onto the SAME outgoing owner_timestamp — no artificial re-bump for an already-pending mutation (PART 2/5)', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+		const messageId = 'dmsg_edit_same_second';
+		await createSyncedOwnMessage(dialogHash, messageId, 500, 'dms_' + 'b'.repeat(128));
+
+		vi.spyOn(Date, 'now').mockReturnValue(500_000);
+
+		await store.editMessage('u_peer', messageId, 'edit 1');
+		const afterEdit1 = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(Number(afterEdit1.owner_timestamp)).toBe(501);
+
+		await store.editMessage('u_peer', messageId, 'edit 2');
+		const afterEdit2 = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(Number(afterEdit2.owner_timestamp)).toBe(501);
+		expect(Number(afterEdit2.owner_timestamp)).toBeGreaterThan(500);
+
+		const raw = await readRawPendingEntry('dialog_messages', messageId);
+		expect(raw?.revision).toBe(2);
+	});
+
+	it('Test C: an edit made after the wall clock rolls backward still advances strictly past the previous version', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+		const messageId = 'dmsg_edit_clock_rollback';
+		await createSyncedOwnMessage(dialogHash, messageId, 1000, 'dms_' + 'c'.repeat(128));
+
+		vi.spyOn(Date, 'now').mockReturnValue(900_000);
+
+		await store.editMessage('u_peer', messageId, 'edited text');
+		const record = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(Number(record.owner_timestamp)).toBe(1001);
+	});
+
+	it('Test D: a BigInt previous owner_timestamp (as hydrated from Electric) is safely advanced to a JSON-safe number', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+		const messageId = 'dmsg_edit_bigint_previous';
+		await createSyncedOwnMessage(dialogHash, messageId, 1700000000n, 'dms_' + 'd'.repeat(128));
+
+		vi.spyOn(Date, 'now').mockReturnValue(1_000_000_000);
+
+		await store.editMessage('u_peer', messageId, 'edited text');
+
+		const record = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(typeof record.owner_timestamp).not.toBe('bigint');
+		expect(Number(record.owner_timestamp)).toBe(1700000001);
+
+		const { toProtocolRecord } = await import('@/utils/db/tanstack/dialogQueue');
+		const protocolRecord = toProtocolRecord('dialog_messages', record);
+		expect(typeof protocolRecord.owner_timestamp).toBe('number');
+		expect(() => JSON.stringify(protocolRecord)).not.toThrow();
+	});
+
+	it('the pending queue entry key stays dialog_messages:<same message_id> — the edit updates the existing row, it does not create a new one', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+		const messageId = 'dmsg_edit_same_key';
+		await createSyncedOwnMessage(dialogHash, messageId, 200, 'dms_' + 'e'.repeat(128));
+
+		await store.editMessage('u_peer', messageId, 'edited text');
+
+		const raw = await readRawPendingEntry('dialog_messages', messageId);
+		expect(raw).toBeTruthy();
+		expect(raw!.key).toBe(messageId);
+		expect(dialog.pendingDialogMessagesCollection.get(messageId)?.message_id).toBe(messageId);
+	});
+
+	it('repeated edits (each acked before the next) keep advancing owner_timestamp and the parent_sign_hash chain', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+		const messageId = 'dmsg_edit_repeated';
+		const originalTimestamp = 200;
+		const signHashV1 = 'dms_' + '1'.repeat(128);
+		await createSyncedOwnMessage(dialogHash, messageId, originalTimestamp, signHashV1);
+
+		vi.spyOn(Date, 'now').mockReturnValue(200_000);
+
+		await store.editMessage('u_peer', messageId, 'edit 1');
+		const afterEdit1 = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(Number(afterEdit1.owner_timestamp)).toBe(201);
+		expect(afterEdit1.parent_sign_hash).toBe(signHashV1);
+		dialog.pendingDialogMessagesCollection.delete(messageId);
+		await deleteFromIndexedDB('dialog-pending-queue', 'pending', `dialog_messages:${messageId}`);
+		const signHashV2 = 'dms_' + '2'.repeat(128);
+		await createSyncedOwnMessage(dialogHash, messageId, 201, signHashV2);
+
+		await store.editMessage('u_peer', messageId, 'edit 2');
+		const afterEdit2 = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(Number(afterEdit2.owner_timestamp)).toBe(202);
+		expect(afterEdit2.parent_sign_hash).toBe(signHashV2);
+	});
+
+	it('throws instead of silently minting a fresh timestamp when the existing message has no owner_timestamp (data-integrity guard)', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+		const messageId = 'dmsg_edit_missing_timestamp';
+		const { recordSynced } = await import('@/utils/db/tanstack/dialogCache');
+		await recordSynced('dialog_messages', messageId, {
+			message_id: messageId,
+			dialog_hash: dialogHash!,
+			sender_hash: 'u_me',
+			content_b64: 'synced-ciphertext',
+			deleted_flag: false,
+			sign_hash: 'dms_' + 'c'.repeat(128),
+			owner_timestamp: null,
+		});
+
+		await expect(store.editMessage('u_peer', messageId, 'edited text')).rejects.toThrow(/owner_timestamp/);
+		expect(dialog.pendingDialogMessagesCollection.get(messageId)).toBeUndefined();
+	});
+});
+
+describe('editMessage — rapid/concurrent edits of the same message coalesce instead of racing (PART 1-5, Test A-F)', () => {
+	it('a second edit fired before the first is acked does NOT inherit the pending row\'s null sign_hash as its parent (PART 1 simple repro, PART 3)', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+		const messageId = 'dmsg_backtoback_edits';
+		const originalSignHash = 'dms_' + 'a'.repeat(128);
+		await createSyncedOwnMessage(dialogHash, messageId, 100, originalSignHash);
+
+		await store.editMessage('u_peer', messageId, 'edit A');
+		await store.editMessage('u_peer', messageId, 'edit B');
+
+		const record = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(record.parent_sign_hash).toBe(originalSignHash);
+		expect(record.parent_sign_hash).not.toBeNull();
+
+		const { resolvePendingDialogRecord } = await import('@/utils/db/tanstack/dialogQueue');
+		expect(resolvePendingDialogRecord('dialog_messages', record, null).mutationType).toBe('update');
+
+		const raw = await readRawPendingEntry('dialog_messages', messageId);
+		expect(raw?.revision).toBe(2);
+	});
+
+	it('Test A/B/C/F: two genuinely concurrent edits, forced to read the SAME confirmed base, coalesce into exactly one valid pending update — latest write wins, no duplicate/conflicting entries', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+		const messageId = 'dmsg_true_concurrent_edit';
+		const originalSignHash = 'dms_' + 'a'.repeat(128);
+		await createSyncedOwnMessage(dialogHash, messageId, 100, originalSignHash);
+		const results = await runConcurrentEdits([
+			() => store.editMessage('u_peer', messageId, 'edit A'),
+			() => store.editMessage('u_peer', messageId, 'edit B'),
+		]);
+
+		expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+
+		const raw = await readRawPendingEntry('dialog_messages', messageId);
+		expect(raw).toBeTruthy();
+		expect(raw!.revision).toBe(2);
+
+		const record = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(record.message_id).toBe(messageId);
+		expect(record.parent_sign_hash).toBe(originalSignHash);
+		const outTs = Number(record.owner_timestamp);
+		expect(Number.isSafeInteger(outTs)).toBe(true);
+		expect(outTs).toBeGreaterThan(100);
+
+		const { resolvePendingDialogRecord, toProtocolRecord } = await import('@/utils/db/tanstack/dialogQueue');
+		expect(resolvePendingDialogRecord('dialog_messages', record, null).mutationType).toBe('update');
+		expect(() => JSON.stringify(toProtocolRecord('dialog_messages', record))).not.toThrow();
+
+		const { DialogCrypto } = await import('@/libs/DialogCrypto');
+		const key = await deriveMyKeyForPeer('u_peer');
+		const decrypted = JSON.parse(await DialogCrypto.decryptContent(key, record.content_b64!));
+		expect(['edit A', 'edit B']).toContain(decrypted.text);
+	});
+});
+
+describe('Page_Chat display helpers — edit no longer moves the message or changes its shown time (PART 3/5)', () => {
+	it('getDialogMessageDisplayTimestamp derives the bubble time from the immutable UUIDv7 creation time, not the (now-advanced) owner_timestamp', async () => {
+		const { store, dialog } = await freshStore();
+		const dialogHash = store.getDialogHash('u_peer');
+
+		const { messageId, record } = await sendAndAwaitPersisted(store, dialog, 'first version');
+		const { getDialogMessageCreatedAtMs, getDialogMessageDisplayTimestamp } = await import('@/utils/db/tanstack/dialogDisplay');
+		const createdAtMs = getDialogMessageCreatedAtMs(messageId);
+		expect(createdAtMs).not.toBeNull();
+		const expectedDisplaySec = createdAtMs! / 1000;
+
+		const sentAtSec = Number(record.owner_timestamp);
+		dialog.pendingDialogMessagesCollection.delete(messageId);
+		await deleteFromIndexedDB('dialog-pending-queue', 'pending', `dialog_messages:${messageId}`);
+		const { recordSynced } = await import('@/utils/db/tanstack/dialogCache');
+		await recordSynced('dialog_messages', messageId, {
+			message_id: messageId,
+			dialog_hash: dialogHash!,
+			sender_hash: 'u_me',
+			content_b64: record.content_b64,
+			deleted_flag: false,
+			owner_timestamp: sentAtSec,
+			sign_hash: 'dms_' + 'f'.repeat(128),
+		});
+
+		const editedAtSec = sentAtSec + 100_000;
+		vi.spyOn(Date, 'now').mockReturnValue(editedAtSec * 1000);
+		await store.editMessage('u_peer', messageId, 'edited version');
+		const edited = dialog.pendingDialogMessagesCollection.get(messageId)!;
+		expect(Number(edited.owner_timestamp)).toBe(editedAtSec);
+		expect(Number(edited.owner_timestamp)).not.toBe(expectedDisplaySec);
+
+		expect(getDialogMessageDisplayTimestamp(edited)).toBe(expectedDisplaySec);
 	});
 });
 

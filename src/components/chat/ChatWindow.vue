@@ -29,7 +29,7 @@
             {{ msg.authorName }}
           </div>
           <div v-if="editingMessageId === msg.id" class="message-edit">
-            <textarea ref="editTextarea" v-model="editingText" class="form-control form-control-sm mb-1" rows="2"
+            <textarea :ref="setEditTextareaRef" v-model="editingText" class="form-control form-control-sm mb-1" rows="2"
               @keydown.enter.exact.prevent="saveEdit" @keydown.esc.prevent="cancelEdit"></textarea>
             <div class="d-flex gap-1 justify-content-end">
               <button type="button" class="btn btn-sm btn-light" @click="cancelEdit">Cancel</button>
@@ -52,7 +52,7 @@
             </button>
           </div>
           <div class="message-time text-end mt-1" :class="msg.isMine ? 'text-dark' : 'text-muted'">
-            {{ msg.timestamp }}
+            <span v-if="msg.isEdited" class="edited-marker" title="Edited">Edited </span>{{ msg.timestamp }}
             <span v-if="msg._syncStatus === 'sending' || msg._syncStatus === 'syncing'" class="sync-status pending" title="Syncing...">✓</span>
             <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Synced">✓</span>
             <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Failed to sync">!</span>
@@ -143,6 +143,10 @@ const contextMenuRef = ref(null);
 const editingMessageId = ref(null);
 const editingText = ref('');
 const editTextarea = ref(null);
+
+const setEditTextareaRef = (el) => {
+  editTextarea.value = typeof HTMLTextAreaElement !== 'undefined' && el instanceof HTMLTextAreaElement ? el : null;
+};
 
 const contextMenuMsg = computed(() => {
   if (!contextMenu.value) return null;
@@ -309,6 +313,10 @@ watch(() => props.messages, () => {
 
 .message-time {
   font-size: 10px;
+}
+
+.edited-marker {
+  opacity: 0.6;
 }
 
 .sync-status {

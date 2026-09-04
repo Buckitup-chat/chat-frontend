@@ -52,6 +52,31 @@ function clearDatabaseContents(dbName: string): Promise<void> {
 	});
 }
 
+export async function deleteFromIndexedDB(dbName: string, storeName: string, key: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const openReq = indexedDB.open(dbName);
+		openReq.onsuccess = () => {
+			const db = openReq.result;
+			if (!db.objectStoreNames.contains(storeName)) {
+				db.close();
+				resolve();
+				return;
+			}
+			const tx = db.transaction(storeName, 'readwrite');
+			tx.objectStore(storeName).delete(key);
+			tx.oncomplete = () => {
+				db.close();
+				resolve();
+			};
+			tx.onerror = () => {
+				db.close();
+				reject(tx.error);
+			};
+		};
+		openReq.onerror = () => reject(openReq.error);
+	});
+}
+
 export async function readAllFromIndexedDB(dbName: string, storeName: string): Promise<unknown[]> {
 	return new Promise((resolve, reject) => {
 		const openReq = indexedDB.open(dbName);
