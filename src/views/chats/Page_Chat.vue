@@ -8,6 +8,7 @@
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.removeOptimisticItem(id)"
             @show-image="handleShowImage" @play-video="handlePlayVideo"
+            @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge">
@@ -785,6 +786,44 @@ const handleDeleteMessage = async (messageId) => {
         await $dialogs.deleteMessage(peerHash.value, messageId);
     } catch (e) {
         console.error('Failed to delete message:', e);
+    }
+};
+
+// ---------- signed DAG checkpoint ----------
+
+const handleCreateCheckpoint = async () => {
+    try {
+        await $dialogs.createDialogCheckpoint(peerHash.value);
+        $swal.fire({ icon: 'success', title: 'Checkpoint signed', timer: 2500, showConfirmButton: false });
+    } catch (e) {
+        const details = e?.details
+            ? ` (${e.details.waiting || 0} waiting, ${e.details.unadmitted?.length || 0} unverified)`
+            : '';
+        $swal.fire({ icon: 'error', title: 'Cannot checkpoint yet', text: `${e.message}${details}` });
+    }
+};
+
+const handleCheckpointInfo = async ({ part }) => {
+    try {
+        const [verify, compare] = await Promise.all([
+            $dialogs.verifyDialogCheckpoint(peerHash.value, part),
+            $dialogs.compareDialogCheckpoint(peerHash.value, part),
+        ]);
+        let text = `Commitments: ${verify.status}` +
+            (verify.status === 'incomplete_history' ? ` (${verify.missingEventIds.length} missing)` : '') +
+            `\nAgainst current state: ${compare.verdict}`;
+        if (compare.verdict === 'VIEW_CHANGED') {
+            const diff = await $dialogs.diffDialogCheckpoint(peerHash.value, part);
+            if (diff.status === 'ok') {
+                const byType = diff.changes.reduce((m, c) => ((m[c.type] = (m[c.type] || 0) + 1), m), {});
+                text += '\nChanges: ' + (Object.entries(byType).map(([t, n]) => `${t}×${n}`).join(', ') || 'none');
+            } else {
+                text += `\nDiff: ${diff.status} (${diff.missingEventIds.length} events missing locally)`;
+            }
+        }
+        $swal.fire({ title: `Checkpoint · ${new Date(part.createdAt * 1000).toLocaleString()}`, text });
+    } catch (e) {
+        $swal.fire({ icon: 'error', title: 'Checkpoint check failed', text: String(e.message || e) });
     }
 };
 

@@ -13,8 +13,12 @@
         </div>
         <div class="fw-bold fs-5">{{ title }}</div>
       </div>
-      <div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')">
-        <div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>
+      <div class="d-flex align-items-center">
+        <button type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Sign a checkpoint of this dialog's history"
+          @click="emit('createCheckpoint')">🔏</button>
+        <div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')">
+          <div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>
+        </div>
       </div>
     </div>
 
@@ -193,6 +197,12 @@
               </div>
             </div>
             </template>
+            <!-- Signed DAG checkpoint: a compact marker, not a text bubble.
+                 Tap asks the page to verify + compare against current state. -->
+            <button v-for="(cp, ci) in checkpointsOf(msg)" :key="'cp' + ci" type="button"
+              class="msg-checkpoint" @click="emit('checkpointInfo', { part: cp, messageId: msg.id })">
+              🔏 History checkpoint · tap to compare
+            </button>
             <div v-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
             <div v-else class="message-text text-break">
               {{ msg.text }}
@@ -411,7 +421,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'showFileState', 'discardMessage']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -559,6 +569,7 @@ const toggleQuoteChain = (msg, qi) => {
   expandedQuotes.value = next;
 };
 const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
+const checkpointsOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'checkpoint');
 
 /** Availability only shows while it is genuinely partial — a complete file
  *  needs no explanation, and an unknown manifest is not a claim to make. */
@@ -1178,6 +1189,16 @@ watch(() => props.messages, () => {
 /* ---------- §4.2: admitted but causally unplaced ---------- */
 .message-unplaced { opacity: .72; }
 .msg-unplaced-note { margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
+.msg-checkpoint {
+  display: block;
+  border: 1px dashed #8e2b77;
+  background: rgba(142, 43, 119, .06);
+  color: #8e2b77;
+  border-radius: 10px;
+  font-size: 12px;
+  padding: 4px 10px;
+  margin: 2px 0;
+}
 
 .context-menu-danger { color: #dc3545; }
 

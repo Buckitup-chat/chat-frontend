@@ -76,6 +76,26 @@ export interface VideoPart extends Omit<ImagePart, 'kind'> {
 	durationSeconds: number;
 }
 
+/**
+ * Signed DAG checkpoint (07 §"checkpoint"): commitments to the causal
+ * history (frontier) and the materialized view of a dialog at a moment this
+ * device confirmed. Rides an ordinary message, so the commitments stay
+ * inside the ciphertext and the signature/transport come for free — the
+ * server sees a normal row. Semantics and derivations: src/lib/pq/checkpoint.ts.
+ */
+export interface CheckpointPart {
+	kind: 'checkpoint';
+	version: number;
+	reducerVersion: string;
+	treeVersion: string;
+	frontierRoot: string;
+	viewRoot: string;
+	/** message_id → sign_hash tails observed at checkpoint time (source of
+	 * truth; frontierRoot is its fingerprint). */
+	frontier: Record<string, string>;
+	createdAt: number;
+}
+
 /** A typed value this build does not render yet (e.g. "image" before the
  * file transport lands). Preserved verbatim so re-encoding loses nothing. */
 export interface UnknownPart {
@@ -84,7 +104,7 @@ export interface UnknownPart {
 	value: unknown;
 }
 
-export type ContentPart = TextPart | QuotePart | FilePart | ImagePart | VideoPart | UnknownPart;
+export type ContentPart = TextPart | QuotePart | FilePart | ImagePart | VideoPart | CheckpointPart | UnknownPart;
 
 export class ContentDecodeError extends Error {}
 
@@ -109,6 +129,13 @@ const encodePart = (part: ContentPart): unknown => {
 					part.widthAspect, part.heightAspect, part.thumbHashB64, part.name, part.size,
 					part.mimeType, part.createdAt, part.fileId, part.encSecretB64,
 					part.durationSeconds || 0,
+				],
+			};
+		case 'checkpoint':
+			return {
+				checkpoint: [
+					part.version, part.reducerVersion, part.treeVersion,
+					part.frontierRoot, part.viewRoot, part.frontier, part.createdAt,
 				],
 			};
 		case 'unknown':
@@ -183,6 +210,26 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					? [{ kind: 'video', ...media, durationSeconds: Math.max(0, Math.round(Number(im[9]))) || 0 }]
 					: [{ kind: 'image', ...media }];
 			}
+			if (type === 'checkpoint') {
+				const c = obj.checkpoint;
+				if (
+					!Array.isArray(c) || c.length < 7 ||
+					typeof c[3] !== 'string' || typeof c[4] !== 'string' ||
+					c[5] === null || typeof c[5] !== 'object' || Array.isArray(c[5])
+				) {
+					throw new ContentDecodeError('malformed checkpoint envelope');
+				}
+				return [{
+					kind: 'checkpoint',
+					version: Number(c[0]),
+					reducerVersion: String(c[1]),
+					treeVersion: String(c[2]),
+					frontierRoot: c[3],
+					viewRoot: c[4],
+					frontier: c[5] as Record<string, string>,
+					createdAt: Number(c[6]),
+				}];
+			}
 			if (type === 'file') {
 				const f = obj.file;
 				if (!Array.isArray(f) || f.length < 6 || typeof f[4] !== 'string' || typeof f[5] !== 'string') {
@@ -229,6 +276,7 @@ export const contentToText = (parts: ContentPart[]): string =>
 			// Attachments render as their own element in the bubble; naming them
 			// here too would print the filename twice under the picture.
 			if (p.kind === 'file' || p.kind === 'image' || p.kind === 'video') return '';
+			if (p.kind === 'checkpoint') return ''; // renders as its own marker
 			return `[${p.type}]`;
 		})
 		.filter(Boolean)
@@ -243,5 +291,6 @@ export const previewText = (parts: ContentPart[]): string => {
 		const icon = media.kind === 'image' ? '🖼' : media.kind === 'video' ? '🎬' : '📄';
 		return `${icon} ${media.name}`;
 	}
+	if (parts.some((p) => p.kind === 'checkpoint')) return '🔏 checkpoint';
 	return '';
 };

@@ -8,6 +8,10 @@ import { computeTails } from '@/lib/data/refs';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
+import {
+    CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
+    deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
+} from '@/lib/pq/checkpoint';
 import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
 import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
 import { openVideo } from '@/lib/data/videoStream';
@@ -668,6 +672,207 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return out;
     };
 
+    // ---------- signed DAG checkpoint (src/lib/pq/checkpoint.ts) ----------
+    //
+    // A checkpoint attests "this device held this causally complete local
+    // state and it materialized to this view". It rides an ordinary message
+    // (content type "checkpoint"), so signing, transport, versioning and the
+    // receive gate all apply unchanged and the server sees a normal row.
+
+    const loadDialogRows = async (dialogHash) => {
+        const colls = getDialogCollections(dialogHash);
+        await colls.messages.preload().catch(() => { });
+        await colls.versions.preload().catch(() => { });
+        return {
+            current: colls.messages.toArray.filter((r) => r.sign_hash),
+            versions: colls.versions.toArray.filter((r) => r.sign_hash),
+        };
+    };
+
+    // Reducer dialog-state-v1: the winning revision per message is the
+    // server-materialized current row (edits archive their predecessor), so
+    // the reduction is "gate-admitted current rows as they stand" — the same
+    // selection the feed renders. Tombstones stay in the state as deleted:
+    // a delete is a view change, not a disappearance.
+    const computeDialogViewState = async (dialogHash) => {
+        const { current } = await loadDialogRows(dialogHash);
+        const state = {};
+        const unadmitted = [];
+        for (const row of current) {
+            const verdict = await admitMessageRow(row);
+            if (verdict.status === 'verified') {
+                state[row.message_id] = { signHash: row.sign_hash, deleted: !!row.deleted_flag };
+            } else {
+                unadmitted.push(row.message_id);
+            }
+        }
+        return { state, rows: current, unadmitted };
+    };
+
+    const computeDialogFrontier = async (rows) => {
+        const withRefs = await Promise.all(rows.map(async (r) => ({
+            message_id: r.message_id,
+            sign_hash: r.sign_hash,
+            refs: await decryptRefsOf(r),
+        })));
+        return {
+            frontier: computeTails(withRefs),
+            undecryptableRefs: withRefs.filter((w) => w.refs === null).map((w) => w.message_id),
+        };
+    };
+
+    /**
+     * Creates and sends a checkpoint over the dialog's current state.
+     * Fails (INCOMPLETE_CAUSAL_HISTORY) while anything is unadmitted or any
+     * refs blob is still undecryptable: a checkpoint must not attest history
+     * the device has not fully verified (ТЗ §7 — head hashes alone can
+     * reference data never seen locally).
+     */
+    const createDialogCheckpoint = async (peerHash) => {
+        const dialogHash = getDialogHash(peerHash);
+        const { state, rows, unadmitted } = await computeDialogViewState(dialogHash);
+        const gate = gateFor(dialogHash);
+        const waiting = gate.stats().pending;
+        const { frontier, undecryptableRefs } = await computeDialogFrontier(rows);
+        if (unadmitted.length || waiting || undecryptableRefs.length) {
+            const err = new Error('INCOMPLETE_CAUSAL_HISTORY');
+            err.details = { unadmitted, waiting, undecryptableRefs };
+            throw err;
+        }
+
+        const part = {
+            kind: 'checkpoint',
+            version: CHECKPOINT_VERSION,
+            reducerVersion: REDUCER_VERSION,
+            treeVersion: TREE_VERSION,
+            frontierRoot: deriveFrontierRoot(frontier),
+            viewRoot: buildViewTree(state).root,
+            frontier,
+            createdAt: Math.floor(Date.now() / 1000),
+        };
+        const messageId = await sendMessage(peerHash, [part]);
+        return { messageId, part };
+    };
+
+    /**
+     * Protocol-level checks of a received checkpoint part. The carrying row's
+     * ML-DSA signature and authorship were already enforced by the gate — an
+     * unadmitted row never reaches this code — so this validates the inner
+     * commitments (§19): versions, frontier_root consistency, and whether the
+     * attested revisions are locally known.
+     */
+    const verifyDialogCheckpoint = async (peerHash, part) => {
+        if (part.version !== CHECKPOINT_VERSION) {
+            return { status: 'unsupported_version', component: 'checkpoint_version', version: String(part.version) };
+        }
+        // Unknown reducer/tree: the signature stands, the view is simply not
+        // reproducible here — never INVALID (§32).
+        if (part.reducerVersion !== REDUCER_VERSION) {
+            return { status: 'unsupported_version', component: 'reducer_version', version: part.reducerVersion };
+        }
+        if (part.treeVersion !== TREE_VERSION) {
+            return { status: 'unsupported_version', component: 'tree_version', version: part.treeVersion };
+        }
+        if (deriveFrontierRoot(part.frontier) !== part.frontierRoot) {
+            return { status: 'invalid', reason: 'frontier_root does not match the frontier set' };
+        }
+
+        const dialogHash = getDialogHash(peerHash);
+        const { current, versions } = await loadDialogRows(dialogHash);
+        const known = new Set([...current, ...versions].map((r) => r.sign_hash));
+        const missing = Object.entries(part.frontier)
+            .filter(([, sh]) => !known.has(sh))
+            .map(([mid, sh]) => `${mid}|${sh}`);
+        if (missing.length) return { status: 'incomplete_history', missingEventIds: missing };
+        return { status: 'valid' };
+    };
+
+    /**
+     * O(1) comparison of the checkpoint against the current admitted state
+     * (§20-21). view.equal is null when reducer/tree versions differ — roots
+     * from different semantics are incomparable, not unequal.
+     */
+    const compareDialogCheckpoint = async (peerHash, part) => {
+        const dialogHash = getDialogHash(peerHash);
+        const { state, rows } = await computeDialogViewState(dialogHash);
+        const { frontier } = await computeDialogFrontier(rows);
+
+        const historyEqual = deriveFrontierRoot(frontier) === part.frontierRoot;
+        const reducerVersionEqual = part.reducerVersion === REDUCER_VERSION;
+        const treeVersionEqual = part.treeVersion === TREE_VERSION;
+        const viewEqual = reducerVersionEqual && treeVersionEqual
+            ? buildViewTree(state).root === part.viewRoot
+            : null;
+
+        const verdict =
+            viewEqual === null ? 'VIEW_UNVERIFIABLE'
+                : historyEqual && viewEqual ? 'EXACT_MATCH'
+                    : !historyEqual && viewEqual ? 'HISTORY_CHANGED_VIEW_EQUAL'
+                        : !historyEqual ? 'VIEW_CHANGED'
+                            // same causally-closed history + same reducer MUST
+                            // reproduce the same view (Invariant 3)
+                            : 'INCONSISTENT_VIEW';
+
+        return {
+            verdict,
+            history: { equal: historyEqual },
+            view: { equal: viewEqual },
+            reducerVersionEqual,
+            treeVersionEqual,
+        };
+    };
+
+    /**
+     * Reconstructs the view as of the checkpoint's frontier and diffs it
+     * against the current view (§22-24). The old state is rebuilt from the
+     * causal closure: revisions reachable from the frontier through refs and
+     * parent_sign_hash chains, taking the newest reachable revision per
+     * message. Archived revisions come from dialog_messages_versions and are
+     * gate-verified like everything else.
+     */
+    const diffDialogCheckpoint = async (peerHash, part) => {
+        const dialogHash = getDialogHash(peerHash);
+        const { state: newState, rows } = await computeDialogViewState(dialogHash);
+        const { current, versions } = await loadDialogRows(dialogHash);
+
+        const bySignHash = new Map();
+        for (const row of [...versions, ...current]) {
+            const verdict = await admitMessageRow(row);
+            if (verdict.status === 'verified') bySignHash.set(row.sign_hash, row);
+        }
+
+        const missing = [];
+        const bestByMessage = new Map(); // message_id -> row (max owner_timestamp reachable)
+        const visited = new Set();
+        const queue = Object.entries(part.frontier).map(([mid, sh]) => ({ mid, sh }));
+        while (queue.length) {
+            const { mid, sh } = queue.pop();
+            if (visited.has(sh)) continue;
+            visited.add(sh);
+            const row = bySignHash.get(sh);
+            if (!row) { missing.push(`${mid}|${sh}`); continue; }
+            const best = bestByMessage.get(row.message_id);
+            if (!best || row.owner_timestamp > best.owner_timestamp) bestByMessage.set(row.message_id, row);
+            if (row.parent_sign_hash) queue.push({ mid: row.message_id, sh: row.parent_sign_hash });
+            const refs = await decryptRefsOf(row);
+            if (refs) for (const [rmid, rsh] of Object.entries(refs)) queue.push({ mid: rmid, sh: rsh });
+        }
+        if (missing.length) return { status: 'incomplete_history', missingEventIds: missing };
+
+        const oldState = {};
+        for (const [mid, row] of bestByMessage) {
+            oldState[mid] = { signHash: row.sign_hash, deleted: !!row.deleted_flag };
+        }
+
+        const diff = diffViewTrees(buildViewTree(oldState), buildViewTree(newState));
+        const { frontier } = await computeDialogFrontier(rows);
+        return {
+            status: 'ok',
+            currentFrontier: frontier,
+            changes: classifyChanges(diff),
+        };
+    };
+
     /**
      * Toggle reaction. Owns its optimistic state: computes the deterministic
      * reaction_hash and desired end state, registers the optimistic item, and
@@ -897,6 +1102,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         getFileAvailability,
         openVideoSource,
         getMessageHistory,
+        createDialogCheckpoint,
+        verifyDialogCheckpoint,
+        compareDialogCheckpoint,
+        diffDialogCheckpoint,
         admitMessageRow,
         isMessageAdmitted,
         admitReactionRow,
