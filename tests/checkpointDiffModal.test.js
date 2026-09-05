@@ -43,4 +43,21 @@ describe('CheckpointDiffModal', () => {
 		await w.find('.cd-change').trigger('click');
 		expect(w.emitted('jump')[0]).toEqual([M2]);
 	});
+
+	it('future messages collapse into one marker that jumps to the first', async () => {
+		const w = mount(CheckpointDiffModal, {
+			props: {
+				createdAt: 1788470000,
+				changes: [{ type: 'MESSAGE_EDITED', messageId: M1, oldText: 'a', newText: 'b' }],
+				futureAdded: { count: 57, firstMessageId: M2 },
+			},
+		});
+		const future = w.find('.cd-change._future');
+		expect(future.text()).toContain('57 new messages since the checkpoint');
+		// exactly two rows: the detailed past change and the single marker
+		expect(w.findAll('.cd-change')).toHaveLength(2);
+		expect(w.find('.cd-sub').text()).toContain('1 change to attested history · 57 new after');
+		await future.trigger('click');
+		expect(w.emitted('jump')[0]).toEqual([M2]);
+	});
 });

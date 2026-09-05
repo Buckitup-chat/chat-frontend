@@ -15,7 +15,8 @@
             <template #above-input><TransferPanel :current-peer="peerHash" /></template>
         </ChatWindow>
         <CheckpointDiffModal v-if="checkpointDiff" :created-at="checkpointDiff.createdAt"
-            :changes="checkpointDiff.changes" @close="checkpointDiff = null" @jump="handleCheckpointJump" />
+            :changes="checkpointDiff.changes" :future-added="checkpointDiff.futureAdded"
+            @close="checkpointDiff = null" @jump="handleCheckpointJump" />
         <EditHistoryModal v-if="editHistory"
             :current-text="editHistory.msg.text"
             :current-sign-hash="editHistory.msg._raw?.sign_hash || ''"
@@ -809,18 +810,20 @@ const handleCreateCheckpoint = async () => {
 const chatWindowRef = ref(null);
 const checkpointDiff = ref(null); // { createdAt, changes } → CheckpointDiffModal
 
-const handleCheckpointInfo = async ({ part }) => {
+const handleCheckpointInfo = async ({ part, messageId }) => {
     try {
         const [verify, compare] = await Promise.all([
             $dialogs.verifyDialogCheckpoint(peerHash.value, part),
             $dialogs.compareDialogCheckpoint(peerHash.value, part),
         ]);
-        // The interesting case gets the real diff, message by message.
+        // The interesting case gets the real diff: attested history detailed
+        // message by message, the unbounded continuation as one marker.
         if (verify.status === 'valid' && compare.verdict === 'VIEW_CHANGED') {
-            const diff = await $dialogs.describeCheckpointDiff(peerHash.value, part);
-            if (diff.status === 'ok' && diff.changes.length) {
+            const diff = await $dialogs.describeCheckpointDiff(peerHash.value, part, { pointerMessageId: messageId });
+            if (diff.status === 'ok' && (diff.changes.length || diff.futureAdded.count)) {
                 checkpointDiff.value = {
                     createdAt: part.createdAt,
+                    futureAdded: diff.futureAdded,
                     changes: diff.changes.map((c) => ({
                         ...c,
                         authorName: c.senderHash === $userPQ.currentUserHash ? 'Me' : chatName.value,

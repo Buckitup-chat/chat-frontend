@@ -7,7 +7,7 @@
       <div class="cd-head">
         <div>
           <div class="cd-title">Since the checkpoint</div>
-          <div class="cd-sub">{{ fmtWhen }} · {{ changes.length }} {{ changes.length === 1 ? 'change' : 'changes' }}</div>
+          <div class="cd-sub">{{ fmtWhen }} · {{ subLine }}</div>
         </div>
         <button type="button" class="cd-close" @click="emit('close')" title="Close">✕</button>
       </div>
@@ -38,6 +38,15 @@
         <div v-else class="cd-text _old">was present at the checkpoint, missing from local state now</div>
       </div>
 
+      <!-- The dialog ahead of the pointer is unbounded — one marker, not a list. -->
+      <div v-if="futureAdded && futureAdded.count" class="cd-change _future" role="button"
+        @click="futureAdded.firstMessageId && emit('jump', futureAdded.firstMessageId)">
+        <div class="cd-meta"><span class="cd-tag _future_tag">after</span></div>
+        <div class="cd-text">{{ futureAdded.count }} new {{ futureAdded.count === 1 ? 'message' : 'messages' }} since the checkpoint</div>
+      </div>
+
+      <div v-if="!changes.length && !(futureAdded && futureAdded.count)" class="cd-text _old">Nothing changed.</div>
+
       <p class="cd-fine">The checkpoint fixed what this device had verified locally at signing time; it does not claim no other events existed elsewhere.</p>
     </div>
   </div>
@@ -49,12 +58,21 @@ import { diffWords } from '@/lib/data/textDiff';
 
 const props = defineProps({
   createdAt: { type: Number, required: true },
-  /** Hydrated changes: [{ type, messageId, oldText?, newText?, authorName? }] */
+  /** Hydrated PAST changes only: revisions of what the checkpoint attested. */
   changes: { type: Array, required: true },
+  /** New messages ahead of the pointer, collapsed: { count, firstMessageId }. */
+  futureAdded: { type: Object, default: null },
 });
 const emit = defineEmits(['close', 'jump']);
 
 const fmtWhen = computed(() => new Date(props.createdAt * 1000).toLocaleString());
+
+const subLine = computed(() => {
+  const parts = [];
+  if (props.changes.length) parts.push(`${props.changes.length} ${props.changes.length === 1 ? 'change' : 'changes'} to attested history`);
+  if (props.futureAdded?.count) parts.push(`${props.futureAdded.count} new after`);
+  return parts.join(' · ') || 'no changes';
+});
 
 const LABELS = {
   MESSAGE_ADDED: 'added',
@@ -105,7 +123,9 @@ const label = (type) => LABELS[type] || type;
   &._message_edited { background: #8e2b77; }
   &._message_deleted { background: #b3261e; }
   &._message_restored { background: #1565c0; }
+  &._future_tag { background: #55525c; }
 }
+.cd-change._future { background: #fbfafc; border: 1px dashed #e0dde4; }
 .cd-author { font-size: 11px; color: #7a7a7a; }
 .cd-text { margin-top: 4px; font-size: 13px; line-height: 1.45; color: #17161a; white-space: pre-wrap; word-break: break-word; }
 .cd-text._old { color: #8f889b; }

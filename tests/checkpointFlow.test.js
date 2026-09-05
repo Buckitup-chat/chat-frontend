@@ -193,6 +193,34 @@ describe('checkpoint through the store', () => {
 		expect(added.newText).toBe('Waiting for keys…');
 	});
 
+	// The pointer splits the feed: attested history behind it is bounded and
+	// detailed; the continuation ahead is unbounded and collapses to a count.
+	it('details only the past; future messages collapse into one marker', async () => {
+		const LATE = 'dmsg_0192aa00-0000-7000-8000-00000000000a'; // authored before the pointer
+		const CP = 'dmsg_0192aaab-0000-7000-8000-00000000000b'; // the checkpoint message itself
+		const F1 = 'dmsg_0192aaac-0000-7000-8000-00000000000c';
+		const F2 = 'dmsg_0192aaad-0000-7000-8000-00000000000d';
+
+		const v1 = makeRow(M1);
+		seed(v1);
+		const { part } = await store.createDialogCheckpoint(peer);
+
+		// afterwards: an edit of attested history, a LATE old message slotting
+		// in behind the pointer, the checkpoint's own row, and two new ones
+		const v2 = makeRow(M1, { content_b64: toBase64(new Uint8Array([8])), parent_sign_hash: v1.sign_hash, owner_timestamp: 1_700_000_600 });
+		collections.dialog.messages.rows.set(M1, v2);
+		collections.dialog.versions.rows.set(`${M1}|${v1.sign_hash}`, v1);
+		seed(makeRow(LATE), makeRow(CP), makeRow(F1), makeRow(F2));
+
+		const diff = await store.describeCheckpointDiff(peer, part, { pointerMessageId: CP });
+		expect(diff.status).toBe('ok');
+		expect(diff.changes.map((c) => [c.type, c.messageId]).sort()).toEqual([
+			['MESSAGE_ADDED', LATE],
+			['MESSAGE_EDITED', M1],
+		]);
+		expect(diff.futureAdded).toEqual({ count: 2, firstMessageId: F1 });
+	});
+
 	it('unknown reducer version: signature stands, view unverifiable (§32)', async () => {
 		seed(makeRow(M1));
 		const { part } = await store.createDialogCheckpoint(peer);

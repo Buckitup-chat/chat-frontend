@@ -5,6 +5,7 @@ import { getUserCardsCollection, getDialogCollections } from '@/lib/data/collect
 import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
+import { feedOrderKey } from '@/lib/data/feedOrder';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError } from '@/lib/pq/content';
@@ -895,15 +896,35 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * diffDialogCheckpoint hydrated for display: each change carries the
      * concrete before/after content (or attachment label) alongside the
      * revision hashes, plus the author for attribution.
+     *
+     * The pointer (the checkpoint's own position in the feed) splits the
+     * result: behind it the checkpoint attested a bounded set, and any
+     * revision of it — a late insert, an edit, a delete — is history changing
+     * under the user's feet, detailed one by one. Ahead of it the dialog just
+     * continues without limit, so new messages collapse into `futureAdded`
+     * (a count and the first id to jump to), never a list.
      */
-    const describeCheckpointDiff = async (peerHash, part) => {
+    const describeCheckpointDiff = async (peerHash, part, { pointerMessageId } = {}) => {
         const dialogHash = getDialogHash(peerHash);
         const diff = await diffDialogCheckpoint(peerHash, part);
         if (diff.status !== 'ok') return diff;
 
+        const pointerKey = feedOrderKey(pointerMessageId, part.createdAt);
+        const past = [];
+        const futureAdds = [];
+        for (const c of diff.changes) {
+            if (c.messageId === pointerMessageId) continue; // the pointer itself
+            if (c.type === 'MESSAGE_ADDED' && feedOrderKey(c.messageId, part.createdAt) >= pointerKey) {
+                futureAdds.push(c);
+            } else {
+                past.push(c);
+            }
+        }
+        futureAdds.sort((a, b) => feedOrderKey(a.messageId, 0) - feedOrderKey(b.messageId, 0));
+
         const msgColl = getDialogCollections(dialogHash).messages;
         const changes = [];
-        for (const c of diff.changes) {
+        for (const c of past) {
             const currentRow = msgColl.get(c.messageId) || null;
             const entry = { ...c, senderHash: currentRow?.sender_hash ?? null };
             if (c.type === 'MESSAGE_ADDED') {
@@ -918,7 +939,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
             }
             changes.push(entry);
         }
-        return { ...diff, changes };
+        return {
+            ...diff,
+            changes,
+            futureAdded: { count: futureAdds.length, firstMessageId: futureAdds[0]?.messageId ?? null },
+        };
     };
 
     /**
