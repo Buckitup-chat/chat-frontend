@@ -1,6 +1,6 @@
 <template>
     <div class="h-100 w-100">
-        <ChatWindow :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
+        <ChatWindow ref="chatWindowRef" :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :peer-hash="peerHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId"
             :downloads="downloadsByFileId" :images="imagesByFileId"
@@ -14,6 +14,8 @@
             @acknowledgeMessage="handleAcknowledge">
             <template #above-input><TransferPanel :current-peer="peerHash" /></template>
         </ChatWindow>
+        <CheckpointDiffModal v-if="checkpointDiff" :created-at="checkpointDiff.createdAt"
+            :changes="checkpointDiff.changes" @close="checkpointDiff = null" @jump="handleCheckpointJump" />
         <EditHistoryModal v-if="editHistory"
             :current-text="editHistory.msg.text"
             :current-sign-hash="editHistory.msg._raw?.sign_hash || ''"
@@ -50,6 +52,7 @@ import { feedOrderKey } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
 import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
+import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { v7 as uuidv7 } from 'uuid';
 
@@ -803,28 +806,42 @@ const handleCreateCheckpoint = async () => {
     }
 };
 
+const chatWindowRef = ref(null);
+const checkpointDiff = ref(null); // { createdAt, changes } → CheckpointDiffModal
+
 const handleCheckpointInfo = async ({ part }) => {
     try {
         const [verify, compare] = await Promise.all([
             $dialogs.verifyDialogCheckpoint(peerHash.value, part),
             $dialogs.compareDialogCheckpoint(peerHash.value, part),
         ]);
-        let text = `Commitments: ${verify.status}` +
-            (verify.status === 'incomplete_history' ? ` (${verify.missingEventIds.length} missing)` : '') +
-            `\nAgainst current state: ${compare.verdict}`;
-        if (compare.verdict === 'VIEW_CHANGED') {
-            const diff = await $dialogs.diffDialogCheckpoint(peerHash.value, part);
-            if (diff.status === 'ok') {
-                const byType = diff.changes.reduce((m, c) => ((m[c.type] = (m[c.type] || 0) + 1), m), {});
-                text += '\nChanges: ' + (Object.entries(byType).map(([t, n]) => `${t}×${n}`).join(', ') || 'none');
-            } else {
-                text += `\nDiff: ${diff.status} (${diff.missingEventIds.length} events missing locally)`;
+        // The interesting case gets the real diff, message by message.
+        if (verify.status === 'valid' && compare.verdict === 'VIEW_CHANGED') {
+            const diff = await $dialogs.describeCheckpointDiff(peerHash.value, part);
+            if (diff.status === 'ok' && diff.changes.length) {
+                checkpointDiff.value = {
+                    createdAt: part.createdAt,
+                    changes: diff.changes.map((c) => ({
+                        ...c,
+                        authorName: c.senderHash === $userPQ.currentUserHash ? 'Me' : chatName.value,
+                    })),
+                };
+                return;
             }
         }
+        const text = `Commitments: ${verify.status}` +
+            (verify.status === 'incomplete_history' ? ` (${verify.missingEventIds.length} missing)` : '') +
+            `\nAgainst current state: ${compare.verdict}`;
         $swal.fire({ title: `Checkpoint · ${new Date(part.createdAt * 1000).toLocaleString()}`, text });
     } catch (e) {
         $swal.fire({ icon: 'error', title: 'Checkpoint check failed', text: String(e.message || e) });
     }
+};
+
+const handleCheckpointJump = async (messageId) => {
+    checkpointDiff.value = null;
+    await nextTick();
+    chatWindowRef.value?.jumpToMessage(messageId);
 };
 
 const handleSendMessage = (text, replyTo = null) => {

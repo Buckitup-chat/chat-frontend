@@ -166,7 +166,31 @@ describe('checkpoint through the store', () => {
 		collections.dialog.versions.rows.set(`${M1}|${v1.sign_hash}`, v1);
 
 		const diff = await store.diffDialogCheckpoint(peer, part);
-		expect(diff.changes).toEqual([{ type: 'MESSAGE_DELETED', messageId: M1 }]);
+		expect(diff.changes).toEqual([
+			{ type: 'MESSAGE_DELETED', messageId: M1, oldVersion: v1.sign_hash, newVersion: tomb.sign_hash },
+		]);
+	});
+
+	it('describeCheckpointDiff hydrates changes with content and authorship', async () => {
+		const v1 = makeRow(M1);
+		seed(v1);
+		const { part } = await store.createDialogCheckpoint(peer);
+
+		// edit M1 and add M2 after the checkpoint
+		const v2 = makeRow(M1, { content_b64: toBase64(new Uint8Array([8])), parent_sign_hash: v1.sign_hash, owner_timestamp: 1_700_000_600 });
+		collections.dialog.messages.rows.set(M1, v2);
+		collections.dialog.versions.rows.set(`${M1}|${v1.sign_hash}`, v1);
+		seed(makeRow(M2));
+
+		const diff = await store.describeCheckpointDiff(peer, part);
+		expect(diff.status).toBe('ok');
+		const edited = diff.changes.find((c) => c.type === 'MESSAGE_EDITED');
+		const added = diff.changes.find((c) => c.type === 'MESSAGE_ADDED');
+		expect(edited.senderHash).toBe(author.userHash);
+		// no dialog keys in this harness — the fallback must say so, not lie
+		expect(edited.oldText).toBe('Waiting for keys…');
+		expect(edited.newText).toBe('Waiting for keys…');
+		expect(added.newText).toBe('Waiting for keys…');
 	});
 
 	it('unknown reducer version: signature stands, view unverifiable (§32)', async () => {

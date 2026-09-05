@@ -713,6 +713,9 @@ const jumpToMessage = (messageId) => {
   setTimeout(() => el.classList.remove('msg-jump-highlight'), 1500);
 };
 
+// The checkpoint diff modal lives on the page but jumps land here.
+defineExpose({ jumpToMessage });
+
 const handleReactionClick = (messageId, emoji) => {
   emit('toggleReaction', messageId, emoji);
 };

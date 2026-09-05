@@ -7,7 +7,7 @@ import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
-import { encodeContent, decodeContent, contentToText, ContentDecodeError } from '@/lib/pq/content';
+import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError } from '@/lib/pq/content';
 import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
@@ -873,6 +873,54 @@ export const useDialogsStore = defineStore('dialogs', () => {
         };
     };
 
+    // What a specific revision looked like — for showing the change itself,
+    // not just naming it. Archived revisions come from the versions shape;
+    // decryption follows the same path the feed uses.
+    const revisionPreview = async (dialogHash, signHash) => {
+        const { current, versions } = await loadDialogRows(dialogHash);
+        const row = [...current, ...versions].find((r) => r.sign_hash === signHash);
+        if (!row) return { text: 'Revision not synced', decrypted: false };
+        if (!row.content_b64) return { text: '', decrypted: true, deleted: !!row.deleted_flag };
+        try {
+            const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+            if (!key) return { text: 'Waiting for keys…', decrypted: false };
+            const json = await DialogCrypto.decryptContent(key, row.content_b64);
+            return { text: json ? previewText(decodeContent(json)) : '', decrypted: true };
+        } catch {
+            return { text: 'Undecryptable content', decrypted: false };
+        }
+    };
+
+    /**
+     * diffDialogCheckpoint hydrated for display: each change carries the
+     * concrete before/after content (or attachment label) alongside the
+     * revision hashes, plus the author for attribution.
+     */
+    const describeCheckpointDiff = async (peerHash, part) => {
+        const dialogHash = getDialogHash(peerHash);
+        const diff = await diffDialogCheckpoint(peerHash, part);
+        if (diff.status !== 'ok') return diff;
+
+        const msgColl = getDialogCollections(dialogHash).messages;
+        const changes = [];
+        for (const c of diff.changes) {
+            const currentRow = msgColl.get(c.messageId) || null;
+            const entry = { ...c, senderHash: currentRow?.sender_hash ?? null };
+            if (c.type === 'MESSAGE_ADDED') {
+                entry.newText = currentRow ? (await revisionPreview(dialogHash, currentRow.sign_hash)).text : '';
+            } else if (c.type === 'MESSAGE_EDITED') {
+                entry.oldText = (await revisionPreview(dialogHash, c.oldVersion)).text;
+                entry.newText = (await revisionPreview(dialogHash, c.newVersion)).text;
+            } else if (c.type === 'MESSAGE_DELETED') {
+                entry.oldText = (await revisionPreview(dialogHash, c.oldVersion)).text;
+            } else if (c.type === 'MESSAGE_RESTORED') {
+                entry.newText = (await revisionPreview(dialogHash, c.newVersion)).text;
+            }
+            changes.push(entry);
+        }
+        return { ...diff, changes };
+    };
+
     /**
      * Toggle reaction. Owns its optimistic state: computes the deterministic
      * reaction_hash and desired end state, registers the optimistic item, and
@@ -1106,6 +1154,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         verifyDialogCheckpoint,
         compareDialogCheckpoint,
         diffDialogCheckpoint,
+        describeCheckpointDiff,
         admitMessageRow,
         isMessageAdmitted,
         admitReactionRow,

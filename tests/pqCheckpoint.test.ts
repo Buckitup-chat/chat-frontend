@@ -82,14 +82,14 @@ describe('view tree (Invariants 3, 5, 6, 7)', () => {
 		expect(diff.changed).toHaveLength(2);
 		const changes = classifyChanges(diff);
 		expect(changes).toContainEqual({ type: 'MESSAGE_EDITED', messageId: mid(1), oldVersion: sh(1), newVersion: sh(8) });
-		expect(changes).toContainEqual({ type: 'MESSAGE_DELETED', messageId: mid(3) });
+		expect(changes).toContainEqual({ type: 'MESSAGE_DELETED', messageId: mid(3), oldVersion: sh(3), newVersion: sh(9) });
 	});
 
 	it('classifies restore and removal', () => {
 		const old = buildViewTree({ [mid(1)]: { signHash: sh(1), deleted: true }, [mid(2)]: { signHash: sh(2), deleted: false } });
 		const next = buildViewTree({ [mid(1)]: { signHash: sh(3), deleted: false } });
 		const changes = classifyChanges(diffViewTrees(old, next));
-		expect(changes).toContainEqual({ type: 'MESSAGE_RESTORED', messageId: mid(1) });
+		expect(changes).toContainEqual({ type: 'MESSAGE_RESTORED', messageId: mid(1), oldVersion: sh(1), newVersion: sh(3) });
 		expect(changes).toContainEqual({ type: 'MESSAGE_REMOVED', messageId: mid(2) });
 	});
 });

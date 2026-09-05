@@ -220,10 +220,15 @@ export type DialogChange =
 	| { type: 'MESSAGE_ADDED'; messageId: string }
 	| { type: 'MESSAGE_REMOVED'; messageId: string }
 	| { type: 'MESSAGE_EDITED'; messageId: string; oldVersion: string; newVersion: string }
-	| { type: 'MESSAGE_DELETED'; messageId: string }
-	| { type: 'MESSAGE_RESTORED'; messageId: string };
+	| { type: 'MESSAGE_DELETED'; messageId: string; oldVersion: string; newVersion: string }
+	| { type: 'MESSAGE_RESTORED'; messageId: string; oldVersion: string; newVersion: string };
 
-/** Checkpoint-relative reading of a raw view diff (old = checkpoint state). */
+/**
+ * Checkpoint-relative reading of a raw view diff (old = checkpoint state).
+ * Every change names both revisions, so a UI can resolve and show the
+ * concrete before/after content — for a delete, oldVersion is what the
+ * message said before the tombstone.
+ */
 export const classifyChanges = (diff: ViewDiff): DialogChange[] => {
 	const changes: DialogChange[] = [];
 	for (const key of diff.added) changes.push({ type: 'MESSAGE_ADDED', messageId: key });
@@ -231,9 +236,10 @@ export const classifyChanges = (diff: ViewDiff): DialogChange[] => {
 	// surfaced rather than silently dropped
 	for (const key of diff.removed) changes.push({ type: 'MESSAGE_REMOVED', messageId: key });
 	for (const { key, from, to } of diff.changed) {
-		if (!from.deleted && to.deleted) changes.push({ type: 'MESSAGE_DELETED', messageId: key });
-		else if (from.deleted && !to.deleted) changes.push({ type: 'MESSAGE_RESTORED', messageId: key });
-		else changes.push({ type: 'MESSAGE_EDITED', messageId: key, oldVersion: from.signHash, newVersion: to.signHash });
+		const versions = { oldVersion: from.signHash, newVersion: to.signHash };
+		if (!from.deleted && to.deleted) changes.push({ type: 'MESSAGE_DELETED', messageId: key, ...versions });
+		else if (from.deleted && !to.deleted) changes.push({ type: 'MESSAGE_RESTORED', messageId: key, ...versions });
+		else changes.push({ type: 'MESSAGE_EDITED', messageId: key, ...versions });
 	}
 	return changes;
 };
