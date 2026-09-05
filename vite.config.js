@@ -81,11 +81,18 @@ export default defineConfig(({ command }) => {
 					name: 'BuckitUp',
 					short_name: 'BuckitUp',
 					description: 'Privacy-first end-to-end encrypted messenger',
-					theme_color: '#17161a',
-					background_color: '#17161a',
+					// #241824 — the brand dark the icon set is built on (designer's
+					// handoff): splash, status bar and icon background are one
+					// paint, no seam at the icon edge.
+					theme_color: '#241824',
+					background_color: '#241824',
 					display: 'standalone',
-					// SVG mark until design exports raster sizes (192/512)
-					icons: [{ src: 'icons/buckitup_circle.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }],
+					icons: [
+						{ src: 'img/pwa/pwa-192.png', sizes: '192x192', type: 'image/png' },
+						{ src: 'img/pwa/pwa-512.png', sizes: '512x512', type: 'image/png' },
+						{ src: 'img/pwa/pwa-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+						{ src: 'img/pwa/pwa-monochrome.png', sizes: '512x512', type: 'image/png', purpose: 'monochrome' },
+					],
 				},
 			}),
 		],
