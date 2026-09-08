@@ -67,15 +67,28 @@ describe('awaitShapeVisibility', () => {
 		expect(resolved).toBe(true);
 	});
 
-	// Replication lag must not fail a write the server already accepted.
-	it('proceeds when the barrier times out', async () => {
-		awaitTxId.mockImplementationOnce(async () => { throw new Error('timeout'); });
-		await expect(awaitShapeVisibility(storageCollection, [1])).resolves.toBeUndefined();
+	// Replication lag must not fail a write the server already accepted — the
+	// barrier reports that the read model is behind and lets the caller decide,
+	// rather than throwing the accepted write back at it.
+	it('reports a timeout instead of failing the write', async () => {
+		awaitTxId.mockImplementation(async () => { throw new Error('timeout'); });
+		await expect(awaitShapeVisibility(storageCollection, [1])).resolves.toBe(false);
+	});
+
+	// A slow shape is the common case; a lost one is not. One longer retry
+	// separates them before the scope is called behind.
+	it('retries once with a longer budget before giving up', async () => {
+		awaitTxId
+			.mockImplementationOnce(async () => { throw new Error('timeout'); })
+			.mockImplementationOnce(async () => true);
+		await expect(awaitShapeVisibility(storageCollection, [7])).resolves.toBe(true);
+		expect(awaitTxId).toHaveBeenCalledTimes(2);
+		expect(awaitTxId.mock.calls[0][1]).toBeLessThan(awaitTxId.mock.calls[1][1]);
 	});
 
 	it('is a no-op without a collection or txids', async () => {
-		await expect(awaitShapeVisibility(null, [1])).resolves.toBeUndefined();
-		await expect(awaitShapeVisibility(storageCollection, [])).resolves.toBeUndefined();
+		await expect(awaitShapeVisibility(null, [1])).resolves.toBe(true);
+		await expect(awaitShapeVisibility(storageCollection, [])).resolves.toBe(true);
 		expect(awaitTxId).not.toHaveBeenCalled();
 	});
 });

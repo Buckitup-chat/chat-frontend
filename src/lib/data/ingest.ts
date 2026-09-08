@@ -10,7 +10,8 @@
 // signature (see confirm.ts).
 import { api } from '@/api/client';
 import { mutationAppliedOnServer } from './confirm';
-import { awaitShapeVisibility, collectionForRelation } from './barrier';
+import { awaitShapeVisibility, collectionForRelation, scopeForRelation } from './barrier';
+import { markUnconfirmed, clearUnconfirmed } from './staleBase';
 import { enqueue, resolveEntry, recordFailure, ensureDrainLoop, stopDrainLoop } from './outbox';
 import type { IngestRowResult } from './types';
 
@@ -248,6 +249,14 @@ export async function sendMutationsAndAwaitShape(
 		// for the next drain. Either way the caller sees the same error as
 		// before the outbox existed.
 		await recordFailure(outboxId, e);
+		// The drain loop stops itself when the queue empties, so a live-send
+		// that fails after that point would leave a durable, retryable entry
+		// with nothing scheduled to retry it — waiting on a later login or an
+		// 'online' event that may never come. Arming the loop here is what
+		// makes "retryable" mean the client will actually try again (ADR §5).
+		ensureDrainLoop(ownerOf(mutations), (queued) =>
+			sendMutationsWithRetry(queued, signSkey, { retries: 1 })
+		);
 		throw e;
 	}
 	await resolveEntry(outboxId);
@@ -256,7 +265,15 @@ export async function sendMutationsAndAwaitShape(
 	const relation = first?.syncMetadata?.relation;
 	if (relation) {
 		const row = first?.modified ?? first?.changes ?? null;
-		await awaitShapeVisibility(collectionForRelation(relation, row), result.txids, relation);
+		const visible = await awaitShapeVisibility(collectionForRelation(relation, row), result.txids, relation);
+		// Accepted but not visible is not a send failure: the caller keeps its
+		// success, and the mutation is never resent. What it does mean is that
+		// this scope's read model is behind, so the next write that would
+		// extend a row here refuses rather than chaining onto a stale tip
+		// (staleBase.ts, ADR §7.1).
+		const scope = scopeForRelation(relation, row);
+		if (visible) clearUnconfirmed(scope);
+		else markUnconfirmed(scope);
 	}
 	return result;
 }

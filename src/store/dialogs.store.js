@@ -5,6 +5,7 @@ import { getUserCardsCollection, getDialogCollections, withDialogCollections } f
 import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
+import { assertFreshBase } from '@/lib/data/staleBase';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { loadPointer, savePointer, viewMoved } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
@@ -462,6 +463,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // collection. A preload failure is "state unknown" — it must not be
         // collapsed into "message not found" (which would mislead the user
         // and could mask a mere connectivity blip as a missing message).
+        // A version chain is built from the tip in the local snapshot. If the
+        // last accepted write to this dialog never became visible, that tip may
+        // be a revision behind and the new version would chain onto the wrong
+        // one (ADR §7.1).
+        assertFreshBase(`dialog_messages|${dialogHash}`);
+
         const msgColl = getDialogCollections(dialogHash).messages;
         await msgColl.preload();
         const current = msgColl.get(messageId) || null;
@@ -569,6 +576,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
      */
     const deleteMessage = async (peerHash, messageId) => {
         const dialogHash = await initDialogKeys(peerHash);
+        // A tombstone is a new version of the message: same chain, same rule
+        // as an edit (ADR §7.1).
+        assertFreshBase(`dialog_messages|${dialogHash}`);
         const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
         const msgColl = getDialogCollections(dialogHash).messages;

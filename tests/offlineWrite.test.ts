@@ -29,8 +29,9 @@ vi.mock('@/api/client', () => ({
 
 // The barrier needs live collections; delivery is what this file is about.
 vi.mock('@/lib/data/barrier', () => ({
-	awaitShapeVisibility: async () => {},
+	awaitShapeVisibility: async () => true,
 	collectionForRelation: () => null,
+	scopeForRelation: (relation) => relation,
 }));
 
 const { sendMutationsAndAwaitShape, drainPendingWrites } = await import('@/lib/data/ingest');
@@ -114,6 +115,32 @@ describe('writing with no network', () => {
 
 		expect(sent).toHaveLength(0);
 		expect(await pendingEntries(MY_HASH)).toHaveLength(1);
+	});
+
+	// The drain loop stops itself when the queue empties. A live-send failing
+	// after that leaves a durable, retryable entry with nothing scheduled to
+	// retry it — the entry sits on disk until a later login or an 'online'
+	// event that may never come. The failing send must arm the loop itself.
+	it('a live-send failure schedules its own retry, with no external trigger', async () => {
+		vi.useFakeTimers();
+		try {
+			// the queue starts empty and no loop is running
+			expect(await pendingEntries(MY_HASH)).toHaveLength(0);
+
+			await sendMutationsAndAwaitShape([message('stranded')], SKEY, { retries: 0 }).catch(() => {});
+			expect(await pendingEntries(MY_HASH)).toHaveLength(1);
+
+			// nobody logs in, nobody fires 'online' — only time passes
+			online = true;
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			expect(sent).toHaveLength(1);
+			expect(await pendingEntries(MY_HASH)).toHaveLength(0);
+		} finally {
+			const { stopDrainLoop } = await import('@/lib/data/outbox');
+			stopDrainLoop();
+			vi.useRealTimers();
+		}
 	});
 
 	it('does not queue twice when a write succeeds normally', async () => {

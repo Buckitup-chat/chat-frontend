@@ -7,6 +7,7 @@
 // success only if the server row is byte-identical to ours, which we can
 // verify by comparing signatures — a retry re-sends the same signed object.
 import { getDialogCollections, getUserCardsCollection, getUserStorageCollection } from './collections';
+import { toBytes } from '@/lib/pq/signature';
 
 interface MutationLike {
 	type?: string;
@@ -59,6 +60,30 @@ const lookup = async (relation: string, row: Record<string, unknown>): Promise<R
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Whether two signature values are the same signature.
+ *
+ * Never compare these as strings. The same bytes reach us in more than one
+ * spelling — the shape endpoint returns binary columns as base64 without
+ * padding while a signed payload is built with it, and a row that has been
+ * through local persistence arrives as `\x`-hex or as bytes — so an identical
+ * signature routinely fails a string comparison. toBytes normalizes all of
+ * them; this is the same trimorphism the verification path already handles.
+ */
+const sameSignature = (a: string | Uint8Array | null | undefined, b: string | Uint8Array | null | undefined): boolean => {
+	if (!a || !b) return false;
+	try {
+		const x = toBytes(a);
+		const y = toBytes(b);
+		return x.length === y.length && x.every((v, i) => v === y[i]);
+	} catch (e) {
+		// Unparseable on either side is "not confirmed", never "confirmed":
+		// this result decides whether a durable entry may be dropped.
+		console.warn('[data] signature comparison failed:', e);
+		return false;
+	}
+};
+
+/**
  * True iff the server already holds exactly the row this mutation carries
  * (same signature). Polls the live collection briefly: the conflicting row
  * arrives through the shape stream, which may lag the 422 by a moment.
@@ -73,7 +98,7 @@ export async function mutationAppliedOnServer(mutation: MutationLike, opts: { at
 		try {
 			const remote = await lookup(relation, row);
 			if (remote) {
-				return remote.sign_b64 === row.sign_b64;
+				return sameSignature(remote.sign_b64, row.sign_b64);
 			}
 		} catch (e) {
 			console.warn('[data] confirm lookup failed:', e);

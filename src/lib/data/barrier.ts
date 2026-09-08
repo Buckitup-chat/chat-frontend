@@ -21,6 +21,9 @@ interface AwaitableCollection {
 /** How long to wait for a committed txid to appear in the shape. */
 export const SHAPE_BARRIER_TIMEOUT_MS = 10_000;
 
+/** Second, longer wait before declaring the read model behind. */
+export const SHAPE_BARRIER_RETRY_MS = 20_000;
+
 /**
  * The collection that will serve as the base for subsequent writes of this
  * relation. Dialog tables need the row's dialog_hash to find their shape.
@@ -54,26 +57,60 @@ export function collectionForRelation(
 }
 
 /**
- * Block until every txid is visible in the collection.
+ * The read scope a relation's writes share. Dialog tables are scoped per
+ * dialog, user_storage per account: a barrier that timed out in one dialog
+ * says nothing about another.
+ */
+export function scopeForRelation(
+	relation: string,
+	row: Record<string, unknown> | null | undefined
+): string {
+	switch (relation) {
+		case 'user_storage':
+			return `user_storage|${String(row?.user_hash || '')}`;
+		case 'dialog_keys':
+		case 'dialog_messages':
+		case 'dialog_message_reactions':
+		case 'dialog_message_receipts':
+			return `${relation}|${String(row?.dialog_hash || '')}`;
+		default:
+			return relation;
+	}
+}
+
+/**
+ * Waits for every txid to become visible in the collection. Returns false when
+ * one of them did not arrive in time.
  *
- * A timeout is logged and swallowed rather than thrown: the write itself did
- * succeed, and failing the caller because replication was slow would be worse
- * than proceeding with a possibly stale base (which the conflict path already
- * handles).
+ * A timeout is not a send failure — the server committed, and resending the
+ * same mutation because replication lagged would be wrong. But it is also not
+ * success: the read model is known to be behind, and anything that builds on
+ * it would sign against a stale tip. The caller decides; this only reports.
+ *
+ * The wait is retried once with a longer budget before giving up, since the
+ * common case is a slow shape rather than a lost one.
  */
 export async function awaitShapeVisibility(
 	collection: AwaitableCollection | null,
 	txids: number[],
 	label = 'shape'
-): Promise<void> {
+): Promise<boolean> {
 	const awaitTxId = collection?.utils?.awaitTxId;
-	if (!awaitTxId || txids.length === 0) return;
+	if (!awaitTxId || txids.length === 0) return true;
 
+	let visible = true;
 	for (const txid of txids) {
-		try {
-			await awaitTxId(txid, SHAPE_BARRIER_TIMEOUT_MS);
-		} catch (e) {
-			console.warn(`[data] ${label}: txid ${txid} not visible within the barrier timeout:`, e);
+		let seen = false;
+		for (const budget of [SHAPE_BARRIER_TIMEOUT_MS, SHAPE_BARRIER_RETRY_MS]) {
+			try {
+				await awaitTxId(txid, budget);
+				seen = true;
+				break;
+			} catch (e) {
+				console.warn(`[data] ${label}: txid ${txid} not visible within ${budget}ms:`, e);
+			}
 		}
+		if (!seen) visible = false;
 	}
+	return visible;
 }
