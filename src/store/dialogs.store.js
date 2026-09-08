@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
-import { getUserCardsCollection, getDialogCollections, releaseDialogCollections, isDialogWarm } from '@/lib/data/collections';
+import { getUserCardsCollection, getDialogCollections, withDialogCollections } from '@/lib/data/collections';
 import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
@@ -740,9 +740,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const me = $userPQ.currentUserHash;
         const stored = await loadPointer(me, dialogHash);
 
-        const colls = getDialogCollections(dialogHash);
-        await colls.messages.preload().catch(() => { });
-        const rows = colls.messages.toArray.filter((r) => r.sign_hash);
+        const rows = await withDialogCollections(dialogHash, async (colls) => {
+            await colls.messages.preload().catch(() => { });
+            return colls.messages.toArray.filter((r) => r.sign_hash);
+        });
 
         const pointer = await findLatestCheckpoint(dialogHash, rows, stored);
         if (pointer.scannedTo !== stored.scannedTo || pointer.checkpoint !== stored.checkpoint) {
@@ -754,8 +755,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
         }
 
         const alert = {
-            changed: viewMoved(rows, pointer.checkpoint.viewRoot),
+            changed: viewMoved(rows, pointer.checkpoint.viewRoot, pointer.checkpoint.messageId),
             createdAt: pointer.checkpoint.createdAt,
+            messageId: pointer.checkpoint.messageId,
         };
         // reassign: a Map mutation is not reactive on its own
         checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, alert);
@@ -775,16 +777,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         scanInFlight = (async () => {
             for (const peerHash of peerHashes) {
                 if (!peerHash || peerHash === $userPQ.currentUserHash) continue;
-                const dialogHash = getDialogHash(peerHash);
-                const wasWarm = dialogHash ? isDialogWarm(dialogHash) : true;
                 try {
                     await refreshCheckpointAlert(peerHash);
                 } catch (e) {
                     console.warn('[dialogs] checkpoint alert scan failed for', peerHash, e);
-                } finally {
-                    if (!wasWarm && dialogHash) {
-                        releaseDialogCollections(dialogHash);
-                    }
                 }
             }
         })().finally(() => { scanInFlight = null; });
@@ -872,7 +868,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const messageId = await sendMessage(peerHash, [part]);
         // The new checkpoint is the pointer now: the dialog matches what was just
         // confirmed, so its alert clears without waiting for the next scan.
-        checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, { changed: false, createdAt: part.createdAt });
+        checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, { changed: false, createdAt: part.createdAt, messageId });
         savePointer($userPQ.currentUserHash, getDialogHash(peerHash), {
             checkpoint: { messageId, viewRoot: part.viewRoot, frontierRoot: part.frontierRoot, createdAt: part.createdAt },
             scannedTo: feedOrderKey(messageId, part.createdAt),

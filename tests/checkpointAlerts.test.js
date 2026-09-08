@@ -21,7 +21,7 @@ const makeCollection = (rows = {}, counted = false) => ({
 });
 
 let collections;
-let released;
+let opened;
 
 vi.mock('@/store/userPQ.store', () => ({
 	userPQStore: () => ({ currentUserHash: MY_HASH_HOLDER.value }),
@@ -29,8 +29,7 @@ vi.mock('@/store/userPQ.store', () => ({
 vi.mock('@/lib/data/collections', () => ({
 	getUserCardsCollection: () => collections.cards,
 	getDialogCollections: () => collections.dialog,
-	releaseDialogCollections: (h) => released.push(h),
-	isDialogWarm: () => false,
+	withDialogCollections: async (h, read) => { opened.push(h); return read(collections.dialog); },
 }));
 vi.mock('@/lib/data/ingest', () => ({ sendMutationsAndAwaitShape: async () => ({ ok: true }) }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
@@ -90,7 +89,7 @@ describe('checkpoint alerts', () => {
 	beforeEach(async () => {
 		setActivePinia(createPinia());
 		resetCardRegistry();
-		released = [];
+		opened = [];
 		mem = new Map();
 		_setStoreForTests({
 			async get(k) { return mem.get(k) ?? null; },
@@ -121,10 +120,13 @@ describe('checkpoint alerts', () => {
 		expect(store.checkpointAlerts.get(peer)).toBeUndefined();
 	});
 
-	it('releases collections it opened, so the scan does not evict the open dialog', async () => {
+	// The sweep must not join the warm set: one entry per dialog would evict
+	// the dialog the user is in, and the open view would keep a collection
+	// that has stopped syncing.
+	it('reads dialogs through the non-registering path', async () => {
 		seed(await row(M1, [{ kind: 'text', text: 'hi' }]));
 		await store.scanCheckpointAlerts([peer]);
-		expect(released).toContain(dialogHash);
+		expect(opened).toEqual([dialogHash]);
 	});
 
 	it('skips the current user and empty entries', async () => {

@@ -2,11 +2,11 @@
 import { useTransfersStore } from '@/store/transfers.store';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue'
 import SyncStatus from './SyncStatus.vue'
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, inject } from 'vue'
 import { userPQStore } from '@/store/userPQ.store'
 import { useDialogsStore } from '@/store/dialogs.store'
 
-const emit = defineEmits<{ select: [address: string] }>()
+const emit = defineEmits<{ select: [address: string, opts?: { checkpoint?: boolean }] }>()
 
 const { selected } = defineProps({
   selected: { type: Array, default: () => [] },
@@ -46,16 +46,36 @@ const filtered = computed(() => {
 const $transfers = useTransfersStore();
 const $dialogs = useDialogsStore();
 
-// Checkpoint alerts (see dialogs.store): opening the list scans the dialogs
-// this account has confirmed a state in, and marks the ones that moved since.
-// The scan is sequential and starts once the contact list is known, so an
-// empty or still-loading list costs nothing.
+// Checkpoint alerts (see dialogs.store): the list scans the dialogs this
+// account has confirmed a state in and marks the ones that moved since.
+//
+// The list holds no dialog subscription of its own, so there is nothing to
+// react to — the scan is re-run at the moments the answer can have changed:
+// coming back from a dialog, returning to the tab, and while the list is on
+// screen. The store collapses overlapping runs into one.
 const scanAlerts = () => {
   const peers = filtered.value.map((u) => u.user_hash).filter(Boolean)
   if (peers.length) $dialogs.scanCheckpointAlerts(peers)
 }
-onMounted(scanAlerts)
+
+const $route = inject('$route', null)
+let rescanTimer = null
+const onVisible = () => { if (document.visibilityState === 'visible') scanAlerts() }
+
+onMounted(() => {
+  scanAlerts()
+  document.addEventListener('visibilitychange', onVisible)
+  // A dialog open in another tab or on another device moves while this list
+  // is shown; nothing here observes that, so the list refreshes on a slow
+  // beat rather than pretending to be live.
+  rescanTimer = setInterval(scanAlerts, 30000)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onVisible)
+  clearInterval(rescanTimer)
+})
 watch(() => filtered.value.length, scanAlerts)
+watch(() => $route?.params?.address, (now, before) => { if (before && !now) scanAlerts() })
 </script>
 
 <template>
@@ -82,9 +102,11 @@ watch(() => filtered.value.length, scanAlerts)
         <span v-if="$transfers.transferPeers.has(user.user_hash)" class="_transfer_dot" title="Transfer in progress">
           <span class="_transfer_dot_mark"></span>передача
         </span>
-        <!-- The dialog moved since the checkpoint this account signed in it. -->
+        <!-- The dialog moved since the checkpoint this account signed in it.
+             Tapping it opens the dialog on the checkpoint comparison. -->
         <span v-if="$dialogs.alertingPeers.has(user.user_hash)" class="_checkpoint_dot"
-          title="Изменилось с момента вашей отметки"></span>
+          role="button" title="Изменилось с момента вашей отметки — открыть сравнение"
+          @click.stop="emit('select', user.user_hash, { checkpoint: true })"></span>
       </div>
     </div>
   </div>
@@ -128,6 +150,7 @@ watch(() => filtered.value.length, scanAlerts)
 }
 
 ._checkpoint_dot {
+  cursor: pointer;
   width: 10px;
   height: 10px;
   border-radius: 50%;

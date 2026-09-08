@@ -75,9 +75,15 @@ export interface AlertRow {
  * A row that later fails verification still counts as a change — something
  * happened in that dialog worth looking at.
  */
-export const rawViewState = (rows: AlertRow[]): Record<string, { signHash: string; deleted: boolean }> => {
+export const rawViewState = (
+	rows: AlertRow[],
+	excludeMessageId?: string,
+): Record<string, { signHash: string; deleted: boolean }> => {
 	const state: Record<string, { signHash: string; deleted: boolean }> = {};
-	for (const row of rows) state[row.message_id] = { signHash: row.sign_hash, deleted: !!row.deleted_flag };
+	for (const row of rows) {
+		if (row.message_id === excludeMessageId) continue;
+		state[row.message_id] = { signHash: row.sign_hash, deleted: !!row.deleted_flag };
+	}
 	return state;
 };
 
@@ -87,6 +93,13 @@ export const rawViewState = (rows: AlertRow[]): Record<string, { signHash: strin
  * Compares view roots, not frontiers: history that changed without changing
  * what is displayed — an edit undone by a later edit, a losing fork — is not
  * worth a notification.
+ *
+ * The message carrying the checkpoint is excluded: it did not exist when the
+ * root was computed, so counting it would make every checkpoint report its
+ * own arrival as a change.
  */
-export const viewMoved = (rows: AlertRow[], checkpointViewRoot: string): boolean =>
-	buildViewTree(rawViewState(rows)).root !== checkpointViewRoot;
+export const viewMoved = (
+	rows: AlertRow[],
+	checkpointViewRoot: string,
+	carrierMessageId?: string,
+): boolean => buildViewTree(rawViewState(rows, carrierMessageId)).root !== checkpointViewRoot;

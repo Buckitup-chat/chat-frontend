@@ -240,6 +240,31 @@ export function getDialogCollections(dialogHash: string): DialogCollections {
 	return entry;
 }
 
+/**
+ * Reads a dialog without joining the warm set.
+ *
+ * A background sweep over many dialogs must not touch the LRU: inserting one
+ * entry per dialog evicts the dialog the user is actually in, and an evicted
+ * entry is rebuilt as a *new* collection while the open view still holds the
+ * old one — which then stops syncing. So a dialog already warm is reused as
+ * is, and anything else is built outside the registry and torn down when the
+ * reader is done.
+ */
+export async function withDialogCollections<T>(
+	dialogHash: string,
+	read: (colls: DialogCollections) => Promise<T>,
+): Promise<T> {
+	const warm = dialogRegistry.get(dialogHash);
+	if (warm) return read(warm);
+
+	const transient = buildDialogCollections(dialogHash);
+	try {
+		return await read(transient);
+	} finally {
+		await Promise.allSettled(Object.values(transient).map((c) => c.cleanup?.()));
+	}
+}
+
 /** Whether a dialog is already in the warm set — a caller that only needs to
  * read a dialog can release it afterwards without evicting one the user is
  * actually in. */

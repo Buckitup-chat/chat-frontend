@@ -40,7 +40,7 @@
 
 <script setup>
 import { ref, computed, watch, inject } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
@@ -58,6 +58,7 @@ import { getUserCardsCollection } from '@/lib/data/collections';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
+const $router = useRouter();
 const $swal = inject('$swal');
 const $userPQ = userPQStore();
 const $dialogs = useDialogsStore();
@@ -840,6 +841,27 @@ const handleCheckpointInfo = async ({ part, messageId }) => {
         $swal.fire({ icon: 'error', title: 'Checkpoint check failed', text: String(e.message || e) });
     }
 };
+
+// Arriving from the alert dot (?checkpoint=1): open the newest checkpoint's
+// comparison once the messages are decoded, then drop the query so a reload
+// does not reopen it. Waiting on decryptedMessages is the point — the dot is
+// tapped before this dialog has any content in memory.
+const newestCheckpointMessage = () => {
+    for (let i = decryptedMessages.value.length - 1; i >= 0; i--) {
+        const msg = decryptedMessages.value[i];
+        const part = (msg.parts || []).find((x) => x.kind === 'checkpoint');
+        if (part) return { part, messageId: msg.id };
+    }
+    return null;
+};
+
+watch([() => $route.query.checkpoint, decryptedMessages], async ([wanted]) => {
+    if (!wanted) return;
+    const found = newestCheckpointMessage();
+    if (!found) return;
+    $router.replace({ name: 'chat', params: { address: peerHash.value } });
+    await handleCheckpointInfo(found);
+}, { immediate: true });
 
 const handleCheckpointJump = async (messageId) => {
     checkpointDiff.value = null;

@@ -85,3 +85,31 @@ describe('pointer storage', () => {
 		expect(await loadPointer(ME, DIALOG)).toEqual({ checkpoint: null, scannedTo: 0 });
 	});
 });
+
+describe('what counts as a change', () => {
+	const CARRIER = 'dmsg_0192aacc-0000-7000-8000-00000000000c';
+
+	// The checkpoint travels as a message, so signing one adds a row that did
+	// not exist when the root was computed. Counting it would make every
+	// checkpoint immediately report its own arrival.
+	it('the message carrying the checkpoint is not a change', () => {
+		const root = buildViewTree(rawViewState(rows)).root;
+		const withCarrier = [...rows, { message_id: CARRIER, sign_hash: sh(9), deleted_flag: false }];
+		expect(viewMoved(withCarrier, root)).toBe(true); // without the exclusion
+		expect(viewMoved(withCarrier, root, CARRIER)).toBe(false); // with it
+	});
+
+	// The pointer is about the dialog, not about the other side: what this
+	// account writes after confirming a state is a change like any other.
+	it('a message this account sent afterwards is a change', () => {
+		const root = buildViewTree(rawViewState(rows)).root;
+		const mine = [...rows, { message_id: 'dmsg_mine', sign_hash: sh(5), deleted_flag: false }];
+		expect(viewMoved(mine, root, CARRIER)).toBe(true);
+	});
+
+	it('an edit of a message counts whoever made it', () => {
+		const root = buildViewTree(rawViewState(rows)).root;
+		const edited = [rows[0], { ...rows[1], sign_hash: sh(7) }];
+		expect(viewMoved(edited, root, CARRIER)).toBe(true);
+	});
+});
