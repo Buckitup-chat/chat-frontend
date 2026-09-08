@@ -1,11 +1,12 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
-import { getUserCardsCollection, getDialogCollections } from '@/lib/data/collections';
+import { getUserCardsCollection, getDialogCollections, releaseDialogCollections, isDialogWarm } from '@/lib/data/collections';
 import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
 import { feedOrderKey } from '@/lib/data/feedOrder';
+import { loadPointer, savePointer, viewMoved } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError } from '@/lib/pq/content';
@@ -673,6 +674,123 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return out;
     };
 
+    // ---------- checkpoint alerts on the dialogs list ----------
+    //
+    // A checkpoint marks a state the user confirmed; the dialogs list flags the
+    // dialogs that have moved since. The flag is advisory — it is computed from
+    // the rows as stored, without re-running the receive gate, because a dot is
+    // a hint to look, not an assertion about authenticity. Opening the dialog
+    // runs the verified comparison (compare/diffDialogCheckpoint) and that is
+    // what the user is shown.
+    //
+    // The view root is the right signal: history that changed without changing
+    // what is displayed (an edit reverted by another edit, a losing fork) is
+    // not something to interrupt anyone about.
+
+    /** peerHash -> { changed, createdAt } for dialogs holding a checkpoint. */
+    const checkpointAlerts = ref(new Map());
+
+    /** Peers whose latest checkpoint no longer matches the dialog. */
+    const alertingPeers = computed(() => {
+        const out = new Set();
+        for (const [peer, alert] of checkpointAlerts.value) if (alert.changed) out.add(peer);
+        return out;
+    });
+
+    // Finds the newest checkpoint this user signed, decoding only messages the
+    // previous scan had not reached yet. Checkpoints are immutable, so a known
+    // one never has to be found again; `scannedTo` keeps dialogs that never had
+    // one from being decrypted end to end on every visit.
+    const findLatestCheckpoint = async (dialogHash, rows, pointer) => {
+        const mine = rows
+            .filter((r) => r.sender_hash === $userPQ.currentUserHash && !r.deleted_flag && r.content_b64)
+            .map((r) => ({ row: r, order: feedOrderKey(r.message_id, r.owner_timestamp) }))
+            .filter((e) => e.order > pointer.scannedTo)
+            .sort((a, b) => b.order - a.order);
+
+        let scannedTo = pointer.scannedTo;
+        for (const { row, order } of mine) {
+            scannedTo = Math.max(scannedTo, order);
+            const decoded = await decryptMessageRow(row);
+            if (!decoded.decrypted) continue;
+            const part = (decoded.parts || []).find((x) => x.kind === 'checkpoint');
+            if (!part) continue;
+            // newest first: the first hit wins, older messages cannot beat it
+            return {
+                checkpoint: {
+                    messageId: row.message_id,
+                    viewRoot: part.viewRoot,
+                    frontierRoot: part.frontierRoot,
+                    createdAt: part.createdAt,
+                },
+                scannedTo,
+            };
+        }
+        return { checkpoint: pointer.checkpoint, scannedTo };
+    };
+
+    /**
+     * Refreshes one dialog's alert. Returns null when the dialog holds no
+     * checkpoint of this user's — nothing was confirmed, so nothing can differ.
+     */
+    const refreshCheckpointAlert = async (peerHash) => {
+        const dialogHash = getDialogHash(peerHash);
+        if (!dialogHash) return null;
+
+        const me = $userPQ.currentUserHash;
+        const stored = await loadPointer(me, dialogHash);
+
+        const colls = getDialogCollections(dialogHash);
+        await colls.messages.preload().catch(() => { });
+        const rows = colls.messages.toArray.filter((r) => r.sign_hash);
+
+        const pointer = await findLatestCheckpoint(dialogHash, rows, stored);
+        if (pointer.scannedTo !== stored.scannedTo || pointer.checkpoint !== stored.checkpoint) {
+            await savePointer(me, dialogHash, pointer);
+        }
+        if (!pointer.checkpoint) {
+            checkpointAlerts.value.delete(peerHash);
+            return null;
+        }
+
+        const alert = {
+            changed: viewMoved(rows, pointer.checkpoint.viewRoot),
+            createdAt: pointer.checkpoint.createdAt,
+        };
+        // reassign: a Map mutation is not reactive on its own
+        checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, alert);
+        return alert;
+    };
+
+    /**
+     * Scans dialogs for checkpoints whose state has moved (the dialogs list
+     * calls this on open). Strictly sequential: each dialog's collections open
+     * an Electric shape, and a parallel sweep would put one long-poll per
+     * dialog on the wire at once. Dialogs not already warm are released again
+     * so the scan does not evict the open dialog from the registry.
+     */
+    let scanInFlight = null;
+    const scanCheckpointAlerts = async (peerHashes) => {
+        if (scanInFlight) return scanInFlight;
+        scanInFlight = (async () => {
+            for (const peerHash of peerHashes) {
+                if (!peerHash || peerHash === $userPQ.currentUserHash) continue;
+                const dialogHash = getDialogHash(peerHash);
+                const wasWarm = dialogHash ? isDialogWarm(dialogHash) : true;
+                try {
+                    await refreshCheckpointAlert(peerHash);
+                } catch (e) {
+                    console.warn('[dialogs] checkpoint alert scan failed for', peerHash, e);
+                } finally {
+                    if (!wasWarm && dialogHash) {
+                        releaseDialogCollections(dialogHash);
+                    }
+                }
+            }
+        })().finally(() => { scanInFlight = null; });
+        return scanInFlight;
+    };
+
     // ---------- signed DAG checkpoint (src/lib/pq/checkpoint.ts) ----------
     //
     // A checkpoint attests "this device held this causally complete local
@@ -752,6 +870,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
             createdAt: Math.floor(Date.now() / 1000),
         };
         const messageId = await sendMessage(peerHash, [part]);
+        // The new checkpoint is the pointer now: the dialog matches what was just
+        // confirmed, so its alert clears without waiting for the next scan.
+        checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, { changed: false, createdAt: part.createdAt });
+        savePointer($userPQ.currentUserHash, getDialogHash(peerHash), {
+            checkpoint: { messageId, viewRoot: part.viewRoot, frontierRoot: part.frontierRoot, createdAt: part.createdAt },
+            scannedTo: feedOrderKey(messageId, part.createdAt),
+        }).catch(() => { });
         return { messageId, part };
     };
 
@@ -1180,6 +1305,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         compareDialogCheckpoint,
         diffDialogCheckpoint,
         describeCheckpointDiff,
+        checkpointAlerts,
+        alertingPeers,
+        scanCheckpointAlerts,
+        refreshCheckpointAlert,
         admitMessageRow,
         isMessageAdmitted,
         admitReactionRow,

@@ -240,6 +240,13 @@ export function getDialogCollections(dialogHash: string): DialogCollections {
 	return entry;
 }
 
+/** Whether a dialog is already in the warm set — a caller that only needs to
+ * read a dialog can release it afterwards without evicting one the user is
+ * actually in. */
+export function isDialogWarm(dialogHash: string): boolean {
+	return dialogRegistry.has(dialogHash);
+}
+
 /** Drop a dialog's collections immediately (e.g. after deleting a dialog). */
 export function releaseDialogCollections(dialogHash: string): void {
 	dialogRegistry.delete(dialogHash);

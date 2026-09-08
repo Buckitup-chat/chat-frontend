@@ -2,8 +2,9 @@
 import { useTransfersStore } from '@/store/transfers.store';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue'
 import SyncStatus from './SyncStatus.vue'
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { userPQStore } from '@/store/userPQ.store'
+import { useDialogsStore } from '@/store/dialogs.store'
 
 const emit = defineEmits<{ select: [address: string] }>()
 
@@ -43,6 +44,18 @@ const filtered = computed(() => {
   return list
 })
 const $transfers = useTransfersStore();
+const $dialogs = useDialogsStore();
+
+// Checkpoint alerts (see dialogs.store): opening the list scans the dialogs
+// this account has confirmed a state in, and marks the ones that moved since.
+// The scan is sequential and starts once the contact list is known, so an
+// empty or still-loading list costs nothing.
+const scanAlerts = () => {
+  const peers = filtered.value.map((u) => u.user_hash).filter(Boolean)
+  if (peers.length) $dialogs.scanCheckpointAlerts(peers)
+}
+onMounted(scanAlerts)
+watch(() => filtered.value.length, scanAlerts)
 </script>
 
 <template>
@@ -69,6 +82,9 @@ const $transfers = useTransfersStore();
         <span v-if="$transfers.transferPeers.has(user.user_hash)" class="_transfer_dot" title="Transfer in progress">
           <span class="_transfer_dot_mark"></span>передача
         </span>
+        <!-- The dialog moved since the checkpoint this account signed in it. -->
+        <span v-if="$dialogs.alertingPeers.has(user.user_hash)" class="_checkpoint_dot"
+          title="Изменилось с момента вашей отметки"></span>
       </div>
     </div>
   </div>
@@ -111,6 +127,15 @@ const $transfers = useTransfersStore();
   }
 }
 
+._checkpoint_dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #8e2b77;
+  box-shadow: 0 0 0 3px rgba(142, 43, 119, .18);
+  flex-shrink: 0;
+  margin-left: 8px;
+}
 ._transfer_dot {
   display: inline-flex;
   align-items: center;
