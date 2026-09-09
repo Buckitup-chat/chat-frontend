@@ -249,4 +249,26 @@ describe('checkpoint through the store', () => {
 		});
 		expect((await store.diffDialogCheckpoint(peer, foreign)).status).toBe('incomplete_history');
 	});
+
+	// On the live stack the checkpoint's carrier message replicates like any
+	// row. Without excluding it, a checkpoint disagrees with itself the moment
+	// its own message lands: an extra view leaf and a new frontier tail.
+	it('a checkpoint still matches itself after its carrier replicates', async () => {
+		const r1 = makeRow(M1);
+		seed(r1);
+		const { part, messageId } = await store.createDialogCheckpoint(peer);
+
+		// the carrier arrives from the shape stream
+		seed(makeRow('dmsg_0192aabb-0000-7000-8000-0000000000cc'));
+		const carrier = collections.dialog.messages.rows.get('dmsg_0192aabb-0000-7000-8000-0000000000cc');
+		collections.dialog.messages.rows.delete(carrier.message_id);
+		collections.dialog.messages.rows.set(messageId, { ...carrier, message_id: messageId });
+
+		const withoutPointer = await store.compareDialogCheckpoint(peer, part);
+		expect(withoutPointer.verdict).not.toBe('EXACT_MATCH'); // the trap, documented
+
+		const cmp = await store.compareDialogCheckpoint(peer, part, { pointerMessageId: messageId });
+		expect(cmp.verdict).toBe('EXACT_MATCH');
+		expect(cmp).toMatchObject({ history: { equal: true }, view: { equal: true } });
+	});
 });

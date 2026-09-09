@@ -53,7 +53,7 @@ export async function openDialogWith(page: Page, peerName: string): Promise<void
 	// In-app navigation only: a full page load drops the unlocked vault and
 	// lands on the login screen — reload/re-auth is its own scenario, not a
 	// side effect every test pays for.
-	await page.getByText('Chats', { exact: true }).click();
+	await page.locator('._menu_btn').filter({ hasText: 'Chats' }).first().click();
 	const search = page.getByPlaceholder(/search/i).first();
 	await search.fill(peerName);
 	// the peer's card must replicate from staging before the row exists

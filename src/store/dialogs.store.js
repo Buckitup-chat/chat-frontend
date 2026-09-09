@@ -782,13 +782,23 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * so the scan does not evict the open dialog from the registry.
      */
     let scanInFlight = null;
+    // One dialog must not wedge the sweep: a cold shape's preload can stall
+    // (no first commit to resolve on), and a stuck refresh would hold
+    // scanInFlight forever — every later tick returns the same dead promise
+    // and no alert ever updates again. The budget bounds one dialog's cost;
+    // the sweep moves on and the next tick tries that dialog afresh.
+    const REFRESH_BUDGET_MS = 15_000;
     const scanCheckpointAlerts = async (peerHashes) => {
         if (scanInFlight) return scanInFlight;
         scanInFlight = (async () => {
             for (const peerHash of peerHashes) {
                 if (!peerHash || peerHash === $userPQ.currentUserHash) continue;
                 try {
-                    await refreshCheckpointAlert(peerHash);
+                    await Promise.race([
+                        refreshCheckpointAlert(peerHash),
+                        new Promise((_, reject) => setTimeout(
+                            () => reject(new Error('refresh budget exceeded')), REFRESH_BUDGET_MS)),
+                    ]);
                 } catch (e) {
                     console.warn('[dialogs] checkpoint alert scan failed for', peerHash, e);
                 }
@@ -924,10 +934,18 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * (§20-21). view.equal is null when reducer/tree versions differ — roots
      * from different semantics are incomparable, not unequal.
      */
-    const compareDialogCheckpoint = async (peerHash, part) => {
+    const compareDialogCheckpoint = async (peerHash, part, { pointerMessageId } = {}) => {
         const dialogHash = getDialogHash(peerHash);
         const { state, rows } = await computeDialogViewState(dialogHash);
-        const { frontier } = await computeDialogFrontier(rows);
+        // The message carrying the checkpoint replicates like any other row,
+        // but it did not exist when the roots were computed — leaving it in
+        // makes every checkpoint immediately disagree with itself, in both
+        // the view (an extra leaf) and the frontier (it becomes the new tail).
+        if (pointerMessageId) delete state[pointerMessageId];
+        const scopedRows = pointerMessageId
+            ? rows.filter((r) => r.message_id !== pointerMessageId)
+            : rows;
+        const { frontier } = await computeDialogFrontier(scopedRows);
 
         const historyEqual = deriveFrontierRoot(frontier) === part.frontierRoot;
         const reducerVersionEqual = part.reducerVersion === REDUCER_VERSION;

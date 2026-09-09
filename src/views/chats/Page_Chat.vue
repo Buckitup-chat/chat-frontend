@@ -815,7 +815,7 @@ const handleCheckpointInfo = async ({ part, messageId }) => {
     try {
         const [verify, compare] = await Promise.all([
             $dialogs.verifyDialogCheckpoint(peerHash.value, part),
-            $dialogs.compareDialogCheckpoint(peerHash.value, part),
+            $dialogs.compareDialogCheckpoint(peerHash.value, part, { pointerMessageId: messageId }),
         ]);
         // The interesting case gets the real diff: attested history detailed
         // message by message, the unbounded continuation as one marker.
