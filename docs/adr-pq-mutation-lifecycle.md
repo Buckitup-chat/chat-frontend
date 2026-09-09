@@ -152,13 +152,100 @@ If delivery is retried after the client cannot determine whether the previous re
 
 ---
 
-## 7. Dependent writes and replay order
+## 7. Write dependencies and dispatch
 
-A mutation that depends on current state must be constructed from the latest confirmed state and must not use a known stale local snapshot.
+Three kinds of dependency exist. The first two constrain how a mutation is
+constructed; the third constrains when it may be dispatched. None of them
+requires waiting for another mutation's outcome before sending an unrelated
+one.
 
-This includes operations that depend on values such as `sign_hash`, `parent_sign_hash`, previous `owner_timestamp` or current causal refs.
+### 7.1 Chained writes
 
-One account's queue replays strictly in creation order. Dependent writes — a dialog key before the message that needs it, a message before the edit that supersedes it, a user card before the storage row that references it — are only correct while that order holds, so a queue must never be drained concurrently.
+A mutation that supersedes an existing row — a new version in a
+`parent_sign_hash` chain, or any update of a row already published under the
+same primary key — is constructed from a specific predecessor revision: it
+carries the predecessor's `sign_hash` and an `owner_timestamp` strictly
+greater than the stored one (the server rejects otherwise: "timestamp not
+newer").
+
+Both values are client-derived — `sign_hash` comes from the client's own
+signature before any request is made — so a successor may be constructed and
+signed before its predecessor is confirmed. Construction never waits on the
+network; it waits on the client's knowledge of what it signed.
+
+Whether to dispatch the successor before the predecessor's confirmation is a
+quality policy, not a correctness rule. If the predecessor is rejected, the
+in-flight successor is rejected too — noise in quarantine, never corruption.
+The default policy is to hold a successor until its predecessor reaches
+`SERVER_ACCEPTED`, to avoid minting doomed mutations; an implementation that
+pipelines a chain (or co-batches it, §7.3) stays within this contract.
+
+The base revision must be one the client may trust: its own immutable signed
+snapshot, or a verified replicated row. When the client knows its view of a
+chain is behind the server — an accepted write whose shape echo has not
+arrived — new links in that chain are blocked, not built on the stale tip.
+When a predecessor fails permanently, its dependents are blocked and
+surfaced, never silently dropped and never auto-rebased unless the mutation
+type explicitly allows it.
+
+This applies to user_card updates, user_storage edits, message edits, message
+tombstones and reaction toggles — the master + versions pattern of the
+backend's 03_data_versioning.md, plus every in-place update.
+
+### 7.2 Independent writes
+
+A mutation that creates a new row — a new message, a first reaction on a
+message, a receipt — captures the author's local scope at creation time and
+carries no structural dependency on other in-flight mutations. For messages
+that scope is `refs_map_b64`, the DAG tails observed at authoring time; a
+reaction or receipt instead names the exact message revision it applies to
+(`message_sign_hash`), which the author derives locally and does not need
+confirmed.
+
+The captured scope is fixed when the intent is created. Deferred encoding,
+waiting on prerequisites, or a reload must not silently replace it with
+fresher tails: the refs record what the author saw, not the newest state the
+client has since learned.
+
+Independent writes may be constructed, enqueued, and dispatched concurrently.
+The client must not block them on confirmation of prior unrelated mutations.
+Two sends observing the same tails — including two sends by the same author —
+produce a fork, which the protocol handles by design (04_ordering.md,
+§Invariants); display order comes from UUIDv7 regardless, and forks must not
+be prevented by artificial serialization.
+
+### 7.3 Prerequisites and dispatch order
+
+Some rows are only accepted once another entity exists. These are not version
+chains and the dependency is not visible in the row's own fields, but the
+server enforces them:
+
+- the author's `user_card` must exist before any row signed by that author;
+- the sender's `dialog_key` for a dialog must exist before a message or a
+  reaction in it ("dialog_key required before posting to dialog").
+
+A prerequisite is satisfied by the prerequisite row reaching
+`SERVER_ACCEPTED`; its visibility in a replicated shape is a separate,
+stronger condition that is only required when the dependent step actually
+reads the row from replicated state.
+
+Dispatch order is expressed through explicit dependencies, not a global
+account barrier:
+
+- one sender per account — live-send, retry and replay all pass through the
+  same coordinator under the leader lock; no send path bypasses it;
+- creation order is the deterministic priority among mutations that are
+  ready; it is not a promise that a later mutation waits for an earlier
+  unrelated one;
+- a mutation in retry backoff or quarantine leaves the dispatch path and
+  blocks only its own dependents; unrelated mutations continue;
+- sending dependent mutations as separate HTTP requests does not by itself
+  guarantee the order the server applies them in — a dependency edge is
+  closed either by awaiting the prerequisite's acceptance, or by an ordered
+  batch if the backend confirms in-order application within one
+  `ingest_each` request as a contract;
+- replay after reload and after leader takeover follows exactly these rules —
+  same edges, same priority; replay is not a stricter ordering mode.
 
 ---
 
