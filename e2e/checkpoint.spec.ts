@@ -51,13 +51,7 @@ test('the diff modal shows the concrete change and the future marker', async () 
 	await modal.locator('.cd-close').click();
 });
 
-// FIXME: the alert machinery is correct — a manual refreshCheckpointAlert
-// paints the dot instantly (verified by an in-page probe) — but the automatic
-// sweep does not fire it in a live browser: neither the 30s interval nor the
-// route-watch produces the alert within 90s. Under investigation; the store
-// side already carries a per-dialog refresh budget so a stuck preload cannot
-// wedge the sweep.
-test.fixme('the dialogs list grows an alert dot and the dot opens the comparison', async () => {
+test('the dialogs list grows an alert dot and the dot opens the comparison', async () => {
 	// alice returns to the list; the sweep finds her checkpoint outrun
 	await alice.page.locator('._menu_btn').filter({ hasText: 'Chats' }).first().click();
 	const bobRow = alice.page.locator('._user').filter({ hasText: bob.name }).first();

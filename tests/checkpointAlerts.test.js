@@ -11,6 +11,7 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { _setStoreForTests } from '@/lib/data/localStore';
+import { savePointer } from '@/lib/data/checkpointAlerts';
 
 let messagePreloads = 0;
 const makeCollection = (rows = {}, counted = false) => ({
@@ -86,6 +87,13 @@ describe('checkpoint alerts', () => {
 
 	const seed = (...rows) => { for (const r of rows) collections.dialog.messages.rows.set(r.message_id, r); };
 
+	// The sweep only visits dialogs holding a checkpoint pointer — the same
+	// registration signing a checkpoint performs.
+	const indexDialog = () => savePointer(me.userHash, dialogHash, {
+		checkpoint: { messageId: M1, viewRoot: 'dvr_x', frontierRoot: 'dfr_x', createdAt: 1 },
+		scannedTo: 0,
+	});
+
 	beforeEach(async () => {
 		setActivePinia(createPinia());
 		resetCardRegistry();
@@ -114,8 +122,11 @@ describe('checkpoint alerts', () => {
 	// empty, so a dialog whose content cannot be decrypted must simply produce
 	// no alert rather than throwing into the dialogs list.
 	it('a dialog whose content will not decrypt raises no alert', async () => {
+		// direct refresh (the probe/manual path): rows exist but no key in this
+		// harness, so no checkpoint can be found — and that must mean silence,
+		// not an error thrown into the dialogs list
 		seed(await row(M1, [{ kind: 'text', text: 'hi' }]));
-		await store.scanCheckpointAlerts([peer]);
+		expect(await store.refreshCheckpointAlert(peer)).toBe(null);
 		expect(store.alertingPeers.has(peer)).toBe(false);
 		expect(store.checkpointAlerts.get(peer)).toBeUndefined();
 	});
@@ -124,9 +135,20 @@ describe('checkpoint alerts', () => {
 	// the dialog the user is in, and the open view would keep a collection
 	// that has stopped syncing.
 	it('reads dialogs through the non-registering path', async () => {
+		await indexDialog();
 		seed(await row(M1, [{ kind: 'text', text: 'hi' }]));
 		await store.scanCheckpointAlerts([peer]);
 		expect(opened).toEqual([dialogHash]);
+	});
+
+	// A shared backend replicates hundreds of stranger cards; a dialog where
+	// this account never signed a checkpoint cannot alert, so the sweep must
+	// not open its shape at all.
+	it('skips dialogs without a pointer without opening their collections', async () => {
+		seed(await row(M1, [{ kind: 'text', text: 'hi' }]));
+		await store.scanCheckpointAlerts([peer]);
+		expect(opened).toEqual([]);
+		expect(store.checkpointAlerts.size).toBe(0);
 	});
 
 	it('skips the current user and empty entries', async () => {
@@ -137,6 +159,7 @@ describe('checkpoint alerts', () => {
 	// One sweep at a time: each dialog's collections open a shape, so a second
 	// entry into the list must not put a second scan on the wire.
 	it('a scan already in flight is not started twice', async () => {
+		await indexDialog();
 		seed(await row(M1, [{ kind: 'text', text: 'hi' }]));
 		messagePreloads = 0;
 		const a = store.scanCheckpointAlerts([peer]);

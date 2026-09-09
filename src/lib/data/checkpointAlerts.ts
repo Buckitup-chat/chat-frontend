@@ -53,6 +53,9 @@ export const savePointer = async (
 	if (!userHash || !dialogHash) return;
 	try {
 		await kvSet(key(userHash, dialogHash), pointer);
+		// The sweep only visits indexed dialogs, so a pointer that carries a
+		// checkpoint must register its dialog or no alert will ever fire there.
+		if (pointer.checkpoint) await rememberPointerDialog(userHash, dialogHash);
 	} catch (e) {
 		// The pointer is a cache: losing it costs a rescan, nothing more.
 		console.warn('[checkpointAlerts] pointer save failed:', e);
@@ -103,3 +106,40 @@ export const viewMoved = (
 	checkpointViewRoot: string,
 	carrierMessageId?: string,
 ): boolean => buildViewTree(rawViewState(rows, carrierMessageId)).root !== checkpointViewRoot;
+
+// ---------- which dialogs are worth sweeping ----------
+//
+// The dialogs list knows every replicated user card — on a shared backend
+// that is hundreds of strangers, and sweeping them all means opening
+// hundreds of cold shapes to learn that nothing was ever confirmed there.
+// A checkpoint pointer only comes into existence through this account's own
+// signing (or a scan that found one), so an index of dialogs that HAVE a
+// pointer bounds the sweep to dialogs where an alert is even possible.
+//
+// Record keys in localStore are HMAC-derived, so the pointer records cannot
+// be enumerated — the index is its own record. A checkpoint signed by this
+// account on another device is not in this index until a dialog visit finds
+// it; that is the trade until multi-device sync of local state exists.
+
+const indexKey = (userHash: string) => `cpptr-index|${userHash}`;
+
+export const pointerDialogs = async (userHash: string): Promise<Set<string>> => {
+	if (!userHash) return new Set();
+	try {
+		return new Set((await kvGet<string[]>(indexKey(userHash))) ?? []);
+	} catch {
+		return new Set();
+	}
+};
+
+export const rememberPointerDialog = async (userHash: string, dialogHash: string): Promise<void> => {
+	if (!userHash || !dialogHash) return;
+	try {
+		const dialogs = await pointerDialogs(userHash);
+		if (dialogs.has(dialogHash)) return;
+		dialogs.add(dialogHash);
+		await kvSet(indexKey(userHash), [...dialogs]);
+	} catch (e) {
+		console.warn('[checkpointAlerts] pointer index update failed:', e);
+	}
+};

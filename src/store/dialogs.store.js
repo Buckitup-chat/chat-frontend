@@ -7,7 +7,7 @@ import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
 import { assertFreshBase } from '@/lib/data/staleBase';
 import { feedOrderKey } from '@/lib/data/feedOrder';
-import { loadPointer, savePointer, viewMoved } from '@/lib/data/checkpointAlerts';
+import { loadPointer, savePointer, viewMoved, pointerDialogs } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError } from '@/lib/pq/content';
@@ -791,8 +791,15 @@ export const useDialogsStore = defineStore('dialogs', () => {
     const scanCheckpointAlerts = async (peerHashes) => {
         if (scanInFlight) return scanInFlight;
         scanInFlight = (async () => {
+            // The list hands over every replicated card — on a shared backend
+            // that is hundreds of strangers. An alert is only possible where
+            // this account has a checkpoint pointer, and those dialogs are
+            // indexed; everything else is skipped without opening a shape.
+            const indexed = await pointerDialogs($userPQ.currentUserHash);
             for (const peerHash of peerHashes) {
                 if (!peerHash || peerHash === $userPQ.currentUserHash) continue;
+                const dialogHash = getDialogHash(peerHash);
+                if (!dialogHash || !indexed.has(dialogHash)) continue;
                 try {
                     await Promise.race([
                         refreshCheckpointAlert(peerHash),
