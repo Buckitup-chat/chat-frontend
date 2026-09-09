@@ -19,14 +19,39 @@ import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
 
 const VAULT_KEY_OPTIONS = {
-  authenticatorSelection: {
-    authenticatorAttachment: "cross-platform",
-    userVerification: "preferred",
-    residentKey: "preferred",
-    requireResidentKey: false
-  },
+  // Only the fields local-data-lock's getLockKey() actually reads survive the
+  // trip (relyingParty*, username/displayName, addNewPasskey, …). WebAuthn
+  // registration options like authenticatorSelection are silently dropped by
+  // the library — they are enforced by the credentials.create wrapper below.
+}
 
-  timeout: 60000,
+// The vault's lock-key seed lives inside the passkey's userHandle, and only a
+// discoverable (resident) credential returns the userHandle on auth. A
+// server-side credential logs in once — registration still has the seed in
+// memory — and then locks the account out forever with "did not provide a
+// valid encryption/decryption key". Platform authenticators make passkeys
+// discoverable voluntarily, which masks this; security keys and strict
+// implementations do not. local-data-lock gives no way to pass
+// authenticatorSelection through, so it is enforced here: a passkey that
+// cannot hold the seed must fail at registration, not at the next login.
+if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
+  const nativeCreate = navigator.credentials.create.bind(navigator.credentials);
+  navigator.credentials.create = (options) => {
+    if (options?.publicKey && !options.publicKey.authenticatorSelection) {
+      options = {
+        ...options,
+        publicKey: {
+          ...options.publicKey,
+          authenticatorSelection: {
+            residentKey: 'required',
+            requireResidentKey: true,
+            userVerification: 'preferred',
+          },
+        },
+      };
+    }
+    return nativeCreate(options);
+  };
 }
 
 /**
