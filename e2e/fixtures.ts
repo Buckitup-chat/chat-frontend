@@ -5,16 +5,23 @@
 // makes every navigator.credentials call resolve silently, so the production
 // WebAuthn path — vault, key generation, card publication — runs exactly as it
 // does for a real user.
-import { test as base, expect, type BrowserContext, type Page } from '@playwright/test';
+import { test as base, expect, type BrowserContext, type CDPSession, type Page } from '@playwright/test';
 
 export { expect };
 
-/** Attach a silent platform authenticator to a page. Must run before the app
- * checks isUserVerifyingPlatformAuthenticatorAvailable — i.e. before goto. */
+// The virtual authenticator lives with the CDP session that created it: it
+// survives reloads of its page, but a new tab starts with none — and the
+// vault's passkey must follow the account there, so the tab gets its own
+// authenticator plus a copy of the credential (which is what a platform
+// authenticator does across tabs for real).
+const pageAuth = new WeakMap<Page, { cdp: CDPSession; id: string }>();
+
+/** Arm a silent platform authenticator for this page. Must run before the
+ * app checks isUserVerifyingPlatformAuthenticatorAvailable. */
 export async function armWebAuthn(context: BrowserContext, page: Page): Promise<void> {
 	const cdp = await context.newCDPSession(page);
 	await cdp.send('WebAuthn.enable');
-	await cdp.send('WebAuthn.addVirtualAuthenticator', {
+	const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
 		options: {
 			protocol: 'ctap2',
 			transport: 'internal',
@@ -24,6 +31,58 @@ export async function armWebAuthn(context: BrowserContext, page: Page): Promise<
 			automaticPresenceSimulation: true,
 		},
 	});
+	pageAuth.set(page, { cdp, id: authenticatorId });
+}
+
+const authOf = (page: Page) => {
+	const a = pageAuth.get(page);
+	if (!a) throw new Error('page has no armed authenticator');
+	return a;
+};
+
+export async function exportCredentials(page: Page): Promise<Record<string, unknown>[]> {
+	const a = authOf(page);
+	const { credentials } = await a.cdp.send('WebAuthn.getCredentials', { authenticatorId: a.id });
+	return credentials as Record<string, unknown>[];
+}
+
+export async function importCredentials(page: Page, credentials: Record<string, unknown>[]): Promise<void> {
+	const a = authOf(page);
+	for (const credential of credentials) {
+		await a.cdp.send('WebAuthn.addCredential', {
+			authenticatorId: a.id,
+			credential: { ...credential, isResidentCredential: true } as never,
+		});
+	}
+}
+
+/**
+ * The app never asks for a discoverable credential, so the authenticator
+ * stores a server-side one — and `credentials.get` then omits the userHandle,
+ * which is where the vault keeps its lock-key seed (local-data-lock
+ * extractLockKey). Real platform authenticators make passkeys discoverable
+ * regardless; mirror that, or every re-login fails with "did not provide a
+ * valid encryption/decryption key".
+ */
+export async function makeCredentialsResident(context: BrowserContext, page: Page): Promise<void> {
+	const a = authOf(page);
+	const { credentials } = await a.cdp.send('WebAuthn.getCredentials', { authenticatorId: a.id });
+	for (const credential of credentials) {
+		if (credential.isResidentCredential) continue;
+		await a.cdp.send('WebAuthn.removeCredential', { authenticatorId: a.id, credentialId: credential.credentialId });
+		await a.cdp.send('WebAuthn.addCredential', {
+			authenticatorId: a.id,
+			credential: { ...credential, isResidentCredential: true },
+		});
+	}
+}
+
+/** Re-login after a full page load: pick the account, the passkey resolves
+ * silently. Call with the page already showing the login screen. */
+export async function reconnectAccount(page: Page): Promise<void> {
+	await expect(page.getByText('Connect existing account')).toBeVisible({ timeout: 30_000 });
+	await page.locator('._contact').first().click();
+	await expect(page.locator('.wrapper')).toBeVisible({ timeout: 90_000 });
 }
 
 /** Unique per run, unique per role: account names double as search keys, so
@@ -44,6 +103,7 @@ export async function createAccount(context: BrowserContext, page: Page, role: s
 	await page.getByRole('button', { name: 'Create', exact: true }).click();
 	// account creation publishes the card to staging and logs in
 	await expect(page.locator('.wrapper')).toBeVisible({ timeout: 90_000 });
+	await makeCredentialsResident(context, page);
 	return name;
 }
 
