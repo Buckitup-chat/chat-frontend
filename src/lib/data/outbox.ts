@@ -49,6 +49,17 @@ export interface OutboxEntry {
 	 */
 	status?: 'pending' | 'quarantined';
 	quarantinedAt?: number;
+	/**
+	 * Coordinator fields (ADR §7.3). The retry schedule lives on the entry,
+	 * not in a loop's memory: a reload must resume the same schedule, not
+	 * invent a new one. Dependencies are entry ids this one must not be
+	 * dispatched before; a quarantined dependency blocks its dependents
+	 * rather than letting them race ahead of a failed prerequisite.
+	 */
+	nextAttemptAt?: number;
+	dependsOn?: string[];
+	/** Read scope of the write (barrier.ts scopeForRelation) — dispatch metadata. */
+	scope?: string;
 }
 
 /**
@@ -57,6 +68,9 @@ export interface OutboxEntry {
  * producer, and hitting it is reported, not absorbed.
  */
 export const MAX_OUTBOX_ENTRIES = 1000;
+
+const RETRY_BASE_MS = 5_000;
+const RETRY_MAX_MS = 5 * 60_000;
 
 const indexedDb = new IndexedDBAdapter(DB_NAME);
 
@@ -114,7 +128,12 @@ const relationOf = (mutations: unknown[]): string => {
  * Losing durability is bad; refusing to run is worse. In practice the vault is
  * always unlocked here: these mutations were just signed with it.
  */
-export async function enqueue(mutations: unknown[], userHash: string): Promise<string | null> {
+export interface EnqueueOptions {
+	dependsOn?: string[];
+	scope?: string;
+}
+
+export async function enqueue(mutations: unknown[], userHash: string, opts: EnqueueOptions = {}): Promise<string | null> {
 	if (!userHash) return null;
 	try {
 		const keys = await storage.keys();
@@ -133,6 +152,8 @@ export async function enqueue(mutations: unknown[], userHash: string): Promise<s
 			createdAt: Date.now(),
 			attempts: 0,
 			lastError: null,
+			...(opts.dependsOn?.length ? { dependsOn: opts.dependsOn } : {}),
+			...(opts.scope ? { scope: opts.scope } : {}),
 		};
 		await storage.set(entry.id, JSON.stringify(entry));
 		return entry.id;
@@ -167,6 +188,12 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 			entry.status = 'quarantined';
 			entry.quarantinedAt = Date.now();
 			console.warn(`[outbox] quarantined ${entry.relation} entry ${id}: ${entry.lastError}`);
+		} else {
+			// RETRYABLE_FAILURE carries the time of its next attempt (ADR §5),
+			// persisted so a reload resumes the schedule instead of resetting
+			// it. Exponential per entry, jittered so parallel clients spread.
+			const backoff = Math.min(RETRY_BASE_MS * 2 ** (entry.attempts - 1), RETRY_MAX_MS);
+			entry.nextAttemptAt = Date.now() + backoff + Math.floor(Math.random() * 1000);
 		}
 		await storage.set(id, JSON.stringify(entry));
 	} catch {
@@ -278,6 +305,32 @@ export async function discardEntry(id: string): Promise<void> {
 	await storage.delete(id).catch(() => {});
 }
 
+/**
+ * Entries the coordinator may dispatch now (§7.3): pending, past their
+ * scheduled attempt time, with every dependency resolved. A dependency that
+ * is quarantined or still pending blocks its dependents — and only them;
+ * everything unrelated stays ready. Order is creation order: a deterministic
+ * priority among the ready, never a wait on the unready.
+ */
+export async function readyEntries(userHash: string, now: number = Date.now()): Promise<OutboxEntry[]> {
+	const all = await entriesOf(userHash);
+	const byId = new Map(all.map((e) => [e.id, e]));
+	return all.filter((e) => {
+		if (e.status === 'quarantined') return false;
+		if ((e.nextAttemptAt ?? 0) > now) return false;
+		// a dependency absent from storage was resolved and forgotten
+		return (e.dependsOn ?? []).every((dep) => !byId.has(dep));
+	});
+}
+
+/** Pending entries held back by an unresolved or quarantined dependency. */
+export async function blockedEntries(userHash: string): Promise<OutboxEntry[]> {
+	const all = await entriesOf(userHash);
+	const byId = new Map(all.map((e) => [e.id, e]));
+	return all.filter((e) =>
+		e.status !== 'quarantined' && (e.dependsOn ?? []).some((dep) => byId.has(dep)));
+}
+
 export async function pendingCount(userHash: string): Promise<number> {
 	return (await pendingEntries(userHash)).length;
 }
@@ -320,7 +373,10 @@ export async function drainOutbox(
 	}
 
 	try {
-		const entries = await pendingEntries(userHash);
+		// Only entries whose schedule has come due and whose dependencies are
+		// resolved (§7.3). Scheduled and blocked entries stay put — they are
+		// "remaining", not failures, and they hold back nobody else.
+		const entries = await readyEntries(userHash);
 		let sent = 0;
 		let dropped = 0;
 
@@ -347,7 +403,13 @@ export async function drainOutbox(
 				};
 			}
 		}
-		return { sent, dropped, remaining: 0, stoppedEarly: false, wasLeader: true };
+		return {
+			sent,
+			dropped,
+			remaining: await pendingCount(userHash),
+			stoppedEarly: false,
+			wasLeader: true,
+		};
 	} finally {
 		if (WebLocksLeader.isSupported()) leader.releaseLeadership();
 	}
@@ -361,8 +423,6 @@ export async function drainOutbox(
 let loopTimer: ReturnType<typeof setTimeout> | null = null;
 let loopFailures = 0;
 
-const RETRY_BASE_MS = 5_000;
-const RETRY_MAX_MS = 5 * 60_000;
 
 const nextDelay = (): number => {
 	const backoff = Math.min(RETRY_BASE_MS * 2 ** loopFailures, RETRY_MAX_MS);
@@ -379,10 +439,27 @@ const nextDelay = (): number => {
 export function ensureDrainLoop(
 	userHash: string,
 	send: (mutations: unknown[]) => Promise<unknown>,
+	opts: { resetSchedules?: boolean } = {},
 ): void {
 	stopDrainLoop();
 	loopFailures = 0;
-	void runLoopOnce(userHash, send);
+	void (async () => {
+		if (opts.resetSchedules) await clearSchedules(userHash);
+		await runLoopOnce(userHash, send);
+	})();
+}
+
+/** An external trigger (login, 'online') invalidates backoffs computed
+ * against the previous network conditions — entries become due now. */
+async function clearSchedules(userHash: string): Promise<void> {
+	try {
+		for (const entry of await entriesOf(userHash)) {
+			if (entry.status !== 'quarantined' && entry.nextAttemptAt) {
+				delete entry.nextAttemptAt;
+				await storage.set(entry.id, JSON.stringify(entry));
+			}
+		}
+	} catch { /* schedule reset is best-effort */ }
 }
 
 async function runLoopOnce(
@@ -407,7 +484,16 @@ async function runLoopOnce(
 		return; // queue is empty — the next external trigger restarts the loop
 	}
 	loopFailures = result.stoppedEarly ? loopFailures + 1 : 0;
-	loopTimer = setTimeout(() => void runLoopOnce(userHash, send), nextDelay());
+	// Sleep until the earliest scheduled attempt if that comes sooner than the
+	// loop's own backoff — per-entry schedules are the authority (ADR §5).
+	let delay = nextDelay();
+	try {
+		const soonest = (await entriesOf(userHash))
+			.filter((e) => e.status !== 'quarantined' && e.nextAttemptAt)
+			.reduce<number | null>((min, e) => (min === null || e.nextAttemptAt! < min ? e.nextAttemptAt! : min), null);
+		if (soonest !== null) delay = Math.min(delay, Math.max(soonest - Date.now(), 250));
+	} catch { /* pacing fallback is the loop backoff */ }
+	loopTimer = setTimeout(() => void runLoopOnce(userHash, send), delay);
 }
 
 /** Call on logout: another account's entries are not this session's to send. */

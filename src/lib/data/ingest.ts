@@ -12,6 +12,7 @@ import { api } from '@/api/client';
 import { mutationAppliedOnServer } from './confirm';
 import { awaitShapeVisibility, collectionForRelation, scopeForRelation } from './barrier';
 import { markUnconfirmed, clearUnconfirmed } from './staleBase';
+import { contractFor } from './writeContracts';
 import { enqueue, resolveEntry, recordFailure, ensureDrainLoop, stopDrainLoop } from './outbox';
 import type { IngestRowResult } from './types';
 
@@ -264,16 +265,23 @@ export async function sendMutationsAndAwaitShape(
 	const first = mutations[0] as MutationShape | undefined;
 	const relation = first?.syncMetadata?.relation;
 	if (relation) {
-		const row = first?.modified ?? first?.changes ?? null;
-		const visible = await awaitShapeVisibility(collectionForRelation(relation, row), result.txids, relation);
-		// Accepted but not visible is not a send failure: the caller keeps its
-		// success, and the mutation is never resent. What it does mean is that
-		// this scope's read model is behind, so the next write that would
-		// extend a row here refuses rather than chaining onto a stale tip
-		// (staleBase.ts, ADR §7.1).
-		const scope = scopeForRelation(relation, row);
-		if (visible) clearUnconfirmed(scope);
-		else markUnconfirmed(scope);
+		// The operation's contract decides the wait (§7.3, writeContracts.ts):
+		// 'accepted' operations are done — nothing reads their scope from the
+		// shape next, and holding the caller for up to 30s of replication lag
+		// bought nothing. 'visible' operations still await the echo.
+		const contract = contractFor(relation, first?.type);
+		if (contract.confirmation === 'visible') {
+			const row = first?.modified ?? first?.changes ?? null;
+			const visible = await awaitShapeVisibility(collectionForRelation(relation, row), result.txids, relation);
+			// Accepted but not visible is not a send failure: the caller keeps
+			// its success, and the mutation is never resent. What it does mean
+			// is that this scope's read model is behind, so the next write that
+			// would extend a row here refuses rather than chaining onto a stale
+			// tip (staleBase.ts, ADR §7.1).
+			const scope = scopeForRelation(relation, row);
+			if (visible) clearUnconfirmed(scope);
+			else markUnconfirmed(scope);
+		}
 	}
 	return result;
 }
@@ -288,7 +296,10 @@ export function drainPendingWrites(userHash: string, signSkey: Uint8Array): void
 	// until the queue empties, so a 503 with no connectivity change cannot
 	// strand the queue until the next login (ADR §5).
 	ensureDrainLoop(userHash, (mutations) =>
-		sendMutationsWithRetry(mutations, signSkey, { retries: 1 })
+		sendMutationsWithRetry(mutations, signSkey, { retries: 1 }),
+		// login/'online' is a fresh signal: backoffs computed before it no
+		// longer describe the world — everything pending becomes due now
+		{ resetSchedules: true },
 	);
 }
 
