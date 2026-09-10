@@ -106,6 +106,6 @@ const acc = computed(() => {
 });
 
 const shortCode = computed(() => {
-  if (acc.value.user_hash) return acc.value.user_hash.slice(2, 7);
+  if (acc.value.user_hash) return acc.value.user_hash.slice(2, 8);
 });
 </script>
