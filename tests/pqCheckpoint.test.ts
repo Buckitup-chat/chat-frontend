@@ -60,6 +60,14 @@ describe('view tree (Invariants 3, 5, 6, 7)', () => {
 		expect(buildViewTree(state(2)).root).not.toBe(buildViewTree(state(1)).root);
 	});
 
+	// The trie sorts keys as strings and walks them as UTF-8 bytes; those
+	// orders agree only on ASCII, so a non-ASCII key must die at the door
+	// rather than feed buildBranch's divergence scan.
+	it('rejects a non-ASCII key instead of building a wrong tree', () => {
+		expect(() => buildViewTree({ 'dmsg_ключ': { signHash: sh(1), deleted: false } }))
+			.toThrow(/not ASCII/);
+	});
+
 	it('changing one message version changes the root (Invariant 5)', () => {
 		const before = buildViewTree(state(5)).root;
 		const after = buildViewTree(state(5, { [mid(2)]: { signHash: sh(9), deleted: false } })).root;

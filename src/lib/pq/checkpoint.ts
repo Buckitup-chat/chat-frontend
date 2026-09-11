@@ -135,6 +135,13 @@ const EMPTY_ROOT = () => concatHash(utf8(NODE_DOMAIN), utf8('\0empty'));
  * an exact recursive diff.
  */
 export const buildViewTree = (state: ViewState): ViewTree => {
+	// Keys are sorted as UTF-16 strings but walked as UTF-8 bytes; the two
+	// orders agree only on ASCII. dmsg_ keys are ASCII by grammar — anything
+	// else is a caller reusing the trie outside its domain, where
+	// buildBranch's divergence scan is not guaranteed to terminate.
+	for (const key of Object.keys(state)) {
+		if (!/^[\x00-\x7f]+$/.test(key)) throw new TypeError(`view tree key is not ASCII: ${key}`);
+	}
 	const entries: TrieLeaf[] = Object.entries(state)
 		.map(([key, value]) => ({
 			kind: 'leaf' as const, key, keyBits: utf8(key), value, hash: deriveLeafHash(key, value),

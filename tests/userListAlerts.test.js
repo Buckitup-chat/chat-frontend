@@ -10,6 +10,7 @@ const PEER_B = 'u_' + 'b'.repeat(128);
 
 const scanCheckpointAlerts = vi.fn();
 let alerting = new Set();
+let alertEntries = new Map();
 let transferPeers = new Set();
 
 vi.mock('@/store/userPQ.store', () => ({
@@ -22,7 +23,7 @@ vi.mock('@/store/userPQ.store', () => ({
 	}),
 }));
 vi.mock('@/store/dialogs.store', () => ({
-	useDialogsStore: () => ({ alertingPeers: alerting, scanCheckpointAlerts }),
+	useDialogsStore: () => ({ alertingPeers: alerting, checkpointAlerts: alertEntries, scanCheckpointAlerts }),
 }));
 vi.mock('@/store/transfers.store', () => ({
 	useTransfersStore: () => ({ transferPeers }),
@@ -57,6 +58,19 @@ describe('checkpoint alerts in the dialogs list', () => {
 	it('shows nothing when no checkpoint has moved', () => {
 		alerting = new Set();
 		expect(mountList().findAll('._checkpoint_dot')).toHaveLength(0);
+	});
+
+	// The dot's entire purpose is the payload: it opens the dialog ALREADY
+	// asking for this alert's comparison, and it must not double-fire the
+	// row's plain select underneath (.stop).
+	it('tapping the dot selects the peer with that checkpoint, once', async () => {
+		const CP_ID = 'dmsg_0192aaaa-0000-7000-8000-0000000000ff';
+		alerting = new Set([PEER_A]);
+		alertEntries = new Map([[PEER_A, { changed: true, messageId: CP_ID }]]);
+		const w = mountList();
+		await w.find('._checkpoint_dot').trigger('click');
+		expect(w.emitted('select')).toEqual([[PEER_A, { checkpoint: CP_ID }]]);
+		alertEntries = new Map();
 	});
 
 	it('sits alongside the transfer marker rather than replacing it', () => {

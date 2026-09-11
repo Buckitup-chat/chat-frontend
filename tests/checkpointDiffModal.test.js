@@ -44,6 +44,43 @@ describe('CheckpointDiffModal', () => {
 		expect(w.emitted('jump')[0]).toEqual([M2]);
 	});
 
+	it('shows a restored message and names the restoration', () => {
+		const w = mountWith([{ type: 'MESSAGE_RESTORED', messageId: M1, newText: 'снова тут' }]);
+		expect(w.find('.cd-tag').text()).toBe('restored');
+		expect(w.text()).toContain('снова тут');
+	});
+
+	// MESSAGE_REMOVED is the one change type that means local state LOST a
+	// row the checkpoint attested — it must render as that warning, not
+	// disappear into a generic row.
+	it('a removed message renders as missing from local state', () => {
+		const w = mountWith([{ type: 'MESSAGE_REMOVED', messageId: M1 }]);
+		expect(w.find('.cd-tag').text()).toBe('missing');
+		expect(w.text()).toContain('was present at the checkpoint, missing from local state now');
+	});
+
+	it('says so when nothing changed', () => {
+		const w = mountWith([]);
+		expect(w.text()).toContain('Nothing changed.');
+		expect(w.find('.cd-sub').text()).toContain('no changes');
+	});
+
+	// The overlay is position:fixed over the whole screen; the ✕ and the
+	// backdrop are its only two exits.
+	it('closes from the ✕ button', async () => {
+		const w = mountWith([]);
+		await w.find('.cd-close').trigger('click');
+		expect(w.emitted('close')).toHaveLength(1);
+	});
+
+	it('closes from the backdrop but not from the card body', async () => {
+		const w = mountWith([]);
+		await w.find('.cd-card').trigger('click');
+		expect(w.emitted('close')).toBeUndefined();
+		await w.find('.cd-modal').trigger('click');
+		expect(w.emitted('close')).toHaveLength(1);
+	});
+
 	it('future messages collapse into one marker that jumps to the first', async () => {
 		const w = mount(CheckpointDiffModal, {
 			props: {

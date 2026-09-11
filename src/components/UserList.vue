@@ -6,7 +6,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, inject } from 'vue'
 import { userPQStore } from '@/store/userPQ.store'
 import { useDialogsStore } from '@/store/dialogs.store'
 
-const emit = defineEmits<{ select: [address: string, opts?: { checkpoint?: boolean }] }>()
+const emit = defineEmits<{ select: [address: string, opts?: { checkpoint?: boolean | string }] }>()
 
 const { selected } = defineProps({
   selected: { type: Array, default: () => [] },
