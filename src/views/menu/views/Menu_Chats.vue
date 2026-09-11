@@ -30,7 +30,7 @@ const select = (address, opts = {}) => {
 	$router.push({
 		name: 'chat',
 		params: { address },
-		...(opts.checkpoint ? { query: { checkpoint: '1' } } : {}),
+		...(opts.checkpoint ? { query: { checkpoint: opts.checkpoint === true ? '1' : opts.checkpoint } } : {}),
 	});
 	closeMenu();
 };

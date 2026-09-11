@@ -108,6 +108,11 @@ export type ContentPart = TextPart | QuotePart | FilePart | ImagePart | VideoPar
 
 export class ContentDecodeError extends Error {}
 
+// Wire grammar of a checkpoint frontier entry (pq_dialogs.md: message_id =
+// "dmsg_" + UUIDv7; sign_hash = "dms_" + 128 hex chars).
+const FRONTIER_MESSAGE_ID = /^dmsg_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const FRONTIER_SIGN_HASH = /^dms_[0-9a-f]{128}$/;
+
 const encodePart = (part: ContentPart): unknown => {
 	switch (part.kind) {
 		case 'text':
@@ -218,6 +223,15 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					c[5] === null || typeof c[5] !== 'object' || Array.isArray(c[5])
 				) {
 					throw new ContentDecodeError('malformed checkpoint envelope');
+				}
+				// The frontier feeds hash pre-images and equality checks, so its
+				// entries are held to the exact wire grammar: a key smuggling a
+				// delimiter or a truncated hash must die here, not survive as a
+				// second reading of a signed commitment.
+				for (const [mid, sh] of Object.entries(c[5] as Record<string, unknown>)) {
+					if (!FRONTIER_MESSAGE_ID.test(mid) || typeof sh !== 'string' || !FRONTIER_SIGN_HASH.test(sh)) {
+						throw new ContentDecodeError('malformed checkpoint frontier entry');
+					}
 				}
 				return [{
 					kind: 'checkpoint',

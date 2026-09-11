@@ -26,15 +26,28 @@
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 
-export const CHECKPOINT_VERSION = 1;
+export const CHECKPOINT_VERSION = 2;
 export const REDUCER_VERSION = 'dialog-state-v1';
-export const TREE_VERSION = 'dialog-view-tree-v1';
+export const TREE_VERSION = 'dialog-view-tree-v2';
 
-const FRONTIER_DOMAIN = 'BUCKITUP_DIALOG_FRONTIER_V1';
-const LEAF_DOMAIN = 'BUCKITUP_DIALOG_VIEW_LEAF_V1';
+const FRONTIER_DOMAIN = 'BUCKITUP_DIALOG_FRONTIER_V2';
+const LEAF_DOMAIN = 'BUCKITUP_DIALOG_VIEW_LEAF_V2';
 const NODE_DOMAIN = 'BUCKITUP_DIALOG_VIEW_NODE_V1';
 
 const utf8 = (s: string) => new TextEncoder().encode(s);
+
+// Every variable-length field in a hash pre-image is length-framed
+// (u32be(len) || bytes). Delimiter-joined concatenation is not injective
+// when the joined strings are attacker-controlled: {"A|X\nB": "Y"} and
+// {"A": "X", "B": "Y"} would collapse to one pre-image, letting two
+// structurally different frontiers share a root — the exact property a
+// commitment must not have.
+const u32 = (n: number): Uint8Array => {
+	const b = new Uint8Array(4);
+	new DataView(b.buffer).setUint32(0, n);
+	return b;
+};
+const framed = (b: Uint8Array): Uint8Array[] => [u32(b.length), b];
 
 const concatHash = (...parts: Uint8Array[]): Uint8Array => {
 	const total = parts.reduce((n, p) => n + p.length, 0);
@@ -50,12 +63,15 @@ const concatHash = (...parts: Uint8Array[]): Uint8Array => {
 export type Frontier = Record<string, string>;
 
 /**
- * 'dfr_' + hex hash over the sorted "message_id|sign_hash" pairs. A plain
- * fast fingerprint; the frontier map itself stays the source of truth.
+ * 'dfr_' + hex hash over the sorted, length-framed (message_id, sign_hash)
+ * pairs. A plain fast fingerprint; the frontier map itself stays the source
+ * of truth.
  */
 export const deriveFrontierRoot = (frontier: Frontier): string => {
-	const pairs = Object.entries(frontier).map(([mid, sh]) => `${mid}|${sh}`).sort();
-	return 'dfr_' + bytesToHex(concatHash(utf8(FRONTIER_DOMAIN), utf8('\0' + pairs.join('\n'))));
+	const pairs = Object.entries(frontier).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+	const parts: Uint8Array[] = [utf8(FRONTIER_DOMAIN), u32(pairs.length)];
+	for (const [mid, sh] of pairs) parts.push(...framed(utf8(mid)), ...framed(utf8(sh)));
+	return 'dfr_' + bytesToHex(concatHash(...parts));
 };
 
 // ---------- view state and Merkle trie ----------
@@ -71,7 +87,12 @@ export interface ViewLeafValue {
 export type ViewState = Record<string, ViewLeafValue>; // message_id → value
 
 export const deriveLeafHash = (messageId: string, value: ViewLeafValue): Uint8Array =>
-	concatHash(utf8(LEAF_DOMAIN), utf8(`\0${messageId}\0${value.signHash}\0${value.deleted ? 'true' : 'false'}`));
+	concatHash(
+		utf8(LEAF_DOMAIN),
+		...framed(utf8(messageId)),
+		...framed(utf8(value.signHash)),
+		Uint8Array.of(value.deleted ? 1 : 0),
+	);
 
 interface TrieLeaf { kind: 'leaf'; key: string; keyBits: Uint8Array; value: ViewLeafValue; hash: Uint8Array }
 interface TrieNode { kind: 'node'; bit: number; left: TrieBranch; right: TrieBranch; hash: Uint8Array }
@@ -199,15 +220,25 @@ export const proveViewKey = (tree: ViewTree, key: string): ViewProofStep[] | nul
 	return path;
 };
 
+const SIBLING_HEX = /^[0-9a-f]{128}$/;
+
+/** Returns false rather than throwing on malformed input, like the rest of
+ * the verification layer (signature.ts). */
 export const verifyViewProof = (
 	root: string,
 	key: string,
 	value: ViewLeafValue,
 	proof: ViewProofStep[],
 ): boolean => {
+	if (!Array.isArray(proof)) return false;
 	let hash = deriveLeafHash(key, value);
 	for (let i = proof.length - 1; i >= 0; i--) {
 		const step = proof[i];
+		if (
+			!step || typeof step.sibling !== 'string' || !SIBLING_HEX.test(step.sibling) ||
+			(step.side !== 'left' && step.side !== 'right') ||
+			!Number.isInteger(step.bit) || step.bit < 0
+		) return false;
 		const sibling = Uint8Array.from(step.sibling.match(/.{2}/g)!.map((h) => parseInt(h, 16)));
 		hash = step.side === 'left' ? nodeHash(step.bit, sibling, hash) : nodeHash(step.bit, hash, sibling);
 	}

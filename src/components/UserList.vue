@@ -106,7 +106,7 @@ watch(() => $route?.params?.address, (now, before) => { if (before && !now) scan
              Tapping it opens the dialog on the checkpoint comparison. -->
         <span v-if="$dialogs.alertingPeers.has(user.user_hash)" class="_checkpoint_dot"
           role="button" title="Изменилось с момента вашей отметки — открыть сравнение"
-          @click.stop="emit('select', user.user_hash, { checkpoint: true })"></span>
+          @click.stop="emit('select', user.user_hash, { checkpoint: $dialogs.checkpointAlerts.get(user.user_hash)?.messageId || true })"></span>
       </div>
     </div>
   </div>

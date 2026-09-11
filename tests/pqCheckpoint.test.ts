@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
 	proveViewKey, verifyViewProof,
+	CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
 } from '@/lib/pq/checkpoint';
 import { encodeContent, decodeContent, previewText, ContentDecodeError } from '@/lib/pq/content';
 
@@ -32,6 +33,16 @@ describe('frontier root', () => {
 		expect(deriveFrontierRoot({ [mid(1)]: sh(2) })).not.toBe(base);
 		expect(deriveFrontierRoot({})).toMatch(/^dfr_/);
 		expect(deriveFrontierRoot({})).not.toBe(base);
+	});
+
+	// The pre-image is length-framed: without framing, a single key smuggling
+	// the "key|value\nkey" delimiters collapses two structurally different
+	// maps into one byte string — one signed root reading as two different
+	// attested sets, the exact property a commitment must not have.
+	it('a delimiter-smuggling key cannot collide with an honest frontier', () => {
+		const honest = { [mid(1)]: sh(1), [mid(2)]: sh(2) };
+		const forged = { [`${mid(1)}|${sh(1)}\n${mid(2)}`]: sh(2) };
+		expect(deriveFrontierRoot(forged)).not.toBe(deriveFrontierRoot(honest));
 	});
 });
 
@@ -109,14 +120,27 @@ describe('Merkle proof', () => {
 	it('returns null for an absent key', () => {
 		expect(proveViewKey(buildViewTree(state(3)), mid(99))).toBe(null);
 	});
+
+	// Same convention as the signature layer: malformed input is a false
+	// verdict, not an exception in whatever UI called verify.
+	it('returns false on malformed proof input instead of throwing', () => {
+		const s = state(3);
+		const tree = buildViewTree(s);
+		const key = Object.keys(s)[0];
+		const good = proveViewKey(tree, key)!;
+		expect(verifyViewProof(tree.root, key, s[key], [{ ...good[0], sibling: '' }, ...good.slice(1)])).toBe(false);
+		expect(verifyViewProof(tree.root, key, s[key], [{ ...good[0], sibling: 'zz'.repeat(64) }, ...good.slice(1)])).toBe(false);
+		expect(verifyViewProof(tree.root, key, s[key], [{ ...good[0], sibling: good[0].sibling.slice(0, 127) }, ...good.slice(1)])).toBe(false);
+		expect(verifyViewProof(tree.root, key, s[key], [{ ...good[0], side: 'up' as never }, ...good.slice(1)])).toBe(false);
+	});
 });
 
 describe('checkpoint envelope (07 §"checkpoint")', () => {
 	const part = {
 		kind: 'checkpoint' as const,
-		version: 1,
-		reducerVersion: 'dialog-state-v1',
-		treeVersion: 'dialog-view-tree-v1',
+		version: CHECKPOINT_VERSION,
+		reducerVersion: REDUCER_VERSION,
+		treeVersion: TREE_VERSION,
 		frontierRoot: deriveFrontierRoot({ [mid(1)]: sh(1) }),
 		viewRoot: buildViewTree(state(1)).root,
 		frontier: { [mid(1)]: sh(1) },
@@ -130,5 +154,14 @@ describe('checkpoint envelope (07 §"checkpoint")', () => {
 	it('rejects a malformed envelope and previews as a marker', () => {
 		expect(() => decodeContent('{"checkpoint":[1,2]}')).toThrow(ContentDecodeError);
 		expect(previewText([part])).toBe('🔏 checkpoint');
+	});
+
+	// The frontier feeds hash pre-images; entries outside the exact wire
+	// grammar die at decode, never reach a root computation or a diff.
+	it('rejects a frontier entry outside the wire grammar', () => {
+		const evil = { ...part, frontier: { [`${mid(1)}|x`]: sh(1) } };
+		expect(() => decodeContent(encodeContent([evil]))).toThrow(ContentDecodeError);
+		const badValue = { ...part, frontier: { [mid(1)]: 'dms_short' } };
+		expect(() => decodeContent(encodeContent([badValue]))).toThrow(ContentDecodeError);
 	});
 });

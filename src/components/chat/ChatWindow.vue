@@ -14,7 +14,9 @@
         <div class="fw-bold fs-5">{{ title }}</div>
       </div>
       <div class="d-flex align-items-center">
-        <button type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Sign a checkpoint of this dialog's history"
+        <!-- Rooms mount this component too and bind no checkpoint handler;
+             without a peer there is no dialog to attest. -->
+        <button v-if="peerHash" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Sign a checkpoint of this dialog's history"
           @click="emit('createCheckpoint')">🔏</button>
         <div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')">
           <div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>

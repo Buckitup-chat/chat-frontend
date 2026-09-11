@@ -39,7 +39,7 @@
 </style>
 
 <script setup>
-import { ref, computed, watch, inject } from 'vue';
+import { ref, computed, watch, inject, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
@@ -842,25 +842,52 @@ const handleCheckpointInfo = async ({ part, messageId }) => {
     }
 };
 
-// Arriving from the alert dot (?checkpoint=1): open the newest checkpoint's
-// comparison once the messages are decoded, then drop the query so a reload
-// does not reopen it. Waiting on decryptedMessages is the point — the dot is
-// tapped before this dialog has any content in memory.
-const newestCheckpointMessage = () => {
-    for (let i = decryptedMessages.value.length - 1; i >= 0; i--) {
-        const msg = decryptedMessages.value[i];
-        const part = (msg.parts || []).find((x) => x.kind === 'checkpoint');
-        if (part) return { part, messageId: msg.id };
+// Arriving from the alert dot (?checkpoint=<messageId>): open THAT
+// checkpoint's comparison once the messages are decoded, then drop the query
+// so a reload does not reopen it. Waiting on decryptedMessages is the point —
+// the dot is tapped before this dialog has any content in memory.
+//
+// The alert fired for a specific checkpoint of this user's; resolving "the
+// newest checkpoint in the feed" instead would let the peer swap the
+// comparison base by signing their own checkpoint on top (their carrier is
+// newer, so the alert's diff would silently vanish behind it).
+const checkpointPartOf = (msg) => (msg?.parts || []).find((x) => x.kind === 'checkpoint');
+
+const resolveCheckpointMessage = (wanted) => {
+    if (typeof wanted === 'string' && wanted.startsWith('dmsg_')) {
+        const msg = decryptedMessages.value.find((m) => m.id === wanted);
+        const part = checkpointPartOf(msg);
+        return part ? { part, messageId: msg.id } : null;
     }
-    return null;
+    // Legacy '?checkpoint=1' (a reloaded old URL): newest checkpoint this
+    // user signed, in feed order — never the peer's.
+    let best = null;
+    for (const msg of decryptedMessages.value) {
+        if (!msg.isMine) continue;
+        const part = checkpointPartOf(msg);
+        if (!part) continue;
+        if (!best || feedOrderKey(msg.id, part.createdAt) > feedOrderKey(best.messageId, best.part.createdAt)) {
+            best = { part, messageId: msg.id };
+        }
+    }
+    return best;
 };
 
+// One shot per arrival: decryptedMessages is reassigned on every rebuild and
+// the un-awaited router.replace leaves a window where the query is still set —
+// without the guard a rebuild in that window would run the comparison twice.
+let checkpointOpening = false;
 watch([() => $route.query.checkpoint, decryptedMessages], async ([wanted]) => {
-    if (!wanted) return;
-    const found = newestCheckpointMessage();
+    if (!wanted || checkpointOpening) return;
+    const found = resolveCheckpointMessage(wanted);
     if (!found) return;
-    $router.replace({ name: 'chat', params: { address: peerHash.value } });
-    await handleCheckpointInfo(found);
+    checkpointOpening = true;
+    try {
+        $router.replace({ name: 'chat', params: { address: peerHash.value } });
+        await handleCheckpointInfo(found);
+    } finally {
+        checkpointOpening = false;
+    }
 }, { immediate: true });
 
 const handleCheckpointJump = async (messageId) => {

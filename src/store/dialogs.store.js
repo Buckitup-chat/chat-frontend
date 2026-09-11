@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { getUserCardsCollection, getDialogCollections, withDialogCollections } from '@/lib/data/collections';
 import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
@@ -356,13 +356,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
      */
     const pendingKeys = {};
 
-    const getSenderMsgKey = async (dialogHash, authorHash) => {
+    const getSenderMsgKey = async (dialogHash, authorHash, colls = null) => {
         const cacheKey = `${dialogHash}_${authorHash}`;
         if (senderMsgKeys.value[cacheKey]) return senderMsgKeys.value[cacheKey];
         if (pendingKeys[cacheKey]) return pendingKeys[cacheKey];
 
         const promise = (async () => {
-            const dialogColls = getDialogCollections(dialogHash);
+            const dialogColls = colls ?? getDialogCollections(dialogHash);
             await dialogColls.keys.preload().catch(() => {});
             const keyRow = dialogColls.keys.get(`${dialogHash}|${authorHash}`);
             if (!keyRow || keyRow.deleted_flag) return null;
@@ -610,9 +610,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
     /**
      * Decrypt a message row
      */
-    const decryptMessageRow = async (row) => {
+    const decryptMessageRow = async (row, colls = null) => {
         try {
-            const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+            const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash, colls);
             if (!key) return { ...row, decrypted: false, text: "Waiting for keys..." };
 
             const jsonStr = await DialogCrypto.decryptContent(key, row.content_b64);
@@ -700,6 +700,17 @@ export const useDialogsStore = defineStore('dialogs', () => {
     /** peerHash -> { changed, createdAt } for dialogs holding a checkpoint. */
     const checkpointAlerts = ref(new Map());
 
+    // Session caches are keyed by dialog/peer, not by account. Alerts,
+    // derived sender keys and decrypted refs from account A must not leak
+    // into account B's session — a peer present in both lists would show A's
+    // alert dot until B's own sweep caught up.
+    watch(() => $userPQ.currentUserHash, () => {
+        checkpointAlerts.value = new Map();
+        senderMsgKeys.value = {};
+        decryptedRefsCache.clear();
+        dialogGates.clear();
+    });
+
     /** Peers whose latest checkpoint no longer matches the dialog. */
     const alertingPeers = computed(() => {
         const out = new Set();
@@ -711,32 +722,38 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // previous scan had not reached yet. Checkpoints are immutable, so a known
     // one never has to be found again; `scannedTo` keeps dialogs that never had
     // one from being decrypted end to end on every visit.
-    const findLatestCheckpoint = async (dialogHash, rows, pointer) => {
+    const findLatestCheckpoint = async (dialogHash, rows, pointer, colls = null) => {
         const mine = rows
             .filter((r) => r.sender_hash === $userPQ.currentUserHash && !r.deleted_flag && r.content_b64)
             .map((r) => ({ row: r, order: feedOrderKey(r.message_id, r.owner_timestamp) }))
             .filter((e) => e.order > pointer.scannedTo)
             .sort((a, b) => b.order - a.order);
 
-        let scannedTo = pointer.scannedTo;
-        for (const { row, order } of mine) {
-            scannedTo = Math.max(scannedTo, order);
-            const decoded = await decryptMessageRow(row);
-            if (!decoded.decrypted) continue;
+        // The watermark advances only past rows that actually decrypted. A row
+        // that failed (its dialog key has not arrived yet) must be rescanned,
+        // and `order > scannedTo` is the only thing that brings a row back —
+        // advancing past a failure would blind this dialog's alerts for good.
+        let sawUndecrypted = false;
+        let found = null;
+        for (const { row } of mine) {
+            const decoded = await decryptMessageRow(row, colls);
+            if (!decoded.decrypted) { sawUndecrypted = true; continue; }
             const part = (decoded.parts || []).find((x) => x.kind === 'checkpoint');
             if (!part) continue;
-            // newest first: the first hit wins, older messages cannot beat it
-            return {
-                checkpoint: {
-                    messageId: row.message_id,
-                    viewRoot: part.viewRoot,
-                    frontierRoot: part.frontierRoot,
-                    createdAt: part.createdAt,
-                },
-                scannedTo,
+            // newest first: the first decrypted hit wins; rows below it are
+            // older and cannot beat it, so they never need decoding at all
+            found = {
+                messageId: row.message_id,
+                viewRoot: part.viewRoot,
+                frontierRoot: part.frontierRoot,
+                createdAt: part.createdAt,
             };
+            break;
         }
-        return { checkpoint: pointer.checkpoint, scannedTo };
+        const scannedTo = sawUndecrypted || !mine.length
+            ? pointer.scannedTo
+            : Math.max(pointer.scannedTo, mine[0].order);
+        return { checkpoint: found ?? pointer.checkpoint, scannedTo };
     };
 
     /**
@@ -750,12 +767,16 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const me = $userPQ.currentUserHash;
         const stored = await loadPointer(me, dialogHash);
 
-        const rows = await withDialogCollections(dialogHash, async (colls) => {
+        // Both the read AND the decryption run inside the transient bundle:
+        // decryptMessageRow's key lookup opens dialog collections too, and
+        // letting it fall back to getDialogCollections would re-register the
+        // dialog in the LRU through the back door — the exact effect
+        // withDialogCollections exists to prevent.
+        const { rows, pointer } = await withDialogCollections(dialogHash, async (colls) => {
             await colls.messages.preload().catch(() => { });
-            return colls.messages.toArray.filter((r) => r.sign_hash);
+            const loaded = colls.messages.toArray.filter((r) => r.sign_hash);
+            return { rows: loaded, pointer: await findLatestCheckpoint(dialogHash, loaded, stored, colls) };
         });
-
-        const pointer = await findLatestCheckpoint(dialogHash, rows, stored);
         if (pointer.scannedTo !== stored.scannedTo || pointer.checkpoint !== stored.checkpoint) {
             await savePointer(me, dialogHash, pointer);
         }
@@ -852,7 +873,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     const computeDialogFrontier = async (rows) => {
-        const withRefs = await Promise.all(rows.map(async (r) => ({
+        // Same candidate rule as computeObservedTails (pq_dialogs.md §Tail
+        // calculation): the checkpoint's frontier commits to the frontier the
+        // dialog's refs_map actually describe. A row admitted here but not
+        // there (a tombstone) would become a permanent frontier member no
+        // refs_map ever references, skewing the root on identical state.
+        const candidates = rows.filter((r) => !r.deleted_flag && r.sign_hash);
+        const withRefs = await Promise.all(candidates.map(async (r) => ({
             message_id: r.message_id,
             sign_hash: r.sign_hash,
             refs: await decryptRefsOf(r),
@@ -892,7 +919,18 @@ export const useDialogsStore = defineStore('dialogs', () => {
             frontier,
             createdAt: Math.floor(Date.now() / 1000),
         };
-        const messageId = await sendMessage(peerHash, [part]);
+        // ADR §11: the alert is cleared and the pointer saved only once the
+        // send settles — a checkpoint whose carrier never left the device must
+        // not report "signed" while silencing the very alert it was meant to
+        // re-arm. A transient failure stays durable in the outbox; if its
+        // replay lands later, the next scan adopts the row as usual.
+        let settle;
+        const sent = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+        const messageId = await sendMessage(peerHash, [part], (status) => {
+            if (status === 'synced') settle.resolve();
+            else if (status === 'error') settle.reject(new Error('CHECKPOINT_SEND_FAILED'));
+        });
+        await sent;
         // The new checkpoint is the pointer now: the dialog matches what was just
         // confirmed, so its alert clears without waiting for the next scan.
         checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, { changed: false, createdAt: part.createdAt, messageId });
@@ -928,7 +966,15 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
         const dialogHash = getDialogHash(peerHash);
         const { current, versions } = await loadDialogRows(dialogHash);
-        const known = new Set([...current, ...versions].map((r) => r.sign_hash));
+        // Only gate-admitted rows count as known — sign_hash is a derived
+        // column not covered by the signature (verifyDialogRow.ts), so a raw
+        // read here would let a planted row with an invented sign_hash turn
+        // incomplete_history into valid. Same admission rule as diff.
+        const known = new Set();
+        for (const row of [...current, ...versions]) {
+            const verdict = await admitMessageRow(row);
+            if (verdict.status === 'verified') known.add(row.sign_hash);
+        }
         const missing = Object.entries(part.frontier)
             .filter(([, sh]) => !known.has(sh))
             .map(([mid, sh]) => `${mid}|${sh}`);
@@ -1037,6 +1083,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const { current, versions } = await loadDialogRows(dialogHash);
         const row = [...current, ...versions].find((r) => r.sign_hash === signHash);
         if (!row) return { text: 'Revision not synced', decrypted: false };
+        // The version collection is keyed by (message_id, sign_hash) and
+        // sign_hash is a derived column: a row whose column lies about its
+        // signature would occupy the honest revision's slot. Same rule as
+        // getMessageHistory — verify before showing anything as "what it said".
+        const signPkey = await getVerifiedSignPkey(row.sender_hash);
+        if (!signPkey || verifyMessageRow(row, signPkey).status !== 'ok') {
+            return { text: 'Unverifiable revision', decrypted: false };
+        }
         if (!row.content_b64) return { text: '', decrypted: true, deleted: !!row.deleted_flag };
         try {
             const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
