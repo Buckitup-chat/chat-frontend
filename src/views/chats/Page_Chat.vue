@@ -8,6 +8,7 @@
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.removeOptimisticItem(id)"
             @show-image="handleShowImage" @play-video="handlePlayVideo"
+            :checkpoint-signing="checkpointSigning"
             @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
@@ -39,7 +40,7 @@
 </style>
 
 <script setup>
-import { ref, computed, watch, inject, nextTick } from 'vue';
+import { ref, computed, watch, inject, nextTick, onBeforeUnmount } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { userPQStore } from '@/store/userPQ.store';
@@ -796,17 +797,46 @@ const handleDeleteMessage = async (messageId) => {
 
 // ---------- signed DAG checkpoint ----------
 
+// Signing awaits the server round trip; the button stays disabled meanwhile
+// so a slow link cannot queue N carriers from N impatient taps.
+const checkpointSigning = ref(false);
+let pageAlive = true;
+onBeforeUnmount(() => { pageAlive = false; });
+
 const handleCreateCheckpoint = async () => {
+    if (checkpointSigning.value) return;
+    checkpointSigning.value = true;
     try {
         await $dialogs.createDialogCheckpoint(peerHash.value);
+        if (!pageAlive) return; // no minutes-late toast on another screen
         $swal.fire({ icon: 'success', title: 'Checkpoint signed', timer: 2500, showConfirmButton: false });
     } catch (e) {
+        if (!pageAlive) return;
+        // A transient failure left the signed carrier durable in the outbox:
+        // it WILL be retried and the marker appears when a connection
+        // returns. Telling the user it failed outright would be the inverse
+        // of the old false "signed" — both misreport the outbox contract.
+        const queued = e?.cause && e.cause.name === 'IngestError' && !e.cause.permanent;
+        if (queued) {
+            $swal.fire({
+                icon: 'info', title: 'Checkpoint queued',
+                text: 'No connection right now — the signed checkpoint is stored and will be sent when the network returns.',
+            });
+            return;
+        }
         const details = e?.details
             ? ` (${e.details.waiting || 0} waiting, ${e.details.unadmitted?.length || 0} unverified)`
             : '';
         $swal.fire({ icon: 'error', title: 'Cannot checkpoint yet', text: `${e.message}${details}` });
+    } finally {
+        checkpointSigning.value = false;
     }
 };
+
+watch(dialogHash, (dh) => {
+    if (!dh || !peerHash.value) return;
+    $dialogs.refreshCheckpointAlert(peerHash.value).catch(() => { });
+}, { immediate: true });
 
 const chatWindowRef = ref(null);
 const checkpointDiff = ref(null); // { createdAt, changes } → CheckpointDiffModal
@@ -883,7 +913,7 @@ watch([() => $route.query.checkpoint, decryptedMessages], async ([wanted]) => {
     if (!found) return;
     checkpointOpening = true;
     try {
-        $router.replace({ name: 'chat', params: { address: peerHash.value } });
+        await $router.replace({ name: 'chat', params: { address: peerHash.value } });
         await handleCheckpointInfo(found);
     } finally {
         checkpointOpening = false;

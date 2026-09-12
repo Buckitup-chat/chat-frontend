@@ -211,8 +211,14 @@ describe('checkpoint through the store', () => {
 	// anything: no success, no cleared alert, no pointer past the ghost row.
 	it('a failed send surfaces as an error and clears nothing', async () => {
 		seed(await makeRow(M1, {}));
-		sendImpl = async () => { throw new Error('server rejected'); };
-		await expect(store.createDialogCheckpoint(peer)).rejects.toThrow('CHECKPOINT_SEND_FAILED');
+		// shaped like a transient IngestError: durable in the outbox, retried
+		const transient = Object.assign(new Error('ingest network error'), { name: 'IngestError', permanent: false });
+		sendImpl = async () => { throw transient; };
+		const failure = await store.createDialogCheckpoint(peer).then(() => null, (e) => e);
+		expect(failure?.message).toBe('CHECKPOINT_SEND_FAILED');
+		// the cause travels so the UI can say "queued, will retry" instead of
+		// reporting an outbox-held write as lost
+		expect(failure?.cause).toBe(transient);
 		expect(store.checkpointAlerts.has(peer)).toBe(false);
 	});
 

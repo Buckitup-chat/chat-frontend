@@ -16,9 +16,17 @@ const encodeBase64 = (bytes, padded = false) => {
 
 const SIGN_HASH_RELATIONS = new Set(['dialog_messages', 'dialog_messages_versions']);
 
+// A write path that awaits its outcome must not inherit fetch's "wait
+// forever": on a half-open connection a bare fetch never settles, and
+// everything upstream — retries, the outbox, the button the user pressed —
+// hangs with it. 30s is far beyond any healthy round trip.
+const FETCH_TIMEOUT_MS = 30_000;
+const timedFetch = (url, init = {}) =>
+  fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+
 export const api = {
   ingest: (mutations) => {
-    return fetch(`${ELECTRIC_API_URL}/ingest`, {
+    return timedFetch(`${ELECTRIC_API_URL}/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mutations }),
@@ -30,7 +38,7 @@ export const api = {
     const challengeSig = ml_dsa87.sign(new TextEncoder().encode(challengeResp.challenge), signSkey);
     const signature = encodeBase64(challengeSig);
 
-    return fetch(`${ELECTRIC_API_URL}/ingest`, {
+    return timedFetch(`${ELECTRIC_API_URL}/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -48,7 +56,7 @@ export const api = {
     const challengeSig = ml_dsa87.sign(new TextEncoder().encode(challengeResp.challenge), signSkey);
     const signature = encodeBase64(challengeSig);
 
-    return fetch(`${ELECTRIC_API_URL}/ingest_each`, {
+    return timedFetch(`${ELECTRIC_API_URL}/ingest_each`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -62,7 +70,7 @@ export const api = {
   },
 
   getChallenge: async () => {
-    const resp = await fetch(`${ELECTRIC_API_URL}/challenge`, {
+    const resp = await timedFetch(`${ELECTRIC_API_URL}/challenge`, {
       headers: { accept: "application/json" },
     });
     return resp.json();

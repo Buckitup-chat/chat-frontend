@@ -32,7 +32,7 @@ export const TREE_VERSION = 'dialog-view-tree-v2';
 
 const FRONTIER_DOMAIN = 'BUCKITUP_DIALOG_FRONTIER_V2';
 const LEAF_DOMAIN = 'BUCKITUP_DIALOG_VIEW_LEAF_V2';
-const NODE_DOMAIN = 'BUCKITUP_DIALOG_VIEW_NODE_V1';
+const NODE_DOMAIN = 'BUCKITUP_DIALOG_VIEW_NODE_V2';
 
 const utf8 = (s: string) => new TextEncoder().encode(s);
 
@@ -126,7 +126,10 @@ const buildBranch = (entries: TrieLeaf[], fromBit: number): TrieBranch => {
 	return { kind: 'node', bit, left, right, hash: nodeHash(bit, left.hash, right.hash) };
 };
 
-const EMPTY_ROOT = () => concatHash(utf8(NODE_DOMAIN), utf8('\0empty'));
+// The version is mixed in explicitly: the empty dialog is the one state
+// whose root no leaf-hash change would otherwise touch, and roots from
+// different tree semantics must never compare equal.
+const EMPTY_ROOT = () => concatHash(utf8(NODE_DOMAIN), ...framed(utf8(TREE_VERSION)), utf8('empty'));
 
 /**
  * Deterministic for a given state regardless of construction or delivery

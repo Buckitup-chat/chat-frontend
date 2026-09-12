@@ -2,8 +2,8 @@
 // the checkpoint fixed, and does the pointer survive a round trip.
 import { describe, it, expect, beforeEach } from 'vitest';
 import { _setStoreForTests } from '@/lib/data/localStore';
-import { loadPointer, savePointer, rawViewState, viewMoved } from '@/lib/data/checkpointAlerts';
-import { buildViewTree } from '@/lib/pq/checkpoint';
+import { loadPointer, savePointer, rawViewState, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
+import { buildViewTree, CHECKPOINT_VERSION } from '@/lib/pq/checkpoint';
 
 const M1 = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
 const M2 = 'dmsg_0192aabb-0000-7000-8000-000000000002';
@@ -62,13 +62,65 @@ describe('pointer storage', () => {
 	const DIALOG = 'di_' + 'b'.repeat(128);
 
 	it('round-trips, and an unknown dialog reads as nothing scanned', async () => {
-		expect(await loadPointer(ME, DIALOG)).toEqual({ checkpoint: null, scannedTo: 0 });
+		expect(await loadPointer(ME, DIALOG)).toEqual({ v: CHECKPOINT_VERSION, checkpoint: null, scannedTo: 0 });
 		const pointer = {
 			checkpoint: { messageId: M1, viewRoot: rootOf(rows), frontierRoot: 'dfr_x', createdAt: 1788470000 },
 			scannedTo: 1788470000123,
 		};
 		await savePointer(ME, DIALOG, pointer);
-		expect(await loadPointer(ME, DIALOG)).toEqual(pointer);
+		expect(await loadPointer(ME, DIALOG)).toEqual({ ...pointer, v: CHECKPOINT_VERSION });
+	});
+
+	// Roots from other checkpoint semantics are incomparable with freshly
+	// derived ones; a stale pointer must read as EMPTY (rescan), not as a
+	// baseline that lights an unquenchable dot.
+	it('a pointer saved under other semantics reads as nothing known', async () => {
+		mem.set(`cpptr|${ME}|${DIALOG}`, JSON.stringify({
+			v: 1,
+			checkpoint: { messageId: M1, viewRoot: 'dvr_old', frontierRoot: 'dfr_old', createdAt: 1 },
+			scannedTo: 999,
+		}));
+		// raw write above bypasses savePointer's stamping — emulate exactly
+		// what an older build left behind
+		_setStoreForTests({
+			async get(k) { const v = mem.get(k); return v ? JSON.parse(v as string) : null; },
+			async set(k, v) { mem.set(k, JSON.stringify(v)); },
+			async delete(k) { mem.delete(k); },
+			async keys() { return [...mem.keys()]; },
+			async clear() { mem.clear(); },
+		});
+		expect(await loadPointer(ME, DIALOG)).toEqual({ v: CHECKPOINT_VERSION, checkpoint: null, scannedTo: 0 });
+	});
+
+	// Two dialogs indexed concurrently: the second read-modify-write must not
+	// overwrite the first (the sweep and a fresh signing interleave through
+	// await points on the same index array).
+	it('concurrent index registrations both survive', async () => {
+		const slow = new Map<string, unknown>();
+		_setStoreForTests({
+			async get(k) { await new Promise((r) => setTimeout(r, 1)); return slow.get(k) ?? null; },
+			async set(k, v) { await new Promise((r) => setTimeout(r, 1)); slow.set(k, v); },
+			async delete(k) { slow.delete(k); },
+			async keys() { return [...slow.keys()]; },
+			async clear() { slow.clear(); },
+		});
+		const D2 = 'di_' + 'e'.repeat(128);
+		await Promise.all([
+			rememberPointerDialog(ME, DIALOG),
+			rememberPointerDialog(ME, D2),
+		]);
+		expect(await pointerDialogs(ME)).toEqual(new Set([DIALOG, D2]));
+	});
+
+	// An unreadable index is "unknown", not "empty": the sweep retries next
+	// tick instead of silently skipping every dialog for the session.
+	it('an unreadable index reads as unknown, an absent one as empty', async () => {
+		expect(await pointerDialogs(ME)).toEqual(new Set());
+		_setStoreForTests({
+			async get() { throw new Error('locked vault'); },
+			async set() {}, async delete() {}, async keys() { return []; }, async clear() {},
+		});
+		expect(await pointerDialogs(ME)).toBe(null);
 	});
 
 	it('is scoped per account and per dialog', async () => {
@@ -82,7 +134,7 @@ describe('pointer storage', () => {
 			async get() { throw new Error('locked vault'); },
 			async set() {}, async delete() {}, async keys() { return []; }, async clear() {},
 		});
-		expect(await loadPointer(ME, DIALOG)).toEqual({ checkpoint: null, scannedTo: 0 });
+		expect(await loadPointer(ME, DIALOG)).toEqual({ v: CHECKPOINT_VERSION, checkpoint: null, scannedTo: 0 });
 	});
 });
 

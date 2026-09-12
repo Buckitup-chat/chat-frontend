@@ -198,6 +198,38 @@ describe('checkpoint alerts', () => {
 		expect(found).toMatchObject({ changed: false, messageId: CP });
 	});
 
+	// Roots from other checkpoint semantics are incomparable with locally
+	// derived ones — adopting a v1 carrier as the pointer would light a
+	// "changed" dot that no state can ever put out.
+	it('a checkpoint from other semantics never becomes the pointer', async () => {
+		const r1 = await row(M1, [{ kind: 'text', text: 'hi' }]);
+		const stale = { ...checkpointPart([r1]), version: 1, treeVersion: 'dialog-view-tree-v1' };
+		seed(r1, await row(CP, [stale], { [M1]: r1.sign_hash }));
+
+		expect(await store.refreshCheckpointAlert(peer)).toBe(null);
+		expect(store.alertingPeers.has(peer)).toBe(false);
+		const pointer = await loadPointer(me.userHash, dialogHash);
+		expect(pointer.checkpoint).toBe(null);
+	});
+
+	// The gated sweep can only see indexed dialogs, and the index used to be
+	// written only by the sweep itself — a closed loop. Opening the dialog
+	// (Page_Chat calls refreshCheckpointAlert) is the bootstrap: a checkpoint
+	// signed by this account on ANOTHER device is discovered and registered
+	// here, and the sweep sees the dialog from then on.
+	it('a dialog visit bootstraps the index for the sweep', async () => {
+		const r1 = await row(M1, [{ kind: 'text', text: 'hi' }]);
+		seed(r1, await row(CP, [checkpointPart([r1])], { [M1]: r1.sign_hash }));
+
+		await store.scanCheckpointAlerts([peer]);
+		expect(opened).toEqual([]); // not indexed: the sweep must not open it
+
+		await store.refreshCheckpointAlert(peer); // = opening the dialog
+		opened = []; // count only what the SWEEP opens from here
+		await store.scanCheckpointAlerts([peer]);
+		expect(opened).toEqual([dialogHash]); // now indexed and swept
+	});
+
 	it('a dialog whose content will not decrypt raises no alert', async () => {
 		// direct refresh (the probe/manual path): rows exist but their key is
 		// absent, so no checkpoint can be found — and that must mean silence,

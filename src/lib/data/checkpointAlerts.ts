@@ -13,10 +13,15 @@
 // account key and its key name is derived — another account sharing the
 // browser profile learns neither the pointer nor which dialog it belongs to.
 import { kvGet, kvSet } from './localStore';
-import { buildViewTree } from '@/lib/pq/checkpoint';
+import { buildViewTree, CHECKPOINT_VERSION } from '@/lib/pq/checkpoint';
 
 export interface CheckpointPointer {
 	/** Newest checkpoint this user signed in the dialog; null = none found. */
+	/** Checkpoint semantics version the roots were derived under. A stored
+	 * pointer from other semantics is incomparable with freshly derived
+	 * roots — comparing them would light a "changed" dot that nothing can
+	 * ever put out. */
+	v?: number;
 	checkpoint: {
 		messageId: string;
 		viewRoot: string;
@@ -30,14 +35,18 @@ export interface CheckpointPointer {
 	scannedTo: number;
 }
 
-const EMPTY: CheckpointPointer = { checkpoint: null, scannedTo: 0 };
+const EMPTY: CheckpointPointer = { v: CHECKPOINT_VERSION, checkpoint: null, scannedTo: 0 };
 
 const key = (userHash: string, dialogHash: string) => `cpptr|${userHash}|${dialogHash}`;
 
 export const loadPointer = async (userHash: string, dialogHash: string): Promise<CheckpointPointer> => {
 	if (!userHash || !dialogHash) return EMPTY;
 	try {
-		return (await kvGet<CheckpointPointer>(key(userHash, dialogHash))) ?? EMPTY;
+		const stored = await kvGet<CheckpointPointer>(key(userHash, dialogHash));
+		// Other-version pointers are dropped wholesale (scannedTo included):
+		// the rescan re-reads the dialog under current semantics.
+		if (!stored || stored.v !== CHECKPOINT_VERSION) return EMPTY;
+		return stored;
 	} catch {
 		// Locked vault or another account's record: treat as "nothing known"
 		// rather than failing the dialogs list.
@@ -52,7 +61,7 @@ export const savePointer = async (
 ): Promise<void> => {
 	if (!userHash || !dialogHash) return;
 	try {
-		await kvSet(key(userHash, dialogHash), pointer);
+		await kvSet(key(userHash, dialogHash), { ...pointer, v: CHECKPOINT_VERSION });
 		// The sweep only visits indexed dialogs, so a pointer that carries a
 		// checkpoint must register its dialog or no alert will ever fire there.
 		if (pointer.checkpoint) await rememberPointerDialog(userHash, dialogHash);
@@ -123,23 +132,30 @@ export const viewMoved = (
 
 const indexKey = (userHash: string) => `cpptr-index|${userHash}`;
 
-export const pointerDialogs = async (userHash: string): Promise<Set<string>> => {
+export const pointerDialogs = async (userHash: string): Promise<Set<string> | null> => {
 	if (!userHash) return new Set();
 	try {
 		return new Set((await kvGet<string[]>(indexKey(userHash))) ?? []);
-	} catch {
-		return new Set();
+	} catch (e) {
+		// null = "could not read", distinct from "nothing indexed": the caller
+		// skips this tick and retries, instead of silently sweeping nothing
+		// for the rest of the session.
+		console.warn('[checkpointAlerts] pointer index read failed:', e);
+		return null;
 	}
 };
 
-export const rememberPointerDialog = async (userHash: string, dialogHash: string): Promise<void> => {
-	if (!userHash || !dialogHash) return;
-	try {
-		const dialogs = await pointerDialogs(userHash);
+let indexWrite: Promise<void> = Promise.resolve();
+
+export const rememberPointerDialog = (userHash: string, dialogHash: string): Promise<void> => {
+	if (!userHash || !dialogHash) return Promise.resolve();
+	indexWrite = indexWrite.then(async () => {
+		const dialogs = (await pointerDialogs(userHash)) ?? new Set<string>();
 		if (dialogs.has(dialogHash)) return;
 		dialogs.add(dialogHash);
 		await kvSet(indexKey(userHash), [...dialogs]);
-	} catch (e) {
+	}).catch((e) => {
 		console.warn('[checkpointAlerts] pointer index update failed:', e);
-	}
+	});
+	return indexWrite;
 };

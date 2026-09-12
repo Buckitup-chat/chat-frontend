@@ -110,7 +110,8 @@ export class ContentDecodeError extends Error {}
 
 // Wire grammar of a checkpoint frontier entry (pq_dialogs.md: message_id =
 // "dmsg_" + UUIDv7; sign_hash = "dms_" + 128 hex chars).
-const FRONTIER_MESSAGE_ID = /^dmsg_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const isWireMessageId = (s: string): boolean => FRONTIER_MESSAGE_ID.test(s);
+const FRONTIER_MESSAGE_ID = /^dmsg_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FRONTIER_SIGN_HASH = /^dms_[0-9a-f]{128}$/;
 
 const encodePart = (part: ContentPart): unknown => {

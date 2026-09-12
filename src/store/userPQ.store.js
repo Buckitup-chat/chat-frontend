@@ -37,9 +37,18 @@ export const userPQStore = defineStore('userPQ', () => {
     });
   });
 
-  const isAuthenticated = computed(() => em.value?.isAuth ?? false);
-
-  const currentUserHash = computed(() => em.value?.currentUserHash ?? null);
+  // Plain refs fed by the manager's authChange event — NOT computeds over
+  // the instance. EncryptionManagerPQ extends EventTarget (a raw target for
+  // Vue's reactivity) and keeps #currentUserHash in a private field, so a
+  // computed reading it never invalidates: it would freeze on whatever value
+  // the first read saw and every watcher downstream would stay silent
+  // across login/logout/account switch.
+  const isAuthenticated = ref(false);
+  const currentUserHash = ref(null);
+  const syncAuthState = () => {
+    isAuthenticated.value = em.value?.isAuth ?? false;
+    currentUserHash.value = em.value?.currentUserHash ?? null;
+  };
 
   const currentUserFull = computed(() => {
     if (!currentUser.value) return null;
@@ -51,7 +60,11 @@ export const userPQStore = defineStore('userPQ', () => {
 
     // Phase 1: local vault registry (fast, offline)
     em.value = EncryptionManagerPQ.getInstance();
+    // Every auth transition dispatches authChange: login, logout,
+    // createUserVault (logs in), deleteUserVault (logs out if current).
+    em.value.addEventListener('authChange', syncAuthState);
     await em.value.initialize();
+    syncAuthState();
     myLocalUsers.value = await em.value.getLocalUserCards();
     localDataReady.value = true;
 

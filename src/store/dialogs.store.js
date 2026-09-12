@@ -10,7 +10,7 @@ import { feedOrderKey } from '@/lib/data/feedOrder';
 import { loadPointer, savePointer, viewMoved, pointerDialogs } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
-import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError } from '@/lib/pq/content';
+import { encodeContent, decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError } from '@/lib/pq/content';
 import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
@@ -445,7 +445,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 onStatus?.('synced');
             } catch (e) {
                 console.error('[dialogs] sendMessage failed:', e);
-                onStatus?.('error');
+                onStatus?.('error', e);
             }
         })();
 
@@ -740,6 +740,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
             if (!decoded.decrypted) { sawUndecrypted = true; continue; }
             const part = (decoded.parts || []).find((x) => x.kind === 'checkpoint');
             if (!part) continue;
+            // Roots from other checkpoint semantics are incomparable with
+            // locally derived ones — adopting such a pointer lights a
+            // "changed" dot that no state can ever put out (§32: unknown
+            // versions are unverifiable, never unequal).
+            if (part.version !== CHECKPOINT_VERSION || part.reducerVersion !== REDUCER_VERSION || part.treeVersion !== TREE_VERSION) continue;
             // newest first: the first decrypted hit wins; rows below it are
             // older and cannot beat it, so they never need decoding at all
             found = {
@@ -817,18 +822,25 @@ export const useDialogsStore = defineStore('dialogs', () => {
             // this account has a checkpoint pointer, and those dialogs are
             // indexed; everything else is skipped without opening a shape.
             const indexed = await pointerDialogs($userPQ.currentUserHash);
+            // null = the index could not be read (locked storage, transient
+            // failure). Skipping the tick keeps the 30s retry alive; treating
+            // it as "empty" would silently disable every alert for the session.
+            if (indexed === null) return;
             for (const peerHash of peerHashes) {
                 if (!peerHash || peerHash === $userPQ.currentUserHash) continue;
                 const dialogHash = getDialogHash(peerHash);
                 if (!dialogHash || !indexed.has(dialogHash)) continue;
+                let budget;
                 try {
                     await Promise.race([
                         refreshCheckpointAlert(peerHash),
-                        new Promise((_, reject) => setTimeout(
-                            () => reject(new Error('refresh budget exceeded')), REFRESH_BUDGET_MS)),
+                        new Promise((_, reject) => { budget = setTimeout(
+                            () => reject(new Error('refresh budget exceeded')), REFRESH_BUDGET_MS); }),
                     ]);
                 } catch (e) {
                     console.warn('[dialogs] checkpoint alert scan failed for', peerHash, e);
+                } finally {
+                    clearTimeout(budget);
                 }
             }
         })().finally(() => { scanInFlight = null; });
@@ -909,6 +921,16 @@ export const useDialogsStore = defineStore('dialogs', () => {
             throw err;
         }
 
+        // The server's Ecto types make an out-of-grammar message_id
+        // unreplicable, so this is a tripwire, not a reachable path: if the
+        // grammars ever diverge, fail here — at signing, visibly — rather
+        // than publish a checkpoint whose own decoder rejects it.
+        const badFrontier = Object.keys(frontier).filter((mid) => !isWireMessageId(mid));
+        if (badFrontier.length) {
+            const err = new Error('INCOMPLETE_CAUSAL_HISTORY');
+            err.details = { unadmitted: badFrontier, waiting: 0, undecryptableRefs: [] };
+            throw err;
+        }
         const part = {
             kind: 'checkpoint',
             version: CHECKPOINT_VERSION,
@@ -926,15 +948,15 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // replay lands later, the next scan adopts the row as usual.
         let settle;
         const sent = new Promise((resolve, reject) => { settle = { resolve, reject }; });
-        const messageId = await sendMessage(peerHash, [part], (status) => {
+        const messageId = await sendMessage(peerHash, [part], (status, cause) => {
             if (status === 'synced') settle.resolve();
-            else if (status === 'error') settle.reject(new Error('CHECKPOINT_SEND_FAILED'));
+            else if (status === 'error') settle.reject(new Error('CHECKPOINT_SEND_FAILED', { cause }));
         });
         await sent;
         // The new checkpoint is the pointer now: the dialog matches what was just
         // confirmed, so its alert clears without waiting for the next scan.
         checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, { changed: false, createdAt: part.createdAt, messageId });
-        savePointer($userPQ.currentUserHash, getDialogHash(peerHash), {
+        await savePointer($userPQ.currentUserHash, getDialogHash(peerHash), {
             checkpoint: { messageId, viewRoot: part.viewRoot, frontierRoot: part.frontierRoot, createdAt: part.createdAt },
             scannedTo: feedOrderKey(messageId, part.createdAt),
         }).catch(() => { });
