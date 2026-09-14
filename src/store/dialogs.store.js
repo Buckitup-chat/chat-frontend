@@ -2,7 +2,8 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { getUserCardsCollection, getDialogCollections, withDialogCollections } from '@/lib/data/collections';
-import { sendMutationsAndAwaitShape } from '@/lib/data/ingest';
+import { sendMutationsAndAwaitShape, DurabilityError, OWNER_FIELD } from '@/lib/data/ingest';
+import { enqueueIntent, resolveIntent } from '@/lib/data/intents';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
 import { assertFreshBase } from '@/lib/data/staleBase';
@@ -56,10 +57,45 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // (an edit basing on the tip, a second message needing the key row, a
     // reaction toggle) reads the collection as its base, and an HTTP 200 only
     // proves the Postgres commit — not that Electric delivered it.
+    //
+    // §3.1: the row arrives here fully constructed (content and refs already
+    // encrypted) but not yet signed — signing needs the vault, an await that
+    // did not durably exist before this. A durable intent closes that one
+    // gap: a crash or reload during getSignSkeyBytes() now has something to
+    // recover, instead of losing a fully-built row with nothing to show for
+    // it. The intent is resolved once the mutation is durably in outbox.ts
+    // (signed and enqueued) — from there, outbox.ts's own retry/quarantine
+    // lifecycle is authoritative regardless of how the network call turns
+    // out; a stale intent left behind by an actual DurabilityError is the one
+    // case that must survive to be retried instead.
     const pushRow = async (relation, row, mutationType = 'insert') => {
+        const owner = row[OWNER_FIELD[relation]] ?? '';
+        const intentId = await enqueueIntent({ relation, row, mutationType }, owner, relation);
+        if (intentId === null) {
+            throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
+        }
+        // Everything up to and including getSignSkeyBytes()/createGenericMutation
+        // may fail (vault locked, key export error) with the intent left
+        // untouched and durable — that is the point. Only past this line does
+        // sendMutationsAndAwaitShape run, whose own first step is outbox.ts's
+        // enqueue(): once that has happened, outbox.ts's retry/quarantine
+        // lifecycle is authoritative and the intent's job is done regardless
+        // of how the network call itself turns out.
         const signSkey = await getSignSkeyBytes();
         const mutation = api.createGenericMutation(relation, row, signSkey, mutationType);
-        return sendMutationsAndAwaitShape([mutation], signSkey);
+        try {
+            const result = await sendMutationsAndAwaitShape([mutation], signSkey);
+            await resolveIntent(intentId);
+            return result;
+        } catch (e) {
+            if (!(e instanceof DurabilityError)) {
+                // Reached outbox.ts — nothing reads intents.ts for recovery
+                // yet (§3.6/§3.7), so leaving this one behind would only
+                // leak it.
+                await resolveIntent(intentId);
+            }
+            throw e;
+        }
     };
 
     // --- causal refs (refs_map) ---

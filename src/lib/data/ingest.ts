@@ -53,6 +53,30 @@ const isUniqueConflict = (r: IngestRowResult): boolean => {
 	);
 };
 
+function validateBatchResults(results: unknown, mutationCount: number, status: number): IngestRowResult[] {
+	if (!Array.isArray(results)) {
+		throw new IngestError(`ingest HTTP ${status}: no per-row results`, { permanent: false, status });
+	}
+	if (results.length !== mutationCount) {
+		throw new IngestError(
+			`ingest: expected ${mutationCount} results, got ${results.length}`,
+			{ permanent: false, status }
+		);
+	}
+	const seen = new Set<number>();
+	for (const r of results) {
+		const index = (r as { index?: unknown } | null)?.index;
+		if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index >= mutationCount) {
+			throw new IngestError(`ingest: malformed result index ${JSON.stringify(index)}`, { permanent: false, status });
+		}
+		if (seen.has(index)) {
+			throw new IngestError(`ingest: duplicate result index ${index}`, { permanent: false, status });
+		}
+		seen.add(index);
+	}
+	return results as IngestRowResult[];
+}
+
 export interface SendResult {
 	txids: number[];
 	results: IngestRowResult[];
@@ -81,13 +105,7 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 		/* non-JSON body */
 	}
 
-	const results = body?.results;
-	if (!Array.isArray(results)) {
-		throw new IngestError(`ingest HTTP ${resp.status}: no per-row results`, {
-			permanent: false,
-			status: resp.status,
-		});
-	}
+	const results = validateBatchResults(body?.results, mutations.length, resp.status);
 
 	const failed = results.filter((r) => r.status !== 'ok');
 	if (failed.length > 0) {
@@ -196,7 +214,9 @@ interface MutationShape {
  */
 // Which row field names the signing account, per relation. Used to partition
 // outbox entries: only the account whose key signed a mutation may replay it.
-const OWNER_FIELD: Record<string, string> = {
+// Exported so callers can attribute a durable intent (intents.ts, §3.1) to
+// its owner before a mutation exists to read syncMetadata.relation from.
+export const OWNER_FIELD: Record<string, string> = {
 	user_cards: 'user_hash',
 	user_storage: 'user_hash',
 	dialog_keys: 'sender_hash',

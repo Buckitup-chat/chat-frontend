@@ -39,8 +39,25 @@ vi.mock('@/lib/data/collections', () => ({
 	getDialogCollections: () => collections.dialog,
 }));
 
+class MockDurabilityError extends Error {}
+
 vi.mock('@/lib/data/ingest', () => ({
 	sendMutationsAndAwaitShape: (mutations) => sendImpl(mutations),
+	DurabilityError: MockDurabilityError,
+	OWNER_FIELD: {
+		dialog_keys: 'sender_hash',
+		dialog_messages: 'sender_hash',
+		dialog_message_reactions: 'reactor_hash',
+		dialog_message_receipts: 'peer_hash',
+	},
+}));
+
+// §3.1: pushRow now durables an intent before signing. Store-level tests are
+// about what gets sent, not about the intent store itself (covered by
+// tests/intents.test.ts) — a no-op stub keeps that orthogonal.
+vi.mock('@/lib/data/intents', () => ({
+	enqueueIntent: async () => 'test-intent-id',
+	resolveIntent: async () => {},
 }));
 
 vi.mock('@/api/client', () => ({

@@ -46,8 +46,20 @@ vi.mock('@/lib/data/collections', () => ({
 	getDialogCollections: () => collections.dialog,
 	withDialogCollections: async (h, read) => read(collections.dialog),
 }));
+class MockDurabilityError extends Error {}
 vi.mock('@/lib/data/ingest', () => ({
 	sendMutationsAndAwaitShape: (mutations) => sendImpl(mutations),
+	DurabilityError: MockDurabilityError,
+	OWNER_FIELD: {
+		dialog_keys: 'sender_hash',
+		dialog_messages: 'sender_hash',
+		dialog_message_reactions: 'reactor_hash',
+		dialog_message_receipts: 'peer_hash',
+	},
+}));
+vi.mock('@/lib/data/intents', () => ({
+	enqueueIntent: async () => 'test-intent-id',
+	resolveIntent: async () => {},
 }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: { getInstance: () => ({ exportVaultKeys: async () => HOLDER.vault }) },

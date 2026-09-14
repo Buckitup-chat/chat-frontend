@@ -28,7 +28,21 @@ vi.mock('@/lib/data/collections', () => ({
 	getUserCardsCollection: () => collections.cards,
 	getDialogCollections: () => collections.dialog,
 }));
-vi.mock('@/lib/data/ingest', () => ({ sendMutationsAndAwaitShape: async () => ({ ok: true }) }));
+class MockDurabilityError extends Error {}
+vi.mock('@/lib/data/ingest', () => ({
+	sendMutationsAndAwaitShape: async () => ({ ok: true }),
+	DurabilityError: MockDurabilityError,
+	OWNER_FIELD: {
+		dialog_keys: 'sender_hash',
+		dialog_messages: 'sender_hash',
+		dialog_message_reactions: 'reactor_hash',
+		dialog_message_receipts: 'peer_hash',
+	},
+}));
+vi.mock('@/lib/data/intents', () => ({
+	enqueueIntent: async () => 'test-intent-id',
+	resolveIntent: async () => {},
+}));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: { getInstance: () => ({ exportVaultKeys: async () => ({}) }) },
 }));
