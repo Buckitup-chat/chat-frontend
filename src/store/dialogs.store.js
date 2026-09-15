@@ -1251,7 +1251,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
             reactor_hash: myHash,
         };
 
-        const typeB64 = intent.desiredActive ? await DialogCrypto.encryptContent(myKey, emoji) : '';
+        // A retraction still needs an encrypted, non-empty type_b64: the
+        // backend's own changeset requires the field present (Ecto treats an
+        // empty binary as blank), so a literal '' is rejected 422 forever and
+        // the reaction can never be removed. Encrypt an empty emoji instead.
+        const typeB64 = await DialogCrypto.encryptContent(myKey, intent.desiredActive ? emoji : '');
         const row = {
             ...base,
             type_b64: typeB64,

@@ -38,9 +38,13 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 		update: { dependencyClass: 'chained', confirmation: 'accepted' },
 	},
 	dialog_keys: {
-		// Prerequisite for messages/reactions in the dialog — the server checks
-		// its own store, not our shape.
-		insert: { dependencyClass: 'prerequisite-provider', confirmation: 'accepted' },
+		// Prerequisite for messages/reactions in the dialog on the SERVER side
+		// — but this client also reads the row back from the shape as its own
+		// "have I published a key yet" check (initDialogKeysUnguarded), so
+		// 'accepted' left a window where a second call in the same dialog saw
+		// "absent" and republished with a fresh (incompatible) key wrapping,
+		// permanently conflicting with itself. Await the echo.
+		insert: { dependencyClass: 'prerequisite-provider', confirmation: 'visible' },
 	},
 	dialog_messages: {
 		// CONTESTED rows of the barrier table (№6-8): stays 'visible' until the
@@ -50,7 +54,13 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 		update: { dependencyClass: 'chained', confirmation: 'visible' },
 	},
 	dialog_message_reactions: {
-		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
+		// The reaction-intent map (runReactionWrite) clears its in-flight entry
+		// as soon as the write settles and re-derives "is this active" from the
+		// collection on the next tap. 'accepted' left the same window as
+		// dialog_keys above: a second tap inside replication lag saw no pending
+		// intent and no row yet, so an un-react re-sent an insert instead of a
+		// retraction. Await the echo.
+		insert: { dependencyClass: 'independent', confirmation: 'visible' },
 		// toggle reads the stored row's owner_timestamp — contested (№9), keep
 		update: { dependencyClass: 'chained', confirmation: 'visible' },
 	},

@@ -95,8 +95,14 @@ export interface DialogMessageReceiptRow {
 /** Per-row outcome of POST /ingest_each. */
 export interface IngestRowResult {
 	index: number;
-	status: 'ok' | 'error';
+	/**
+	 * 'exists' is the server's own idempotency verdict on a PK conflict:
+	 * `conflicted: false` means the stored row already carries our exact
+	 * fields (a safe retry), `true` means a different revision is there.
+	 */
+	status: 'ok' | 'error' | 'exists';
 	txid?: number;
+	conflicted?: boolean;
 	error?: string;
 	details?: Record<string, string[]>;
 }
