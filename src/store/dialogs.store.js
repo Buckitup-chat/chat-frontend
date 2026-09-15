@@ -7,7 +7,7 @@ import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
 import { assertFreshBase } from '@/lib/data/staleBase';
 import { feedOrderKey } from '@/lib/data/feedOrder';
-import { loadPointer, savePointer, viewMoved, pointerDialogs } from '@/lib/data/checkpointAlerts';
+import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError } from '@/lib/pq/content';
@@ -784,6 +784,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
         });
         if (pointer.scannedTo !== stored.scannedTo || pointer.checkpoint !== stored.checkpoint) {
             await savePointer(me, dialogHash, pointer);
+        } else if (pointer.checkpoint) {
+            // Unchanged pointer ≠ registered dialog: the index entry can be
+            // lost independently (a failed write), and this visit is its
+            // only way back — the sweep never looks at unindexed dialogs.
+            await rememberPointerDialog(me, dialogHash);
         }
         if (!pointer.checkpoint) {
             checkpointAlerts.value.delete(peerHash);
@@ -874,6 +879,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const state = {};
         const unadmitted = [];
         for (const row of current) {
+            // message_id is signed but a peer signs whatever they like; the
+            // server's Ecto type stops out-of-grammar ids from replicating,
+            // and this is the client half: such a row is unadmitted, never a
+            // trie key (buildViewTree throws on non-ASCII by design).
+            if (!isWireMessageId(row.message_id)) {
+                unadmitted.push(row.message_id);
+                continue;
+            }
             const verdict = await admitMessageRow(row);
             if (verdict.status === 'verified') {
                 state[row.message_id] = { signHash: row.sign_hash, deleted: !!row.deleted_flag };
@@ -910,6 +923,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * reference data never seen locally).
      */
     const createDialogCheckpoint = async (peerHash) => {
+        const me = $userPQ.currentUserHash;
         const dialogHash = getDialogHash(peerHash);
         const { state, rows, unadmitted } = await computeDialogViewState(dialogHash);
         const gate = gateFor(dialogHash);
@@ -953,10 +967,15 @@ export const useDialogsStore = defineStore('dialogs', () => {
             else if (status === 'error') settle.reject(new Error('CHECKPOINT_SEND_FAILED', { cause }));
         });
         await sent;
+        // A switch during the (possibly minutes-long) send: the checkpoint
+        // belongs to the account that signed it — writing its pointer under
+        // the new account's keys would plant an unquenchable alert in a
+        // dialog where the referenced carrier does not even exist.
+        if ($userPQ.currentUserHash !== me) return { messageId, part };
         // The new checkpoint is the pointer now: the dialog matches what was just
         // confirmed, so its alert clears without waiting for the next scan.
         checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, { changed: false, createdAt: part.createdAt, messageId });
-        await savePointer($userPQ.currentUserHash, getDialogHash(peerHash), {
+        await savePointer(me, dialogHash, {
             checkpoint: { messageId, viewRoot: part.viewRoot, frontierRoot: part.frontierRoot, createdAt: part.createdAt },
             scannedTo: feedOrderKey(messageId, part.createdAt),
         }).catch(() => { });
@@ -1023,9 +1042,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const { frontier } = await computeDialogFrontier(scopedRows);
 
         const historyEqual = deriveFrontierRoot(frontier) === part.frontierRoot;
+        const versionEqual = part.version === CHECKPOINT_VERSION;
         const reducerVersionEqual = part.reducerVersion === REDUCER_VERSION;
         const treeVersionEqual = part.treeVersion === TREE_VERSION;
-        const viewEqual = reducerVersionEqual && treeVersionEqual
+        const viewEqual = versionEqual && reducerVersionEqual && treeVersionEqual
             ? buildViewTree(state).root === part.viewRoot
             : null;
 
@@ -1056,6 +1076,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * gate-verified like everything else.
      */
     const diffDialogCheckpoint = async (peerHash, part) => {
+        // Protocol guard, not a UI courtesy: every caller — present and
+        // future — gets the honest verdict for foreign semantics instead of
+        // a diff built from incomparable roots.
+        if (part.version !== CHECKPOINT_VERSION || part.reducerVersion !== REDUCER_VERSION || part.treeVersion !== TREE_VERSION) {
+            return { status: 'unsupported_version' };
+        }
         const dialogHash = getDialogHash(peerHash);
         const { state: newState, rows } = await computeDialogViewState(dialogHash);
         const { current, versions } = await loadDialogRows(dialogHash);

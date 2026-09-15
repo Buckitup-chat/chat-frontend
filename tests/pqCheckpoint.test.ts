@@ -113,6 +113,37 @@ describe('view tree (Invariants 3, 5, 6, 7)', () => {
 	});
 });
 
+// Golden vectors: the exact bytes of every commitment, pinned. Round 3 of
+// the external review existed because root BYTES changed while the version
+// LABEL did not — the two live in different lines and nothing tied them
+// together. Now anything that touches a domain string, the framing, the
+// leaf encoding or the empty-root derivation fails here first, and the fix
+// is a conscious pair: bump the version, re-pin the vector.
+describe('golden root vectors (semantics dialog-view-tree-v3)', () => {
+	const V = {
+		empty: 'dvr_f3bcd03de89000c6bf9ab01cca0afe925354f33b7ff33cfa1d99da2fd6e2f80a2a0800fe2f128fd81983fac94fea3fd355e50452bec31fd499ce4d2788a50703',
+		one: 'dvr_884679ae3c29ed338bfb58a29b429a3ae900c673c7d1fc0df7d39e5e4389f285c48a7f088d0a3ca3556facd93c1100b34588b2f8ae77317b51eeb7e10f17b4cc',
+		two: 'dvr_e53fd84da31a6975ec26dacb4c22f31ac6f08c9cebbb1f3de7b53e1f390537d739d25361f77cb17555a55ba6bcb67670524a8091d3a5d9f7b53a689a89d9ee02',
+		three: 'dvr_e2a570eec8ea406bf88a4c4a7f65c10c20b0a0ab52a6a9543694978532853a470ea423b44b7e98cd4545e9f45d3cf3d98f8df8182f9678dcf39d62822f5a2a75',
+		oneDeleted: 'dvr_c21c5d896a3efad8aa1c4aa1b1ec2e1142a633cf6de68eab3212326c0a5496d9d2801a3741b1d1e9e9807b3efc0fc7b36453d644c2d15484c1f83d5fc5e9af78',
+		frontierEmpty: 'dfr_bdd0a8d5caea61df45adc03b350c349af62be77fd25c9a8fc7d508ae66553b2f0aa3113715273fdf32f448f5fb6e64828d138d85736b0fd3950713c8b2e2d854',
+		frontierTwo: 'dfr_f078c73ed53b46c94e836c1a0d1615b3599f68d75e1617441c7caeadb5e20e192a4f433edb6d38e4380b49470b5bbdf01850a4a8353cd930b147f1b9e002b7e5',
+	};
+
+	it('view roots reproduce byte for byte', () => {
+		expect(buildViewTree(state(0)).root).toBe(V.empty);
+		expect(buildViewTree(state(1)).root).toBe(V.one);
+		expect(buildViewTree(state(2)).root).toBe(V.two);
+		expect(buildViewTree(state(3)).root).toBe(V.three);
+		expect(buildViewTree({ [mid(0)]: { signHash: sh(0), deleted: true } }).root).toBe(V.oneDeleted);
+	});
+
+	it('frontier roots reproduce byte for byte', () => {
+		expect(deriveFrontierRoot({})).toBe(V.frontierEmpty);
+		expect(deriveFrontierRoot({ [mid(1)]: sh(1), [mid(2)]: sh(2) })).toBe(V.frontierTwo);
+	});
+});
+
 describe('Merkle proof', () => {
 	it('round-trips for every key and fails for tampered values', () => {
 		const s = state(9);

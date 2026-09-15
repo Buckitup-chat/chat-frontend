@@ -28,7 +28,14 @@ import { bytesToHex } from '@noble/hashes/utils';
 
 export const CHECKPOINT_VERSION = 2;
 export const REDUCER_VERSION = 'dialog-state-v1';
-export const TREE_VERSION = 'dialog-view-tree-v2';
+export const TREE_VERSION = 'dialog-view-tree-v3';
+
+/** Everything a stored root's meaning depends on, in one stamp. A pointer
+ * saved under a different stamp is incomparable and must be dropped, so a
+ * future bump of ANY component invalidates it — not only the envelope
+ * version. tests/pqCheckpoint golden vectors pin the actual bytes: any
+ * change to the derivation fails there first and forces a conscious bump. */
+export const CHECKPOINT_SEMANTICS = `${CHECKPOINT_VERSION}|${REDUCER_VERSION}|${TREE_VERSION}`;
 
 const FRONTIER_DOMAIN = 'BUCKITUP_DIALOG_FRONTIER_V2';
 const LEAF_DOMAIN = 'BUCKITUP_DIALOG_VIEW_LEAF_V2';

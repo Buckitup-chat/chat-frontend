@@ -274,7 +274,12 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#cryptSkey = this.#normalizeKey(this.#cryptSkey);
 
     if (!(this.#signSkey instanceof Uint8Array)) {
+      // isAuth is currentUserHash && signSkey: leaving the hash set with the
+      // key gone would strand the app half-logged-in — and this is the one
+      // state change in the file listeners would otherwise never hear about.
       this.#signSkey = null;
+      this.#currentUserHash = null;
+      this.#dispatchAuthChange();
       throw new Error('Failed to load secret key from vault');
     }
 
@@ -392,7 +397,7 @@ export class EncryptionManagerPQ extends EventTarget {
   #dispatchAuthChange() {
     this.dispatchEvent(new CustomEvent('authChange', {
       detail: {
-        isAuthenticated: this.isAuthenticated,
+        isAuthenticated: this.isAuth,
         userHash: this.#currentUserHash
       }
     }));
