@@ -12,7 +12,7 @@ import { api } from '@/api/client';
 import { mutationAppliedOnServer } from './confirm';
 import { dispatchMutations, dependenciesFor } from './coordinator';
 import { OWNER_FIELD } from './writeContracts';
-import { enqueue, resolveEntry, recordFailure, ensureDrainLoop, stopDrainLoop } from './outbox';
+import { enqueue, resolveEntry, recordFailure, ensureDrainLoop, stopDrainLoop, isLeader } from './outbox';
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
@@ -251,6 +251,13 @@ export async function sendMutationsAndAwaitShape(
 	// legitimately run before the vault unlocks opt out per call.
 	if (outboxId === null && (opts.durability ?? 'required') === 'required') {
 		throw new DurabilityError();
+	}
+
+	if (!isLeader()) {
+		ensureDrainLoop(owner, (queued) =>
+			dispatchMutations(queued, (m) => sendMutationsWithRetry(m, signSkey, { retries: 1 }))
+		);
+		return { txids: [], results: [] };
 	}
 
 	let result: SendResult;

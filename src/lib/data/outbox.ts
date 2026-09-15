@@ -92,7 +92,54 @@ let storage: StringStore = createSecureStore(indexedDb, {
 let plainStorage: StringStore = indexedDb;
 let encrypted = true;
 
-const leader = new WebLocksLeader(LOCK_NAME);
+let leader: WebLocksLeader | null = null;
+let leaderUserHash: string | null = null;
+let onBecomeLeader: (() => void) | null = null;
+
+export function isLeader(): boolean {
+	if (leaderOverrideForTests !== null) return leaderOverrideForTests;
+	if (!WebLocksLeader.isSupported()) return true;
+	return leader?.isLeader() ?? true;
+}
+
+let leaderOverrideForTests: boolean | null = null;
+export function _setLeaderForTests(value: boolean | null): void {
+	leaderOverrideForTests = value;
+}
+
+export function startLeaderElection(userHash: string, becomeLeader: () => void): void {
+	if (leaderUserHash === userHash) {
+		onBecomeLeader = becomeLeader;
+		return;
+	}
+	stopLeaderElection();
+	leaderUserHash = userHash;
+	onBecomeLeader = becomeLeader;
+	if (!WebLocksLeader.isSupported()) return;
+	leader = new WebLocksLeader(`${LOCK_NAME}:${userHash}`);
+	leader.onLeadershipChange((becameLeader) => {
+		if (becameLeader) onBecomeLeader?.();
+	});
+	void leader.requestLeadership();
+}
+
+export function stopLeaderElection(): void {
+	leader?.releaseLeadership();
+	leader = null;
+	leaderUserHash = null;
+	onBecomeLeader = null;
+}
+
+const WAKE_CHANNEL_NAME = 'buckitup-outbox-wake';
+const wakeChannel: BroadcastChannel | null =
+	typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(WAKE_CHANNEL_NAME) : null;
+
+export function onOutboxWake(handler: (userHash: string) => void): () => void {
+	if (!wakeChannel) return () => {};
+	const listener = (ev: MessageEvent<{ userHash: string }>) => handler(ev.data.userHash);
+	wakeChannel.addEventListener('message', listener);
+	return () => wakeChannel.removeEventListener('message', listener);
+}
 
 /**
  * Test hook: swap the storage adapter (node has no IndexedDB).
@@ -156,6 +203,7 @@ export async function enqueue(mutations: unknown[], userHash: string, opts: Enqu
 			...(opts.scope ? { scope: opts.scope } : {}),
 		};
 		await storage.set(entry.id, JSON.stringify(entry));
+		wakeChannel?.postMessage({ userHash });
 		return entry.id;
 	} catch (e) {
 		console.warn('[outbox] storage unavailable, write is not durable:', e);
@@ -367,52 +415,50 @@ export async function drainOutbox(
 	userHash: string,
 	send: (mutations: unknown[]) => Promise<unknown>
 ): Promise<DrainResult> {
-	const isLeader = WebLocksLeader.isSupported() ? await leader.requestLeadership() : true;
-	if (!isLeader) {
+	const hasLeadership = leaderOverrideForTests !== null
+		? leaderOverrideForTests
+		: WebLocksLeader.isSupported() ? await (leader?.requestLeadership() ?? Promise.resolve(true)) : true;
+	if (!hasLeadership) {
 		return { sent: 0, dropped: 0, remaining: await pendingCount(userHash), stoppedEarly: false, wasLeader: false };
 	}
 
-	try {
-		// Only entries whose schedule has come due and whose dependencies are
-		// resolved (§7.3). Scheduled and blocked entries stay put — they are
-		// "remaining", not failures, and they hold back nobody else.
-		const entries = await readyEntries(userHash);
-		let sent = 0;
-		let dropped = 0;
+	// Only entries whose schedule has come due and whose dependencies are
+	// resolved (§7.3). Scheduled and blocked entries stay put — they are
+	// "remaining", not failures, and they hold back nobody else.
+	const entries = await readyEntries(userHash);
+	let sent = 0;
+	let dropped = 0;
 
-		for (const entry of entries) {
-			try {
-				await send(entry.mutations);
-				await resolveEntry(entry.id);
-				sent++;
-			} catch (e) {
-				if (e instanceof IngestError && e.permanent) {
-					// Out of the replay path but never silently gone: the entry
-					// keeps its signed mutations and the server's verdict.
-					await recordFailure(entry.id, e);
-					dropped++;
-					continue;
-				}
+	for (const entry of entries) {
+		try {
+			await send(entry.mutations);
+			await resolveEntry(entry.id);
+			sent++;
+		} catch (e) {
+			if (e instanceof IngestError && e.permanent) {
+				// Out of the replay path but never silently gone: the entry
+				// keeps its signed mutations and the server's verdict.
 				await recordFailure(entry.id, e);
-				return {
-					sent,
-					dropped,
-					remaining: entries.length - sent - dropped,
-					stoppedEarly: true,
-					wasLeader: true,
-				};
+				dropped++;
+				continue;
 			}
+			await recordFailure(entry.id, e);
+			return {
+				sent,
+				dropped,
+				remaining: entries.length - sent - dropped,
+				stoppedEarly: true,
+				wasLeader: true,
+			};
 		}
-		return {
-			sent,
-			dropped,
-			remaining: await pendingCount(userHash),
-			stoppedEarly: false,
-			wasLeader: true,
-		};
-	} finally {
-		if (WebLocksLeader.isSupported()) leader.releaseLeadership();
 	}
+	return {
+		sent,
+		dropped,
+		remaining: await pendingCount(userHash),
+		stoppedEarly: false,
+		wasLeader: true,
+	};
 }
 
 // ---------- timed retry loop (ADR §5: RETRYABLE_FAILURE carries a time for

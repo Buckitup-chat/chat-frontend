@@ -11,6 +11,7 @@ import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { api } from '@/api/client';
 import { sendMutationsAndAwaitShape, drainPendingWrites, stopDrainLoop } from '@/lib/data/ingest';
+import { startLeaderElection, stopLeaderElection, onOutboxWake } from '@/lib/data/outbox';
 import { recoverIntents } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { getUserCardsCollection } from '@/lib/data/collections';
@@ -304,6 +305,7 @@ export class EncryptionManagerPQ extends EventTarget {
   // account and dropped on logout — entries signed by another user must not
   // be replayed with this session's auth.
   #outboxOnlineListener = null;
+  #outboxWakeUnsubscribe = null;
 
   #startOutboxDrain() {
     const userHash = this.#currentUserHash;
@@ -321,18 +323,26 @@ export class EncryptionManagerPQ extends EventTarget {
     drainPendingWrites(userHash, signSkey);
 
     this.#stopOutboxDrain();
+    startLeaderElection(userHash, () => drainPendingWrites(userHash, signSkey));
+
     this.#outboxOnlineListener = () => drainPendingWrites(userHash, signSkey);
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.#outboxOnlineListener);
     }
+    this.#outboxWakeUnsubscribe = onOutboxWake((wokenUserHash) => {
+      if (wokenUserHash === userHash) drainPendingWrites(userHash, signSkey);
+    });
   }
 
   #stopOutboxDrain() {
     stopDrainLoop();
+    stopLeaderElection();
     if (this.#outboxOnlineListener && typeof window !== 'undefined') {
       window.removeEventListener('online', this.#outboxOnlineListener);
     }
     this.#outboxOnlineListener = null;
+    this.#outboxWakeUnsubscribe?.();
+    this.#outboxWakeUnsubscribe = null;
   }
 
   async logout() {
