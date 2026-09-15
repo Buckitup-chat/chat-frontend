@@ -652,11 +652,14 @@ export class EncryptionManagerPQ extends EventTarget {
    * unreferenced row rather than a map pointing at nothing.
    */
   async #writeSlot(name, valueB64, hashB64) {
-    const { orphaned } = await this.#slots().ensureSlotUuid(name, {
+    const { uuid, orphaned } = await this.#slots().ensureSlotUuid(name, {
       mint: randomSlotUuid,
       writeRow: (uuid) => this.#writeSlotRow(uuid, valueB64, hashB64),
     });
-    if (orphaned) await this.#tombstoneSlotRow(orphaned);
+    if (orphaned) {
+      await this.#tombstoneSlotRow(orphaned);
+      await this.#writeSlotRow(uuid, valueB64, hashB64);
+    }
   }
 
   // Update User Storage
