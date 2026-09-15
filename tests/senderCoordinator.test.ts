@@ -21,9 +21,10 @@ vi.mock('@/api/client', () => ({
 	},
 }));
 
-const awaitShapeVisibility = vi.fn(async () => true);
+const awaitShapeVisibility = vi.fn(async (_collection: unknown, _txids: number[], _label?: string) => true);
 vi.mock('@/lib/data/barrier', () => ({
-	awaitShapeVisibility: (...args: unknown[]) => awaitShapeVisibility(...args),
+	awaitShapeVisibility: (collection: unknown, txids: number[], label?: string) =>
+		awaitShapeVisibility(collection, txids, label),
 	collectionForRelation: () => null,
 	scopeForRelation: (relation: string) => relation,
 }));
