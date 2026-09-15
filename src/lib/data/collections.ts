@@ -10,6 +10,7 @@ import { electricCollectionOptions } from '@tanstack/electric-db-collection';
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence';
 import { getPersistence } from './persistence';
 import { alwaysActiveVisibility } from './visibility';
+import { mirrorInto } from './readCache';
 import type {
 	UserCardRow,
 	UserStorageRow,
@@ -101,7 +102,12 @@ const buildUserCards = () =>
 	);
 
 export function getUserCardsCollection() {
-	if (!userCards) userCards = buildUserCards();
+	if (!userCards) {
+		userCards = buildUserCards();
+		// The public directory: same rows for every account on this device,
+		// so no account-scoped teardown is needed — it lives for the session.
+		mirrorInto(userCards, 'user_cards');
+	}
 	return userCards;
 }
 
@@ -133,20 +139,26 @@ const buildUserStorage = (userHash: string) =>
  * user_storage, and falling back to an unfiltered shape would quietly restore
  * the network-wide sync this replaced.
  */
+let userStorageUnmirror: (() => void) | null = null;
+
 export function getUserStorageCollection(userHash?: string) {
 	const owner = userHash ?? userStorageOwner;
 	if (!owner) {
 		throw new Error('user_storage collection requires a user_hash; is anyone signed in?');
 	}
 	if (!userStorage || userStorageOwner !== owner) {
+		userStorageUnmirror?.();
 		userStorage = buildUserStorage(owner);
 		userStorageOwner = owner;
+		userStorageUnmirror = mirrorInto(userStorage, 'user_storage');
 	}
 	return userStorage;
 }
 
 /** Drops the per-account collection on logout. */
 export function resetUserStorageCollection() {
+	userStorageUnmirror?.();
+	userStorageUnmirror = null;
 	userStorage = null;
 	userStorageOwner = null;
 }
@@ -213,12 +225,32 @@ const buildDialogCollections = (dialogHash: string) => {
 	};
 };
 
+// §3.13: mirror the warm set into the read-cache fallback so a dialog the
+// user was just looking at still shows something on an offline reload, even
+// without OPFS. Only the warm (LRU-tracked) registry is mirrored — a
+// withDialogCollections() reader is a one-off background read, torn down
+// immediately, not "the dialog the user is in".
+const DIALOG_TABLES: Record<keyof DialogCollections, string> = {
+	keys: 'dialog_keys',
+	messages: 'dialog_messages',
+	versions: 'dialog_messages_versions',
+	reactions: 'dialog_message_reactions',
+	receipts: 'dialog_message_receipts',
+};
+
+const mirrorDialogCollections = (entry: DialogCollections): (() => void) => {
+	const unsubs = (Object.keys(DIALOG_TABLES) as Array<keyof DialogCollections>)
+		.map((k) => mirrorInto(entry[k], DIALOG_TABLES[k]));
+	return () => unsubs.forEach((u) => u());
+};
+
 // LRU: the collections themselves stop syncing once unused (gcTime), but the
 // registry would otherwise keep a strong reference to every dialog bundle
 // visited in the session. Keep the current dialog plus a small warm set for
 // quick back-navigation, and drop the rest.
 const MAX_WARM_DIALOGS = 8;
 const dialogRegistry = new Map<string, DialogCollections>();
+const dialogUnmirror = new Map<string, () => void>();
 
 export function getDialogCollections(dialogHash: string): DialogCollections {
 	const existing = dialogRegistry.get(dialogHash);
@@ -231,11 +263,14 @@ export function getDialogCollections(dialogHash: string): DialogCollections {
 
 	const entry = buildDialogCollections(dialogHash);
 	dialogRegistry.set(dialogHash, entry);
+	dialogUnmirror.set(dialogHash, mirrorDialogCollections(entry));
 
 	while (dialogRegistry.size > MAX_WARM_DIALOGS) {
 		const oldest = dialogRegistry.keys().next().value as string | undefined;
 		if (oldest === undefined) break;
 		dialogRegistry.delete(oldest);
+		dialogUnmirror.get(oldest)?.();
+		dialogUnmirror.delete(oldest);
 	}
 	return entry;
 }
@@ -275,6 +310,8 @@ export function isDialogWarm(dialogHash: string): boolean {
 /** Drop a dialog's collections immediately (e.g. after deleting a dialog). */
 export function releaseDialogCollections(dialogHash: string): void {
 	dialogRegistry.delete(dialogHash);
+	dialogUnmirror.get(dialogHash)?.();
+	dialogUnmirror.delete(dialogHash);
 }
 
 /** Test/inspection helper. */
