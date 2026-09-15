@@ -296,6 +296,58 @@ describe('two first messages in a fresh dialog', () => {
 	});
 });
 
+// §4.4: causal scope is fixed at intent creation, not re-derived against
+// later confirmed state, and an independent new message never waits for a
+// predecessor's signing/ACCEPTED just to avoid a fork (v3, "Момент signing").
+describe('causal scope: signing moment separated from intent creation (§4.4)', () => {
+	const decodeRefsMap = (refsMapB64) => JSON.parse(refsMapB64.replace(/^enc\(/, '').replace(/\)$/, ''));
+
+	it('a message sent after an earlier one is signed observes it as a tail', async () => {
+		const store = useDialogsStore();
+		const statuses = [];
+
+		const firstId = await store.sendMessage(PEER_HASH, 'first', (s) => statuses.push(['first', s]));
+		await waitFor(() => statuses.some(([m, s]) => m === 'first' && (s === 'synced' || s === 'error')), 'first to settle');
+		expect(statuses).toContainEqual(['first', 'synced']);
+
+		// The server accepted it — every other test in this file simulates
+		// confirmation the same way, since the mocked transport never assigns
+		// sign_hash on its own.
+		const firstRow = collections.dialog.messages.rows.get(firstId);
+		collections.dialog.messages.rows.set(firstId, { ...firstRow, sign_hash: SIGN_HASH });
+
+		const secondId = await store.sendMessage(PEER_HASH, 'second', (s) => statuses.push(['second', s]));
+		await waitFor(() => statuses.some(([m, s]) => m === 'second' && (s === 'synced' || s === 'error')), 'second to settle');
+
+		const secondMutation = sent
+			.filter((m) => m.relation === 'dialog_messages')
+			.find((m) => m.row.message_id === secondId);
+		expect(decodeRefsMap(secondMutation.row.refs_map_b64)).toEqual({ [firstId]: SIGN_HASH });
+	});
+
+	it('an independent second message does not wait for the first to sign — both observe the same empty tail set, a legitimate fork', async () => {
+		const store = useDialogsStore();
+		const statuses = [];
+
+		// Neither has round-tripped when the other starts — the scope each
+		// captures is whatever was loaded at that instant, not something
+		// waited for.
+		store.sendMessage(PEER_HASH, 'first', (s) => statuses.push(['first', s]));
+		store.sendMessage(PEER_HASH, 'second', (s) => statuses.push(['second', s]));
+		await waitFor(
+			() => statuses.filter(([, s]) => s === 'synced' || s === 'error').length === 2,
+			'both sends to settle'
+		);
+
+		expect(statuses.filter(([, s]) => s === 'synced')).toHaveLength(2);
+		const messages = sent.filter((m) => m.relation === 'dialog_messages');
+		expect(messages).toHaveLength(2);
+		for (const m of messages) {
+			expect(decodeRefsMap(m.row.refs_map_b64)).toEqual({});
+		}
+	});
+});
+
 describe('reaction toggle coalescing', () => {
 	const toggle = (store) =>
 		store.toggleReaction(PEER_HASH, {
