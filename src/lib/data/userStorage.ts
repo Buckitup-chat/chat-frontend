@@ -17,6 +17,7 @@
 import { kvGet, kvSet } from './localStore';
 import { getUserStorageCollection } from './collections';
 import { sendMutationsAndAwaitShape } from './ingest';
+import { freshestOf } from './acceptedSnapshot';
 import { nextOwnerTimestamp } from './time';
 import { api } from '@/api/client';
 import type { UserStorageRow } from './types';
@@ -164,9 +165,11 @@ async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult
 	}
 
 	const serverRow = server.state === 'found' ? server.row : null;
-	const mutationType = serverRow ? 'update' : 'insert';
-	const parentSignHash = serverRow?.sign_hash ?? null;
-	const ownerTimestamp = nextOwnerTimestamp(Math.max(tsOf(serverRow), tsOf(local?.row)));
+	const acceptedLocal = local?.syncStatus === 'synced' ? local.row : null;
+	const baseRow = freshestOf(serverRow, acceptedLocal);
+	const mutationType = baseRow ? 'update' : 'insert';
+	const parentSignHash = baseRow?.sign_hash ?? null;
+	const ownerTimestamp = nextOwnerTimestamp(Math.max(tsOf(baseRow), tsOf(local?.row)));
 
 	const mutation = api.createStorageMutation(
 		userHash, uuid, valueB64, null, 0, ownerTimestamp,
@@ -192,9 +195,6 @@ async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult
 
 	await persist(row, 'syncing');
 	try {
-		// Barrier: the queue must not release the next write for this slot
-		// until the committed revision is visible in the shape, otherwise the
-		// successor reads a stale (or absent) tip and signs a doomed mutation.
 		await sendMutationsAndAwaitShape([mutation], signSkey);
 		await persist(row, 'synced');
 		return { row, sync: Promise.resolve({ status: 'synced' as const }) };

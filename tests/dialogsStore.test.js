@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
+import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 
 // A shape-backed collection: preload() resolves, get() reads the map that the
 // ingest mock feeds. Real collections are Electric-driven; the point here is
@@ -525,6 +526,61 @@ describe('deleteMessage (§3.2)', () => {
 	});
 });
 
+describe('own accepted snapshot as a local base (§4.5)', () => {
+	const ACCEPTED_SIGN_HASH = 'dms_' + '9'.repeat(128);
+
+	const makeSnapshotStorage = () => {
+		const map = new Map();
+		return {
+			async get(k) { return map.get(k) ?? null; },
+			async set(k, v) { map.set(k, v); },
+			async delete(k) { map.delete(k); },
+			async keys() { return [...map.keys()]; },
+			async clear() { map.clear(); },
+		};
+	};
+
+	beforeEach(() => {
+		_setAcceptedSnapshotStorageForTests(makeSnapshotStorage());
+	});
+
+	it('editMessage finds the message via its own accepted-snapshot when the shape has not caught up yet', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		await recordAccepted('dialog_messages', MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'x', deleted_flag: false, sign_hash: ACCEPTED_SIGN_HASH, owner_timestamp: 100,
+		});
+
+		await store.editMessage(PEER_HASH, MSG_ID, 'edited');
+
+		const sent = enqueueIntentSpy.mock.calls.at(-1)?.[0]?.row;
+		expect(sent?.parent_sign_hash).toBe(ACCEPTED_SIGN_HASH);
+	});
+
+	it('prefers the accepted-snapshot over a stale shape row by owner_timestamp', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		collections.dialog.messages.rows.set(MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'old', deleted_flag: false, sign_hash: SIGN_HASH, owner_timestamp: 100,
+		});
+		await recordAccepted('dialog_messages', MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'newer', deleted_flag: false, sign_hash: ACCEPTED_SIGN_HASH, owner_timestamp: 200,
+		});
+
+		await store.deleteMessage(PEER_HASH, MSG_ID);
+
+		const sent = enqueueIntentSpy.mock.calls.at(-1)?.[0]?.row;
+		expect(sent?.parent_sign_hash).toBe(ACCEPTED_SIGN_HASH);
+	});
+});
+
 describe('editMessage coalescing is durable, not just in-memory (§3.1 Target lifecycle: LOCAL INTENT durable before VAULT ACCESS)', () => {
 	it('the first edit of a burst enqueues a durable intent; a coalesced sibling updates it, never a second enqueue', async () => {
 		const store = useDialogsStore();
@@ -542,12 +598,8 @@ describe('editMessage coalescing is durable, not just in-memory (§3.1 Target li
 			store.editMessage(PEER_HASH, MSG_ID, 'edit B'),
 		]);
 
-		// One durable record created, the second edit merged into it — never
-		// two separate durable intents for what coalesces into one write.
 		expect(enqueueIntentSpy).toHaveBeenCalledTimes(1);
 		expect(updateIntentSpy).toHaveBeenCalledTimes(1);
-		// The update carries the LATEST content — proving the durable copy,
-		// not just the in-memory one, reflects the coalesced edit.
 		expect(updateIntentSpy.mock.calls[0][1].row.content_b64).toContain('edit B');
 	});
 

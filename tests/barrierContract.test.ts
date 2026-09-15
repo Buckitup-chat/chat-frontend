@@ -49,11 +49,6 @@ describe('contract-driven barrier', () => {
 		expect(awaitShapeVisibility).not.toHaveBeenCalled();
 	});
 
-	it('a visible-level write still awaits its scope', async () => {
-		await sendMutationsAndAwaitShape(mutation('dialog_messages', 'insert'), SKEY, { retries: 0 });
-		expect(awaitShapeVisibility).toHaveBeenCalledTimes(1);
-	});
-
 	it('an unknown relation falls back to awaiting — weaker guarantees are opt-in', async () => {
 		// an unknown relation also has no owner mapping — durable enqueue is
 		// impossible, which is its own guarantee; best-effort isolates the barrier

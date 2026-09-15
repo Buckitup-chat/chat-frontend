@@ -162,20 +162,14 @@ describe('upsertStorageRow: per-slot serialization', () => {
 		expect((kv.get(`us|${USER}|${SLOT}`) as { row: { value_b64: string } }).row.value_b64).toBe('B');
 	});
 
-	it('lets the second write see the first write as its base', async () => {
-		// after A lands, the server row appears in the collection
-		sendAndAwait.mockImplementationOnce(async () => {
-			collection.rows.set(`${USER}|${SLOT}`, serverRow(2000, 'uss_' + 'b'.repeat(128)));
-			return { txids: [1], results: [] };
-		});
-
+	it('lets the second write see the first write as its base via the local accepted snapshot, even before the shape catches up', async () => {
 		await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'A', hashB64: null, signSkey });
 		await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'B', hashB64: null, signSkey });
 
 		const calls = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls;
 		expect(calls[0]?.at(-1)).toBe('insert');
 		expect(calls[1]?.at(-1)).toBe('update');
-		expect(calls[1]?.[9]).toBe('uss_' + 'b'.repeat(128));
+		expect(calls[1]?.[9]).toBe('uss_' + 'f'.repeat(128));
 	});
 });
 

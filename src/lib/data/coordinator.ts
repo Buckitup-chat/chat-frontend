@@ -1,22 +1,14 @@
-// The one place a signed mutation's dispatch outcome is decided (ADR §7.3,
-// Фаза 4.1: "one sender-coordinator per account").
-//
-// Before this module existed, three call chains each decided for themselves
-// what "send this mutation" meant: a fresh write (ingest.ts, awaiting the
-// shape barrier), a background retry after a transient failure (outbox.ts's
-// drain loop, calling the transport directly), and replay after reload
-// (the same drain loop, triggered from login instead of a failed send). Only
-// the fresh path ever awaited shape visibility — a message that failed once
-// and succeeded on retry or on replay was marked delivered without the
-// CONTESTED-relation guarantee (writeContracts.ts) that its shape had
-// actually become visible, silently weakening the barrier for exactly the
-// writes ADR §7.3 says need it. Routing every path through the same function
-// closes that gap instead of re-deriving it three times.
 import { contractFor, OWNER_FIELD } from './writeContracts';
 import { awaitShapeVisibility, collectionForRelation, scopeForRelation } from './barrier';
 import { markUnconfirmed, clearUnconfirmed } from './staleBase';
+import { recordAccepted } from './acceptedSnapshot';
 import { pendingEntries, quarantinedEntries, type OutboxEntry } from './outbox';
 import type { SendResult } from './ingest';
+
+const ENTITY_KEY_FIELD: Record<string, string> = {
+	dialog_messages: 'message_id',
+	dialog_message_reactions: 'reaction_hash',
+};
 
 interface MutationShape {
 	type?: string;
@@ -113,9 +105,16 @@ export async function dispatchMutations(
 	const first = mutations[0] as MutationShape | undefined;
 	const relation = first?.syncMetadata?.relation;
 	if (relation) {
+		const row = first?.modified ?? first?.changes ?? null;
+		
+		const entityField = ENTITY_KEY_FIELD[relation];
+		const entityKey = entityField ? row?.[entityField] : undefined;
+		if (row && typeof entityKey === 'string' && entityKey) {
+			await recordAccepted(relation, entityKey, row);
+		}
+
 		const contract = contractFor(relation, first?.type);
 		if (contract.confirmation === 'visible') {
-			const row = first?.modified ?? first?.changes ?? null;
 			const visible = await awaitShapeVisibility(collectionForRelation(relation, row), result.txids, relation);
 			const scope = scopeForRelation(relation, row);
 			if (visible) clearUnconfirmed(scope);

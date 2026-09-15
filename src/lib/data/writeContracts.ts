@@ -43,26 +43,20 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 		insert: { dependencyClass: 'prerequisite-provider', confirmation: 'accepted' },
 	},
 	dialog_messages: {
-		// CONTESTED rows of the barrier table (№6-8): stays 'visible' until the
-		// coordinator decision on "own snapshot as a trusted base" — the next
-		// send's refs and the next edit's tip are currently read from the shape.
-		insert: { dependencyClass: 'independent', confirmation: 'visible' },
-		update: { dependencyClass: 'chained', confirmation: 'visible' },
+		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
+		update: { dependencyClass: 'chained', confirmation: 'accepted' },
 	},
 	dialog_message_reactions: {
 		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
-		// toggle reads the stored row's owner_timestamp — contested (№9), keep
-		update: { dependencyClass: 'chained', confirmation: 'visible' },
+		update: { dependencyClass: 'chained', confirmation: 'accepted' },
 	},
 	dialog_message_receipts: {
 		// terminal: nothing ever reads a receipt back as a write base
 		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
 	},
 	user_storage: {
-		// CONTESTED (№3/4): the per-slot queue reads the tip from the shape;
-		// stays 'visible' until the coordinator decision.
-		insert: { dependencyClass: 'chained', confirmation: 'visible' },
-		update: { dependencyClass: 'chained', confirmation: 'visible' },
+		insert: { dependencyClass: 'chained', confirmation: 'accepted' },
+		update: { dependencyClass: 'chained', confirmation: 'accepted' },
 	},
 	files: {
 		// the manifest is read back only by resume's salted one-shot reader

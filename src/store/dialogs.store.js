@@ -7,7 +7,7 @@ import { enqueueIntent, updateIntent } from '@/lib/data/intents';
 import { signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
-import { assertFreshBase } from '@/lib/data/staleBase';
+import { getAccepted, freshestOf } from '@/lib/data/acceptedSnapshot';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { loadPointer, savePointer, viewMoved, pointerDialogs } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
@@ -536,15 +536,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // collection. A preload failure is "state unknown" — it must not be
         // collapsed into "message not found" (which would mislead the user
         // and could mask a mere connectivity blip as a missing message).
-        // A version chain is built from the tip in the local snapshot. If the
-        // last accepted write to this dialog never became visible, that tip may
-        // be a revision behind and the new version would chain onto the wrong
-        // one (ADR §7.1).
-        assertFreshBase(`dialog_messages|${dialogHash}`);
-
+        // A version chain is built from the tip — whichever is fresher of the
+        // shape row and this account's own accepted-snapshot (§4.5): our last
+        // accepted write may not be visible in the shape yet, but it is still
+        // a trustworthy base, more current than a shape that has not caught up.
         const msgColl = getDialogCollections(dialogHash).messages;
         await msgColl.preload();
-        const current = msgColl.get(messageId) || null;
+        const current = freshestOf(msgColl.get(messageId) || null, await getAccepted('dialog_messages', messageId));
         if (!current) throw new Error('Message not found');
         if (current.sender_hash !== $userPQ.currentUserHash) {
             throw new Error('Cannot edit: not owner');
@@ -724,13 +722,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
     const deleteMessage = async (peerHash, messageId) => {
         const dialogHash = await initDialogKeys(peerHash);
         // A tombstone is a new version of the message: same chain, same rule
-        // as an edit (ADR §7.1).
-        assertFreshBase(`dialog_messages|${dialogHash}`);
+        // as an edit (§4.5 — freshest of shape row and own accepted-snapshot).
         const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
 
         const msgColl = getDialogCollections(dialogHash).messages;
         await msgColl.preload();
-        const current = msgColl.get(messageId) || null;
+        const current = freshestOf(msgColl.get(messageId) || null, await getAccepted('dialog_messages', messageId));
         if (!current) throw new Error('Message not found');
         if (current.sender_hash !== $userPQ.currentUserHash) {
             throw new Error('Cannot delete: not owner');
@@ -1358,9 +1355,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
         const { dialogHash, messageId, emoji, myKey, myHash } = ctx;
         const dialogColls = getDialogCollections(dialogHash);
-        // Re-read after the barrier of the previous write: the row may now
-        // exist (or have moved to another revision).
-        const existing = dialogColls.reactions.get(reactionHash);
+        // Re-read after the previous write for this reaction: the row may now
+        // exist (or have moved to another revision). §4.5: prefer whichever is
+        // fresher of the shape row and our own accepted-snapshot — the shape
+        // may not have caught up with our previous toggle yet.
+        const existing = freshestOf(
+            dialogColls.reactions.get(reactionHash) || null,
+            await getAccepted('dialog_message_reactions', reactionHash)
+        );
 
         const base = {
             reaction_hash: reactionHash,
@@ -1413,7 +1415,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const reactionHash = DialogCrypto.computeReactionHash(myKey, messageId, myHash, emoji);
 
         const dialogColls = getDialogCollections(dialogHash);
-        const existing = dialogColls.reactions.get(reactionHash);
+        // §4.5: prefer whichever is fresher of the shape row and our own
+        // accepted-snapshot — right after our own toggle, the shape may still
+        // show the pre-toggle state.
+        const existing = freshestOf(
+            dialogColls.reactions.get(reactionHash) || null,
+            await getAccepted('dialog_message_reactions', reactionHash)
+        );
         // Active only if the row is live AND attached to the revision being
         // displayed: after an edit the old reaction is not shown, so clicking
         // means "react on this revision", not "remove".

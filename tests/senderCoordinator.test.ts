@@ -39,6 +39,11 @@ vi.mock('@/lib/data/barrier', () => ({
 	scopeForRelation: (relation: string) => relation,
 }));
 
+vi.mock('@/lib/data/writeContracts', () => ({
+	contractFor: () => ({ dependencyClass: 'chained', confirmation: 'visible' }),
+	OWNER_FIELD: { dialog_messages: 'sender_hash' },
+}));
+
 const { sendMutationsAndAwaitShape, drainPendingWrites } = await import('@/lib/data/ingest');
 const { pendingEntries, stopDrainLoop, _setStorageForTests } = await import('@/lib/data/outbox');
 
@@ -53,8 +58,8 @@ const makeStorage = () => {
 	};
 };
 
-// dialog_messages insert is a CONTESTED, confirmation:'visible' relation
-// (writeContracts.ts) — the one kind of write these tests need.
+// dialog_messages insert — relation choice does not matter here since
+// contractFor is mocked to 'visible' above regardless of relation.
 const message = (text: string) => ({
 	type: 'insert',
 	modified: { message_id: `dmsg_${text}`, sender_hash: MY_HASH, content_b64: text },
