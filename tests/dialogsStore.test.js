@@ -466,3 +466,69 @@ describe('deleteMessage (§3.2)', () => {
 		await expect(store.deleteMessage(PEER_HASH, MSG_ID)).rejects.toThrow(/not owner/);
 	});
 });
+
+describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B)', () => {
+	// Neither edit knows about the other; each is its own independent outbox
+	// entry (opaque id), never coalesced or looked up by message_id. A late
+	// result for one is matched to it alone (recordFailure/resolveEntry take
+	// an explicit id) — there is no shared record for a wrong ack to land on.
+	it('two concurrent edits of the same message resolve independently — never both, never neither, and the loser never contaminates the winner', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		collections.dialog.messages.rows.set(MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'enc(original)', deleted_flag: false,
+			sign_hash: SIGN_HASH, owner_timestamp: 1000,
+		});
+
+		// Both edits start before either result is known — this is the actual
+		// "edit while send" race: the second read of the collection still
+		// sees the pre-A tip, because nothing has resolved yet.
+		let call = 0;
+		sendImpl = async (mutations) => {
+			call++;
+			sent.push(...mutations);
+			if (call === 2) {
+				// The server's own conflict check (stale parent_sign_hash /
+				// non-strictly-increasing owner_timestamp) — a permanent
+				// rejection, not a silent merge.
+				const err = new Error('parent_sign_hash mismatch');
+				err.permanent = true;
+				throw err;
+			}
+			mutations.forEach(applyMutation);
+			return { txids: [] };
+		};
+
+		const [a, b] = await Promise.allSettled([
+			store.editMessage(PEER_HASH, MSG_ID, 'edit A'),
+			store.editMessage(PEER_HASH, MSG_ID, 'edit B'),
+		]);
+
+		// Exactly one wins and one is visibly rejected to its own caller —
+		// the invariant this test locks in is that outcome, not which one
+		// wins (that ordering race is Phase 4's dependency-aware dispatch to
+		// remove; this architecture already guarantees it fails safely
+		// rather than silently, since there is nothing here that could
+		// confuse A's result for B's).
+		expect([a.status, b.status].sort()).toEqual(['fulfilled', 'rejected']);
+
+		const edits = sent.filter((m) => m.relation === 'dialog_messages' && m.type === 'update');
+		expect(edits).toHaveLength(2);
+		// Both were built from the same base — documenting the known race
+		// this test does not fix: only one write path is dispatched today,
+		// with no wait for a predecessor's SERVER_ACCEPTED before signing the
+		// next (v3 ADR §7.1's default policy) — that ordering lives in the
+		// sender-coordinator, not here.
+		expect(edits.every((m) => m.row.parent_sign_hash === SIGN_HASH)).toBe(true);
+
+		// The winning revision is exactly the one whose send actually applied
+		// (dispatch order = sent order) — the loser's content never overwrote
+		// it, and the loser's rejection never rolled the winner back.
+		const finalRow = collections.dialog.messages.rows.get(MSG_ID);
+		expect(finalRow.content_b64).toBe(edits[0].row.content_b64);
+		expect(finalRow.content_b64).not.toBe(edits[1].row.content_b64);
+	});
+});
