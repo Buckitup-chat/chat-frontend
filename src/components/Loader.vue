@@ -21,11 +21,11 @@
 </template>
 
 <style lang="scss">
-//@import '@/scss/variables.scss';
+@import '@/scss/variables.scss';
 
 .vld-icon {
 	svg {
-		fill: #8e2b77;
+		fill: $primary;
 	}
 }
 
