@@ -11,6 +11,7 @@ import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { api } from '@/api/client';
 import { sendMutationsAndAwaitShape, drainPendingWrites, stopDrainLoop } from '@/lib/data/ingest';
+import { recoverIntents } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { getStorageRow, upsertStorageRow } from '@/lib/data/userStorage';
@@ -307,6 +308,14 @@ export class EncryptionManagerPQ extends EventTarget {
     const userHash = this.#currentUserHash;
     const signSkey = this.#signSkey;
     if (!userHash || !signSkey) return;
+
+    // §3.6: durable intents that never reached signing before this session
+    // (vault locked, crash, reload) resume now that the vault is unlocked —
+    // the level below outbox.ts's own drainPendingWrites, which only knows
+    // about mutations that were already signed.
+    recoverIntents(userHash, signSkey).catch((e) =>
+      console.warn('[EncryptionManagerPQ] intent recovery failed:', e)
+    );
 
     drainPendingWrites(userHash, signSkey);
 
