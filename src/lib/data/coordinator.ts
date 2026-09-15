@@ -32,6 +32,19 @@ const DIALOG_RELATIONS = [
 	'dialog_message_receipts',
 ];
 
+const chainKeyFor = (relation: string, row: Record<string, unknown> | null): string => {
+	if (relation === 'user_storage') {
+		const userHash = row?.user_hash;
+		const uuid = row?.uuid;
+		if (typeof userHash === 'string' && typeof uuid === 'string') return `user_storage:${userHash}|${uuid}`;
+	} else {
+		const entityField = ENTITY_KEY_FIELD[relation];
+		const entityKey = entityField ? row?.[entityField] : undefined;
+		if (typeof entityKey === 'string' && entityKey) return `${relation}:${entityKey}`;
+	}
+	return scopeForRelation(relation, row);
+};
+
 /**
  * Durable entries a fresh mutation must not be dispatched before (ADR §7.1,
  * §7.3). Called once, at enqueue time — the resulting ids are persisted on
@@ -56,16 +69,16 @@ export async function dependenciesFor(mutations: unknown[], userHash: string): P
 	const rowOfEntry = (e: OutboxEntry): Record<string, unknown> | null => rowOf(e.mutations[0] as MutationShape | undefined);
 
 	// §7.1: a chained write supersedes a row; an older, still-unresolved write
-	// of the exact same scope must land (or die, i.e. quarantine — a blocked
+	// of the exact same ENTITY must land (or die, i.e. quarantine — a blocked
 	// dependent stays blocked until the user retries or discards it, ADR §5)
 	// before this one may be dispatched, or the two race to be "the latest".
 	if (contractFor(relation, first?.type).dependencyClass === 'chained') {
-		const scope = scopeForRelation(relation, row);
+		const chainKey = chainKeyFor(relation, row);
 
-		assertFreshBase(scope);
+		assertFreshBase(scopeForRelation(relation, row));
 
 		for (const e of all) {
-			if (scopeForRelation(e.relation, rowOfEntry(e)) === scope) deps.add(e.id);
+			if (chainKeyFor(e.relation, rowOfEntry(e)) === chainKey) deps.add(e.id);
 		}
 	}
 
