@@ -1,6 +1,6 @@
 import { contractFor, OWNER_FIELD } from './writeContracts';
 import { awaitShapeVisibility, collectionForRelation, scopeForRelation } from './barrier';
-import { markUnconfirmed, clearUnconfirmed } from './staleBase';
+import { markUnconfirmed, clearUnconfirmed, assertFreshBase } from './staleBase';
 import { recordAccepted } from './acceptedSnapshot';
 import { pendingEntries, quarantinedEntries, type OutboxEntry } from './outbox';
 import type { SendResult } from './ingest';
@@ -61,6 +61,9 @@ export async function dependenciesFor(mutations: unknown[], userHash: string): P
 	// before this one may be dispatched, or the two race to be "the latest".
 	if (contractFor(relation, first?.type).dependencyClass === 'chained') {
 		const scope = scopeForRelation(relation, row);
+
+		assertFreshBase(scope);
+
 		for (const e of all) {
 			if (scopeForRelation(e.relation, rowOfEntry(e)) === scope) deps.add(e.id);
 		}
