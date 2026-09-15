@@ -73,6 +73,23 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 const FALLBACK: WriteContract = { dependencyClass: 'chained', confirmation: 'visible' };
 
 /**
+ * Which row field names the signing account, per relation. A mutation's
+ * owner is not always the same key — used to partition outbox entries (only
+ * the account whose key signed a mutation may replay it) and to find a
+ * mutation's own `user_cards` prerequisite (§7.3) by identity rather than by
+ * relation name.
+ */
+export const OWNER_FIELD: Record<string, string> = {
+	user_cards: 'user_hash',
+	user_storage: 'user_hash',
+	dialog_keys: 'sender_hash',
+	dialog_messages: 'sender_hash',
+	dialog_messages_versions: 'sender_hash',
+	dialog_message_reactions: 'reactor_hash',
+	dialog_message_receipts: 'peer_hash',
+};
+
+/**
  * The contract for one mutation. Unknown relations get the conservative
  * fallback: treat as chained, await visibility — a new relation must opt in
  * to weaker guarantees explicitly, never receive them by omission.
