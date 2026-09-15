@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { getUserCardsCollection, getDialogCollections, withDialogCollections } from '@/lib/data/collections';
 import { OWNER_FIELD } from '@/lib/data/ingest';
-import { enqueueIntent } from '@/lib/data/intents';
+import { enqueueIntent, updateIntent } from '@/lib/data/intents';
 import { signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
@@ -470,6 +470,61 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return messageId;
     };
 
+    // §3.1 + §3.12: pre-signing coalescing for message edits, durable — not
+    // just in-memory. The target lifecycle (v3, "Target lifecycle") requires
+    // LOCAL INTENT to have durable storage before VAULT ACCESS; an in-memory
+    // Map alone (the first version of this code) loses a coalesced-but-not-
+    // yet-dispatched edit on a crash. The first edit of a burst durables via
+    // enqueueIntent; a later, still-unwritten edit in the same burst updates
+    // that same durable intent via updateIntent, rather than creating a
+    // second one or leaving the merge purely in memory. Mirrors the existing
+    // reaction pattern (reactionIntents/reactionQueues) for the in-memory
+    // coalescing/serialization half.
+    const editIntents = new Map(); // message_id -> { intentId, contentB64, refsMapB64, parentSignHash, ownerTimestamp, written }
+    const editQueues = new Map();  // message_id -> Promise
+    const editClaimLocks = new Map(); // message_id -> Promise, serializes the durable-intent claim step only
+
+    const runEditWrite = async (messageId, ctx) => {
+        const intent = editIntents.get(messageId);
+        if (!intent || intent.written) return;
+        intent.written = true;
+
+        try {
+            const signSkey = await getSignSkeyBytes();
+            await signAndDispatchIntent(intent.intentId, {
+                relation: 'dialog_messages',
+                mutationType: 'update',
+                row: {
+                    message_id: messageId,
+                    dialog_hash: ctx.dialogHash,
+                    sender_hash: ctx.senderHash,
+                    content_b64: intent.contentB64,
+                    deleted_flag: false,
+                    refs_map_b64: intent.refsMapB64,
+                    parent_sign_hash: intent.parentSignHash,
+                    owner_timestamp: intent.ownerTimestamp,
+                },
+            }, signSkey);
+        } catch (e) {
+            // Transient: leave written=false so a later edit of the same
+            // message still finds this base (the write may yet land).
+            // Permanent: fall through to the same cleanup as success — the
+            // stale base must not be reused by the next, unrelated edit.
+            if (!e?.permanent && editIntents.get(messageId) === intent) {
+                intent.written = false;
+            }
+            throw e;
+        } finally {
+            // Only if nobody edited again while this write was in flight: a
+            // newer edit already replaced the entry (new object, written:
+            // false), and that one still needs to be written — deleting it
+            // here would drop the next edit's base along with this one's.
+            if (editIntents.get(messageId) === intent && intent.written) {
+                editIntents.delete(messageId);
+            }
+        }
+    };
+
     /**
      * Edit a message (owner only)
      */
@@ -503,20 +558,94 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const refsMap = await computeObservedTails(dialogHash);
         const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
 
-        // An edit is an HTTP `update`: the server replaces the tip and archives
-        // the previous revision in dialog_messages_versions. The timestamp must
-        // be strictly newer than the tip's, even inside the same second.
-        await pushRow('dialog_messages', {
-            message_id: messageId,
-            dialog_hash: dialogHash,
-            sender_hash: $userPQ.currentUserHash,
-            content_b64: contentB64,
-            deleted_flag: false,
-            refs_map_b64: refsMapB64,
-            parent_sign_hash: current.sign_hash,
-            owner_timestamp: nextOwnerTimestamp(current.owner_timestamp),
-        }, 'update');
+        // §3.1 + §3.12: claiming "is there already a coalescable intent for
+        // this message" and durably enqueuing/updating it must be one atomic
+        // step — both edits in a concurrent burst reach this point only after
+        // several independent awaits (key derivation, encryption, tails), so
+        // without a lock here two calls could both read editIntents.get() as
+        // empty and both enqueue a fresh durable intent; whichever loses the
+        // final editIntents.set() becomes an ORPHAN that nothing ever
+        // resolves, and recovery (§3.6) would sign and send it separately
+        // after a reload — a phantom edit nobody coalesced away.
+        //
+        // This lock covers ONLY the durable claim decision, not dispatch:
+        // runEditWrite starts running (and flips written=true) the moment it
+        // is queued, lock or no lock, so holding the lock across queueing too
+        // would let the first call's own dispatch start and claim written=true
+        // before the SECOND call's claim even begins — permanently defeating
+        // coalescing (every burst would degrade to "second one is unrelated").
+        // Releasing the lock right after the durable decision gives a truly
+        // concurrent sibling a chance to claim before that happens.
+        const claim = editClaimLocks.get(messageId) ?? Promise.resolve();
+        const claimed = claim.then(async () => {
+            const existingIntent = editIntents.get(messageId);
+            const parentSignHash = existingIntent ? existingIntent.parentSignHash : current.sign_hash;
+            const ownerTimestamp = existingIntent
+                ? existingIntent.ownerTimestamp
+                : nextOwnerTimestamp(current.owner_timestamp);
 
+            const storedRow = {
+                message_id: messageId,
+                dialog_hash: dialogHash,
+                sender_hash: $userPQ.currentUserHash,
+                content_b64: contentB64,
+                deleted_flag: false,
+                refs_map_b64: refsMapB64,
+                parent_sign_hash: parentSignHash,
+                owner_timestamp: ownerTimestamp,
+            };
+
+            if (existingIntent && !existingIntent.written) {
+                // Coalesce: update the durable intent in place. No queue
+                // registration here — the dispatch already queued by
+                // whichever call created this intent will read this content
+                // when it runs.
+                await updateIntent(existingIntent.intentId, { relation: 'dialog_messages', mutationType: 'update', row: storedRow });
+                editIntents.set(messageId, { ...existingIntent, contentB64, refsMapB64, parentSignHash, ownerTimestamp });
+                return { fresh: false };
+            }
+
+            // Fresh: durably enqueue. This call owns the one dispatch this
+            // burst gets — but does not queue it yet (see below, outside the
+            // lock).
+            const intentId = await enqueueIntent(
+                { relation: 'dialog_messages', mutationType: 'update', row: storedRow },
+                $userPQ.currentUserHash,
+                'dialog_messages'
+            );
+            if (intentId === null) {
+                throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
+            }
+            editIntents.set(messageId, { intentId, contentB64, refsMapB64, parentSignHash, ownerTimestamp, written: false });
+            return { fresh: true };
+        });
+        editClaimLocks.set(messageId, claimed.then(() => undefined, () => undefined));
+        const { fresh } = await claimed;
+
+        // An edit is an HTTP `update`: the server replaces the tip and
+        // archives the previous revision in dialog_messages_versions.
+        // Chained onto whatever is still running for this message (e.g. an
+        // earlier, already-in-flight write this one did not coalesce into)
+        // — never two writes for the same message at once, even unrelated
+        // ones. A coalescing call does not queue anything of its own; it
+        // just waits on whatever is already there.
+        const ctx = { dialogHash, senderHash: $userPQ.currentUserHash };
+        let dispatchedWrite = editQueues.get(messageId);
+        if (fresh) {
+            const previousWrite = dispatchedWrite ?? Promise.resolve();
+            const nextWrite = previousWrite.then(
+                () => runEditWrite(messageId, ctx),
+                () => runEditWrite(messageId, ctx)
+            );
+            const settledWrite = nextWrite.then(() => undefined, () => undefined);
+            editQueues.set(messageId, nextWrite);
+            settledWrite.then(() => {
+                if (editQueues.get(messageId) === nextWrite) editQueues.delete(messageId);
+            });
+            dispatchedWrite = nextWrite;
+        }
+
+        await dispatchedWrite;
         return messageId;
     };
 

@@ -53,10 +53,14 @@ vi.mock('@/lib/data/ingest', () => ({
 }));
 
 // §3.1: pushRow now durables an intent before signing. Store-level tests are
-// about what gets sent, not about the intent store itself (covered by
-// tests/intents.test.ts) — a no-op stub keeps that orthogonal.
+// mostly about what gets sent, not about the intent store itself (covered by
+// tests/intents.test.ts) — spies keep that orthogonal while still letting one
+// test (§3.12 durability) assert on enqueue-vs-update call counts.
+const enqueueIntentSpy = vi.fn(async () => 'test-intent-id');
+const updateIntentSpy = vi.fn(async () => {});
 vi.mock('@/lib/data/intents', () => ({
-	enqueueIntent: async () => 'test-intent-id',
+	enqueueIntent: (...args) => enqueueIntentSpy(...args),
+	updateIntent: (...args) => updateIntentSpy(...args),
 	resolveIntent: async () => {},
 }));
 
@@ -167,6 +171,8 @@ const waitFor = async (predicate, label) => {
 };
 
 beforeEach(() => {
+	enqueueIntentSpy.mockClear();
+	updateIntentSpy.mockClear();
 	setActivePinia(createPinia());
 	collections = {
 		cards: makeCollection({
@@ -467,12 +473,8 @@ describe('deleteMessage (§3.2)', () => {
 	});
 });
 
-describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B)', () => {
-	// Neither edit knows about the other; each is its own independent outbox
-	// entry (opaque id), never coalesced or looked up by message_id. A late
-	// result for one is matched to it alone (recordFailure/resolveEntry take
-	// an explicit id) — there is no shared record for a wrong ack to land on.
-	it('two concurrent edits of the same message resolve independently — never both, never neither, and the loser never contaminates the winner', async () => {
+describe('editMessage coalescing is durable, not just in-memory (§3.1 Target lifecycle: LOCAL INTENT durable before VAULT ACCESS)', () => {
+	it('the first edit of a burst enqueues a durable intent; a coalesced sibling updates it, never a second enqueue', async () => {
 		const store = useDialogsStore();
 		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
 			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
@@ -483,52 +485,182 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 			sign_hash: SIGN_HASH, owner_timestamp: 1000,
 		});
 
-		// Both edits start before either result is known — this is the actual
-		// "edit while send" race: the second read of the collection still
-		// sees the pre-A tip, because nothing has resolved yet.
-		let call = 0;
-		sendImpl = async (mutations) => {
-			call++;
-			sent.push(...mutations);
-			if (call === 2) {
-				// The server's own conflict check (stale parent_sign_hash /
-				// non-strictly-increasing owner_timestamp) — a permanent
-				// rejection, not a silent merge.
-				const err = new Error('parent_sign_hash mismatch');
-				err.permanent = true;
-				throw err;
-			}
-			mutations.forEach(applyMutation);
-			return { txids: [] };
-		};
+		await Promise.all([
+			store.editMessage(PEER_HASH, MSG_ID, 'edit A'),
+			store.editMessage(PEER_HASH, MSG_ID, 'edit B'),
+		]);
+
+		// One durable record created, the second edit merged into it — never
+		// two separate durable intents for what coalesces into one write.
+		expect(enqueueIntentSpy).toHaveBeenCalledTimes(1);
+		expect(updateIntentSpy).toHaveBeenCalledTimes(1);
+		// The update carries the LATEST content — proving the durable copy,
+		// not just the in-memory one, reflects the coalesced edit.
+		expect(updateIntentSpy.mock.calls[0][1].row.content_b64).toContain('edit B');
+	});
+
+	it('a non-overlapping later edit enqueues its own fresh durable intent, not an update of the finished one', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		collections.dialog.messages.rows.set(MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'enc(original)', deleted_flag: false,
+			sign_hash: SIGN_HASH, owner_timestamp: 1000,
+		});
+
+		await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
+		await store.editMessage(PEER_HASH, MSG_ID, 'edit B');
+
+		expect(enqueueIntentSpy).toHaveBeenCalledTimes(2);
+		expect(updateIntentSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B; §3.12 coalesces the race away)', () => {
+	// Before §3.12, two concurrent edits of the same message were two
+	// independent writes racing on the same stale base — the loser got a
+	// visible permanent rejection (safe, but wasteful and confusing: the
+	// user's second edit "failed" for no reason they caused). §3.12 coalesces
+	// them before either is dispatched, so there is only ever one write, and
+	// both callers observe its outcome.
+	it('two concurrent edits of the same message coalesce into a single write with the latest text', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		collections.dialog.messages.rows.set(MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'enc(original)', deleted_flag: false,
+			sign_hash: SIGN_HASH, owner_timestamp: 1000,
+		});
 
 		const [a, b] = await Promise.allSettled([
 			store.editMessage(PEER_HASH, MSG_ID, 'edit A'),
 			store.editMessage(PEER_HASH, MSG_ID, 'edit B'),
 		]);
 
-		// Exactly one wins and one is visibly rejected to its own caller —
-		// the invariant this test locks in is that outcome, not which one
-		// wins (that ordering race is Phase 4's dependency-aware dispatch to
-		// remove; this architecture already guarantees it fails safely
-		// rather than silently, since there is nothing here that could
-		// confuse A's result for B's).
-		expect([a.status, b.status].sort()).toEqual(['fulfilled', 'rejected']);
+		// Both callers see success — there is no longer a loser to reject.
+		expect([a.status, b.status]).toEqual(['fulfilled', 'fulfilled']);
+
+		const edits = sent.filter((m) => m.relation === 'dialog_messages' && m.type === 'update');
+		expect(edits).toHaveLength(1); // one write, not two
+		expect(edits[0].row.parent_sign_hash).toBe(SIGN_HASH);
+
+		const finalRow = collections.dialog.messages.rows.get(MSG_ID);
+		expect(finalRow.content_b64).toBe(edits[0].row.content_b64);
+	});
+
+	// A late failure of an ALREADY-dispatched edit (queue drained, a new,
+	// independent edit started afterwards) must still fail on its own —
+	// coalescing only merges edits that overlap in time, never edits of
+	// otherwise-unrelated moments.
+	it('an edit that starts only after the previous one is fully dispatched is independent, not coalesced', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		collections.dialog.messages.rows.set(MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'enc(original)', deleted_flag: false,
+			sign_hash: SIGN_HASH, owner_timestamp: 1000,
+		});
+
+		await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
+		await store.editMessage(PEER_HASH, MSG_ID, 'edit B');
+
+		// Two non-overlapping edits are two writes, not merged into one —
+		// coalescing only spans a burst that overlaps in time.
+		const edits = sent.filter((m) => m.relation === 'dialog_messages' && m.type === 'update');
+		expect(edits).toHaveLength(2);
+		expect(edits[0].row.content_b64).not.toBe(edits[1].row.content_b64);
+	});
+
+	// The completed edit's base (parent_sign_hash) must not leak into a later,
+	// unrelated edit of the same message. A left-behind coalescing entry
+	// (missed cleanup) would make every future edit of this message reuse the
+	// FIRST edit's base forever, instead of the tip's current one — the server
+	// would then reject every edit after the first as chaining onto a stale
+	// revision. The fixture advances sign_hash between edits, the way a real
+	// confirmed shape update would, so a stale reuse is actually observable.
+	it('a later, unrelated edit of the same message chains onto the CURRENT tip, not a leftover base from a completed edit', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		collections.dialog.messages.rows.set(MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'enc(original)', deleted_flag: false,
+			sign_hash: SIGN_HASH, owner_timestamp: 1000,
+		});
+
+		await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
+
+		// Simulate the server-confirmed revision arriving through the shape:
+		// the tip now has a new sign_hash, distinct from the one edit A saw.
+		const NEXT_SIGN_HASH = 'dms_' + '9'.repeat(128);
+		collections.dialog.messages.rows.set(MSG_ID, {
+			...collections.dialog.messages.rows.get(MSG_ID),
+			sign_hash: NEXT_SIGN_HASH,
+			owner_timestamp: 2000,
+		});
+
+		await store.editMessage(PEER_HASH, MSG_ID, 'edit B');
 
 		const edits = sent.filter((m) => m.relation === 'dialog_messages' && m.type === 'update');
 		expect(edits).toHaveLength(2);
-		// Both were built from the same base — documenting the known race
-		// this test does not fix: only one write path is dispatched today,
-		// with no wait for a predecessor's SERVER_ACCEPTED before signing the
-		// next (v3 ADR §7.1's default policy) — that ordering lives in the
-		// sender-coordinator, not here.
-		expect(edits.every((m) => m.row.parent_sign_hash === SIGN_HASH)).toBe(true);
+		expect(edits[0].row.parent_sign_hash).toBe(SIGN_HASH);
+		// This is the assertion a missed cleanup breaks: edit B must chain
+		// onto the NEW tip, not silently repeat edit A's now-stale base.
+		expect(edits[1].row.parent_sign_hash).toBe(NEXT_SIGN_HASH);
+	});
 
-		// The winning revision is exactly the one whose send actually applied
-		// (dispatch order = sent order) — the loser's content never overwrote
-		// it, and the loser's rejection never rolled the winner back.
-		const finalRow = collections.dialog.messages.rows.get(MSG_ID);
-		expect(finalRow.content_b64).toBe(edits[0].row.content_b64);
-		expect(finalRow.content_b64).not.toBe(edits[1].row.content_b64);
+	// Mirrors "never runs two writes for one reaction concurrently": the
+	// second edit arrives while the first is already mid-flight (past the
+	// point where runEditWrite claimed the intent) — the window that used to
+	// mean two genuine writes, one of them doomed.
+	it('never runs two writes for one message concurrently, but a second edit mid-flight still gets its own write', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
+		});
+		collections.dialog.messages.rows.set(MSG_ID, {
+			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+			content_b64: 'enc(original)', deleted_flag: false,
+			sign_hash: SIGN_HASH, owner_timestamp: 1000,
+		});
+
+		let inFlight = 0;
+		let maxInFlight = 0;
+		const gates = [];
+		const base = sendImpl;
+		sendImpl = async (mutations) => {
+			inFlight++;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			await new Promise((release) => gates.push(release));
+			inFlight--;
+			return base(mutations);
+		};
+		const releaseAll = async () => {
+			while (gates.length) gates.shift()();
+			await flush();
+		};
+
+		const first = store.editMessage(PEER_HASH, MSG_ID, 'edit A');
+		await flush();
+		await releaseAll(); // let dialog-key creation through, gate only the edit write
+
+		// The first edit's write is now blocked mid-flight, past the point
+		// where it claimed the intent (runEditWrite set written=true).
+		const second = store.editMessage(PEER_HASH, MSG_ID, 'edit B');
+		await flush();
+		await releaseAll();
+		await releaseAll();
+		await Promise.all([first, second]);
+
+		const edits = sent.filter((m) => m.relation === 'dialog_messages' && m.type === 'update');
+		expect(edits).toHaveLength(2); // not coalesced — the first was already claimed
+		expect(maxInFlight).toBe(1);
 	});
 });

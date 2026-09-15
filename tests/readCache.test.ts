@@ -119,6 +119,40 @@ describe('mirrorInto: keeps the cache current from a collection\'s own changes',
 		expect(storage.map.has('dialog_messages:dmsg_1')).toBe(false);
 	});
 
+	// A dialog evicted from the LRU warm set gets a brand-new, cold collection
+	// if reopened later — but only if its keys are not still marked touched
+	// from before. Without this, the fallback would silently stop helping for
+	// exactly the "reopen a previously-seen dialog offline" case it exists for.
+	it('unsubscribe un-touches exactly the keys this subscription touched, so a reopened dialog can use the fallback again', async () => {
+		const coll = fakeCollection([{ key: 'dmsg_1', value: { message_id: 'dmsg_1', content_b64: 'seen' } }]);
+		const unsubscribe = mirrorInto(coll, 'dialog_messages');
+		await Promise.resolve();
+		expect(isTouched('dialog_messages', 'dmsg_1')).toBe(true);
+
+		unsubscribe();
+
+		expect(isTouched('dialog_messages', 'dmsg_1')).toBe(false);
+		// The row is still on disk (unsubscribe is not a delete) — now usable
+		// as a fallback again, e.g. while the reopened dialog's fresh
+		// collection is still cold.
+		expect(await getCachedRow('dialog_messages', 'dmsg_1')).toEqual({ message_id: 'dmsg_1', content_b64: 'seen' });
+	});
+
+	it('unsubscribe never un-touches a key it did not itself touch (a different dialog\'s key survives)', async () => {
+		const collA = fakeCollection([{ key: 'a', value: { message_id: 'a' } }]);
+		const unsubscribeA = mirrorInto(collA, 'dialog_messages');
+		await Promise.resolve();
+
+		const collB = fakeCollection([{ key: 'b', value: { message_id: 'b' } }]);
+		mirrorInto(collB, 'dialog_messages');
+		await Promise.resolve();
+
+		unsubscribeA();
+
+		expect(isTouched('dialog_messages', 'a')).toBe(false);
+		expect(isTouched('dialog_messages', 'b')).toBe(true); // untouched by A's teardown
+	});
+
 	it('unsubscribe stops future mirroring', async () => {
 		const coll = fakeCollection([]);
 		const unsub = mirrorInto(coll, 'dialog_messages');

@@ -132,10 +132,20 @@ export function mirrorInto(collection: MirrorableCollection, table: string): () 
 	// collection type without subscribeChanges just goes unmirrored.
 	if (typeof collection?.subscribeChanges !== 'function') return () => {};
 
+	// Keys THIS subscription touched — tracked so teardown can undo exactly
+	// them. Without this, a dialog evicted from the LRU warm set (or a
+	// user_storage collection torn down on account switch) leaves its keys
+	// touched forever: reopening the same dialog later builds a brand-new,
+	// cold collection, but the fallback would still refuse to serve rows for
+	// keys it once saw, defeating the exact "reopen while offline" case this
+	// module exists for.
+	const ownKeys = new Set<string>();
+
 	const sub = collection.subscribeChanges(
 		(changes) => {
 			for (const change of changes) {
 				const key = String(change.key);
+				ownKeys.add(key);
 				markTouched(table, key);
 				if (change.type === 'delete') {
 					void deleteCachedRow(table, key);
@@ -146,7 +156,10 @@ export function mirrorInto(collection: MirrorableCollection, table: string): () 
 		},
 		{ includeInitialState: true }
 	);
-	return () => sub.unsubscribe();
+	return () => {
+		sub.unsubscribe();
+		for (const key of ownKeys) touchedKeys.delete(cacheKey(table, key));
+	};
 }
 
 /** Logout/account switch: previously-cached rows are not this session's to
