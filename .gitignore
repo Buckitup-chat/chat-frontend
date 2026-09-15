@@ -39,3 +39,7 @@ ssl
 *.njsproj
 *.sln
 *.sw?
+
+# playwright
+test-results/
+playwright-report/

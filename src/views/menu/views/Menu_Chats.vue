@@ -6,7 +6,7 @@
 	</div>
 	<div class="fs-5 text-center mb-2 mt-4 text-muted" v-else-if="!hasUsers">Network users list is empty</div>
 
-	<Chats_List @select="select" :selected="selected" v-show="hasUsers" />
+	<Chats_List @select="(address, opts) => select(address, opts)" :selected="selected" v-show="hasUsers" />
 </template>
 
 <script setup>
@@ -23,9 +23,15 @@ const $userPQ = userPQStore();
 
 const selected = ref([]);
 
-const select = (address) => {
+const select = (address, opts = {}) => {
 	selected.value = [address];
-	$router.push({ name: 'chat', params: { address } });
+	// The alert dot opens the dialog already asking for the comparison; the
+	// intent rides the query so a reload or a shared link behaves the same.
+	$router.push({
+		name: 'chat',
+		params: { address },
+		...(opts.checkpoint ? { query: { checkpoint: opts.checkpoint === true ? '1' : opts.checkpoint } } : {}),
+	});
 	closeMenu();
 };
 

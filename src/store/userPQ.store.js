@@ -1,20 +1,28 @@
 import { defineStore } from 'pinia';
-import { ref, shallowRef, computed, watch } from 'vue';
+import { ref, shallowRef, computed, watch, onScopeDispose } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
+import { preloadWithRetry } from '@/lib/data/attach';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
   const isInitialized = ref(false);
+  // separate from isInitialized: local vault readiness vs network attachment
+  const networkAttached = ref(false);
   const localDataReady = ref(false);
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', () => { isOnline.value = true; });
+    window.addEventListener('offline', () => { isOnline.value = false; });
+  }
 
   const pqUserCards = ref([]);
 
   const currentUser = ref(null);
   const myLocalUsers = ref([]);
   const allNetworkUsers = shallowRef([]);
-  let cardsUnsub = null;
+  // CollectionSubscription (has .unsubscribe()), not a plain function
+  let cardsSub = null;
 
   const contactsMap = ref({});
   const contacts = computed(() => {
@@ -29,9 +37,32 @@ export const userPQStore = defineStore('userPQ', () => {
     });
   });
 
-  const isAuthenticated = computed(() => em.value?.isAuth ?? false);
-
-  const currentUserHash = computed(() => em.value?.currentUserHash ?? null);
+  // Plain refs fed by the manager's authChange event — NOT computeds over
+  // the instance. EncryptionManagerPQ extends EventTarget (a raw target for
+  // Vue's reactivity) and keeps #currentUserHash in a private field, so a
+  // computed reading it never invalidates: it would freeze on whatever value
+  // the first read saw and every watcher downstream would stay silent
+  // across login/logout/account switch.
+  const isAuthenticated = ref(false);
+  const currentUserHash = ref(null);
+  const syncAuthState = () => {
+    isAuthenticated.value = em.value?.isAuth ?? false;
+    currentUserHash.value = em.value?.currentUserHash ?? null;
+  };
+  // The manager is a process-wide singleton but this store's closure is
+  // per-instance: without teardown every HMR reload of this file leaves an
+  // orphaned listener writing into dead refs.
+  let boundManager = null;
+  const bindAuthListener = (manager) => {
+    if (boundManager === manager) return;
+    boundManager?.removeEventListener('authChange', syncAuthState);
+    boundManager = manager;
+    manager?.addEventListener('authChange', syncAuthState);
+  };
+  onScopeDispose(() => {
+    boundManager?.removeEventListener('authChange', syncAuthState);
+    boundManager = null;
+  });
 
   const currentUserFull = computed(() => {
     if (!currentUser.value) return null;
@@ -43,7 +74,11 @@ export const userPQStore = defineStore('userPQ', () => {
 
     // Phase 1: local vault registry (fast, offline)
     em.value = EncryptionManagerPQ.getInstance();
+    // Every auth transition dispatches authChange: login, logout,
+    // createUserVault (logs in), deleteUserVault (logs out if current).
+    bindAuthListener(em.value);
     await em.value.initialize();
+    syncAuthState();
     myLocalUsers.value = await em.value.getLocalUserCards();
     localDataReady.value = true;
 
@@ -55,23 +90,27 @@ export const userPQStore = defineStore('userPQ', () => {
     .filter((r) => !r.deleted_flag)
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
+  // Local startup is one-shot; attaching to the network shape is not.
+  // `isInitialized` only means "local vault is ready" — it must not gate the
+  // network phase, which retries with the same policy every other collection
+  // uses (src/lib/data/attach.ts). Previously a single failed preload left
+  // the app permanently without user_cards until a reload.
   const initNetworkUsers = async () => {
-    const coll = getUserCardsCollection();
-
     isInitialized.value = true;
     console.log(`[userStore] Initialized | Local users: ${myLocalUsers.value.length}`);
 
-    try {
-      await coll.preload();
-      allNetworkUsers.value = readCards(coll);
-      if (!cardsUnsub) {
-        cardsUnsub = coll.subscribeChanges(() => {
-          allNetworkUsers.value = readCards(coll);
-        });
-      }
-    } catch (e) {
-      console.warn('[userStore] user_cards shape preload failed:', e);
+    if (networkAttached.value) return;
+    const coll = getUserCardsCollection();
+    const attached = await preloadWithRetry(coll, () => networkAttached.value, 'user_cards');
+    if (!attached) return;
+
+    allNetworkUsers.value = readCards(coll);
+    if (!cardsSub) {
+      cardsSub = coll.subscribeChanges(() => {
+        allNetworkUsers.value = readCards(coll);
+      });
     }
+    networkAttached.value = true;
   };
 
   const registerNewUser = async ({ name = "Anonymous", notes, avatar, avatarDataUrl }) => {
@@ -160,12 +199,15 @@ export const userPQStore = defineStore('userPQ', () => {
     allNetworkUsers.value = readCards(getUserCardsCollection());
   };
 
+  // One logical operation: persist the local vault registry AND publish the
+  // public card, awaited. The previous version mutated only the in-memory
+  // user and fired the push blindly, so refreshMyLocalUsers() reloaded the
+  // registry from IndexedDB and reverted the name.
   const updateCurrentUserName = async (newName) => {
-    if (!currentUser.value || !currentUserHash.value) return false;
+    if (!currentUser.value || !currentUserHash.value || !em.value) return false;
 
+    await em.value.updateOwnUserCardName(newName);
     currentUser.value.name = newName;
-
-    em.value?.pushCurrentUserCard();
 
     await refreshMyLocalUsers();
     return true;
@@ -186,7 +228,9 @@ export const userPQStore = defineStore('userPQ', () => {
       if (avatarUuid !== undefined) currentUser.value.userStorage.avatarUuid = avatarUuid;
     }
 
-    em.value?.pushCurrentUserCard();
+    // updateUserStorage already republished the card when it changed; this
+    // keeps name-only edits in sync and surfaces a failed publication.
+    await em.value.pushCurrentUserCard();
 
     await refreshMyLocalUsers();
     return true;
@@ -335,6 +379,10 @@ export const userPQStore = defineStore('userPQ', () => {
 
     setEncryptionManager: (manager) => {
       em.value = manager;
+      // a replacement manager is a new event source — rebind or the refs
+      // silently stop tracking auth
+      bindAuthListener(manager);
+      syncAuthState();
     }
   };
 });

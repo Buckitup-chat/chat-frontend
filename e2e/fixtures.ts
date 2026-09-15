@@ -1,0 +1,156 @@
+// Shared machinery for UI E2E.
+//
+// The passkey problem is solved without touching the app: a CDP virtual
+// authenticator (platform transport, user verification on, presence simulated)
+// makes every navigator.credentials call resolve silently, so the production
+// WebAuthn path — vault, key generation, card publication — runs exactly as it
+// does for a real user.
+import { test as base, expect, type BrowserContext, type CDPSession, type Page } from '@playwright/test';
+
+export { expect };
+
+// The virtual authenticator lives with the CDP session that created it: it
+// survives reloads of its page, but a new tab starts with none — and the
+// vault's passkey must follow the account there, so the tab gets its own
+// authenticator plus a copy of the credential (which is what a platform
+// authenticator does across tabs for real).
+const pageAuth = new WeakMap<Page, { cdp: CDPSession; id: string }>();
+
+/** Arm a silent platform authenticator for this page. Must run before the
+ * app checks isUserVerifyingPlatformAuthenticatorAvailable. */
+export async function armWebAuthn(context: BrowserContext, page: Page): Promise<void> {
+	const cdp = await context.newCDPSession(page);
+	await cdp.send('WebAuthn.enable');
+	const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
+		options: {
+			protocol: 'ctap2',
+			transport: 'internal',
+			hasResidentKey: true,
+			hasUserVerification: true,
+			isUserVerified: true,
+			automaticPresenceSimulation: true,
+		},
+	});
+	pageAuth.set(page, { cdp, id: authenticatorId });
+}
+
+const authOf = (page: Page) => {
+	const a = pageAuth.get(page);
+	if (!a) throw new Error('page has no armed authenticator');
+	return a;
+};
+
+export async function exportCredentials(page: Page): Promise<Record<string, unknown>[]> {
+	const a = authOf(page);
+	const { credentials } = await a.cdp.send('WebAuthn.getCredentials', { authenticatorId: a.id });
+	return credentials as Record<string, unknown>[];
+}
+
+export async function importCredentials(page: Page, credentials: Record<string, unknown>[]): Promise<void> {
+	const a = authOf(page);
+	for (const credential of credentials) {
+		await a.cdp.send('WebAuthn.addCredential', {
+			authenticatorId: a.id,
+			credential: { ...credential, isResidentCredential: true } as never,
+		});
+	}
+}
+
+/**
+ * The app never asks for a discoverable credential, so the authenticator
+ * stores a server-side one — and `credentials.get` then omits the userHandle,
+ * which is where the vault keeps its lock-key seed (local-data-lock
+ * extractLockKey). Real platform authenticators make passkeys discoverable
+ * regardless; mirror that, or every re-login fails with "did not provide a
+ * valid encryption/decryption key".
+ */
+export async function makeCredentialsResident(context: BrowserContext, page: Page): Promise<void> {
+	const a = authOf(page);
+	const { credentials } = await a.cdp.send('WebAuthn.getCredentials', { authenticatorId: a.id });
+	for (const credential of credentials) {
+		if (credential.isResidentCredential) continue;
+		await a.cdp.send('WebAuthn.removeCredential', { authenticatorId: a.id, credentialId: credential.credentialId });
+		await a.cdp.send('WebAuthn.addCredential', {
+			authenticatorId: a.id,
+			credential: { ...credential, isResidentCredential: true },
+		});
+	}
+}
+
+/** Re-login after a full page load: pick the account, the passkey resolves
+ * silently. Call with the page already showing the login screen. */
+export async function reconnectAccount(page: Page): Promise<void> {
+	await expect(page.getByText('Connect existing account')).toBeVisible({ timeout: 30_000 });
+	await page.locator('._contact').first().click();
+	await expect(page.locator('.wrapper')).toBeVisible({ timeout: 90_000 });
+}
+
+/** Unique per run, unique per role: account names double as search keys, so
+ * two runs on the shared staging backend must never collide. */
+export const runId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+export const accountName = (role: string) => `e2e-${role}-${runId}`;
+
+/**
+ * Create a fresh account through the real UI and land in the app.
+ * Returns the account name (its search key in other clients).
+ */
+export async function createAccount(context: BrowserContext, page: Page, role: string): Promise<string> {
+	const name = accountName(role);
+	await armWebAuthn(context, page);
+	await page.goto('/');
+	await page.getByRole('button', { name: 'Create new account' }).click();
+	await page.locator('input[type=text]').first().fill(name);
+	await page.getByRole('button', { name: 'Create', exact: true }).click();
+	// account creation publishes the card to staging and logs in
+	await expect(page.locator('.wrapper')).toBeVisible({ timeout: 90_000 });
+	await makeCredentialsResident(context, page);
+	return name;
+}
+
+/** Open the dialog with a peer by their visible name — the manual path a user
+ * takes: chats list → search → tap the row. */
+export async function openDialogWith(page: Page, peerName: string): Promise<void> {
+	// In-app navigation only: a full page load drops the unlocked vault and
+	// lands on the login screen — reload/re-auth is its own scenario, not a
+	// side effect every test pays for.
+	await page.locator('._menu_btn').filter({ hasText: 'Chats' }).first().click();
+	const search = page.getByPlaceholder(/search/i).first();
+	await search.fill(peerName);
+	// the peer's card must replicate from staging before the row exists
+	const row = page.locator('._user').filter({ hasText: peerName }).first();
+	await expect(row).toBeVisible({ timeout: 90_000 });
+	await row.click();
+	await expect(page.locator('.chat-window')).toBeVisible();
+}
+
+export async function sendMessage(page: Page, text: string): Promise<void> {
+	await page.getByPlaceholder('Type a message...').fill(text);
+	await page.getByPlaceholder('Type a message...').press('Enter');
+	// optimistic bubble appears immediately
+	await expect(page.locator('.message-bubble').filter({ hasText: text }).first()).toBeVisible();
+}
+
+export interface Account { page: Page; name: string }
+
+/**
+ * Two independent browser contexts with fresh accounts — separate storage,
+ * separate vaults, talking only through the staging backend.
+ *
+ * Worker-scoped and created concurrently: account creation is the expensive
+ * part (~80s each against staging), so one pair serves every test in the
+ * worker, and tests get dialogs with real history instead of a cold start.
+ */
+export const test = base.extend<Record<never, never>, { pair: { alice: Account; bob: Account } }>({
+	pair: [async ({ browser }, use) => {
+		const make = async (role: string) => {
+			const context = await browser.newContext();
+			const page = await context.newPage();
+			const name = await createAccount(context, page, role);
+			return { context, page, name };
+		};
+		const [a, b] = await Promise.all([make('alice'), make('bob')]);
+		await use({ alice: { page: a.page, name: a.name }, bob: { page: b.page, name: b.name } });
+		await a.context.close();
+		await b.context.close();
+	}, { scope: 'worker', timeout: 300_000 }],
+});

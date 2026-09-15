@@ -5,7 +5,7 @@ Privacy-focused, end-to-end encrypted messenger. This repository contains the Vu
 ## Stack
 
 - **Vue 3** (script setup) + **Vite**, **Pinia** stores, **vue-router**
-- **ElectricSQL + PGlite** — local-first sync of user data (SQL in the browser)
+- **ElectricSQL + TanStack DB** — server data streams in through Electric shapes into reactive in-memory collections (`src/lib/data/`); writes go out as signed mutations to `/ingest_each`
 - **Yjs** (+ y-webrtc / y-websocket / y-indexeddb) — CRDT sync for messages
 - **Post-quantum cryptography** — [`@noble/post-quantum`](https://github.com/paulmillr/noble-post-quantum), `@noble/secp256k1`, `@noble/hashes`
 - **QR / WebRTC handshake** — device-to-device contact verification (`qwbp`, `qr-scanner`)
@@ -52,9 +52,10 @@ src/
   lib/testbed/  Node-based account recovery testbed (Compartmented Secret Sharing)
   router/       vue-router config
   store/        Pinia stores (user, dialogs, web3, ...)
-  utils/        Helpers, local DB (PGlite) layer
+  lib/data/     Typed Electric/TanStack data layer (collections, ingest, local KV)
+  utils/        Helpers
   views/        Route pages (auth, chats, rooms, contacts, backup, account, ...)
-docs/           Architecture notes (Livebook .livemd files)
+docs/           Architecture notes, invariants (docs/invariants.md), backlog, reports
 netlify/        Netlify redirect function for SPA preview hosting
 ```
 
@@ -70,6 +71,7 @@ Pushing to `main` triggers `.github/workflows/deploy-staging.yml`: the staging s
 
 ## Development conventions
 
+- Read `docs/invariants.md` before changing sync, storage or crypto code — every rule there came from a real failure. `CLAUDE.md` in the repo root carries the same guidance for AI-assisted sessions.
 - No one-off scripts in the repo root: recurring utilities live in `scripts/`, experiments stay out of git (history keeps everything if needed).
 - Work notes and reports go to `docs/` or the PR description, not the repo root.
 - Tests live in `tests/` and run via `npm test`.

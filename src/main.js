@@ -88,22 +88,22 @@ app.use(FloatingVue);
 import InfoTooltip from '@/components/InfoTooltip.vue';
 app.component('InfoTooltip', InfoTooltip);
 
-// check only one tab started
-const channel = new BroadcastChannel('buckitup-app');
-let blocked = false;
-channel.onmessage = (e) => {
-	if (e.data === 'app-already-running') {
-		blocked = true;
-		window.stop();
-		document.body.innerHTML = '<h4 class="text-white text-center mt-5">App is already open in another tab.</h4>';
-	}
-};
-channel.postMessage('ping');
-setTimeout(() => {
-	// Wait a bit for any responses from other tabs
-	if (!blocked) {
-		channel.postMessage('app-already-running'); // If no response, mark this as the main tab
-	}
-}, 100); // can increase to 300ms if needed
-
+// Multiple tabs are allowed. The single-tab gate that used to live here
+// guarded PGlite's one-connection-per-database constraint; PGlite is gone on
+// this stack, and every remaining shared resource coordinates across tabs on
+// its own: the outbox drains under a Web Locks leader, and shape persistence
+// (when enabled) elects a writer via BrowserCollectionCoordinator. A second
+// tab is no different from a second device, which the protocol must survive
+// anyway — signed rows, monotonic owner_timestamps, idempotent replays.
 app.mount('#app');
+
+// Offline shell: precached build + encrypted-video streaming (src/sw.js).
+// virtual:pwa-register resolves to a no-op module in dev, where the
+// self-signed stand cannot register workers anyway.
+import('virtual:pwa-register')
+	.then(({ registerSW }) => registerSW({ immediate: true }))
+	.catch(() => { /* dev server without the PWA virtual module */ });
+
+// Everything offline-first lives in browser storage (vault, shapes, chunk
+// cache, outbox, drafts) — ask the browser not to evict it under pressure.
+navigator.storage?.persist?.().catch(() => { });
