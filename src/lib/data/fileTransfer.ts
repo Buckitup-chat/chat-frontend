@@ -22,7 +22,7 @@ import {
 	generateEncSecret,
 	newFileId,
 } from '@/lib/pq/fileCrypto';
-import { api } from '@/api/client';
+import { sendMutationsAndAwaitShape } from './ingest';
 import { getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 
 declare const ELECTRIC_API_URL: string;
@@ -193,7 +193,7 @@ export const uploadFile = async (opts: {
 		uploader_hash: uploaderHash,
 	};
 	const manifestSign = signFields(manifestFields as never, signSkey);
-	const resp = await api.ingestWithAuth(
+	await sendMutationsAndAwaitShape(
 		[{
 			type: 'insert',
 			syncMetadata: { relation: 'files' },
@@ -201,9 +201,6 @@ export const uploadFile = async (opts: {
 		}],
 		signSkey,
 	);
-	if (!resp.ok) {
-		throw new Error(`manifest rejected: HTTP ${resp.status} ${(await resp.text()).slice(0, 200)}`);
-	}
 
 	return { fileId, encSecretB64: opts.encSecretB64, size: bytes.length, chunkCount: total };
 };

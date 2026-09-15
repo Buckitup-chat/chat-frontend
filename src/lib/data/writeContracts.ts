@@ -81,6 +81,7 @@ export const OWNER_FIELD: Record<string, string> = {
 	dialog_messages_versions: 'sender_hash',
 	dialog_message_reactions: 'reactor_hash',
 	dialog_message_receipts: 'peer_hash',
+	files: 'uploader_hash',
 };
 
 /**
