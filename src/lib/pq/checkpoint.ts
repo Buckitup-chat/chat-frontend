@@ -149,8 +149,13 @@ export const buildViewTree = (state: ViewState): ViewTree => {
 	// orders agree only on ASCII. dmsg_ keys are ASCII by grammar — anything
 	// else is a caller reusing the trie outside its domain, where
 	// buildBranch's divergence scan is not guaranteed to terminate.
+	// Checked per code unit (an \x00-\x7f regex trips no-control-regex):
+	// every unit ≤ 0x7f, at least one unit. NUL and DEL stay allowed as
+	// before; any surrogate half is > 0x7f and rejects.
 	for (const key of Object.keys(state)) {
-		if (!/^[\x00-\x7f]+$/.test(key)) throw new TypeError(`view tree key is not ASCII: ${key}`);
+		let ascii = key.length > 0;
+		for (let i = 0; ascii && i < key.length; i++) ascii = key.charCodeAt(i) <= 0x7f;
+		if (!ascii) throw new TypeError(`view tree key is not ASCII: ${key}`);
 	}
 	const entries: TrieLeaf[] = Object.entries(state)
 		.map(([key, value]) => ({

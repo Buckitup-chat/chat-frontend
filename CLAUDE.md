@@ -70,6 +70,26 @@ Phoenix / Ecto).
 - Component tests: `// @vitest-environment jsdom` per file; default env stays
   node so unit tests stay fast.
 
+## Review
+
+For reviewing a branch, PR or release candidate use the `deep-review` skill
+(`/deep-review <branch> --base main`); `deep-review-loop` alternates review
+and fixes until no confirmed critical/high defect remains. Neither is for a
+quick look at a small diff — they fan out subagents and cost real money.
+
+Facts reviewers cannot infer from the code:
+
+- Tests: `npm test` (vitest). If the sandbox has no network or registry
+  access, say so in the limitations — do not invent run results.
+- Feature branches sit on a stack of unmerged migration work. Always compute
+  the merge-base and compare the commit count with what the author claimed.
+- `src/lib/pq/` is the cryptographic layer: diffs touching it get their own
+  security axis and canonicalization checks by execution. Root derivations
+  are pinned byte-for-byte by golden vectors in `tests/pqCheckpoint.test.ts`
+  — a derivation change must bump the version constants and re-pin them.
+- When reading eslint output, the total is the "N problems (X errors, …)"
+  line; the "potentially fixable" line below it is not the error count.
+
 ## Where things live
 
 - `src/lib/data/` — collections, ingest transport, barrier, outbox, secure
