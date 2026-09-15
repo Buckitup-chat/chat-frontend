@@ -56,6 +56,7 @@ import FileStateModal from '@/components/chat/FileStateModal.vue';
 import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
 import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
 import { getUserCardsCollection } from '@/lib/data/collections';
+import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
@@ -458,17 +459,12 @@ const aggregateReactions = (newRows) => {
         // never appears in the active aggregate.
         // The confirmed state must also match the revision the intent targeted:
         // a row still pointing at the previous revision has not yet absorbed
-        // this click, even though it is live.
-        const serverRows = rawAllReactions.value;
-        for (const item of $dialogs.optimisticItems.values()) {
-            if (item.type !== 'reaction' || item.dialogHash !== dialogHashVal) continue;
-            const serverRow = serverRows.find((r) => r.reaction_hash === item.reactionHash);
-            if (!serverRow) continue;
-            const confirmedActive =
-                !serverRow.deleted_flag && serverRow.message_sign_hash === currentSignHashOf(item.messageId);
-            if (confirmedActive === item.desiredActive) {
-                $dialogs.removeOptimisticItem(item.id);
-            }
+        // this click, even though it is live (§3.5 — see reactionReconcile.ts
+        // for the echo-race invariant this dual guard proves).
+        for (const id of reconcileOptimisticReactions(
+            $dialogs.optimisticItems.values(), rawAllReactions.value, dialogHashVal, currentSignHashOf
+        )) {
+            $dialogs.removeOptimisticItem(id);
         }
     }, 200);
 };
