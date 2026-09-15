@@ -72,6 +72,9 @@ in the layer around them" is a genuinely useful conclusion.
 
 ## Tests and UI
 
+*Sonnet-eligible: override `model: "sonnet"` in the Agent call — mechanical
+line-deletion reasoning survives the downgrade.*
+
 Two halves; weight them equally.
 
 **Tests** — read them as an adversary:
@@ -100,6 +103,8 @@ Two halves; weight them equally.
   working exit.
 
 ## Performance and resources
+
+*Sonnet-eligible: override `model: "sonnet"` in the Agent call.*
 
 Add when the diff touches loops over collections that grow, network per item, or
 anything on a timer.

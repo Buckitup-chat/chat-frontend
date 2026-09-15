@@ -105,6 +105,12 @@ Four axes is the working default. Pick from `references/axes.md` by what the dif
 actually touches: no crypto in the diff, no crypto axis. More than six axes buys
 overlap, not coverage.
 
+Model per axis: the agent definition pins `opus`; override to `model: "sonnet"`
+in the Agent call for the cheaper axes — tests-of-tests and performance — and
+keep opus for correctness, integration, security and every verifier. Roughly
+halves the cost of a round for a small loss of depth exactly where depth
+matters least. `references/axes.md` marks the sonnet-eligible axes.
+
 Each prompt must carry, in full, because the agent knows nothing else:
 
 - the absolute repo path and the checked-out commit;
