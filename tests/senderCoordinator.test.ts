@@ -1,3 +1,13 @@
+// Фаза 4.1: one sender-coordinator per account — live-send, retry after
+// backoff and replay after reload must all decide the same way whether a
+// write needs to wait for shape visibility (writeContracts.ts). Before
+// coordinator.ts existed, only the first, live attempt awaited the shape
+// barrier: a message that failed once and succeeded on a background retry,
+// or that got replayed after a reload, was marked delivered without ever
+// checking whether its shape had become visible — silently weaker than the
+// CONTESTED-relation contract promises. These tests fail without the fix:
+// revert dispatchMutations() to a passthrough and the barrier spy sees 0
+// calls on the retried/replayed sends below.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const MY_HASH = 'u_' + 'a'.repeat(128);
@@ -43,6 +53,8 @@ const makeStorage = () => {
 	};
 };
 
+// dialog_messages insert is a CONTESTED, confirmation:'visible' relation
+// (writeContracts.ts) — the one kind of write these tests need.
 const message = (text: string) => ({
 	type: 'insert',
 	modified: { message_id: `dmsg_${text}`, sender_hash: MY_HASH, content_b64: text },
@@ -61,8 +73,12 @@ describe('sender-coordinator: one dispatch path for live-send, retry and replay'
 		vi.useFakeTimers();
 		try {
 			await sendMutationsAndAwaitShape([message('a')], SKEY, { retries: 0 }).catch(() => {});
+			// The failed live attempt never reached a send that succeeded — no
+			// visibility check yet.
 			expect(awaitShapeVisibility).not.toHaveBeenCalled();
 
+			// Nobody logs in and nobody fires 'online' — the failure itself armed
+			// the drain loop (ingest.ts), which retries on its own timer.
 			online = true;
 			await vi.advanceTimersByTimeAsync(60_000);
 
@@ -76,6 +92,8 @@ describe('sender-coordinator: one dispatch path for live-send, retry and replay'
 	});
 
 	it('awaits shape visibility when replaying after a reload', async () => {
+		// "Reload": the write was queued while offline, nothing has retried it
+		// yet, and we now call the login-time replay entry point directly.
 		await sendMutationsAndAwaitShape([message('b')], SKEY, { retries: 0 }).catch(() => {});
 		expect(awaitShapeVisibility).not.toHaveBeenCalled();
 

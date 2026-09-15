@@ -1,3 +1,13 @@
+// Transactional mutation transport: POST mutations to /ingest_each and
+// classify per-row outcomes. One logical write = one transaction; successful
+// rows return txids that TanStack DB collections await to reconcile
+// optimistic state.
+//
+// Idempotency: a unique-key conflict ("has already been taken") is NOT
+// success by itself — the server row may be a different revision, and
+// swallowing the conflict silently loses updates. The retry wrapper treats a
+// conflict as applied only after proving the server row carries our exact
+// signature (see confirm.ts).
 import { api } from '@/api/client';
 import { mutationAppliedOnServer } from './confirm';
 import { dispatchMutations, dependenciesFor } from './coordinator';
@@ -6,8 +16,11 @@ import { enqueue, resolveEntry, recordFailure, ensureDrainLoop, stopDrainLoop } 
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
+	/** true when retrying can never succeed (server-side validation) */
 	permanent: boolean;
+	/** true when every failed row is a unique-key conflict — candidate for identity check */
 	uniqueConflictOnly: boolean;
+	/** indexes of the rows that actually conflicted (never rows the server accepted) */
 	conflictIndexes: number[];
 	status: number | null;
 	results: IngestRowResult[] | null;
@@ -68,6 +81,13 @@ export interface SendResult {
 	results: IngestRowResult[];
 }
 
+/**
+ * Send one logical transaction of mutations. Throws IngestError:
+ * permanent=true → drop the write (rollback optimistic state, surface to UI),
+ * permanent=false → transient, caller may retry.
+ * uniqueConflictOnly=true → all failures are key conflicts; the retry wrapper
+ * may resolve them via the signature identity check.
+ */
 export async function sendMutations(mutations: unknown[], signSkey: Uint8Array): Promise<SendResult> {
 	let resp: Response;
 	try {
@@ -88,8 +108,15 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 
 	const failed = results.filter((r) => r.status !== 'ok');
 	if (failed.length > 0) {
+		// A 422 row outcome is the server's final verdict — validation or a
+		// business rule (e.g. "cannot react to own message"). Retrying the
+		// same signed mutation can never change it; only network-level
+		// failures (5xx, 429, no response) are worth retrying.
 		const permanent = resp.status === 422;
 		const uniqueConflictOnly = failed.every(isUniqueConflict);
+		// Only the rows the server actually rejected need an identity check;
+		// rows it reported as ok are already confirmed by this response and
+		// must not be made to depend on shape propagation.
 		const conflictIndexes = failed.filter(isUniqueConflict).map((r) => r.index);
 		throw new IngestError(
 			`ingest rejected ${failed.length}/${results.length} rows: ${JSON.stringify(failed[0]?.details || failed[0]?.error)}`,
@@ -109,9 +136,18 @@ export interface RetryOptions {
 	retries?: number;
 	baseDelayMs?: number;
 	maxDelayMs?: number;
+	/** Identity check for unique-key conflicts; overridable for tests. */
 	confirmApplied?: (mutation: unknown) => Promise<boolean>;
 }
 
+/**
+ * sendMutations + exponential backoff for transient failures.
+ *
+ * A unique-conflict outcome is resolved through the identity check: if the
+ * server already holds exactly our signed rows (e.g. a retry after a network
+ * error where the first attempt actually landed), that is success; otherwise
+ * it is a permanent conflict surfaced to the caller.
+ */
 export async function sendMutationsWithRetry(
 	mutations: unknown[],
 	signSkey: Uint8Array,
@@ -166,6 +202,17 @@ interface MutationShape {
 	syncMetadata?: { relation?: string };
 }
 
+/**
+ * Send mutations AND wait until the resulting transaction is visible in the
+ * collection that later writes read as their base.
+ *
+ * Use this for every write whose successor derives parent_sign_hash /
+ * owner_timestamp / existence from the shape. Without the barrier a caller
+ * can sign against a tip the server has already superseded — the HTTP 200
+ * only proves the Postgres commit, not shape delivery.
+ */
+// Re-exported so callers can attribute a durable intent (intents.ts, §3.1) to
+// its owner before a mutation exists to read syncMetadata.relation from.
 export { OWNER_FIELD };
 
 const ownerOf = (mutations: unknown[]): string => {
@@ -178,6 +225,7 @@ const ownerOf = (mutations: unknown[]): string => {
 	return typeof value === 'string' ? value : '';
 };
 
+/** Durable storage refused the write — the mutation was NOT sent. */
 export class DurabilityError extends Error {
 	constructor() {
 		super('This message could not be stored for sending. Nothing was sent — try again.');
@@ -190,19 +238,40 @@ export async function sendMutationsAndAwaitShape(
 	signSkey: Uint8Array,
 	opts: RetryOptions & { durability?: 'required' | 'best-effort' } = {}
 ): Promise<SendResult> {
+	// Durability first: the signed mutations hit IndexedDB before the network,
+	// so a reload or crash mid-send replays them on the next login instead of
+	// losing them. The entry is removed only after the server confirms.
 	const owner = ownerOf(mutations);
 	const dependsOn = await dependenciesFor(mutations, owner);
 	const outboxId = await enqueue(mutations, owner, { dependsOn });
 
+	// ADR §11: when durable storage is unavailable, a user-visible mutation
+	// fails visibly — a best-effort network send that looks identical to
+	// success is the one state the interface must never claim. Callers that
+	// legitimately run before the vault unlocks opt out per call.
 	if (outboxId === null && (opts.durability ?? 'required') === 'required') {
 		throw new DurabilityError();
 	}
 
 	let result: SendResult;
 	try {
+		// The operation's contract decides the wait (§7.3, writeContracts.ts):
+		// 'accepted' operations are done once sent — nothing reads their scope
+		// from the shape next, and holding the caller for up to 30s of
+		// replication lag bought nothing. 'visible' operations still await the
+		// echo — coordinator.ts owns that decision so a retry or a replay of
+		// this same entry (below, and in drainPendingWrites) honours it too.
 		result = await dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, opts));
 	} catch (e) {
+		// Permanent rejections die in the outbox too; transient failures stay
+		// for the next drain. Either way the caller sees the same error as
+		// before the outbox existed.
 		await recordFailure(outboxId, e);
+		// The drain loop stops itself when the queue empties, so a live-send
+		// that fails after that point would leave a durable, retryable entry
+		// with nothing scheduled to retry it — waiting on a later login or an
+		// 'online' event that may never come. Arming the loop here is what
+		// makes "retryable" mean the client will actually try again (ADR §5).
 		ensureDrainLoop(owner, (queued) =>
 			dispatchMutations(queued, (m) => sendMutationsWithRetry(m, signSkey, { retries: 1 }))
 		);
@@ -212,10 +281,19 @@ export async function sendMutationsAndAwaitShape(
 	return result;
 }
 
+/**
+ * Replay writes that never got a server confirmation — after login (keys just
+ * became available) and on reconnect. The mutations were signed when created,
+ * so they replay verbatim; only the auth challenge needs the live key.
+ */
 export function drainPendingWrites(userHash: string, signSkey: Uint8Array): void {
+	// The loop owns pacing from here: it drains now and keeps its own timer
+	// until the queue empties, so a 503 with no connectivity change cannot
+	// strand the queue until the next login (ADR §5).
 	ensureDrainLoop(userHash, (mutations) =>
 		dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, { retries: 1 })),
-
+		// login/'online' is a fresh signal: backoffs computed before it no
+		// longer describe the world — everything pending becomes due now
 		{ resetSchedules: true },
 	);
 }
