@@ -18,6 +18,7 @@ import { getUserCardsCollection } from '@/lib/data/collections';
 import { getStorageRow, upsertStorageRow } from '@/lib/data/userStorage';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
+import { clearAcceptedSnapshots } from '@/lib/data/acceptedSnapshot';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
 
@@ -369,6 +370,7 @@ export class EncryptionManagerPQ extends EventTarget {
     // shared browser profile should not keep serving it to whoever logs in
     // next.
     clearReadCache().catch((e) => console.warn('[EncryptionManagerPQ] read-cache clear failed:', e));
+    clearAcceptedSnapshots().catch((e) => console.warn('[EncryptionManagerPQ] accepted-snapshot clear failed:', e));
 
     console.log('Logged out — secret key wiped');
     this.#dispatchAuthChange();
