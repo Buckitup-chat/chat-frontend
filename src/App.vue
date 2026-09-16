@@ -1,4 +1,10 @@
 <template>
+	<!-- The app runs offline (vault login, persisted history, outbox) — the
+	     banner only names the state, nothing below it is disabled. -->
+	<div v-if="!$userPQ.isOnline" class="_offline_banner">
+		Offline — showing local data; sending resumes when the network returns
+	</div>
+
 	<div class="wrapper" v-if="$userPQ.currentUser">
 		<Menu class="_menu" :class="{ _opened: $menuOpened }" />
 
@@ -29,6 +35,20 @@
 <style lang="scss" scoped>
 @import '@/scss/variables.scss';
 @import '@/scss/breakpoints.scss';
+
+._offline_banner {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	z-index: 2000;
+	padding: 3px 10px;
+	background: #17161a;
+	color: #fff;
+	font-size: 12px;
+	text-align: center;
+	opacity: .92;
+}
 
 ._login {
 	width: 100vw;
@@ -116,6 +136,7 @@
 import { web3Store } from '@/store/web3.store';
 
 import { userPQStore } from '@/store/userPQ.store';
+import { initPersistence } from '@/lib/data/persistence';
 
 import { userStore } from '@/store/user.store';
 
@@ -174,13 +195,18 @@ watch(
 	},
 );
 
-	onMounted(() => {
+	onMounted(async () => {
 		window.addEventListener('online', () => ($user.isOnline = navigator.onLine));
 		window.addEventListener('offline', () => ($user.isOnline = navigator.onLine));
 		setTimeout(function tick() {
 			timestamp.value = Math.floor(Date.now().valueOf() / 1000);
 			setTimeout(tick, 1000);
 		}, 1000);
+
+		// Must resolve before the first collection is built: collections
+		// created earlier would silently run in-memory. Resolves false (and
+		// the app runs exactly as before) when OPFS is unavailable.
+		await initPersistence();
 
 		$userPQ.initialize();
 	});

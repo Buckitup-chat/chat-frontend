@@ -10,18 +10,48 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { api } from '@/api/client';
-import { sendMutationsWithRetry } from '@/lib/data/ingest';
+import { sendMutationsAndAwaitShape, drainPendingWrites, stopDrainLoop } from '@/lib/data/ingest';
+import { nextOwnerTimestamp } from '@/lib/data/time';
+import { getUserCardsCollection } from '@/lib/data/collections';
 import { getStorageRow, upsertStorageRow } from '@/lib/data/userStorage';
+import { resetUserStorageCollection } from '@/lib/data/collections';
+import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
+import { createSlotResolver } from '@/lib/data/slots';
 
 const VAULT_KEY_OPTIONS = {
-  authenticatorSelection: {
-    authenticatorAttachment: "cross-platform",
-    userVerification: "preferred",
-    residentKey: "preferred",
-    requireResidentKey: false
-  },
+  // Only the fields local-data-lock's getLockKey() actually reads survive the
+  // trip (relyingParty*, username/displayName, addNewPasskey, …). WebAuthn
+  // registration options like authenticatorSelection are silently dropped by
+  // the library — they are enforced by the credentials.create wrapper below.
+}
 
-  timeout: 60000,
+// The vault's lock-key seed lives inside the passkey's userHandle, and only a
+// discoverable (resident) credential returns the userHandle on auth. A
+// server-side credential logs in once — registration still has the seed in
+// memory — and then locks the account out forever with "did not provide a
+// valid encryption/decryption key". Platform authenticators make passkeys
+// discoverable voluntarily, which masks this; security keys and strict
+// implementations do not. local-data-lock gives no way to pass
+// authenticatorSelection through, so it is enforced here: a passkey that
+// cannot hold the seed must fail at registration, not at the next login.
+if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
+  const nativeCreate = navigator.credentials.create.bind(navigator.credentials);
+  navigator.credentials.create = (options) => {
+    if (options?.publicKey && !options.publicKey.authenticatorSelection) {
+      options = {
+        ...options,
+        publicKey: {
+          ...options.publicKey,
+          authenticatorSelection: {
+            residentKey: 'required',
+            requireResidentKey: true,
+            userVerification: 'preferred',
+          },
+        },
+      };
+    }
+    return nativeCreate(options);
+  };
 }
 
 /**
@@ -32,6 +62,7 @@ const VAULT_KEY_OPTIONS = {
  */
 export class EncryptionManagerPQ extends EventTarget {
   static instance = null;
+  static #cardQueues = new Map();
 
   #rawStore = rawStorage('idb');
   #currentVault = null;
@@ -40,6 +71,7 @@ export class EncryptionManagerPQ extends EventTarget {
   #currentUserHash = null;
   #signSkey = null;
   #cryptSkey = null;
+  #slotResolver = null;
   #cryptPubKey = null;
   #contactSkey = null;
   #evmSkey = null;
@@ -58,28 +90,47 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#loadLocalUserCards()
   }
 
-  // Push own user card to the server as a signed mutation.
-  // Fire-and-forget with retry: card data also lives in the local vault
-  // registry, so a failed push costs nothing locally.
-  #pushOwnCard(card, { isUpdate = false, signSkey = null } = {}) {
+  // Publishing the public user card. Awaited, not fire-and-forget: the
+  // backend refuses a user_storage write until the card exists, so
+  // registration would race its own profile save. Serialized per user_hash
+  // and monotonic, because the server rejects a card update whose timestamp
+  // is not strictly newer than the stored one.
+  async #pushOwnCard(card, { isUpdate = false, signSkey = null } = {}) {
     const key = signSkey || this.#signSkey;
-    if (!key) return;
-    try {
+    if (!key) throw new Error('No signing key for user card');
+
+    const userHash = card.user_hash;
+    const previous = EncryptionManagerPQ.#cardQueues.get(userHash) ?? Promise.resolve();
+    const run = async () => {
+      const serverCard = getUserCardsCollection().get(userHash);
+      const ownerTimestamp = nextOwnerTimestamp(serverCard?.owner_timestamp);
+
       const { mutation } = api.createUserCard(card.name || 'User', {
-        user_hash: card.user_hash,
+        user_hash: userHash,
         sign_pkey: decodeHexOrBase64(card.sign_pkey),
         contact_pkey: decodeHexOrBase64(card.contact_pkey),
         contact_cert: decodeHexOrBase64(card.contact_cert),
         crypt_pkey: decodeHexOrBase64(card.crypt_pkey),
         crypt_cert: decodeHexOrBase64(card.crypt_cert),
         sign_skey: key,
-      }, isUpdate ? 'update' : 'insert');
-      sendMutationsWithRetry([mutation], key).catch((e) => {
-        console.warn('[EncryptionManagerPQ] card push failed:', e?.message || e);
-      });
-    } catch (e) {
-      console.warn('[EncryptionManagerPQ] card push build failed:', e);
-    }
+      }, isUpdate ? 'update' : 'insert', ownerTimestamp);
+
+      // Barrier included: the next card update reads this row as its base.
+      // Best-effort durability: card publication runs while the vault may
+      // still be locked (no key to encrypt the outbox with), and a lost card
+      // write is recoverable — the identity republishes on the next login.
+      return sendMutationsAndAwaitShape([mutation], key, { durability: 'best-effort' });
+    };
+
+    const next = previous.then(run, run);
+    const settled = next.then(() => undefined, () => undefined);
+    EncryptionManagerPQ.#cardQueues.set(userHash, settled);
+    settled.then(() => {
+      if (EncryptionManagerPQ.#cardQueues.get(userHash) === settled) {
+        EncryptionManagerPQ.#cardQueues.delete(userHash);
+      }
+    });
+    return next;
   }
 
   static getInstance() {
@@ -160,7 +211,9 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await this.#saveLocalUserCards();
 
-    this.#pushOwnCard({ ...identity, name }, { signSkey });
+    // The backend refuses a user_storage write until this card exists, so
+    // the profile save below must not start before it is accepted.
+    await this.#pushOwnCard({ ...identity, name }, { signSkey });
 
     await this.login(userHash);
 
@@ -193,6 +246,13 @@ export class EncryptionManagerPQ extends EventTarget {
   // Authentification
 
   async login(userHash) {
+    // This class is a singleton, so the resolver cache and the storage
+    // collection outlive any one session. Signing in without a logout first —
+    // an account switch — would otherwise resolve this account's slot names
+    // against the previous account's addresses.
+    this.#slotResolver = null;
+    resetUserStorageCollection();
+
     await this.#loadLocalUserCards();
 
     const identity = this.#localUserCards.find(i => i.user_hash === userHash);
@@ -214,7 +274,12 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#cryptSkey = this.#normalizeKey(this.#cryptSkey);
 
     if (!(this.#signSkey instanceof Uint8Array)) {
+      // isAuth is currentUserHash && signSkey: leaving the hash set with the
+      // key gone would strand the app half-logged-in — and this is the one
+      // state change in the file listeners would otherwise never hear about.
       this.#signSkey = null;
+      this.#currentUserHash = null;
+      this.#dispatchAuthChange();
       throw new Error('Failed to load secret key from vault');
     }
 
@@ -230,10 +295,43 @@ export class EncryptionManagerPQ extends EventTarget {
 
     this.#dispatchAuthChange();
 
+    // Writes queued before a reload/crash can replay now that the signing key
+    // is available again. Background: a slow drain must not delay login.
+    this.#startOutboxDrain();
+
     return identity;
   }
 
+  // Replays the durable outbox for the logged-in account: once right away,
+  // and again whenever connectivity returns. The listener is bound to the
+  // account and dropped on logout — entries signed by another user must not
+  // be replayed with this session's auth.
+  #outboxOnlineListener = null;
+
+  #startOutboxDrain() {
+    const userHash = this.#currentUserHash;
+    const signSkey = this.#signSkey;
+    if (!userHash || !signSkey) return;
+
+    drainPendingWrites(userHash, signSkey);
+
+    this.#stopOutboxDrain();
+    this.#outboxOnlineListener = () => drainPendingWrites(userHash, signSkey);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', this.#outboxOnlineListener);
+    }
+  }
+
+  #stopOutboxDrain() {
+    stopDrainLoop();
+    if (this.#outboxOnlineListener && typeof window !== 'undefined') {
+      window.removeEventListener('online', this.#outboxOnlineListener);
+    }
+    this.#outboxOnlineListener = null;
+  }
+
   async logout() {
+    this.#stopOutboxDrain();
     if (this.#signSkey) {
       this.#signSkey.fill(0);
       this.#signSkey = null;
@@ -246,6 +344,10 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#cryptPubKey = null;
     this.#currentUserHash = null;
     this.#currentVault = null;
+    // Slot addresses and the storage shape belong to the account that just
+    // left; carrying either into the next login would point at its rows.
+    this.#slotResolver = null;
+    resetUserStorageCollection();
 
     console.log('Logged out — secret key wiped');
     this.#dispatchAuthChange();
@@ -295,7 +397,7 @@ export class EncryptionManagerPQ extends EventTarget {
   #dispatchAuthChange() {
     this.dispatchEvent(new CustomEvent('authChange', {
       detail: {
-        isAuthenticated: this.isAuthenticated,
+        isAuthenticated: this.isAuth,
         userHash: this.#currentUserHash
       }
     }));
@@ -330,9 +432,25 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   // Re-push the current user's card (e.g. after a name change).
-  pushCurrentUserCard() {
+  async pushCurrentUserCard() {
     const card = this.#localUserCards.find(u => u.user_hash === this.#currentUserHash);
-    if (card) this.#pushOwnCard(card, { isUpdate: true });
+    if (!card) return;
+    return this.#pushOwnCard(card, { isUpdate: true });
+  }
+
+  /**
+   * Rename: local vault registry and the public card are one logical
+   * operation. Doing only half of it let the persisted registry keep the old
+   * name and silently revert it on the next login.
+   */
+  async updateOwnUserCardName(newName) {
+    const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
+    if (idx === -1) throw new Error('User not found in local identities');
+
+    this.#localUserCards[idx] = { ...this.#localUserCards[idx], name: newName };
+    await this.#saveLocalUserCards();
+    await this.#pushOwnCard(this.#localUserCards[idx], { isUpdate: true });
+    return this.#localUserCards[idx];
   }
 
   // Sign Challenge
@@ -401,9 +519,133 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards.push(identity);
     await this.#saveLocalUserCards();
 
-    this.#pushOwnCard(identity, { signSkey });
+    // Same dependency as registration: the card may not exist on this Pi yet.
+    await this.#pushOwnCard(identity, { signSkey });
 
     await this.login(identity.user_hash);
+  }
+
+
+  // ---------- user_storage slots ----------
+  //
+  // The root record sits at an address derived from crypt_skey and holds the
+  // profile plus the map of every other slot (lib/pq/slotId). Only this one
+  // address is derivable; the rest are random and found through the map.
+
+  #rootSlotUuid() {
+    return deriveRootSlotUuid(this.#cryptSkey);
+  }
+
+  async #encryptJson(value) {
+    const data = new TextEncoder().encode(JSON.stringify(value));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encrypted = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv },
+      await this.#deriveKeyFromCryptSkey(),
+      data
+    );
+    return {
+      valueB64: arrayToBase64(new Uint8Array([...iv, ...new Uint8Array(encrypted)])),
+      hashB64: bytesToHex(sha256(new Uint8Array(encrypted))),
+    };
+  }
+
+  async #decryptJson(valueB64) {
+    const combined = decodeHexOrBase64(valueB64);
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: combined.slice(0, 12) },
+      await this.#deriveKeyFromCryptSkey(),
+      combined.slice(12)
+    );
+    return JSON.parse(new TextDecoder().decode(decrypted));
+  }
+
+  /** Decrypted root record, or null when this account has none yet. */
+  async #readRoot() {
+    const row = await getStorageRow(this.#currentUserHash, this.#rootSlotUuid());
+    if (!row || !row.value_b64) return null;
+    try {
+      return await this.#decryptJson(row.value_b64);
+    } catch (e) {
+      console.error('Failed to decrypt the user_storage root record:', e);
+      return null;
+    }
+  }
+
+  async #writeRoot(record) {
+    const { valueB64, hashB64 } = await this.#encryptJson(record);
+    const write = await upsertStorageRow({
+      userHash: this.#currentUserHash,
+      uuid: this.#rootSlotUuid(),
+      valueB64,
+      hashB64,
+      signSkey: this.#signSkey,
+    });
+    const sync = await write.sync;
+    if (sync.status === 'failed') {
+      throw new Error('Storage saved locally but failed to sync to the server');
+    }
+  }
+
+  async #writeSlotRow(uuid, valueB64, hashB64) {
+    const write = await upsertStorageRow({
+      userHash: this.#currentUserHash,
+      uuid,
+      valueB64,
+      hashB64,
+      signSkey: this.#signSkey,
+    });
+    const sync = await write.sync;
+    if (sync.status === 'failed') {
+      throw new Error('Saved locally but failed to sync to the server');
+    }
+  }
+
+  /** Signed tombstone for a slot row another client's map won over. */
+  async #tombstoneSlotRow(uuid) {
+    try {
+      const write = await upsertStorageRow({
+        userHash: this.#currentUserHash,
+        uuid,
+        valueB64: '',
+        hashB64: null,
+        signSkey: this.#signSkey,
+        deletedFlag: true,
+      });
+      await write.sync;
+    } catch (e) {
+      // The row is already unreferenced; failing to mark it is not worth
+      // failing the user's save over.
+      console.warn(`Could not tombstone orphaned slot row ${uuid}:`, e);
+    }
+  }
+
+  #slots() {
+    if (!this.#slotResolver) {
+      this.#slotResolver = createSlotResolver({
+        read: () => this.#readRoot(),
+        write: (next) => this.#writeRoot(next),
+      });
+    }
+    return this.#slotResolver;
+  }
+
+  /** Address of a named slot, or null when it has never been created. */
+  async #slotUuid(name) {
+    return this.#slots().getSlotUuid(name);
+  }
+
+  /**
+   * Writes a named slot, creating it on first use. The slot row lands before
+   * the map entry that names it, so a failure between the two leaves an
+   * unreferenced row rather than a map pointing at nothing.
+   */
+  async #writeSlot(name, valueB64, hashB64) {
+    const { orphaned } = await this.#slots().ensureSlotUuid(name, {
+      mint: randomSlotUuid,
+      writeRow: (uuid) => this.#writeSlotRow(uuid, valueB64, hashB64),
+    });
+    if (orphaned) await this.#tombstoneSlotRow(orphaned);
   }
 
   // Update User Storage
@@ -416,27 +658,14 @@ export class EncryptionManagerPQ extends EventTarget {
       throw new Error('Crypt key not loaded');
     }
 
-    // 1. Encrypt profile and save to DB
-    const profileJson = JSON.stringify({ name, notes, avatarUuid });
-    const profileData = new TextEncoder().encode(profileJson);
-
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encryptedData = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      await this.#deriveKeyFromCryptSkey(),
-      profileData
-    );
-
-    const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
-    const combined = arrayToBase64(ivData);
-
-    await upsertStorageRow({
-      userHash: this.#currentUserHash,
-      uuid: 'profile',
-      valueB64: combined,
-      hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
-      signSkey: this.#signSkey,
-    });
+    // 1. Encrypt profile and save to DB.
+    // The root record also carries the slot map, so the profile fields are
+    // merged into what is already there — writing only the profile would
+    // drop the map and strand every slot it points at.
+    const existingRoot = await this.#readRoot();
+    // Profile is a user-visible "saved" action: #writeRoot waits for the
+    // server verdict instead of reporting success while the write stays local.
+    await this.#writeRoot({ ...(existingRoot || {}), name, notes, avatarUuid });
 
     // 2. Update local cards
     const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
@@ -470,7 +699,7 @@ export class EncryptionManagerPQ extends EventTarget {
     );
 
     if (cardChanged) {
-      this.#pushOwnCard(updated, { isUpdate: true });
+      await this.#pushOwnCard(updated, { isUpdate: true });
     }
 
     return updated;
@@ -480,25 +709,20 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
     if (!this.#cryptSkey) return null;
 
-    const storage = await getStorageRow(this.#currentUserHash, 'profile');
-    if (!storage || !storage.value_b64) return null;
-
-    const combined = decodeHexOrBase64(storage.value_b64);
-
-    const iv = combined.slice(0, 12);
-    const encryptedData = combined.slice(12);
-
-    try {
-      const decryptedData = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv },
-        await this.#deriveKeyFromCryptSkey(),
-        encryptedData
-      );
-      return JSON.parse(new TextDecoder().decode(decryptedData));
-    } catch (e) {
-      console.error('Failed to decrypt profile:', e);
+    // Read only. Materializing an empty root record here would be a write on
+    // the read path, and on a second device a losing one: before the shape
+    // delivers the existing row, getServerState honestly reports "absent", so
+    // the empty record would go out with a fresh owner_timestamp and beat the
+    // real profile under last-write-wins. The root record is created by the
+    // write paths instead.
+    const root = await this.#readRoot();
+    if (!root) return null;
+    // A root record holding only the slot map is not a profile: the account
+    // created a slot before ever saving one.
+    if (root.name === undefined && root.notes === undefined && root.avatarUuid === undefined) {
       return null;
     }
+    return root;
   }
 
   // Contacts Encryption
@@ -521,13 +745,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    await upsertStorageRow({
-      userHash: this.#currentUserHash,
-      uuid: 'contacts',
-      valueB64: combined,
-      hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
-      signSkey: this.#signSkey,
-    });
+    await this.#writeSlot('contacts', combined, bytesToHex(sha256(new Uint8Array(encryptedData))));
 
     return true;
   }
@@ -536,7 +754,13 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
     if (!this.#cryptSkey) return [];
 
-    const storage = await getStorageRow(this.#currentUserHash, 'contacts');
+    // No slot yet means this account has never saved contacts. Reading must
+    // not create one: doing so on a transient failure to load the map would
+    // start a second, empty contacts row alongside the real one.
+    const contactsUuid = await this.#slotUuid('contacts');
+    if (!contactsUuid) return [];
+
+    const storage = await getStorageRow(this.#currentUserHash, contactsUuid);
     if (!storage || !storage.value_b64) return [];
 
     const combined = decodeHexOrBase64(storage.value_b64);
@@ -586,13 +810,21 @@ export class EncryptionManagerPQ extends EventTarget {
     const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
     const combined = arrayToBase64(ivData);
 
-    await upsertStorageRow({
+    // The caller publishes this uuid inside the profile revision, so the
+    // avatar must be accepted by the server FIRST — otherwise a profile can
+    // sync successfully while pointing at an avatar row that never landed,
+    // and another device renders a broken reference.
+    const avatarWrite = await upsertStorageRow({
       userHash: this.#currentUserHash,
       uuid,
       valueB64: combined,
       hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
       signSkey: this.#signSkey,
     });
+    const avatarSync = await avatarWrite.sync;
+    if (avatarSync.status === 'failed') {
+      throw new Error('Avatar saved locally but failed to sync to the server');
+    }
 
     return uuid;
   }

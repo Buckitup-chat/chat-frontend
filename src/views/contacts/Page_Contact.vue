@@ -98,7 +98,7 @@ onMounted(async () => {
 });
 
 const goToChat = async () => {
-	window.location.href = `https://buckitup.xyz/chat/${contact.value.user_hash}`;
+	$router.push({ name: 'chat', params: { address: contact.value.user_hash } });
 };
 
 const contact = computed(() => {

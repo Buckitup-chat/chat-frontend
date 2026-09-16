@@ -16,12 +16,15 @@ export interface UserCardRow {
 	sign_b64: string | null;
 }
 
+// Exactly the server schema (chat: lib/chat/data/schemas/user_storage.ex).
+// No `version`, no `hash_b64` — those were client inventions; comparing a
+// synthetic local counter against Electric rows silently preferred stale
+// local data (third-party review, finding 4). Local-only metadata lives in
+// src/lib/data/userStorage.ts, never in this row type.
 export interface UserStorageRow {
 	user_hash: string;
 	uuid: string;
-	version: number;
 	value_b64: string | null;
-	hash_b64: string | null;
 	deleted_flag: boolean;
 	parent_sign_hash: string | null;
 	sign_hash: string | null;
@@ -92,8 +95,14 @@ export interface DialogMessageReceiptRow {
 /** Per-row outcome of POST /ingest_each. */
 export interface IngestRowResult {
 	index: number;
-	status: 'ok' | 'error';
+	/**
+	 * 'exists' is the server's own idempotency verdict on a PK conflict:
+	 * `conflicted: false` means the stored row already carries our exact
+	 * fields (a safe retry), `true` means a different revision is there.
+	 */
+	status: 'ok' | 'error' | 'exists';
 	txid?: number;
+	conflicted?: boolean;
 	error?: string;
 	details?: Record<string, string[]>;
 }

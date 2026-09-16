@@ -1,6 +1,6 @@
 <template>
 	<div>
-		<UserList @select="(address) => emit('select', address)" :selected="selected" />
+		<UserList @select="(address, opts) => emit('select', address, opts)" :selected="selected" />
 	</div>
 </template>
 

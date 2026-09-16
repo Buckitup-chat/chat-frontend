@@ -10,6 +10,7 @@ import { viteCommonjs } from '@originjs/vite-plugin-commonjs'
 import path from 'path';
 
 import wasm from 'vite-plugin-wasm';
+import { VitePWA } from 'vite-plugin-pwa';
 import { fileURLToPath, URL } from 'node:url';
 
 const DOMAIN = process.env.DOMAIN
@@ -61,6 +62,39 @@ export default defineConfig(({ command }) => {
 				}
 			),
 			vue(),
+			// Offline shell: src/sw.js precaches the build and hosts the
+			// encrypted-video streamer (one worker per scope). Disabled in dev —
+			// the stand runs on a self-signed cert where workers cannot
+			// register, and the video path has a no-worker fallback anyway.
+			VitePWA({
+				strategies: 'injectManifest',
+				srcDir: 'src',
+				filename: 'sw.js',
+				registerType: 'autoUpdate',
+				injectRegister: false, // main.js registers explicitly
+				injectManifest: {
+					globPatterns: ['**/*.{js,css,html,svg,png,webp,woff,woff2,wasm}'],
+					// the main bundle is far past workbox's 2 MiB default
+					maximumFileSizeToCacheInBytes: 12 * 1024 * 1024,
+				},
+				manifest: {
+					name: 'BuckitUp',
+					short_name: 'BuckitUp',
+					description: 'Privacy-first end-to-end encrypted messenger',
+					// #241824 — the brand dark the icon set is built on (designer's
+					// handoff): splash, status bar and icon background are one
+					// paint, no seam at the icon edge.
+					theme_color: '#241824',
+					background_color: '#241824',
+					display: 'standalone',
+					icons: [
+						{ src: 'img/pwa/pwa-192.png', sizes: '192x192', type: 'image/png' },
+						{ src: 'img/pwa/pwa-512.png', sizes: '512x512', type: 'image/png' },
+						{ src: 'img/pwa/pwa-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+						{ src: 'img/pwa/pwa-monochrome.png', sizes: '512x512', type: 'image/png', purpose: 'monochrome' },
+					],
+				},
+			}),
 		],
 		define: {
 			ELECTRIC_API_URL: JSON.stringify(
@@ -97,6 +131,11 @@ export default defineConfig(({ command }) => {
 			},
 			exclude: [
 				'@lo-fi/webauthn-local-client',
+				// Ships its OPFS worker + wasm as relative-URL assets; Vite's
+				// dep pre-bundling breaks those URLs ("OPFS worker terminated
+				// unexpectedly"), so serve both packages unbundled.
+				'@tanstack/browser-db-sqlite-persistence',
+				'@journeyapps/wa-sqlite',
 			],
 			include: [
 				'@noble/hashes',

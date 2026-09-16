@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import { useTransfersStore } from '@/store/transfers.store';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue'
 import SyncStatus from './SyncStatus.vue'
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, inject } from 'vue'
 import { userPQStore } from '@/store/userPQ.store'
+import { useDialogsStore } from '@/store/dialogs.store'
 
-const emit = defineEmits<{ select: [address: string] }>()
+const emit = defineEmits<{ select: [address: string, opts?: { checkpoint?: boolean | string }] }>()
 
 const { selected } = defineProps({
   selected: { type: Array, default: () => [] },
@@ -41,6 +43,39 @@ const filtered = computed(() => {
   }
   return list
 })
+const $transfers = useTransfersStore();
+const $dialogs = useDialogsStore();
+
+// Checkpoint alerts (see dialogs.store): the list scans the dialogs this
+// account has confirmed a state in and marks the ones that moved since.
+//
+// The list holds no dialog subscription of its own, so there is nothing to
+// react to — the scan is re-run at the moments the answer can have changed:
+// coming back from a dialog, returning to the tab, and while the list is on
+// screen. The store collapses overlapping runs into one.
+const scanAlerts = () => {
+  const peers = filtered.value.map((u) => u.user_hash).filter(Boolean)
+  if (peers.length) $dialogs.scanCheckpointAlerts(peers)
+}
+
+const $route = inject('$route', null)
+let rescanTimer = null
+const onVisible = () => { if (document.visibilityState === 'visible') scanAlerts() }
+
+onMounted(() => {
+  scanAlerts()
+  document.addEventListener('visibilitychange', onVisible)
+  // A dialog open in another tab or on another device moves while this list
+  // is shown; nothing here observes that, so the list refreshes on a slow
+  // beat rather than pretending to be live.
+  rescanTimer = setInterval(scanAlerts, 30000)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onVisible)
+  clearInterval(rescanTimer)
+})
+watch(() => filtered.value.length, scanAlerts)
+watch(() => $route?.params?.address, (now, before) => { if (before && !now) scanAlerts() })
 </script>
 
 <template>
@@ -63,6 +98,15 @@ const filtered = computed(() => {
     <div class="_list">
       <div class="_user" @click="select(user.user_hash)" v-for="user in filtered" :class="{ _selected: isSelected(user.user_hash) }">
         <Account_Item_PQ :account="user" class="w-100" />
+        <!-- Screen 11: the dialog a transfer is going to is marked. -->
+        <span v-if="$transfers.transferPeers.has(user.user_hash)" class="_transfer_dot" title="Transfer in progress">
+          <span class="_transfer_dot_mark"></span>передача
+        </span>
+        <!-- The dialog moved since the checkpoint this account signed in it.
+             Tapping it opens the dialog on the checkpoint comparison. -->
+        <span v-if="$dialogs.alertingPeers.has(user.user_hash)" class="_checkpoint_dot"
+          role="button" title="Изменилось с момента вашей отметки — открыть сравнение"
+          @click.stop="emit('select', user.user_hash, { checkpoint: $dialogs.checkpointAlerts.get(user.user_hash)?.messageId || true })"></span>
       </div>
     </div>
   </div>
@@ -104,4 +148,32 @@ const filtered = computed(() => {
     }
   }
 }
+
+._checkpoint_dot {
+  cursor: pointer;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #8e2b77;
+  box-shadow: 0 0 0 3px rgba(142, 43, 119, .18);
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+._transfer_dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: #8e2b77;
+  flex-shrink: 0;
+  padding-left: 6px;
+}
+._transfer_dot_mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #8e2b77;
+  animation: transfer-pulse 1.6s ease-in-out infinite;
+}
+@keyframes transfer-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 </style>

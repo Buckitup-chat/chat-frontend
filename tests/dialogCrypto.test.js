@@ -25,3 +25,36 @@ describe('DialogCrypto.computeDialogHash', () => {
 		expect(first).toBe(second);
 	});
 });
+
+describe('DialogCrypto.computeReceiptHash', () => {
+    const MSG = 'dmsg_' + 'a'.repeat(128);
+    const V1 = 'dms_' + 'b'.repeat(128);
+    const V2 = 'dms_' + 'c'.repeat(128);
+    const PEER = 'u_' + 'd'.repeat(128);
+
+    it('matches the domain the server enforces', () => {
+        const h = DialogCrypto.computeReceiptHash(MSG, V1, PEER, 'read');
+        expect(h).toMatch(/^dmrc_[a-f0-9]{128}$/);
+    });
+
+    it('is deterministic, so re-confirming cannot create a duplicate row', () => {
+        expect(DialogCrypto.computeReceiptHash(MSG, V1, PEER, 'read'))
+            .toBe(DialogCrypto.computeReceiptHash(MSG, V1, PEER, 'read'));
+    });
+
+    it('binds to one message revision — an edit needs its own receipt', () => {
+        expect(DialogCrypto.computeReceiptHash(MSG, V1, PEER, 'read'))
+            .not.toBe(DialogCrypto.computeReceiptHash(MSG, V2, PEER, 'read'));
+    });
+
+    it('separates delivered from read', () => {
+        expect(DialogCrypto.computeReceiptHash(MSG, V1, PEER, 'read'))
+            .not.toBe(DialogCrypto.computeReceiptHash(MSG, V1, PEER, 'delivered'));
+    });
+
+    it('separates peers', () => {
+        const other = 'u_' + 'e'.repeat(128);
+        expect(DialogCrypto.computeReceiptHash(MSG, V1, PEER, 'read'))
+            .not.toBe(DialogCrypto.computeReceiptHash(MSG, V1, other, 'read'));
+    });
+});
