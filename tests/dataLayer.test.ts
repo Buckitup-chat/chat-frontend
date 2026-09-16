@@ -85,6 +85,44 @@ describe('sendMutations', () => {
 		expect(err.permanent).toBe(true);
 		expect(err.uniqueConflictOnly).toBe(false);
 	});
+
+	// /ingest_each resolves a PK conflict itself when a Shape module is
+	// registered for the relation: HTTP 200, status "exists", and its own
+	// fingerprint verdict. `conflicted: false` is our own earlier write
+	// arriving again (lost response, retried send) and must read as success —
+	// treating every non-"ok" row as failure retried this identical row
+	// forever, since the retry always lands on the same conflict.
+	it('treats a same-signature "exists" row as success, not a failure to retry', async () => {
+		mockFetchSequence(200, {
+			results: [{ index: 0, status: 'exists', conflicted: false }],
+		});
+		const res = await sendMutations([mutation], signSkey);
+		expect(res.txids).toEqual([]);
+	});
+
+	// `conflicted: true` is a different revision under the same key — a real,
+	// final conflict, not a network hiccup to retry blindly.
+	it('treats a different-signature "exists" row as a permanent conflict', async () => {
+		mockFetchSequence(200, {
+			results: [{ index: 0, status: 'exists', conflicted: true }],
+		});
+		const err = await sendMutations([mutation], signSkey).catch((e) => e);
+		expect(err).toBeInstanceOf(IngestError);
+		expect(err.permanent).toBe(true);
+		expect(err.uniqueConflictOnly).toBe(true);
+		expect(err.conflictIndexes).toEqual([0]);
+	});
+
+	it('an idempotent "exists" row does not block other rows in the same batch from returning ok', async () => {
+		mockFetchSequence(200, {
+			results: [
+				{ index: 0, status: 'ok', txid: 9 },
+				{ index: 1, status: 'exists', conflicted: false },
+			],
+		});
+		const res = await sendMutations([mutation, mutation], signSkey);
+		expect(res.txids).toEqual([9]);
+	});
 });
 
 describe('sendMutationsWithRetry', () => {

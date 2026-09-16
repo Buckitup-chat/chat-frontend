@@ -89,18 +89,31 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 		});
 	}
 
-	const failed = results.filter((r) => r.status !== 'ok');
+	// A PK conflict the server can resolve itself against a registered Shape
+	// module comes back as status "exists" (HTTP 200, not "error"), with its
+	// own verdict on whether our row IS the stored one: `conflicted: false`
+	// is an idempotent retry — already applied by an earlier attempt whose
+	// response we never saw — and must be treated as success, not failure.
+	// `conflicted: true` is a genuine different-revision conflict and, like
+	// the text-matched fallback below, a final verdict worth retrying.
+	const isResolvedConflict = (r: IngestRowResult): boolean => r.status === 'exists' && r.conflicted === false;
+	const isUnresolvedConflict = (r: IngestRowResult): boolean =>
+		(r.status === 'exists' && r.conflicted === true) || isUniqueConflict(r);
+
+	const failed = results.filter((r) => r.status !== 'ok' && !isResolvedConflict(r));
 	if (failed.length > 0) {
-		// A 422 row outcome is the server's final verdict — validation or a
-		// business rule (e.g. "cannot react to own message"). Retrying the
-		// same signed mutation can never change it; only network-level
-		// failures (5xx, 429, no response) are worth retrying.
-		const permanent = resp.status === 422;
-		const uniqueConflictOnly = failed.every(isUniqueConflict);
+		// A 422 row outcome or a same-revision "exists" mismatch is the
+		// server's final verdict — validation, a business rule (e.g. "cannot
+		// react to own message"), or a conflicting revision under the same
+		// key. Retrying the same signed mutation can never change it; only
+		// network-level failures (5xx, 429, no response) are worth retrying.
+		const permanent = resp.status === 422 || failed.some((r) => r.status === 'exists');
+		const uniqueConflictOnly = failed.every(isUnresolvedConflict);
 		// Only the rows the server actually rejected need an identity check;
-		// rows it reported as ok are already confirmed by this response and
-		// must not be made to depend on shape propagation.
-		const conflictIndexes = failed.filter(isUniqueConflict).map((r) => r.index);
+		// rows it reported as ok (or as an idempotent "exists") are already
+		// confirmed by this response and must not be made to depend on shape
+		// propagation.
+		const conflictIndexes = failed.filter(isUnresolvedConflict).map((r) => r.index);
 		throw new IngestError(
 			`ingest rejected ${failed.length}/${results.length} rows: ${JSON.stringify(failed[0]?.details || failed[0]?.error)}`,
 			{ permanent, uniqueConflictOnly, conflictIndexes, status: resp.status, results }

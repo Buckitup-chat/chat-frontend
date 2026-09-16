@@ -36,11 +36,9 @@ beforeEach(async () => {
 });
 
 describe('write contracts pin the agreed barrier table', () => {
-	it('the six uncontested operations wait for acceptance only', () => {
+	it('the four uncontested operations wait for acceptance only', () => {
 		for (const [relation, type] of [
 			['user_cards', 'insert'], ['user_cards', 'update'],
-			['dialog_keys', 'insert'],
-			['dialog_message_reactions', 'insert'],
 			['dialog_message_receipts', 'insert'],
 			['files', 'insert'],
 		] as const) {
@@ -48,10 +46,18 @@ describe('write contracts pin the agreed barrier table', () => {
 		}
 	});
 
+	// dialog_keys/insert and dialog_message_reactions/insert are also read back
+	// from the shape by this client (initDialogKeysUnguarded's "do I already
+	// have a key row" check; runReactionWrite's intent reconciliation) even
+	// though the server itself needs only acceptance — so they wait for
+	// visibility too, or a second call inside replication lag republishes and
+	// permanently conflicts with itself.
 	it('the contested rows keep shape visibility until the coordinator decision', () => {
 		for (const [relation, type] of [
 			['dialog_messages', 'insert'], ['dialog_messages', 'update'],
 			['user_storage', 'insert'], ['user_storage', 'update'],
+			['dialog_keys', 'insert'],
+			['dialog_message_reactions', 'insert'],
 			['dialog_message_reactions', 'update'],
 		] as const) {
 			expect(contractFor(relation, type).confirmation, `${relation}/${type}`).toBe('visible');
