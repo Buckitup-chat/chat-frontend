@@ -1,8 +1,3 @@
-// §3.7: the structural claim behind "AWAITING_UNLOCK has no reachable
-// target" — every durable store this app encrypts locally (outbox.ts,
-// intents.ts, localStore.ts) derives its key through getLocalStorageKey(),
-// which must fail loudly while the vault is locked, never silently produce
-// a usable key or a falsely-empty result.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 let currentUserHash: string | null = null;
@@ -34,7 +29,6 @@ describe('getLocalStorageKey: locked vault fails loudly (§3.7)', () => {
 
 	it('throws even if a caller somehow has a user_hash but the vault itself never loaded', async () => {
 		currentUserHash = MY_HASH;
-		// exportVaultKeys still throws "Vault not loaded" — the second guard.
 		await expect(getLocalStorageKey()).rejects.toThrow(/vault not loaded/i);
 	});
 
@@ -45,7 +39,6 @@ describe('getLocalStorageKey: locked vault fails loudly (§3.7)', () => {
 		const key1 = await getLocalStorageKey();
 		expect(key1).toBeTruthy();
 
-		// Cached: a second call must not re-derive (same object identity).
 		let exportCalls = 0;
 		const originalExport = exportVaultKeys;
 		exportVaultKeys = async () => { exportCalls++; return originalExport(); };
@@ -60,7 +53,7 @@ describe('getLocalStorageKey: locked vault fails loudly (§3.7)', () => {
 		await getLocalStorageKey();
 
 		clearLocalStorageKey();
-		currentUserHash = null; // simulate the account having locked again
+		currentUserHash = null;
 
 		await expect(getLocalStorageKey()).rejects.toThrow(/no unlocked account/i);
 	});
@@ -81,17 +74,12 @@ describe('this is what protects intents.ts/outbox.ts while locked (§3.7 conclus
 			{ getKey: getLocalStorageKey }
 		);
 
-		// Locked: the write never goes through — same failure this module's
-		// own guard produces, not a different, weaker one.
 		await expect(store.set('k', 'v')).rejects.toThrow(/no unlocked account/i);
-		expect(inner.size).toBe(0); // nothing was written despite the attempt
+		expect(inner.size).toBe(0);
 	});
 
 	it('an existing record cannot be silently decrypted while locked either — a missing key never reads as "no such record"', async () => {
 		const { createSecureStore } = await import('@/lib/data/secureStore');
-		// A record left behind from a previous, unlocked session (valid
-		// base64 so get() gets past framing and actually needs the key) —
-		// get() must still try to decrypt it, not skip straight to "not found".
 		const looksLikeCiphertext = btoa(String.fromCharCode(...new Uint8Array(28).fill(1)));
 		const inner = new Map<string, string>([['k', looksLikeCiphertext]]);
 		const store = createSecureStore(
@@ -105,9 +93,6 @@ describe('this is what protects intents.ts/outbox.ts while locked (§3.7 conclus
 			{ getKey: getLocalStorageKey }
 		);
 
-		// secureStore wraps every decrypt-path failure under one message; the
-		// point here is that it fails at all — a locked read must never
-		// resolve as if the record were simply absent.
 		await expect(store.get('k')).rejects.toThrow(/cannot decrypt record/i);
 	});
 });

@@ -53,10 +53,6 @@ vi.mock('@/lib/data/ingest', () => ({
 	},
 }));
 
-// §3.1: pushRow now durables an intent before signing. Store-level tests are
-// mostly about what gets sent, not about the intent store itself (covered by
-// tests/intents.test.ts) — spies keep that orthogonal while still letting one
-// test (§3.12 durability) assert on enqueue-vs-update call counts.
 const enqueueIntentSpy = vi.fn(async () => 'test-intent-id');
 const updateIntentSpy = vi.fn(async () => {});
 vi.mock('@/lib/data/intents', () => ({
@@ -297,9 +293,6 @@ describe('two first messages in a fresh dialog', () => {
 	});
 });
 
-// §4.4: causal scope is fixed at intent creation, not re-derived against
-// later confirmed state, and an independent new message never waits for a
-// predecessor's signing/ACCEPTED just to avoid a fork (v3, "Момент signing").
 describe('causal scope: signing moment separated from intent creation (§4.4)', () => {
 	const decodeRefsMap = (refsMapB64) => JSON.parse(refsMapB64.replace(/^enc\(/, '').replace(/\)$/, ''));
 
@@ -311,9 +304,6 @@ describe('causal scope: signing moment separated from intent creation (§4.4)', 
 		await waitFor(() => statuses.some(([m, s]) => m === 'first' && (s === 'synced' || s === 'error')), 'first to settle');
 		expect(statuses).toContainEqual(['first', 'synced']);
 
-		// The server accepted it — every other test in this file simulates
-		// confirmation the same way, since the mocked transport never assigns
-		// sign_hash on its own.
 		const firstRow = collections.dialog.messages.rows.get(firstId);
 		collections.dialog.messages.rows.set(firstId, { ...firstRow, sign_hash: SIGN_HASH });
 
@@ -330,9 +320,6 @@ describe('causal scope: signing moment separated from intent creation (§4.4)', 
 		const store = useDialogsStore();
 		const statuses = [];
 
-		// Neither has round-tripped when the other starts — the scope each
-		// captures is whatever was loaded at that instant, not something
-		// waited for.
 		store.sendMessage(PEER_HASH, 'first', (s) => statuses.push(['first', s]));
 		store.sendMessage(PEER_HASH, 'second', (s) => statuses.push(['second', s]));
 		await waitFor(
@@ -623,12 +610,6 @@ describe('editMessage coalescing is durable, not just in-memory (§3.1 Target li
 });
 
 describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B; §3.12 coalesces the race away)', () => {
-	// Before §3.12, two concurrent edits of the same message were two
-	// independent writes racing on the same stale base — the loser got a
-	// visible permanent rejection (safe, but wasteful and confusing: the
-	// user's second edit "failed" for no reason they caused). §3.12 coalesces
-	// them before either is dispatched, so there is only ever one write, and
-	// both callers observe its outcome.
 	it('two concurrent edits of the same message coalesce into a single write with the latest text', async () => {
 		const store = useDialogsStore();
 		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
@@ -645,21 +626,16 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 			store.editMessage(PEER_HASH, MSG_ID, 'edit B'),
 		]);
 
-		// Both callers see success — there is no longer a loser to reject.
 		expect([a.status, b.status]).toEqual(['fulfilled', 'fulfilled']);
 
 		const edits = sent.filter((m) => m.relation === 'dialog_messages' && m.type === 'update');
-		expect(edits).toHaveLength(1); // one write, not two
+		expect(edits).toHaveLength(1);
 		expect(edits[0].row.parent_sign_hash).toBe(SIGN_HASH);
 
 		const finalRow = collections.dialog.messages.rows.get(MSG_ID);
 		expect(finalRow.content_b64).toBe(edits[0].row.content_b64);
 	});
 
-	// A late failure of an ALREADY-dispatched edit (queue drained, a new,
-	// independent edit started afterwards) must still fail on its own —
-	// coalescing only merges edits that overlap in time, never edits of
-	// otherwise-unrelated moments.
 	it('an edit that starts only after the previous one is fully dispatched is independent, not coalesced', async () => {
 		const store = useDialogsStore();
 		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
@@ -674,20 +650,11 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 		await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
 		await store.editMessage(PEER_HASH, MSG_ID, 'edit B');
 
-		// Two non-overlapping edits are two writes, not merged into one —
-		// coalescing only spans a burst that overlaps in time.
 		const edits = sent.filter((m) => m.relation === 'dialog_messages' && m.type === 'update');
 		expect(edits).toHaveLength(2);
 		expect(edits[0].row.content_b64).not.toBe(edits[1].row.content_b64);
 	});
 
-	// The completed edit's base (parent_sign_hash) must not leak into a later,
-	// unrelated edit of the same message. A left-behind coalescing entry
-	// (missed cleanup) would make every future edit of this message reuse the
-	// FIRST edit's base forever, instead of the tip's current one — the server
-	// would then reject every edit after the first as chaining onto a stale
-	// revision. The fixture advances sign_hash between edits, the way a real
-	// confirmed shape update would, so a stale reuse is actually observable.
 	it('a later, unrelated edit of the same message chains onto the CURRENT tip, not a leftover base from a completed edit', async () => {
 		const store = useDialogsStore();
 		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
@@ -701,8 +668,6 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 
 		await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
 
-		// Simulate the server-confirmed revision arriving through the shape:
-		// the tip now has a new sign_hash, distinct from the one edit A saw.
 		const NEXT_SIGN_HASH = 'dms_' + '9'.repeat(128);
 		collections.dialog.messages.rows.set(MSG_ID, {
 			...collections.dialog.messages.rows.get(MSG_ID),
@@ -715,15 +680,9 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 		const edits = sent.filter((m) => m.relation === 'dialog_messages' && m.type === 'update');
 		expect(edits).toHaveLength(2);
 		expect(edits[0].row.parent_sign_hash).toBe(SIGN_HASH);
-		// This is the assertion a missed cleanup breaks: edit B must chain
-		// onto the NEW tip, not silently repeat edit A's now-stale base.
 		expect(edits[1].row.parent_sign_hash).toBe(NEXT_SIGN_HASH);
 	});
 
-	// Mirrors "never runs two writes for one reaction concurrently": the
-	// second edit arrives while the first is already mid-flight (past the
-	// point where runEditWrite claimed the intent) — the window that used to
-	// mean two genuine writes, one of them doomed.
 	it('never runs two writes for one message concurrently, but a second edit mid-flight still gets its own write', async () => {
 		const store = useDialogsStore();
 		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
@@ -753,10 +712,8 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 
 		const first = store.editMessage(PEER_HASH, MSG_ID, 'edit A');
 		await flush();
-		await releaseAll(); // let dialog-key creation through, gate only the edit write
+		await releaseAll();
 
-		// The first edit's write is now blocked mid-flight, past the point
-		// where it claimed the intent (runEditWrite set written=true).
 		const second = store.editMessage(PEER_HASH, MSG_ID, 'edit B');
 		await flush();
 		await releaseAll();
@@ -764,7 +721,7 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 		await Promise.all([first, second]);
 
 		const edits = sent.filter((m) => m.relation === 'dialog_messages' && m.type === 'update');
-		expect(edits).toHaveLength(2); // not coalesced — the first was already claimed
+		expect(edits).toHaveLength(2);
 		expect(maxInFlight).toBe(1);
 	});
 });

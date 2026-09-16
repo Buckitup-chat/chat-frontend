@@ -1,8 +1,3 @@
-// Фаза 4.2: explicit dependency rules (ADR §7.1/§7.3). Independent writes
-// (different logical keys) must never wait on each other; a chained write
-// must wait for an older, unresolved write of the exact same scope; any
-// signed row must wait for its own account's user_cards row and, for dialog
-// tables, that dialog's dialog_keys row, if either is still in flight.
 import { describe, it, expect, beforeEach } from 'vitest';
 import { dependenciesFor } from '@/lib/data/coordinator';
 import { enqueue, recordFailure, readyEntries, _setStorageForTests } from '@/lib/data/outbox';
@@ -71,12 +66,8 @@ describe('dependenciesFor: §7.1 chained same-scope serialization', () => {
 	});
 
 	it('independent writes of the same conceptual "row family" do not chain on each other', async () => {
-		// dialog_messages insert is independent (§7.2): two new messages in the
-		// same dialog must never wait on one another.
 		await enqueue(dialogMessage('dh1'), MY_HASH);
 		const deps = await dependenciesFor(dialogMessage('dh1'), MY_HASH);
-		// only the §7.3 dialog_keys/user_cards prerequisites could appear here,
-		// and none were enqueued — so no dependencies at all.
 		expect(deps).toEqual([]);
 	});
 });
@@ -106,14 +97,9 @@ describe('dependenciesFor: §7.3 server-enforced existence prerequisites', () =>
 	});
 });
 
-// The literal Фаза 4.2 regression scenario from the plan: a blocked/backoff
-// user_storage write must not hold back an independent message, but must
-// hold back a dependent edit of that same user_storage slot.
 describe('end-to-end through the real outbox: independent dispatch, chained block', () => {
 	it('an independent ready message and a blocked dependent user_storage edit coexist correctly', async () => {
 		const stuckId = await enqueue(userStorageUpdate(MY_HASH), MY_HASH);
-		// simulate "in backoff": a prior transient failure already scheduled a
-		// future retry for it.
 		await recordFailure(stuckId, new Error('network down'));
 
 		const messageDeps = await dependenciesFor(dialogMessage('dh1'), MY_HASH);
@@ -124,11 +110,7 @@ describe('end-to-end through the real outbox: independent dispatch, chained bloc
 
 		const ready = await readyEntries(MY_HASH);
 		const readyRelations = ready.map((e) => e.relation);
-		// the message has no dependency on the stuck user_storage write — ready.
 		expect(readyRelations).toContain('dialog_messages');
-		// the stuck entry itself is excluded (its own backoff has not elapsed).
-		// the second user_storage edit depends on the still-unresolved first
-		// one — excluded too, even though its own schedule is due now.
 		expect(ready.filter((e) => e.relation === 'user_storage')).toHaveLength(0);
 	});
 });

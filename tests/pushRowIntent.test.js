@@ -1,12 +1,3 @@
-// §3.1 wired into the real write path: pushRow (dialogs.store.js) durables an
-// intent via the real src/lib/data/intents.ts (not stubbed, unlike
-// dialogsStore.test.js) before it ever touches the vault or the network.
-//
-// initDialogKeys is the call site used here because it calls
-// exportVaultKeys() twice — once for its own key derivation, once again
-// inside pushRow's getSignSkeyBytes() — which lets the second call (the one
-// pushRow actually depends on) be made to fail independently of the first,
-// exercising exactly the gap §3.1 closes without needing a real locked vault.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { intentsOf, _setIntentStorageForTests, _clearIntentsForTests } from '@/lib/data/intents';
@@ -25,7 +16,7 @@ let collections;
 let sent;
 let sendImpl;
 let vaultCallCount;
-let failVaultFromCall; // null = never fail; N = throw starting from the Nth exportVaultKeys() call
+let failVaultFromCall;
 
 vi.mock('@/store/userPQ.store', () => ({
 	userPQStore: () => ({ currentUserHash: MY_HASH }),
@@ -108,14 +99,12 @@ beforeEach(async () => {
 
 describe('pushRow durables an intent before signing (§3.1)', () => {
 	it('a vault failure at the signing step leaves the intent durable — nothing is lost', async () => {
-		// 1st exportVaultKeys() call (initDialogKeys' own key derivation)
-		// succeeds; the 2nd (inside pushRow -> getSignSkeyBytes) fails.
 		failVaultFromCall = 2;
 		const store = useDialogsStore();
 
 		await expect(store.initDialogKeys(PEER_HASH)).rejects.toThrow(/vault/i);
 
-		expect(sent).toHaveLength(0); // never reached the network
+		expect(sent).toHaveLength(0);
 		const intents = await intentsOf(MY_HASH);
 		expect(intents).toHaveLength(1);
 		expect(intents[0].relation).toBe('dialog_keys');
@@ -137,8 +126,6 @@ describe('pushRow durables an intent before signing (§3.1)', () => {
 
 		await expect(store.initDialogKeys(PEER_HASH)).rejects.toThrow(/network error/i);
 
-		// the intent's one job — surviving the pre-signing gap — is done;
-		// outbox.ts's own durable/retry/quarantine state is now authoritative
 		expect(await intentsOf(MY_HASH)).toEqual([]);
 	});
 
@@ -163,6 +150,6 @@ describe('pushRow durables an intent before signing (§3.1)', () => {
 
 		await expect(store.initDialogKeys(PEER_HASH)).rejects.toThrow(/could not be stored/i);
 		expect(sent).toHaveLength(0);
-		expect(vaultCallCount).toBe(1); // only initDialogKeys' own derivation ran — pushRow never asked for the key
+		expect(vaultCallCount).toBe(1);
 	});
 });

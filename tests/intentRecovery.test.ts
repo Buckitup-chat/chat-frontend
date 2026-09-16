@@ -1,4 +1,3 @@
-// §3.6: recovery of durable intents left over from before this session.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 let sendImpl: (mutations: unknown[]) => Promise<unknown>;
@@ -94,13 +93,13 @@ describe('recoverIntents (§3.6)', () => {
 		let call = 0;
 		sendImpl = async () => {
 			call++;
-			if (call === 1) throw new Error('ingest network error'); // transient, but still resolves per the rule above
+			if (call === 1) throw new Error('ingest network error');
 			return { txids: [1] };
 		};
 
 		await recoverIntents(A, SKEY);
 
-		expect(sentMutations).toHaveLength(2); // both were attempted
+		expect(sentMutations).toHaveLength(2);
 	});
 
 	it('never touches another account\'s intents', async () => {
@@ -110,7 +109,7 @@ describe('recoverIntents (§3.6)', () => {
 		await recoverIntents(A, SKEY);
 
 		expect(sentMutations).toHaveLength(1);
-		expect((await intentsOf(B))).toHaveLength(1); // untouched, still durable
+		expect((await intentsOf(B))).toHaveLength(1);
 	});
 
 	it('recovering an empty account is a safe no-op', async () => {

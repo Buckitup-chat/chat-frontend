@@ -66,13 +66,6 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 
 const FALLBACK: WriteContract = { dependencyClass: 'chained', confirmation: 'visible' };
 
-/**
- * Which row field names the signing account, per relation. A mutation's
- * owner is not always the same key — used to partition outbox entries (only
- * the account whose key signed a mutation may replay it) and to find a
- * mutation's own `user_cards` prerequisite (§7.3) by identity rather than by
- * relation name.
- */
 export const OWNER_FIELD: Record<string, string> = {
 	user_cards: 'user_hash',
 	user_storage: 'user_hash',

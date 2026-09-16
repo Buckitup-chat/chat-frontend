@@ -45,19 +45,6 @@ const chainKeyFor = (relation: string, row: Record<string, unknown> | null): str
 	return scopeForRelation(relation, row);
 };
 
-/**
- * Durable entries a fresh mutation must not be dispatched before (ADR §7.1,
- * §7.3). Called once, at enqueue time — the resulting ids are persisted on
- * the entry (outbox.ts's `dependsOn`) and honoured by every later dispatch of
- * it (retry, replay), not recomputed each time.
- *
- * Independent writes (new rows, nothing to supersede) get no §7.1 edge —
- * concurrency among them is the point (§7.2), not an oversight. Every write
- * still gets a §7.3 edge onto its own account's `user_cards` row and, for
- * dialog tables, that dialog's `dialog_keys` row, if either is still
- * in-flight: the server rejects a signed row whose prerequisite it has not
- * accepted yet, so racing ahead of it only trades a wait for a rejection.
- */
 export async function dependenciesFor(mutations: unknown[], userHash: string): Promise<string[]> {
 	const first = mutations[0] as MutationShape | undefined;
 	const relation = first?.syncMetadata?.relation;
@@ -68,10 +55,6 @@ export async function dependenciesFor(mutations: unknown[], userHash: string): P
 
 	const rowOfEntry = (e: OutboxEntry): Record<string, unknown> | null => rowOf(e.mutations[0] as MutationShape | undefined);
 
-	// §7.1: a chained write supersedes a row; an older, still-unresolved write
-	// of the exact same ENTITY must land (or die, i.e. quarantine — a blocked
-	// dependent stays blocked until the user retries or discards it, ADR §5)
-	// before this one may be dispatched, or the two race to be "the latest".
 	if (contractFor(relation, first?.type).dependencyClass === 'chained') {
 		const chainKey = chainKeyFor(relation, row);
 
@@ -82,8 +65,6 @@ export async function dependenciesFor(mutations: unknown[], userHash: string): P
 		}
 	}
 
-	// §7.3: this account's user_cards row is a prerequisite for every other
-	// signed row it sends.
 	if (relation !== 'user_cards') {
 		const owner = ownerOf(relation, row);
 		if (owner) {
@@ -93,7 +74,6 @@ export async function dependenciesFor(mutations: unknown[], userHash: string): P
 		}
 	}
 
-	// §7.3: a dialog table row needs that dialog's key accepted first.
 	if (relation !== 'dialog_keys' && DIALOG_RELATIONS.includes(relation)) {
 		const dialogHash = row?.dialog_hash;
 		if (typeof dialogHash === 'string' && dialogHash) {
@@ -106,12 +86,6 @@ export async function dependenciesFor(mutations: unknown[], userHash: string): P
 	return [...deps];
 }
 
-/**
- * Send one logical transaction and, if its contract requires it, wait for the
- * shape to catch up before returning. Used identically by a fresh write, a
- * queued retry, and a reload replay — none of them know or need to know which
- * of the three they are.
- */
 export async function dispatchMutations(
 	mutations: unknown[],
 	send: (mutations: unknown[]) => Promise<SendResult>

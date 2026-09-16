@@ -58,24 +58,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // (an edit basing on the tip, a second message needing the key row, a
     // reaction toggle) reads the collection as its base, and an HTTP 200 only
     // proves the Postgres commit — not that Electric delivered it.
-    //
-    // §3.1: the row arrives here fully constructed (content and refs already
-    // encrypted) but not yet signed — signing needs the vault, an await that
-    // did not durably exist before this. A durable intent closes that one
-    // gap: a crash or reload during getSignSkeyBytes() now has something to
-    // recover — §3.6's recoverIntents() resumes it after the next login,
-    // through the very same signAndDispatchIntent() this calls.
     const pushRow = async (relation, row, mutationType = 'insert') => {
         const owner = row[OWNER_FIELD[relation]] ?? '';
         const intentId = await enqueueIntent({ relation, row, mutationType }, owner, relation);
         if (intentId === null) {
             throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
         }
-        // Everything up to and including getSignSkeyBytes() may fail (vault
-        // locked, key export error) with the intent left untouched and
-        // durable — that is the point. signAndDispatchIntent owns everything
-        // past this line: building and signing the mutation, outbox.ts's
-        // enqueue(), and resolving the intent once that succeeds.
         const signSkey = await getSignSkeyBytes();
         return signAndDispatchIntent(intentId, { relation, row, mutationType }, signSkey);
     };
@@ -470,19 +458,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return messageId;
     };
 
-    // §3.1 + §3.12: pre-signing coalescing for message edits, durable — not
-    // just in-memory. The target lifecycle (v3, "Target lifecycle") requires
-    // LOCAL INTENT to have durable storage before VAULT ACCESS; an in-memory
-    // Map alone (the first version of this code) loses a coalesced-but-not-
-    // yet-dispatched edit on a crash. The first edit of a burst durables via
-    // enqueueIntent; a later, still-unwritten edit in the same burst updates
-    // that same durable intent via updateIntent, rather than creating a
-    // second one or leaving the merge purely in memory. Mirrors the existing
-    // reaction pattern (reactionIntents/reactionQueues) for the in-memory
-    // coalescing/serialization half.
-    const editIntents = new Map(); // message_id -> { intentId, contentB64, refsMapB64, parentSignHash, ownerTimestamp, written }
-    const editQueues = new Map();  // message_id -> Promise
-    const editClaimLocks = new Map(); // message_id -> Promise, serializes the durable-intent claim step only
+    const editIntents = new Map();
+    const editQueues = new Map();
+    const editClaimLocks = new Map();
 
     const runEditWrite = async (messageId, ctx) => {
         const intent = editIntents.get(messageId);
@@ -506,19 +484,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 },
             }, signSkey);
         } catch (e) {
-            // Transient: leave written=false so a later edit of the same
-            // message still finds this base (the write may yet land).
-            // Permanent: fall through to the same cleanup as success — the
-            // stale base must not be reused by the next, unrelated edit.
             if (!e?.permanent && editIntents.get(messageId) === intent) {
                 intent.written = false;
             }
             throw e;
         } finally {
-            // Only if nobody edited again while this write was in flight: a
-            // newer edit already replaced the entry (new object, written:
-            // false), and that one still needs to be written — deleting it
-            // here would drop the next edit's base along with this one's.
             if (editIntents.get(messageId) === intent && intent.written) {
                 editIntents.delete(messageId);
             }
@@ -1415,9 +1385,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const reactionHash = DialogCrypto.computeReactionHash(myKey, messageId, myHash, emoji);
 
         const dialogColls = getDialogCollections(dialogHash);
-        // §4.5: prefer whichever is fresher of the shape row and our own
-        // accepted-snapshot — right after our own toggle, the shape may still
-        // show the pre-toggle state.
         const existing = freshestOf(
             dialogColls.reactions.get(reactionHash) || null,
             await getAccepted('dialog_message_reactions', reactionHash)

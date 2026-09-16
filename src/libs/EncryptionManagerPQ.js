@@ -313,10 +313,6 @@ export class EncryptionManagerPQ extends EventTarget {
     const signSkey = this.#signSkey;
     if (!userHash || !signSkey) return;
 
-    // §3.6: durable intents that never reached signing before this session
-    // (vault locked, crash, reload) resume now that the vault is unlocked —
-    // the level below outbox.ts's own drainPendingWrites, which only knows
-    // about mutations that were already signed.
     recoverIntents(userHash, signSkey).catch((e) =>
       console.warn('[EncryptionManagerPQ] intent recovery failed:', e)
     );
@@ -365,10 +361,6 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#slotResolver = null;
     resetUserStorageCollection();
 
-    // §3.11 discipline: the fallback read-cache is not secret (it mirrors
-    // already-replicated rows), but it is still this account's view — a
-    // shared browser profile should not keep serving it to whoever logs in
-    // next.
     clearReadCache().catch((e) => console.warn('[EncryptionManagerPQ] read-cache clear failed:', e));
     clearAcceptedSnapshots().catch((e) => console.warn('[EncryptionManagerPQ] accepted-snapshot clear failed:', e));
 

@@ -1,4 +1,3 @@
-// IndexedDB read-cache fallback (§3.13) + hydration race guard (§3.4).
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
 	setCachedRow, deleteCachedRow, getCachedRow, getCachedRows,
@@ -55,8 +54,6 @@ describe('hydration race guard (§3.4 — a disk read must never overwrite live 
 	it('a key touched by live data is excluded from a cached read, even if the disk copy exists', async () => {
 		await setCachedRow('dialog_messages', 'dmsg_1', { message_id: 'dmsg_1', content_b64: 'stale' });
 
-		// The exact race: disk write happened first (an earlier session), then
-		// — before anyone reads the cache — live data arrives for the same key.
 		markTouched('dialog_messages', 'dmsg_1');
 
 		expect(await getCachedRow('dialog_messages', 'dmsg_1')).toBeNull();
@@ -97,12 +94,9 @@ describe('mirrorInto: keeps the cache current from a collection\'s own changes',
 	it('mirrors initial state into the cache and marks it touched (a warm SQLite start is not stale)', async () => {
 		const coll = fakeCollection([{ key: 'dmsg_1', value: { message_id: 'dmsg_1', content_b64: 'seen' } }]);
 		mirrorInto(coll, 'dialog_messages');
-		await Promise.resolve(); // let the async set() inside the callback settle
+		await Promise.resolve();
 
 		expect(isTouched('dialog_messages', 'dmsg_1')).toBe(true);
-		// Touched, so getCachedRow correctly refuses to hand it back as a
-		// "fallback" — the caller should read it straight from the live
-		// collection instead, which is exactly the point of touching it.
 		expect(await getCachedRow('dialog_messages', 'dmsg_1')).toBeNull();
 	});
 
@@ -114,15 +108,9 @@ describe('mirrorInto: keeps the cache current from a collection\'s own changes',
 		coll.emit([{ key: 'dmsg_1', type: 'delete' }]);
 		await Promise.resolve();
 
-		// Bypass the touched-guard to inspect the raw store directly — this
-		// proves the delete really happened, not just that isTouched masks it.
 		expect(storage.map.has('dialog_messages:dmsg_1')).toBe(false);
 	});
 
-	// A dialog evicted from the LRU warm set gets a brand-new, cold collection
-	// if reopened later — but only if its keys are not still marked touched
-	// from before. Without this, the fallback would silently stop helping for
-	// exactly the "reopen a previously-seen dialog offline" case it exists for.
 	it('unsubscribe un-touches exactly the keys this subscription touched, so a reopened dialog can use the fallback again', async () => {
 		const coll = fakeCollection([{ key: 'dmsg_1', value: { message_id: 'dmsg_1', content_b64: 'seen' } }]);
 		const unsubscribe = mirrorInto(coll, 'dialog_messages');
@@ -132,9 +120,6 @@ describe('mirrorInto: keeps the cache current from a collection\'s own changes',
 		unsubscribe();
 
 		expect(isTouched('dialog_messages', 'dmsg_1')).toBe(false);
-		// The row is still on disk (unsubscribe is not a delete) — now usable
-		// as a fallback again, e.g. while the reopened dialog's fresh
-		// collection is still cold.
 		expect(await getCachedRow('dialog_messages', 'dmsg_1')).toEqual({ message_id: 'dmsg_1', content_b64: 'seen' });
 	});
 
@@ -150,7 +135,7 @@ describe('mirrorInto: keeps the cache current from a collection\'s own changes',
 		unsubscribeA();
 
 		expect(isTouched('dialog_messages', 'a')).toBe(false);
-		expect(isTouched('dialog_messages', 'b')).toBe(true); // untouched by A's teardown
+		expect(isTouched('dialog_messages', 'b')).toBe(true);
 	});
 
 	it('unsubscribe stops future mirroring', async () => {

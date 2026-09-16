@@ -262,12 +262,6 @@ export async function sendMutationsAndAwaitShape(
 
 	let result: SendResult;
 	try {
-		// The operation's contract decides the wait (§7.3, writeContracts.ts):
-		// 'accepted' operations are done once sent — nothing reads their scope
-		// from the shape next, and holding the caller for up to 30s of
-		// replication lag bought nothing. 'visible' operations still await the
-		// echo — coordinator.ts owns that decision so a retry or a replay of
-		// this same entry (below, and in drainPendingWrites) honours it too.
 		result = await dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, opts));
 	} catch (e) {
 		// Permanent rejections die in the outbox too; transient failures stay

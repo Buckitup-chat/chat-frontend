@@ -35,7 +35,7 @@ describe('strict batch validation', () => {
 
 	it('rejects a sparse response (fewer results than mutations sent)', async () => {
 		mockStatus = 200;
-		mockResults = [{ index: 0, status: 'ok', txid: 1 }]; // second mutation has no result at all
+		mockResults = [{ index: 0, status: 'ok', txid: 1 }];
 		await expect(sendMutations([mutation('a'), mutation('b')], SKEY))
 			.rejects.toMatchObject({ name: 'IngestError', permanent: false });
 	});
@@ -51,7 +51,7 @@ describe('strict batch validation', () => {
 		mockStatus = 200;
 		mockResults = [
 			{ index: 0, status: 'ok', txid: 1 },
-			{ index: 1, status: 'ok', txid: 2 }, // only one mutation was sent
+			{ index: 1, status: 'ok', txid: 2 },
 		];
 		await expect(sendMutations([mutation('a')], SKEY))
 			.rejects.toMatchObject({ name: 'IngestError', permanent: false });

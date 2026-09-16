@@ -104,8 +104,6 @@ const buildUserCards = () =>
 export function getUserCardsCollection() {
 	if (!userCards) {
 		userCards = buildUserCards();
-		// The public directory: same rows for every account on this device,
-		// so no account-scoped teardown is needed — it lives for the session.
 		mirrorInto(userCards, 'user_cards');
 	}
 	return userCards;
@@ -225,11 +223,6 @@ const buildDialogCollections = (dialogHash: string) => {
 	};
 };
 
-// §3.13: mirror the warm set into the read-cache fallback so a dialog the
-// user was just looking at still shows something on an offline reload, even
-// without OPFS. Only the warm (LRU-tracked) registry is mirrored — a
-// withDialogCollections() reader is a one-off background read, torn down
-// immediately, not "the dialog the user is in".
 const DIALOG_TABLES: Record<keyof DialogCollections, string> = {
 	keys: 'dialog_keys',
 	messages: 'dialog_messages',

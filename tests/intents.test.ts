@@ -1,6 +1,3 @@
-// Durable intent (Detailed step plan §3.1): a user action becomes durable
-// before it is signed. This is the level below outbox.ts's immutable signed
-// snapshot — see src/lib/data/intents.ts for the full lifecycle contract.
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
 	enqueueIntent, getIntent, updateIntent, resolveIntent, intentsOf,
@@ -36,8 +33,6 @@ describe('durable intent, before signing', () => {
 		const id = await enqueueIntent(captured, A, 'dialog_messages');
 		expect(id).toBeTruthy();
 
-		// "reload": a fresh storage object over the same underlying bytes —
-		// nothing kept this alive in module memory alone.
 		_setIntentStorageForTests({ ...storage });
 
 		const reloaded = await getIntent(id!);
@@ -73,7 +68,7 @@ describe('durable intent, before signing', () => {
 
 	it('is durable across reload before any signing happens — the point of §3.1', async () => {
 		const id = await enqueueIntent({ refs: ['t1'], text: 'unsent' }, A, 'dialog_messages');
-		_setIntentStorageForTests({ ...storage }); // reload
+		_setIntentStorageForTests({ ...storage });
 		const recovered = await getIntent(id!);
 		expect(recovered).not.toBeNull();
 		expect(recovered!.intent).toEqual({ refs: ['t1'], text: 'unsent' });
