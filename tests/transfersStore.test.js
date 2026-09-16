@@ -9,6 +9,12 @@ let sentMessages;
 
 const uploadAttachment = vi.fn((meta, opts) => new Promise((resolve, reject) => {
 	uploads.set(meta.name, { resolve, reject, signal: opts.signal, opts, meta });
+	// the real transport checks the signal between chunks, so a signal that
+	// aborted before the listener attached still rejects — the fake must too
+	if (opts.signal?.aborted) {
+		reject(new DOMException('aborted', 'AbortError'));
+		return;
+	}
 	opts.signal?.addEventListener('abort', () => {
 		reject(new DOMException('aborted', 'AbortError'));
 	});
@@ -78,6 +84,81 @@ describe('transfer queue', () => {
 		const names = sentMessages[0].parts.filter((p) => p.kind === 'file').map((p) => p.name);
 		expect(names).toEqual(['b']);
 		expect(sentMessages[0].parts.at(-1)).toEqual({ kind: 'text', text: 'подпись' });
+	});
+
+	// The row being cancelled was the LAST live one: the batch decision in
+	// cancel() runs while the abort is still in flight, so the re-run in the
+	// aborted branch is the only thing standing between the finished
+	// attachments and the void.
+	it('cancelling the last live row still sends the finished attachments', async () => {
+		const store = useTransfersStore();
+		await store.enqueueBatch('u_peer', [file('a'), file('b')], '');
+		await tick();
+		finish('a');
+		await tick(); await tick(); // a done, b active
+
+		await store.cancel(store.items.find((i) => i.name === 'b').id);
+		await tick(); await tick();
+
+		expect(sentMessages).toHaveLength(1);
+		expect(sentMessages[0].parts.map((p) => p.name)).toEqual(['a']);
+	});
+
+	// Rows leave the list 3s after finishing; the batch must still compose
+	// every finished part, not just the ones whose rows are still listed.
+	it('a part finished more than 3s before the last one still sends', async () => {
+		vi.useFakeTimers();
+		try {
+			const store = useTransfersStore();
+			const p = store.enqueueBatch('u_peer', [file('a'), file('b')], '');
+			await vi.advanceTimersByTimeAsync(0);
+			await p;
+			await vi.advanceTimersByTimeAsync(0);
+			finish('a');
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(3100); // a's row is gone now
+			expect(store.items.find((i) => i.name === 'a')).toBeUndefined();
+			finish('b');
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(sentMessages).toHaveLength(1);
+			expect(sentMessages[0].parts.map((p2) => p2.name)).toEqual(['a', 'b']);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// Cancel-all with a finished row and an active one: closing the batches
+	// first is what keeps the late abort's re-run from sending the leftovers.
+	it('cancel-all sends nothing even when a row already finished', async () => {
+		const store = useTransfersStore();
+		await store.enqueueBatch('u_peer', [file('a'), file('b')], '');
+		await tick();
+		finish('a');
+		await tick(); await tick(); // a done, b active
+
+		await store.cancelAll();
+		await tick(); await tick();
+
+		expect(sentMessages).toHaveLength(0);
+	});
+
+	// Within its 3s grace a finished row is still cancellable — and that
+	// withdraws its part from the batch.
+	it('cancelling a finished row removes its attachment from the message', async () => {
+		const store = useTransfersStore();
+		await store.enqueueBatch('u_peer', [file('a'), file('b')], '');
+		await tick();
+		finish('a');
+		await tick(); await tick();
+
+		await store.cancel(store.items.find((i) => i.name === 'a').id);
+		finish('b');
+		await tick(); await tick();
+
+		expect(sentMessages).toHaveLength(1);
+		expect(sentMessages[0].parts.map((p) => p.name)).toEqual(['b']);
 	});
 
 	it('cancelling every row sends nothing', async () => {

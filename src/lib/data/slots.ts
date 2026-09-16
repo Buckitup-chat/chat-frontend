@@ -96,6 +96,11 @@ export function createSlotResolver(access: RootAccess) {
 			const confirmed = (await access.read())?.slots?.[name];
 			if (confirmed && confirmed !== uuid) {
 				cached = { ...nextSlots, [name]: confirmed };
+				// The payload was written to the address that just lost the
+				// race; the map no longer names it, and the caller will
+				// tombstone it. Re-issuing the write against the adopted
+				// address is what keeps "save succeeded" true.
+				await writeRow(confirmed);
 				return { uuid: confirmed, created: false, orphaned: uuid };
 			}
 			return { uuid, created: true };
