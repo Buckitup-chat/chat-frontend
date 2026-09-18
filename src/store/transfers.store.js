@@ -164,10 +164,18 @@ export const useTransfersStore = defineStore('transfers', () => {
 			return;
 		}
 		if (batch.caption.trim()) parts.push({ kind: 'text', text: batch.caption.trim() });
+		const dialogs = useDialogsStore();
+		let captured;
+		try {
+			captured = await dialogs.captureMessageIntent(batch.peerHash, parts);
+		} catch (e) {
+			console.error('[transfers] could not store the composed message for sending:', e);
+			batches.value = new Map(batches.value).set(batchId, { ...batch, status: 'error' });
+			return;
+		}
 
 		batches.value = new Map(batches.value).set(batchId, { ...batch, status: 'sending' });
-		const dialogs = useDialogsStore();
-		await dialogs.sendMessage(batch.peerHash, parts, (status) => {
+		await dialogs.dispatchMessageIntent(captured.intentId, captured.payload, captured.token, (status) => {
 			if (status === 'synced' || status === 'error') {
 				batches.value = new Map(batches.value).set(batchId, { ...batch, status });
 			}

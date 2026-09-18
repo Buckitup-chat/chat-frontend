@@ -8,12 +8,12 @@
 // executor could not resolve them after a reload. Our mutations don't need a
 // collection to replay anyway — they are self-contained signed rows.
 //
-// Why replay-after-crash is safe: an entry is deleted only after the server
-// confirms it, so a crash between "accepted" and "deleted" replays a write
-// that already landed. The server answers with a unique-key conflict and the
-// identity check (confirm.ts) proves the stored row carries our exact
-// signature — reported as success, not as a duplicate.
-//
+// Why replay-after-crash is safe: an entry is replaced by a durable accepted
+// marker only after the server confirms it, so a crash between "accepted"
+// and "marked" replays a write that already landed. The server answers with
+// a unique-key conflict and the identity check (confirm.ts) proves the
+// stored row carries our exact signature — reported as success, not as a
+// duplicate.
 // Why entries survive key custody: a mutation carries its own ML-DSA
 // signature over the row content and never expires. Only the *request* needs
 // a live key (auth challenge), which is why draining requires an unlocked
@@ -41,26 +41,21 @@ export interface OutboxEntry {
 	createdAt: number;
 	attempts: number;
 	lastError: string | null;
-	/**
-	 * ADR states. `pending` replays; `quarantined` is a permanent rejection
-	 * kept so the user's action is not silently lost — it leaves only by an
-	 * explicit requeue (the state it depended on changed) or discard.
-	 * Entries written before this field exist are pending.
-	 */
-	status?: 'pending' | 'quarantined';
+	
+	status?: 'pending' | 'server_accepted_pending_reconcile' | 'quarantined' | 'discarded' | 'accepted';
 	quarantinedAt?: number;
-	/**
-	 * Coordinator fields (ADR §7.3). The retry schedule lives on the entry,
-	 * not in a loop's memory: a reload must resume the same schedule, not
-	 * invent a new one. Dependencies are entry ids this one must not be
-	 * dispatched before; a quarantined dependency blocks its dependents
-	 * rather than letting them race ahead of a failed prerequisite.
-	 */
+	discardedAt?: number;
+	acceptedAt?: number;
+	serverAcceptedAt?: number;
+	reconciledAt?: number;
 	nextAttemptAt?: number;
 	dependsOn?: string[];
-	/** Read scope of the write (barrier.ts scopeForRelation) — dispatch metadata. */
+	dependsOnDurableMarkers?: true;
 	scope?: string;
+	sourceIntentId?: string;
 }
+
+const DEPENDS_ON_DURABLE_MARKERS_FIELD = 'dependsOnDurableMarkers' as const;
 
 /**
  * Entries are never silently dropped to make room — the oldest pending write
@@ -128,17 +123,142 @@ export function stopLeaderElection(): void {
 	leader = null;
 	leaderUserHash = null;
 	onBecomeLeader = null;
+	sessionGeneration++;
 }
+
+export function currentSessionUserHash(): string | null {
+	return leaderUserHash;
+}
+let sessionGeneration = 0;
+
+export interface SessionToken {
+	userHash: string;
+	generation: number;
+}
+
+export function currentSessionToken(): SessionToken | null {
+	return leaderUserHash ? { userHash: leaderUserHash, generation: sessionGeneration } : null;
+}
+
+export function sameSessionToken(a: SessionToken | null, b: SessionToken | null): boolean {
+	return !!a && !!b && a.userHash === b.userHash && a.generation === b.generation;
+}
+
+export class SessionFencedError extends Error {}
 
 const WAKE_CHANNEL_NAME = 'buckitup-outbox-wake';
 const wakeChannel: BroadcastChannel | null =
 	typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(WAKE_CHANNEL_NAME) : null;
+const localWakeListeners = new Set<(userHash: string) => void>();
+
+function notifyOtherTabs(userHash: string): void {
+	wakeChannel?.postMessage({ userHash });
+}
+
+function notifyLocalSubscribers(userHash: string): void {
+	for (const handler of localWakeListeners) {
+		try {
+			handler(userHash);
+		} catch (e) {
+			console.warn('[outbox] onOutboxWake subscriber threw:', e);
+		}
+	}
+}
+
+function wakeRetry(userHash: string): void {
+	notifyLocalSubscribers(userHash);
+	notifyOtherTabs(userHash);
+}
 
 export function onOutboxWake(handler: (userHash: string) => void): () => void {
-	if (!wakeChannel) return () => {};
-	const listener = (ev: MessageEvent<{ userHash: string }>) => handler(ev.data.userHash);
-	wakeChannel.addEventListener('message', listener);
-	return () => wakeChannel.removeEventListener('message', listener);
+	localWakeListeners.add(handler);
+	const listener = (ev: MessageEvent<{ userHash: string }>) => {
+		try {
+			handler(ev.data.userHash);
+		} catch (e) {
+			console.warn('[outbox] onOutboxWake subscriber threw:', e);
+		}
+	};
+	wakeChannel?.addEventListener('message', listener);
+	return () => {
+		localWakeListeners.delete(handler);
+		wakeChannel?.removeEventListener('message', listener);
+	};
+}
+const OUTCOME_CHANNEL_NAME = 'buckitup-outbox-outcome';
+const outcomeChannel: BroadcastChannel | null =
+	typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(OUTCOME_CHANNEL_NAME) : null;
+const outcomeListeners = new Set<(userHash: string) => void>();
+
+function notifyOutcomeChange(userHash: string): void {
+	for (const handler of outcomeListeners) {
+		try {
+			handler(userHash);
+		} catch (e) {
+			console.warn('[outbox] outcome subscriber threw:', e);
+		}
+	}
+	outcomeChannel?.postMessage({ userHash });
+}
+
+function onOutcomeChange(handler: (userHash: string) => void): () => void {
+	outcomeListeners.add(handler);
+	const listener = (ev: MessageEvent<{ userHash: string }>) => {
+		try {
+			handler(ev.data.userHash);
+		} catch (e) {
+			console.warn('[outbox] outcome subscriber threw:', e);
+		}
+	};
+	outcomeChannel?.addEventListener('message', listener);
+	return () => {
+		outcomeListeners.delete(handler);
+		outcomeChannel?.removeEventListener('message', listener);
+	};
+}
+
+export type EntryOutcome =
+	| { kind: 'accepted' }
+	| { kind: 'rejected'; error: string }
+	| { kind: 'discarded' };
+
+const FAILSAFE_RECHECK_MS = 5_000;
+
+export async function awaitEntryOutcome(id: string, userHash: string): Promise<EntryOutcome> {
+	const immediate = await currentOutcome(id, userHash);
+	if (immediate !== 'pending' && immediate !== 'unknown') return immediate;
+
+	return new Promise<EntryOutcome>((resolve) => {
+		let settled = false;
+		const finish = (outcome: EntryOutcome) => {
+			if (settled) return;
+			settled = true;
+			unsubscribe();
+			clearInterval(failsafeTimer);
+			resolve(outcome);
+		};
+		const recheck = () => {
+			if (settled) return;
+			void currentOutcome(id, userHash).then((outcome) => {
+				if (outcome !== 'pending' && outcome !== 'unknown') finish(outcome);
+			});
+		};
+		const unsubscribe = onOutcomeChange((changedUserHash) => {
+			if (changedUserHash === userHash) recheck();
+		});
+		const failsafeTimer = setInterval(recheck, FAILSAFE_RECHECK_MS);
+		recheck(); // closes the window between the immediate check above and subscribing
+	});
+}
+
+async function currentOutcome(id: string, userHash: string): Promise<EntryOutcome | 'pending' | 'unknown'> {
+	const result = await readEntry(id);
+	if (result.kind === 'missing' || result.kind === 'foreign' || result.kind === 'corrupt') return 'unknown';
+	if (result.entry.userHash !== userHash) return 'unknown';
+	if (result.entry.status === 'accepted' || result.entry.reconciledAt) return { kind: 'accepted' };
+	if (result.entry.status === 'discarded') return { kind: 'discarded' };
+	if (result.entry.status === 'quarantined') return { kind: 'rejected', error: result.entry.lastError ?? 'rejected by the server' };
+	return 'pending';
 }
 
 /**
@@ -178,15 +298,16 @@ const relationOf = (mutations: unknown[]): string => {
 export interface EnqueueOptions {
 	dependsOn?: string[];
 	scope?: string;
+	sourceIntentId?: string;
 }
 
 export async function enqueue(mutations: unknown[], userHash: string, opts: EnqueueOptions = {}): Promise<string | null> {
 	if (!userHash) return null;
 	try {
-		const keys = await storage.keys();
-		if (keys.length >= MAX_OUTBOX_ENTRIES) {
+		const active = await activeEntryCount();
+		if (active >= MAX_OUTBOX_ENTRIES) {
 			console.error(
-				`[outbox] ${keys.length} entries pending — refusing to queue more. ` +
+				`[outbox] ${active} active entries pending — refusing to queue more. ` +
 				'The server has been unreachable for a long time, or a write is stuck.'
 			);
 			return null;
@@ -199,11 +320,13 @@ export async function enqueue(mutations: unknown[], userHash: string, opts: Enqu
 			createdAt: Date.now(),
 			attempts: 0,
 			lastError: null,
+			[DEPENDS_ON_DURABLE_MARKERS_FIELD]: true,
 			...(opts.dependsOn?.length ? { dependsOn: opts.dependsOn } : {}),
 			...(opts.scope ? { scope: opts.scope } : {}),
+			...(opts.sourceIntentId ? { sourceIntentId: opts.sourceIntentId } : {}),
 		};
 		await storage.set(entry.id, JSON.stringify(entry));
-		wakeChannel?.postMessage({ userHash });
+		notifyOtherTabs(userHash);
 		return entry.id;
 	} catch (e) {
 		console.warn('[outbox] storage unavailable, write is not durable:', e);
@@ -211,10 +334,57 @@ export async function enqueue(mutations: unknown[], userHash: string, opts: Enqu
 	}
 }
 
-/** Delivered and confirmed — forget it. */
+export async function markServerAccepted(id: string | null): Promise<void> {
+	if (!id) return;
+	const result = await readEntry(id).catch(() => null);
+	if (result?.kind !== 'entry') return;
+	const entry = result.entry;
+	if (entry.status === 'server_accepted_pending_reconcile' || entry.status === 'accepted') return;
+	if (entry.status === 'quarantined' || entry.status === 'discarded') return; // defensive: never reachable on the success path
+	entry.status = 'server_accepted_pending_reconcile';
+	entry.serverAcceptedAt = Date.now();
+	await storage.set(id, JSON.stringify(entry));
+}
+
+export async function markReconciled(id: string | null): Promise<void> {
+	if (!id) return;
+	const result = await readEntry(id).catch(() => null);
+	if (result?.kind !== 'entry') return;
+	const entry = result.entry;
+	if (entry.status !== 'server_accepted_pending_reconcile') return;
+	entry.reconciledAt = Date.now();
+	await storage.set(id, JSON.stringify(entry));
+	notifyOutcomeChange(entry.userHash);
+}
+
 export async function resolveEntry(id: string | null): Promise<void> {
 	if (!id) return;
-	await storage.delete(id).catch(() => {});
+	const result = await readEntry(id).catch(() => null);
+	if (result?.kind !== 'entry') return;
+	const entry = result.entry;
+	if (entry.status === 'server_accepted_pending_reconcile' && !entry.reconciledAt) {
+		console.warn('[outbox] resolveEntry refused: reconciliation not yet durably complete (L17-10):', id);
+		return;
+	}
+	const marker: OutboxEntry = {
+		id: entry.id,
+		userHash: entry.userHash,
+		relation: entry.relation,
+		mutations: [],
+		createdAt: entry.createdAt,
+		attempts: entry.attempts,
+		lastError: null,
+		status: 'accepted',
+		acceptedAt: Date.now(),
+		...(entry.sourceIntentId ? { sourceIntentId: entry.sourceIntentId } : {}),
+	};
+	try {
+		await storage.set(id, JSON.stringify(marker));
+	} catch (e) {
+		console.warn('[outbox] could not durably record the terminal marker — reconciled state stays covered by reconciledAt (L17-10):', e);
+		return;
+	}
+	notifyOutcomeChange(entry.userHash);
 }
 
 /**
@@ -230,6 +400,7 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 		const result = await readEntry(id);
 		if (result.kind !== 'entry') return;
 		const entry = result.entry;
+		if (entry.status === 'server_accepted_pending_reconcile' || entry.status === 'accepted' || entry.status === 'discarded') return;
 		entry.attempts += 1;
 		entry.lastError = error instanceof Error ? error.message : String(error);
 		if (error instanceof IngestError && error.permanent) {
@@ -244,6 +415,7 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 			entry.nextAttemptAt = Date.now() + backoff + Math.floor(Math.random() * 1000);
 		}
 		await storage.set(id, JSON.stringify(entry));
+		if (entry.status === 'quarantined') notifyOutcomeChange(entry.userHash);
 	} catch {
 		/* diagnostics only — never let bookkeeping break the send path */
 	}
@@ -293,6 +465,17 @@ async function readEntry(key: string): Promise<ReadResult> {
 	}
 }
 
+async function activeEntryCount(): Promise<number> {
+	const keys = await storage.keys();
+	let active = 0;
+	for (const key of keys) {
+		const result = await readEntry(key);
+		if (result.kind === 'entry' && (result.entry.status === 'discarded' || result.entry.status === 'accepted')) continue;
+		active++;
+	}
+	return active;
+}
+
 /**
  * Upgrade a pre-encryption entry in place, the first time its owner sees it.
  * Entries of other accounts stay readable on disk until that account logs in —
@@ -327,8 +510,20 @@ async function entriesOf(userHash: string): Promise<OutboxEntry[]> {
 	}
 }
 
+export async function findEntryBySourceIntentId(
+	userHash: string,
+	sourceIntentId: string
+): Promise<{ outboxId: string } | null> {
+	const all = await entriesOf(userHash);
+	const match = all.find((e) => e.sourceIntentId === sourceIntentId);
+	return match ? { outboxId: match.id } : null;
+}
+
 export async function pendingEntries(userHash: string): Promise<OutboxEntry[]> {
-	return (await entriesOf(userHash)).filter((e) => e.status !== 'quarantined');
+	return (await entriesOf(userHash)).filter((e) => e.status !== 'quarantined' && e.status !== 'discarded' && e.status !== 'accepted');
+}
+export async function pendingReconciliation(userHash: string): Promise<OutboxEntry[]> {
+	return (await entriesOf(userHash)).filter((e) => e.status === 'server_accepted_pending_reconcile');
 }
 
 export async function quarantinedEntries(userHash: string): Promise<OutboxEntry[]> {
@@ -341,42 +536,109 @@ export async function quarantinedEntries(userHash: string): Promise<OutboxEntry[
  */
 export async function requeueEntry(id: string): Promise<void> {
 	const result = await readEntry(id);
-	if (result.kind !== 'entry') return;
+	if (result.kind !== 'entry' || result.entry.status === 'discarded' || result.entry.status === 'accepted'
+		|| result.entry.status === 'server_accepted_pending_reconcile') return;
 	const entry = result.entry;
 	entry.status = 'pending';
 	delete entry.quarantinedAt;
 	await storage.set(id, JSON.stringify(entry));
+	wakeRetry(entry.userHash);
 }
 
-/** The explicit user decision that ends a quarantined entry's life. */
+
 export async function discardEntry(id: string): Promise<void> {
-	await storage.delete(id).catch(() => {});
+	const result = await readEntry(id);
+	if (result.kind !== 'entry' || result.entry.status === 'discarded' || result.entry.status === 'accepted'
+		|| result.entry.status === 'server_accepted_pending_reconcile') return;
+	const entry = result.entry;
+	const marker: OutboxEntry = {
+		id: entry.id,
+		userHash: entry.userHash,
+		relation: entry.relation,
+		mutations: [],
+		createdAt: entry.createdAt,
+		attempts: entry.attempts,
+		lastError: entry.lastError,
+		status: 'discarded',
+		discardedAt: Date.now(),
+		...(entry.sourceIntentId ? { sourceIntentId: entry.sourceIntentId } : {}),
+	};
+	await storage.set(id, JSON.stringify(marker)).catch(() => {});
+	notifyOutcomeChange(entry.userHash);
 }
+
+type DependencyState = 'resolved' | 'pending' | 'unresolvable';
+
+const dependencyState = (dependent: OutboxEntry, depId: string, byId: Map<string, OutboxEntry>): DependencyState => {
+	const dep = byId.get(depId);
+	if (dep) return (dep.status === 'accepted' || dep.status === 'server_accepted_pending_reconcile') ? 'resolved' : 'pending';
+	return dependent[DEPENDS_ON_DURABLE_MARKERS_FIELD] ? 'unresolvable' : 'resolved';
+};
 
 /**
  * Entries the coordinator may dispatch now (§7.3): pending, past their
  * scheduled attempt time, with every dependency resolved. A dependency that
- * is quarantined or still pending blocks its dependents — and only them;
- * everything unrelated stays ready. Order is creation order: a deterministic
- * priority among the ready, never a wait on the unready.
+ * is quarantined, discarded, still pending, or unresolvable (see
+ * dependencyState) blocks its dependents — and only them; everything
+ * unrelated stays ready. Order is creation order: a deterministic priority
+ * among the ready, never a wait on the unready.
  */
 export async function readyEntries(userHash: string, now: number = Date.now()): Promise<OutboxEntry[]> {
 	const all = await entriesOf(userHash);
 	const byId = new Map(all.map((e) => [e.id, e]));
 	return all.filter((e) => {
-		if (e.status === 'quarantined') return false;
+		if (e.status === 'quarantined' || e.status === 'discarded' || e.status === 'accepted'
+			|| e.status === 'server_accepted_pending_reconcile') return false;
 		if ((e.nextAttemptAt ?? 0) > now) return false;
-		// a dependency absent from storage was resolved and forgotten
-		return (e.dependsOn ?? []).every((dep) => !byId.has(dep));
+		return (e.dependsOn ?? []).every((dep) => dependencyState(e, dep, byId) === 'resolved');
 	});
 }
 
-/** Pending entries held back by an unresolved or quarantined dependency. */
+/** Pending entries held back by an unresolved, quarantined, discarded, or
+ * unresolvable (see dependencyState) dependency. */
 export async function blockedEntries(userHash: string): Promise<OutboxEntry[]> {
 	const all = await entriesOf(userHash);
 	const byId = new Map(all.map((e) => [e.id, e]));
 	return all.filter((e) =>
-		e.status !== 'quarantined' && (e.dependsOn ?? []).some((dep) => byId.has(dep)));
+		e.status !== 'quarantined' && e.status !== 'discarded' && e.status !== 'accepted'
+		&& e.status !== 'server_accepted_pending_reconcile' // L17-10: already past dispatch, never "blocked"
+		&& (e.dependsOn ?? []).some((dep) => dependencyState(e, dep, byId) !== 'resolved'));
+}
+
+export interface BlockerSummary {
+	id: string;
+	relation: string;
+	status: 'quarantined' | 'discarded' | 'unknown';
+	lastError: string | null;
+}
+
+export interface BlockedDependentIssue {
+	entry: { id: string; relation: string };
+	blockers: BlockerSummary[];
+}
+
+export async function blockedDependentIssues(userHash: string): Promise<BlockedDependentIssue[]> {
+	const all = await entriesOf(userHash);
+	const byId = new Map(all.map((e) => [e.id, e]));
+	const issues: BlockedDependentIssue[] = [];
+	for (const e of all) {
+		if (e.status === 'quarantined' || e.status === 'discarded' || e.status === 'accepted'
+			|| e.status === 'server_accepted_pending_reconcile') continue;
+		const blockers: BlockerSummary[] = [];
+		for (const dep of e.dependsOn ?? []) {
+			const state = dependencyState(e, dep, byId);
+			if (state === 'resolved') continue;
+			if (state === 'unresolvable') {
+				blockers.push({ id: dep, relation: 'unknown', status: 'unknown', lastError: null });
+				continue;
+			}
+			const blocker = byId.get(dep);
+			if (!blocker || (blocker.status !== 'quarantined' && blocker.status !== 'discarded')) continue;
+			blockers.push({ id: blocker.id, relation: blocker.relation, status: blocker.status, lastError: blocker.lastError });
+		}
+		if (blockers.length) issues.push({ entry: { id: e.id, relation: e.relation }, blockers });
+	}
+	return issues;
 }
 
 export async function pendingCount(userHash: string): Promise<number> {
@@ -411,13 +673,30 @@ export interface DrainResult {
  * back. Hammering is prevented by stopping the whole drain on the first
  * transient failure: one request per trigger, at most.
  */
+async function reconcileStuckEntries(userHash: string, reconcile: (mutations: unknown[]) => Promise<void>): Promise<void> {
+	for (const entry of await pendingReconciliation(userHash)) {
+		try {
+			await reconcile(entry.mutations);
+			await markReconciled(entry.id);
+			await resolveEntry(entry.id);
+		} catch (e) {
+			console.warn('[outbox] reconciliation still pending after server acceptance (L17-10):', entry.id, e);
+		}
+	}
+}
+
 export async function drainOutbox(
 	userHash: string,
-	send: (mutations: unknown[]) => Promise<unknown>
+	send: (mutations: unknown[]) => Promise<unknown>,
+	reconcile?: (mutations: unknown[], result?: unknown) => Promise<void>,
+	isCurrent?: () => boolean,
 ): Promise<DrainResult> {
 	const hasLeadership = leaderOverrideForTests !== null
 		? leaderOverrideForTests
 		: WebLocksLeader.isSupported() ? await (leader?.requestLeadership() ?? Promise.resolve(true)) : true;
+
+	if (reconcile) await reconcileStuckEntries(userHash, reconcile);
+
 	if (!hasLeadership) {
 		return { sent: 0, dropped: 0, remaining: await pendingCount(userHash), stoppedEarly: false, wasLeader: false };
 	}
@@ -428,12 +707,28 @@ export async function drainOutbox(
 	const entries = await readyEntries(userHash);
 	let sent = 0;
 	let dropped = 0;
+	let hadTransientFailure = false;
 
 	for (const entry of entries) {
+		if (isCurrent && !isCurrent()) break; // superseded mid-batch — see isCurrent's doc comment
 		try {
-			await send(entry.mutations);
-			await resolveEntry(entry.id);
+			const result = await send(entry.mutations);
+			await markServerAccepted(entry.id);
 			sent++;
+
+			if (!reconcile) {
+				await markReconciled(entry.id);
+				await resolveEntry(entry.id);
+				continue;
+			}
+
+			try {
+				await reconcile(entry.mutations, result);
+				await markReconciled(entry.id);
+				await resolveEntry(entry.id);
+			} catch (e) {
+				console.warn('[outbox] reconciliation pending after server acceptance (L17-10):', entry.id, e);
+			}
 		} catch (e) {
 			if (e instanceof IngestError && e.permanent) {
 				// Out of the replay path but never silently gone: the entry
@@ -443,20 +738,14 @@ export async function drainOutbox(
 				continue;
 			}
 			await recordFailure(entry.id, e);
-			return {
-				sent,
-				dropped,
-				remaining: entries.length - sent - dropped,
-				stoppedEarly: true,
-				wasLeader: true,
-			};
+			hadTransientFailure = true;
 		}
 	}
 	return {
 		sent,
 		dropped,
 		remaining: await pendingCount(userHash),
-		stoppedEarly: false,
+		stoppedEarly: hadTransientFailure,
 		wasLeader: true,
 	};
 }
@@ -468,7 +757,7 @@ export async function drainOutbox(
 
 let loopTimer: ReturnType<typeof setTimeout> | null = null;
 let loopFailures = 0;
-
+let loopGeneration = 0;
 
 const nextDelay = (): number => {
 	const backoff = Math.min(RETRY_BASE_MS * 2 ** loopFailures, RETRY_MAX_MS);
@@ -485,13 +774,14 @@ const nextDelay = (): number => {
 export function ensureDrainLoop(
 	userHash: string,
 	send: (mutations: unknown[]) => Promise<unknown>,
-	opts: { resetSchedules?: boolean } = {},
+	opts: { resetSchedules?: boolean; reconcile?: (mutations: unknown[], result?: unknown) => Promise<void> } = {},
 ): void {
-	stopDrainLoop();
+	stopDrainLoop(); // also bumps loopGeneration, invalidating any in-flight chain from a previous call
 	loopFailures = 0;
+	const generation = loopGeneration;
 	void (async () => {
 		if (opts.resetSchedules) await clearSchedules(userHash);
-		await runLoopOnce(userHash, send);
+		await runLoopOnce(userHash, send, opts.reconcile, generation);
 	})();
 }
 
@@ -500,7 +790,7 @@ export function ensureDrainLoop(
 async function clearSchedules(userHash: string): Promise<void> {
 	try {
 		for (const entry of await entriesOf(userHash)) {
-			if (entry.status !== 'quarantined' && entry.nextAttemptAt) {
+			if (entry.status !== 'quarantined' && entry.status !== 'discarded' && entry.nextAttemptAt) {
 				delete entry.nextAttemptAt;
 				await storage.set(entry.id, JSON.stringify(entry));
 			}
@@ -511,18 +801,22 @@ async function clearSchedules(userHash: string): Promise<void> {
 async function runLoopOnce(
 	userHash: string,
 	send: (mutations: unknown[]) => Promise<unknown>,
+	reconcile: ((mutations: unknown[], result?: unknown) => Promise<void>) | undefined,
+	generation: number,
 ): Promise<void> {
 	let result: DrainResult;
 	try {
-		result = await drainOutbox(userHash, send);
+		result = await drainOutbox(userHash, send, reconcile, () => generation === loopGeneration);
 	} catch {
 		result = { sent: 0, dropped: 0, remaining: 1, stoppedEarly: true, wasLeader: true };
 	}
 
+	if (generation !== loopGeneration) return;
+
 	if (!result.wasLeader) {
 		// Another tab is draining. Check back lazily: that tab may close with
 		// entries still queued, and someone has to pick them up.
-		loopTimer = setTimeout(() => void runLoopOnce(userHash, send), 30_000);
+		loopTimer = setTimeout(() => void runLoopOnce(userHash, send, reconcile, generation), 30_000);
 		return;
 	}
 	if (result.remaining === 0) {
@@ -535,15 +829,17 @@ async function runLoopOnce(
 	let delay = nextDelay();
 	try {
 		const soonest = (await entriesOf(userHash))
-			.filter((e) => e.status !== 'quarantined' && e.nextAttemptAt)
+			.filter((e) => e.status !== 'quarantined' && e.status !== 'discarded' && e.nextAttemptAt)
 			.reduce<number | null>((min, e) => (min === null || e.nextAttemptAt! < min ? e.nextAttemptAt! : min), null);
 		if (soonest !== null) delay = Math.min(delay, Math.max(soonest - Date.now(), 250));
 	} catch { /* pacing fallback is the loop backoff */ }
-	loopTimer = setTimeout(() => void runLoopOnce(userHash, send), delay);
+	if (generation !== loopGeneration) return; // re-checked: the entriesOf scan above awaited too
+	loopTimer = setTimeout(() => void runLoopOnce(userHash, send, reconcile, generation), delay);
 }
 
 /** Call on logout: another account's entries are not this session's to send. */
 export function stopDrainLoop(): void {
+	loopGeneration++;
 	if (loopTimer) {
 		clearTimeout(loopTimer);
 		loopTimer = null;

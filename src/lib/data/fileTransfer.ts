@@ -184,7 +184,7 @@ export const uploadFile = async (opts: {
 	// Manifest commit: the trust anchor other devices use to accept chunks.
 	const manifestFields = {
 		chunk_count: total,
-		chunk_sign_hashes: chunkSignHashes, // canonical encoding: concatenated base64
+		chunk_sign_hashes: chunkSignHashes,
 		chunk_size: CHUNK_SIZE,
 		deleted_flag: false,
 		file_id: fileId,
@@ -193,7 +193,7 @@ export const uploadFile = async (opts: {
 		uploader_hash: uploaderHash,
 	};
 	const manifestSign = signFields(manifestFields as never, signSkey);
-	await sendMutationsAndAwaitShape(
+	const manifestHandle = await sendMutationsAndAwaitShape(
 		[{
 			type: 'insert',
 			syncMetadata: { relation: 'files' },
@@ -201,6 +201,11 @@ export const uploadFile = async (opts: {
 		}],
 		signSkey,
 	);
+	const manifestOutcome = await manifestHandle.acceptance;
+	if (manifestOutcome.kind !== 'accepted') {
+		const reason = manifestOutcome.kind === 'rejected' ? manifestOutcome.error : 'discarded before delivery';
+		throw new Error(`File manifest for ${fileId} was not accepted: ${reason}`);
+	}
 
 	return { fileId, encSecretB64: opts.encSecretB64, size: bytes.length, chunkCount: total };
 };

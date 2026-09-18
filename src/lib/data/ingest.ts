@@ -10,9 +10,9 @@
 // signature (see confirm.ts).
 import { api } from '@/api/client';
 import { mutationAppliedOnServer } from './confirm';
-import { dispatchMutations, dependenciesFor } from './coordinator';
+import { dispatchMutations, dependenciesFor, reconcileAccepted } from './coordinator';
 import { OWNER_FIELD } from './writeContracts';
-import { enqueue, resolveEntry, recordFailure, ensureDrainLoop, stopDrainLoop, isLeader } from './outbox';
+import { enqueue, recordFailure, ensureDrainLoop, stopDrainLoop, isLeader, awaitEntryOutcome, type EntryOutcome } from './outbox';
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
@@ -52,6 +52,15 @@ const isUniqueConflict = (r: IngestRowResult): boolean => {
 	);
 };
 
+const isTimestampNotNewer = (r: IngestRowResult): boolean => {
+	if (r.status === 'ok' || r.error !== 'validation_failed') return false;
+	const field = r.details?.owner_timestamp;
+	return Array.isArray(field) && field.some((msg) => /timestamp not newer/i.test(msg));
+};
+
+const isExistsConflict = (r: IngestRowResult): boolean => r.status === 'exists';
+const isConfirmedDuplicate = (r: IngestRowResult): boolean => r.status === 'exists' && r.conflicted === false;
+
 function validateBatchResults(results: unknown, mutationCount: number, status: number): IngestRowResult[] {
 	if (!Array.isArray(results)) {
 		throw new IngestError(`ingest HTTP ${status}: no per-row results`, { permanent: false, status });
@@ -72,6 +81,10 @@ function validateBatchResults(results: unknown, mutationCount: number, status: n
 			throw new IngestError(`ingest: duplicate result index ${index}`, { permanent: false, status });
 		}
 		seen.add(index);
+		const rowStatus = (r as { status?: unknown } | null)?.status;
+		if (rowStatus !== 'ok' && rowStatus !== 'error' && rowStatus !== 'exists') {
+			throw new IngestError(`ingest: unknown result status ${JSON.stringify(rowStatus)} at index ${index}`, { permanent: false, status });
+		}
 	}
 	return results as IngestRowResult[];
 }
@@ -108,16 +121,24 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 
 	const failed = results.filter((r) => r.status !== 'ok');
 	if (failed.length > 0) {
+		if (failed.every(isConfirmedDuplicate)) {
+			return {
+				txids: results.filter((r) => typeof r.txid === 'number').map((r) => r.txid as number),
+				results,
+			};
+		}
+
 		// A 422 row outcome is the server's final verdict — validation or a
 		// business rule (e.g. "cannot react to own message"). Retrying the
 		// same signed mutation can never change it; only network-level
 		// failures (5xx, 429, no response) are worth retrying.
 		const permanent = resp.status === 422;
-		const uniqueConflictOnly = failed.every(isUniqueConflict);
+		const isConflict = (r: IngestRowResult) => isExistsConflict(r) || isUniqueConflict(r) || isTimestampNotNewer(r);
+		const uniqueConflictOnly = failed.every(isConflict);
 		// Only the rows the server actually rejected need an identity check;
 		// rows it reported as ok are already confirmed by this response and
 		// must not be made to depend on shape propagation.
-		const conflictIndexes = failed.filter(isUniqueConflict).map((r) => r.index);
+		const conflictIndexes = failed.filter(isConflict).map((r) => r.index);
 		throw new IngestError(
 			`ingest rejected ${failed.length}/${results.length} rows: ${JSON.stringify(failed[0]?.details || failed[0]?.error)}`,
 			{ permanent, uniqueConflictOnly, conflictIndexes, status: resp.status, results }
@@ -233,17 +254,28 @@ export class DurabilityError extends Error {
 	}
 }
 
+export interface DeliveryHandle {
+	outboxId: string | null;
+	phase: 'accepted' | 'queued';
+	result?: SendResult;
+	acceptance: Promise<EntryOutcome>;
+}
+
 export async function sendMutationsAndAwaitShape(
 	mutations: unknown[],
 	signSkey: Uint8Array,
-	opts: RetryOptions & { durability?: 'required' | 'best-effort' } = {}
-): Promise<SendResult> {
+	opts: RetryOptions & {
+		durability?: 'required' | 'best-effort';
+		onDurable?: (outboxId: string) => void | Promise<void>;
+		sourceIntentId?: string;
+	} = {}
+): Promise<DeliveryHandle> {
 	// Durability first: the signed mutations hit IndexedDB before the network,
 	// so a reload or crash mid-send replays them on the next login instead of
 	// losing them. The entry is removed only after the server confirms.
 	const owner = ownerOf(mutations);
 	const dependsOn = await dependenciesFor(mutations, owner);
-	const outboxId = await enqueue(mutations, owner, { dependsOn });
+	const outboxId = await enqueue(mutations, owner, { dependsOn, sourceIntentId: opts.sourceIntentId });
 
 	// ADR §11: when durable storage is unavailable, a user-visible mutation
 	// fails visibly — a best-effort network send that looks identical to
@@ -252,17 +284,23 @@ export async function sendMutationsAndAwaitShape(
 	if (outboxId === null && (opts.durability ?? 'required') === 'required') {
 		throw new DurabilityError();
 	}
-
-	if (!isLeader()) {
-		ensureDrainLoop(owner, (queued) =>
-			dispatchMutations(queued, (m) => sendMutationsWithRetry(m, signSkey, { retries: 1 }))
+	if (outboxId !== null) await opts.onDurable?.(outboxId);
+	if (!isLeader() || dependsOn.length > 0) {
+		ensureDrainLoop(owner, (queued) => sendMutationsWithRetry(queued, signSkey, { retries: 1 }),
+			{ reconcile: reconcileAccepted },
 		);
-		return { txids: [], results: [] };
+		return {
+			outboxId,
+			phase: 'queued',
+			acceptance: outboxId
+				? awaitEntryOutcome(outboxId, owner)
+				: Promise.resolve({ kind: 'rejected', error: 'not durably queued' } as const),
+		};
 	}
 
 	let result: SendResult;
 	try {
-		result = await dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, opts));
+		result = await dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, opts), outboxId);
 	} catch (e) {
 		// Permanent rejections die in the outbox too; transient failures stay
 		// for the next drain. Either way the caller sees the same error as
@@ -273,13 +311,17 @@ export async function sendMutationsAndAwaitShape(
 		// with nothing scheduled to retry it — waiting on a later login or an
 		// 'online' event that may never come. Arming the loop here is what
 		// makes "retryable" mean the client will actually try again (ADR §5).
-		ensureDrainLoop(owner, (queued) =>
-			dispatchMutations(queued, (m) => sendMutationsWithRetry(m, signSkey, { retries: 1 }))
+		ensureDrainLoop(owner, (queued) => sendMutationsWithRetry(queued, signSkey, { retries: 1 }),
+			{ reconcile: reconcileAccepted },
 		);
 		throw e;
 	}
-	await resolveEntry(outboxId);
-	return result;
+	return {
+		outboxId,
+		phase: 'accepted',
+		result,
+		acceptance: outboxId ? awaitEntryOutcome(outboxId, owner) : Promise.resolve({ kind: 'accepted' }),
+	};
 }
 
 /**
@@ -290,12 +332,11 @@ export async function sendMutationsAndAwaitShape(
 export function drainPendingWrites(userHash: string, signSkey: Uint8Array): void {
 	// The loop owns pacing from here: it drains now and keeps its own timer
 	// until the queue empties, so a 503 with no connectivity change cannot
-	// strand the queue until the next login (ADR §5).
-	ensureDrainLoop(userHash, (mutations) =>
-		dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, { retries: 1 })),
+	// strand the queue until the next login (ADR §5). `reconcile` runs the
+	ensureDrainLoop(userHash, (mutations) => sendMutationsWithRetry(mutations, signSkey, { retries: 1 }),
 		// login/'online' is a fresh signal: backoffs computed before it no
 		// longer describe the world — everything pending becomes due now
-		{ resetSchedules: true },
+		{ resetSchedules: true, reconcile: reconcileAccepted },
 	);
 }
 

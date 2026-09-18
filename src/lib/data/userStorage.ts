@@ -141,12 +141,14 @@ async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult
 	const persist = (row: UserStorageRow, syncStatus: StorageSyncStatus, syncError?: string) =>
 		kvSet(key, { row, hash_b64: hashB64, syncStatus, syncError } satisfies LocalStorageEntry);
 
+	const acceptedLocal = local?.syncStatus === 'synced' ? local.row : null;
+
 	// Server base unknown → do not sign anything. Keep the user's edit locally
 	// and report the failure honestly; re-signing against a guessed base would
 	// produce a conflict the moment connectivity returns.
 	// (A durable outbox that materializes the mutation later is the tracked
 	// follow-up — see the offline-first note in the review.)
-	if (server.state === 'unavailable') {
+	if (server.state === 'unavailable' && !acceptedLocal) {
 		const pendingRow: UserStorageRow = {
 			user_hash: userHash,
 			uuid,
@@ -165,7 +167,6 @@ async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult
 	}
 
 	const serverRow = server.state === 'found' ? server.row : null;
-	const acceptedLocal = local?.syncStatus === 'synced' ? local.row : null;
 	const baseRow = freshestOf(serverRow, acceptedLocal);
 	const mutationType = baseRow ? 'update' : 'insert';
 	const parentSignHash = baseRow?.sign_hash ?? null;
@@ -195,9 +196,16 @@ async function upsertStorageRowSerial(opts: UpsertOptions): Promise<UpsertResult
 
 	await persist(row, 'syncing');
 	try {
-		await sendMutationsAndAwaitShape([mutation], signSkey);
-		await persist(row, 'synced');
-		return { row, sync: Promise.resolve({ status: 'synced' as const }) };
+		const handle = await sendMutationsAndAwaitShape([mutation], signSkey);
+		const outcome = await handle.acceptance;
+		if (outcome.kind === 'accepted') {
+			await persist(row, 'synced');
+			return { row, sync: Promise.resolve({ status: 'synced' as const }) };
+		}
+		const message = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
+		await persist(row, 'failed', message);
+		console.warn(`[userStorage] ${uuid}: sync failed:`, message);
+		return { row, sync: Promise.resolve({ status: 'failed' as const, error: message }) };
 	} catch (e: unknown) {
 		const message = String((e as Error)?.message || e);
 		await persist(row, 'failed', message);

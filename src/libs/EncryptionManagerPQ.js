@@ -14,11 +14,11 @@ import { sendMutationsAndAwaitShape, drainPendingWrites, stopDrainLoop } from '@
 import { startLeaderElection, stopLeaderElection, onOutboxWake } from '@/lib/data/outbox';
 import { recoverIntents } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
+import { freshestOf, getAccepted, recordAccepted } from '@/lib/data/acceptedSnapshot';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { getStorageRow, upsertStorageRow } from '@/lib/data/userStorage';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
-import { clearAcceptedSnapshots } from '@/lib/data/acceptedSnapshot';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
 
@@ -67,6 +67,7 @@ if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
 export class EncryptionManagerPQ extends EventTarget {
   static instance = null;
   static #cardQueues = new Map();
+  static #acceptedCardCache = new Map();
 
   #rawStore = rawStorage('idb');
   #currentVault = null;
@@ -98,7 +99,7 @@ export class EncryptionManagerPQ extends EventTarget {
   // backend refuses a user_storage write until the card exists, so
   // registration would race its own profile save. Serialized per user_hash
   // and monotonic, because the server rejects a card update whose timestamp
-  // is not strictly newer than the stored one.
+  // is not strictly newer than the stored one — user_cards carries no
   async #pushOwnCard(card, { isUpdate = false, signSkey = null } = {}) {
     const key = signSkey || this.#signSkey;
     if (!key) throw new Error('No signing key for user card');
@@ -106,8 +107,18 @@ export class EncryptionManagerPQ extends EventTarget {
     const userHash = card.user_hash;
     const previous = EncryptionManagerPQ.#cardQueues.get(userHash) ?? Promise.resolve();
     const run = async () => {
+      const sessionCard = EncryptionManagerPQ.#acceptedCardCache.get(userHash) ?? null;
+      if (sessionCard) {
+        try {
+          await recordAccepted('user_cards', userHash, sessionCard);
+        } catch {
+        }
+      }
+
       const serverCard = getUserCardsCollection().get(userHash);
-      const ownerTimestamp = nextOwnerTimestamp(serverCard?.owner_timestamp);
+      const acceptedCard = await getAccepted('user_cards', userHash);
+      const baseCard = freshestOf(freshestOf(serverCard, acceptedCard), sessionCard);
+      const ownerTimestamp = nextOwnerTimestamp(baseCard?.owner_timestamp);
 
       const { mutation } = api.createUserCard(card.name || 'User', {
         user_hash: userHash,
@@ -118,12 +129,24 @@ export class EncryptionManagerPQ extends EventTarget {
         crypt_cert: decodeHexOrBase64(card.crypt_cert),
         sign_skey: key,
       }, isUpdate ? 'update' : 'insert', ownerTimestamp);
+      const signedRow = mutation.modified ?? mutation.changes;
 
-      // Barrier included: the next card update reads this row as its base.
       // Best-effort durability: card publication runs while the vault may
       // still be locked (no key to encrypt the outbox with), and a lost card
       // write is recoverable — the identity republishes on the next login.
-      return sendMutationsAndAwaitShape([mutation], key, { durability: 'best-effort' });
+      const handle = await sendMutationsAndAwaitShape([mutation], key, { durability: 'best-effort' });
+      const outcome = handle.phase === 'accepted' ? { kind: 'accepted' } : await handle.acceptance;
+      if (outcome.kind !== 'accepted') {
+        const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
+        throw new Error(`User card ${isUpdate ? 'update' : 'creation'} was not accepted: ${reason}`);
+      }
+      EncryptionManagerPQ.#acceptedCardCache.set(userHash, signedRow);
+      try {
+        await recordAccepted('user_cards', userHash, signedRow);
+      } catch (e) {
+        console.warn('[EncryptionManagerPQ] could not record accepted card snapshot locally (L17-10-adjacent — session-local continuation still covers this account):', e);
+      }
+      return handle;
     };
 
     const next = previous.then(run, run);
@@ -143,6 +166,10 @@ export class EncryptionManagerPQ extends EventTarget {
     }
 
     return EncryptionManagerPQ.instance;
+  }
+
+  static _clearAcceptedCardCacheForTests() {
+    EncryptionManagerPQ.#acceptedCardCache.clear();
   }
 
   get isAuth() {
@@ -313,14 +340,16 @@ export class EncryptionManagerPQ extends EventTarget {
     const signSkey = this.#signSkey;
     if (!userHash || !signSkey) return;
 
-    recoverIntents(userHash, signSkey).catch((e) =>
+    this.#stopOutboxDrain();
+    startLeaderElection(userHash, () => drainPendingWrites(userHash, signSkey));
+    
+    import('@/lib/data/messageIntent').then(({ materializeMessageIntent }) =>
+      recoverIntents(userHash, signSkey, { materializeMessage: materializeMessageIntent })
+    ).catch((e) =>
       console.warn('[EncryptionManagerPQ] intent recovery failed:', e)
     );
 
     drainPendingWrites(userHash, signSkey);
-
-    this.#stopOutboxDrain();
-    startLeaderElection(userHash, () => drainPendingWrites(userHash, signSkey));
 
     this.#outboxOnlineListener = () => drainPendingWrites(userHash, signSkey);
     if (typeof window !== 'undefined') {
@@ -362,8 +391,7 @@ export class EncryptionManagerPQ extends EventTarget {
     resetUserStorageCollection();
 
     clearReadCache().catch((e) => console.warn('[EncryptionManagerPQ] read-cache clear failed:', e));
-    clearAcceptedSnapshots().catch((e) => console.warn('[EncryptionManagerPQ] accepted-snapshot clear failed:', e));
-
+    
     console.log('Logged out — secret key wiped');
     this.#dispatchAuthChange();
   }

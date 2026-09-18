@@ -2,12 +2,16 @@ import { contractFor, OWNER_FIELD } from './writeContracts';
 import { awaitShapeVisibility, collectionForRelation, scopeForRelation } from './barrier';
 import { markUnconfirmed, clearUnconfirmed, assertFreshBase } from './staleBase';
 import { recordAccepted } from './acceptedSnapshot';
-import { pendingEntries, quarantinedEntries, type OutboxEntry } from './outbox';
+import {
+	pendingEntries, quarantinedEntries, currentSessionUserHash,
+	markServerAccepted, markReconciled, resolveEntry, type OutboxEntry,
+} from './outbox';
 import type { SendResult } from './ingest';
 
 const ENTITY_KEY_FIELD: Record<string, string> = {
 	dialog_messages: 'message_id',
 	dialog_message_reactions: 'reaction_hash',
+	user_cards: 'user_hash',
 };
 
 interface MutationShape {
@@ -86,30 +90,50 @@ export async function dependenciesFor(mutations: unknown[], userHash: string): P
 	return [...deps];
 }
 
-export async function dispatchMutations(
-	mutations: unknown[],
-	send: (mutations: unknown[]) => Promise<SendResult>
-): Promise<SendResult> {
-	const result = await send(mutations);
-
+export async function reconcileAccepted(mutations: unknown[], result: unknown = null): Promise<void> {
+	const sendResult = result as SendResult | null;
 	const first = mutations[0] as MutationShape | undefined;
 	const relation = first?.syncMetadata?.relation;
-	if (relation) {
-		const row = first?.modified ?? first?.changes ?? null;
-		
-		const entityField = ENTITY_KEY_FIELD[relation];
-		const entityKey = entityField ? row?.[entityField] : undefined;
-		if (row && typeof entityKey === 'string' && entityKey) {
+	if (!relation) return;
+	const row = first?.modified ?? first?.changes ?? null;
+
+	const entityField = ENTITY_KEY_FIELD[relation];
+	const entityKey = entityField ? row?.[entityField] : undefined;
+	if (row && typeof entityKey === 'string' && entityKey) {
+		const owner = ownerOf(relation, row);
+		const activeSession = currentSessionUserHash();
+		if (activeSession && owner && owner !== activeSession) {
+			throw new Error(`reconcileAccepted: fenced — ${relation}:${entityKey} does not belong to the active session`);
+		}
+		if (owner && owner === activeSession) {
 			await recordAccepted(relation, entityKey, row);
 		}
+	}
 
+	if (sendResult) {
 		const contract = contractFor(relation, first?.type);
 		if (contract.confirmation === 'visible') {
-			const visible = await awaitShapeVisibility(collectionForRelation(relation, row), result.txids, relation);
+			const visible = await awaitShapeVisibility(collectionForRelation(relation, row), sendResult.txids, relation);
 			const scope = scopeForRelation(relation, row);
 			if (visible) clearUnconfirmed(scope);
 			else markUnconfirmed(scope);
 		}
+	}
+}
+
+export async function dispatchMutations(
+	mutations: unknown[],
+	send: (mutations: unknown[]) => Promise<SendResult>,
+	outboxId: string | null = null,
+): Promise<SendResult> {
+	const result = await send(mutations);
+	await markServerAccepted(outboxId);
+	try {
+		await reconcileAccepted(mutations, result);
+		await markReconciled(outboxId);
+		await resolveEntry(outboxId);
+	} catch (e) {
+		console.warn('[coordinator] local reconciliation pending after server acceptance (L17-10):', e);
 	}
 	return result;
 }

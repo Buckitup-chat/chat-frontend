@@ -95,8 +95,9 @@ export interface DialogMessageReceiptRow {
 /** Per-row outcome of POST /ingest_each. */
 export interface IngestRowResult {
 	index: number;
-	status: 'ok' | 'error';
+	status: 'ok' | 'error' | 'exists';
 	txid?: number;
 	error?: string;
 	details?: Record<string, string[]>;
+	conflicted?: boolean;
 }
