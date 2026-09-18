@@ -57,6 +57,35 @@ describe('sendMutations', () => {
 		expect(err.permanent).toBe(true);
 	});
 
+	it('classifies "timestamp not newer" as a conflict candidate, not an opaque permanent failure', async () => {
+		mockFetchSequence(422, {
+			results: [
+				{ index: 0, status: 'error', error: 'validation_failed', details: { owner_timestamp: ['timestamp not newer'] } },
+			],
+		});
+		const err = await sendMutations([mutation], signSkey).catch((e) => e);
+		expect(err).toBeInstanceOf(IngestError);
+		expect(err.uniqueConflictOnly).toBe(true);
+	});
+
+	it('treats status "exists" with conflicted:false as success, not a failure to classify', async () => {
+		mockFetchSequence(200, {
+			results: [{ index: 0, status: 'exists', conflicted: false }],
+		});
+		const res = await sendMutations([mutation], signSkey);
+		expect(res.txids).toEqual([]);
+	});
+
+	it('classifies status "exists" with conflicted:true as a unique conflict, not success', async () => {
+		mockFetchSequence(200, {
+			results: [{ index: 0, status: 'exists', conflicted: true }],
+		});
+		const err = await sendMutations([mutation], signSkey).catch((e) => e);
+		expect(err).toBeInstanceOf(IngestError);
+		expect(err.uniqueConflictOnly).toBe(true);
+		expect(err.permanent).toBe(false);
+	});
+
 	it('throws permanent IngestError on validation failure', async () => {
 		mockFetchSequence(422, {
 			results: [{ index: 0, status: 'error', error: 'validation_failed', details: { sign_hash: ["can't be blank"] } }],
@@ -150,6 +179,51 @@ describe('sendMutationsWithRetry', () => {
 		expect(confirmApplied).toHaveBeenCalledTimes(1);
 		expect(confirmApplied).toHaveBeenCalledWith(m1);
 		expect(res.txids).toEqual([99]);
+	});
+
+	it('resolves status "exists" with conflicted:false without calling confirmApplied', async () => {
+		mockFetchSequence(200, {
+			results: [{ index: 0, status: 'exists', conflicted: false }],
+		});
+		const confirmApplied = vi.fn(async () => true);
+		const res = await sendMutationsWithRetry([mutation], signSkey, { retries: 2, baseDelayMs: 1, confirmApplied });
+		expect(confirmApplied).not.toHaveBeenCalled();
+		expect(res.results[0].status).toBe('exists');
+	});
+
+	it('resolves status "exists" with conflicted:true as success when identity is confirmed', async () => {
+		mockFetchSequence(200, {
+			results: [{ index: 0, status: 'exists', conflicted: true }],
+		});
+		const confirmApplied = vi.fn(async () => true);
+		const res = await sendMutationsWithRetry([mutation], signSkey, { retries: 2, baseDelayMs: 1, confirmApplied });
+		expect(confirmApplied).toHaveBeenCalledTimes(1);
+		expect(res.results.length).toBe(1);
+	});
+
+	it('resolves "timestamp not newer" as success when identity is confirmed', async () => {
+		mockFetchSequence(422, {
+			results: [
+				{ index: 0, status: 'error', error: 'validation_failed', details: { owner_timestamp: ['timestamp not newer'] } },
+			],
+		});
+		const confirmApplied = vi.fn(async () => true);
+		const res = await sendMutationsWithRetry([mutation], signSkey, { retries: 2, baseDelayMs: 1, confirmApplied });
+		expect(confirmApplied).toHaveBeenCalledTimes(1);
+		expect(res.results.length).toBe(1);
+	});
+
+	it('turns "timestamp not newer" into a permanent error when the server row differs', async () => {
+		mockFetchSequence(422, {
+			results: [
+				{ index: 0, status: 'error', error: 'validation_failed', details: { owner_timestamp: ['timestamp not newer'] } },
+			],
+		});
+		const confirmApplied = vi.fn(async () => false);
+		const err = await sendMutationsWithRetry([mutation], signSkey, { retries: 2, baseDelayMs: 1, confirmApplied }).catch((e) => e);
+		expect(err).toBeInstanceOf(IngestError);
+		expect(err.permanent).toBe(true);
+		expect(err.uniqueConflictOnly).toBe(true);
 	});
 
 	it('turns a unique conflict into a permanent error when the server row differs', async () => {

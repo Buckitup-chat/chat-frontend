@@ -116,11 +116,26 @@ export function createDialogGate(deps: GateDeps) {
 		}
 	};
 
+	const inFlight = new Map<string, Promise<GateVerdict>>();
+
 	const admit = async (row: MessageLike): Promise<GateVerdict> => {
 		const key = keyOf(row);
 		const prior = admitted.get(key);
 		if (prior) return { status: 'verified', dagVerified: prior.dagVerified, isGenesis: false };
 
+		const pending = inFlight.get(key);
+		if (pending) return pending;
+
+		const attempt = admitOnce(row, key);
+		inFlight.set(key, attempt);
+		try {
+			return await attempt;
+		} finally {
+			if (inFlight.get(key) === attempt) inFlight.delete(key);
+		}
+	};
+
+	const admitOnce = async (row: MessageLike, key: string): Promise<GateVerdict> => {
 		const signPkey = await deps.resolveSignPkey(row.sender_hash);
 		if (!signPkey) {
 			// The author's card is itself a replicated row that may simply not

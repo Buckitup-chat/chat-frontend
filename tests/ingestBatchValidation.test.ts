@@ -80,4 +80,11 @@ describe('strict batch validation', () => {
 		await expect(sendMutations([mutation('a')], SKEY))
 			.rejects.toMatchObject({ name: 'IngestError', permanent: false });
 	});
+
+	it('rejects an unrecognized result status rather than passing it through as a generic failure', async () => {
+		mockStatus = 200;
+		mockResults = [{ index: 0, status: 'superseded' } as unknown as IngestRowResult];
+		await expect(sendMutations([mutation('a')], SKEY))
+			.rejects.toMatchObject({ name: 'IngestError', permanent: false, message: expect.stringContaining('unknown result status') });
+	});
 });
