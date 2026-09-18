@@ -14,14 +14,18 @@ const uploadAttachment = vi.fn((meta, opts) => new Promise((resolve, reject) => 
 	});
 }));
 
-const sendMessage = vi.fn((peerHash, parts, onStatus) => {
-	sentMessages.push({ peerHash, parts });
+const captureMessageIntent = vi.fn(async (peerHash, parts) => ({
+	intentId: 'intent_x',
+	payload: { peerHash, parts, messageId: 'dmsg_x' },
+}));
+const dispatchMessageIntent = vi.fn((intentId, payload, onStatus) => {
+	sentMessages.push({ peerHash: payload.peerHash, parts: payload.parts });
 	onStatus?.('synced');
-	return 'dmsg_x';
+	return Promise.resolve();
 });
 
 vi.mock('@/store/dialogs.store', () => ({
-	useDialogsStore: () => ({ uploadAttachment, sendMessage }),
+	useDialogsStore: () => ({ uploadAttachment, captureMessageIntent, dispatchMessageIntent }),
 }));
 
 const { useTransfersStore } = await import('@/store/transfers.store');
@@ -50,7 +54,8 @@ describe('transfer queue', () => {
 		uploads.clear();
 		sentMessages = [];
 		uploadAttachment.mockClear();
-		sendMessage.mockClear();
+		captureMessageIntent.mockClear();
+		dispatchMessageIntent.mockClear();
 	});
 
 	it('drains sequentially: one active row, the rest wait', async () => {
@@ -162,5 +167,22 @@ describe('transfer queue', () => {
 		expect(store.stats.totalChunks).toBe(3);
 		expect(store.stats.doneChunks).toBe(1);
 		expect(store.stats.percent).toBe(33);
+	});
+
+	it('a durable-capture failure for the composed batch message never reaches dispatch (no encryption/signing/network afterward)', async () => {
+		const store = useTransfersStore();
+		captureMessageIntent.mockRejectedValueOnce(new Error('storage unavailable'));
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+		await store.enqueueBatch('u_peer', [file('a')], '');
+		await tick();
+		finish('a');
+		await tick(); await tick();
+
+		expect(captureMessageIntent).toHaveBeenCalledTimes(1);
+		expect(dispatchMessageIntent).not.toHaveBeenCalled();
+		expect(sentMessages).toHaveLength(0);
+		expect(errorSpy).toHaveBeenCalled();
+		errorSpy.mockRestore();
 	});
 });

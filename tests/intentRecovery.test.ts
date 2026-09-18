@@ -1,9 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
 
 let sendImpl: (mutations: unknown[]) => Promise<unknown>;
 const sentMutations: unknown[][] = [];
 
-class MockDurabilityError extends Error {}
+const { MockDurabilityError } = vi.hoisted(() => {
+	class MockDurabilityError extends Error {}
+	return { MockDurabilityError };
+});
 
 vi.mock('@/api/client', () => ({
 	api: {
@@ -13,8 +17,13 @@ vi.mock('@/api/client', () => ({
 	},
 }));
 
+let outboxIdSeq = 0;
 vi.mock('@/lib/data/ingest', () => ({
-	sendMutationsAndAwaitShape: (mutations: unknown[]) => { sentMutations.push(mutations); return sendImpl(mutations); },
+	sendMutationsAndAwaitShape: async (mutations: unknown[]) => {
+		sentMutations.push(mutations);
+		const result = await sendImpl(mutations);
+		return { outboxId: `test-outbox-${++outboxIdSeq}`, phase: 'accepted', result, acceptance: Promise.resolve({ kind: 'accepted' }) };
+	},
 	DurabilityError: MockDurabilityError,
 }));
 
@@ -42,6 +51,8 @@ beforeEach(async () => {
 	await _clearIntentsForTests();
 	sentMutations.length = 0;
 	sendImpl = async () => ({ txids: [1] });
+	stopLeaderElection();
+	startLeaderElection(A, () => {});
 });
 
 describe('signAndDispatchIntent', () => {
@@ -55,14 +66,17 @@ describe('signAndDispatchIntent', () => {
 		expect((sentMutations[0][0] as { row: unknown }).row).toEqual(capturedRow);
 	});
 
-	it('resolves the intent once the mutation is durable, regardless of network outcome', async () => {
+	it('leaves the intent claimed (not resolved) when the mock never proves durability — never fabricates a resolved marker without proof', async () => {
 		sendImpl = async () => { throw new Error('ingest network error'); };
 		const id = await enqueueIntent({ relation: 'dialog_messages', row: { a: 1 }, mutationType: 'insert' }, A, 'dialog_messages');
 
 		await expect(signAndDispatchIntent(id!, { relation: 'dialog_messages', row: { a: 1 } }, SKEY))
 			.rejects.toThrow(/network error/i);
 
-		expect(await getIntent(id!)).toBeNull();
+		const after = await getIntent(id!);
+		expect(after).not.toBeNull();
+		expect((after!.intent as Record<string, unknown>).resolved).toBeFalsy();
+		expect((after!.intent as Record<string, unknown>).signedMutation).toBeTruthy();
 	});
 
 	it('leaves the intent behind on a DurabilityError — nothing durable happened yet', async () => {
@@ -83,7 +97,7 @@ describe('recoverIntents (§3.6)', () => {
 		await recoverIntents(A, SKEY);
 
 		expect(sentMutations).toHaveLength(2);
-		expect(await intentsOf(A)).toEqual([]);
+		expect((await intentsOf(A)).entries).toEqual([]);
 	});
 
 	it("one intent's failure does not stop the rest from recovering", async () => {
@@ -109,7 +123,7 @@ describe('recoverIntents (§3.6)', () => {
 		await recoverIntents(A, SKEY);
 
 		expect(sentMutations).toHaveLength(1);
-		expect((await intentsOf(B))).toHaveLength(1);
+		expect((await intentsOf(B)).entries).toHaveLength(1);
 	});
 
 	it('recovering an empty account is a safe no-op', async () => {

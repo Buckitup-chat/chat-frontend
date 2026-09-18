@@ -46,24 +46,46 @@ describe('durable intent, before signing', () => {
 		await updateIntent(id!, { text: 'v2' });
 		await updateIntent(id!, { text: 'v3, final before send' });
 
-		expect((await intentsOf(A)).length).toBe(1);
+		expect((await intentsOf(A)).entries.length).toBe(1);
 		expect((await getIntent(id!))?.intent).toEqual({ text: 'v3, final before send' });
 	});
 
-	it('resolveIntent ends the intent\'s life — it does not resurrect on the next read', async () => {
+	it('resolveIntent replaces the intent with a durable, positive terminal marker — not a delete', async () => {
 		const id = await enqueueIntent({ text: 'x' }, A, 'dialog_messages');
-		await resolveIntent(id!);
+		await resolveIntent(id!, { outcome: 'durably-dispatched', ref: 'outbox-1' });
 
-		expect(await getIntent(id!)).toBeNull();
-		expect(await intentsOf(A)).toEqual([]);
+		const marker = await getIntent(id!);
+		expect(marker).not.toBeNull();
+		expect(marker!.intent).toMatchObject({ resolved: true, outcome: 'durably-dispatched', ref: 'outbox-1' });
+		expect((await intentsOf(A)).entries).toEqual([]);
 	});
 
-	it('updateIntent on an already-resolved (or unknown) id is a no-op, not a resurrection', async () => {
+	it('resolveIntent is idempotent — resolving an already-resolved id again does not throw or lose the marker', async () => {
 		const id = await enqueueIntent({ text: 'x' }, A, 'dialog_messages');
-		await resolveIntent(id!);
-		await updateIntent(id!, { text: 'too late' });
+		await resolveIntent(id!, { outcome: 'durably-dispatched', ref: 'outbox-1' });
+		await resolveIntent(id!, { outcome: 'durably-dispatched', ref: 'outbox-1' });
 
-		expect(await getIntent(id!)).toBeNull();
+		expect((await getIntent(id!))?.intent).toMatchObject({ resolved: true });
+	});
+
+	it('resolveIntent on an unknown id is a safe no-op (already gone, nothing to mark)', async () => {
+		await expect(resolveIntent('never-existed', { outcome: 'durably-dispatched', ref: 'outbox-1' })).resolves.toBe(true);
+	});
+
+	it('resolveIntent refuses to mark "durably-dispatched" with no outbox reference', async () => {
+		const id = await enqueueIntent({ text: 'x' }, A, 'dialog_messages');
+		await expect(resolveIntent(id!, { outcome: 'durably-dispatched' })).resolves.toBe(false);
+		expect((await getIntent(id!))?.intent).toEqual({ text: 'x' });
+	});
+
+	it('updateIntent on an already-resolved id refuses (returns false), never resurrecting a stale payload', async () => {
+		const id = await enqueueIntent({ text: 'x' }, A, 'dialog_messages');
+		await resolveIntent(id!, { outcome: 'durably-dispatched', ref: 'outbox-1' });
+
+		const ok = await updateIntent(id!, { text: 'too late' });
+
+		expect(ok).toBe(false);
+		expect((await getIntent(id!))?.intent).toMatchObject({ resolved: true });
 	});
 
 	it('is durable across reload before any signing happens — the point of §3.1', async () => {
@@ -75,14 +97,91 @@ describe('durable intent, before signing', () => {
 	});
 });
 
+describe('getIntent distinguishes absence from failure (§2)', () => {
+	it('propagates a storage read failure — never silently reads it as "not found"', async () => {
+		_setIntentStorageForTests({
+			async get() { throw new Error('indexeddb blocked'); },
+			async set() { throw new Error('indexeddb blocked'); },
+			async delete() {},
+			async keys() { throw new Error('indexeddb blocked'); },
+			async clear() {},
+		});
+
+		await expect(getIntent('some-id')).rejects.toThrow(/indexeddb blocked/i);
+	});
+
+	it('propagates a corrupt (unparsable) record — never silently reads it as "not found"', async () => {
+		const id = await enqueueIntent({ text: 'x' }, A, 'dialog_messages');
+		await storage.set(id!, 'not valid json {{{');
+
+		await expect(getIntent(id!)).rejects.toThrow();
+	});
+
+	it('a genuinely never-enqueued id still reads as null — the one legitimate absence', async () => {
+		expect(await getIntent('never-enqueued')).toBeNull();
+	});
+});
+
+describe('intentsOf distinguishes an empty queue from a broken scan (§4)', () => {
+	it('a whole-scan failure (storage.keys() itself throwing) propagates — never a silent empty list', async () => {
+		_setIntentStorageForTests({
+			async get() { return null; },
+			async set() {},
+			async delete() {},
+			async keys() { throw new Error('indexeddb blocked'); },
+			async clear() {},
+		});
+
+		await expect(intentsOf(A)).rejects.toThrow(/indexeddb blocked/i);
+	});
+
+	it('one corrupt record is reported as an issue and skipped — it does not hide this account\'s other, valid intents', async () => {
+		const idGood = await enqueueIntent({ text: 'still readable' }, A, 'dialog_messages');
+		await storage.set('corrupt-key', 'not valid json {{{');
+
+		const { entries, issues } = await intentsOf(A);
+
+		expect(entries.map((e) => e.id)).toEqual([idGood]);
+		expect(issues).toContainEqual(expect.objectContaining({ key: 'corrupt-key', kind: 'corrupt' }));
+	});
+
+	it('one per-key read failure (e.g. a decrypt error) is reported as "foreign", not "corrupt", and still does not hide other valid intents', async () => {
+		const idGood = await enqueueIntent({ text: 'still readable' }, A, 'dialog_messages');
+		const realGet = storage.get.bind(storage);
+		_setIntentStorageForTests({
+			...storage,
+			async get(k) {
+				if (k === 'unreadable-key') throw new Error('[secureStore] cannot decrypt record');
+				return realGet(k);
+			},
+			async keys() {
+				return [...(await storage.keys()), 'unreadable-key'];
+			},
+		});
+
+		const { entries, issues } = await intentsOf(A);
+
+		expect(entries.map((e) => e.id)).toEqual([idGood]);
+		expect(issues).toContainEqual(expect.objectContaining({ key: 'unreadable-key', kind: 'foreign' }));
+	});
+
+	it('a corrupt record is never deleted and never silently treated as accepted/resolved', async () => {
+		await storage.set('corrupt-key', 'not valid json {{{');
+
+		await intentsOf(A);
+
+		expect(await storage.get('corrupt-key')).toBe('not valid json {{{');
+	});
+});
+
 describe('account isolation (§3.11, same discipline from day one)', () => {
 	it('intentsOf only returns the requested account\'s intents', async () => {
 		const idA = await enqueueIntent({ text: 'a' }, A, 'dialog_messages');
 		await enqueueIntent({ text: 'b' }, B, 'dialog_messages');
 
-		const forA = await intentsOf(A);
+		const forA = (await intentsOf(A)).entries;
 		expect(forA.map((e) => e.id)).toEqual([idA]);
-		const forB = await intentsOf(B);
+		const forB = (await intentsOf(B)).entries;
 		expect(forB).toHaveLength(1);
 		expect(forB[0].userHash).toBe(B);
 	});

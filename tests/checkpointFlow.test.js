@@ -20,6 +20,8 @@ import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
+import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
+import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
 import { deriveFrontierRoot, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@/lib/pq/checkpoint';
 
 const makeCollection = (rows = {}) => ({
@@ -46,9 +48,15 @@ vi.mock('@/lib/data/collections', () => ({
 	getDialogCollections: () => collections.dialog,
 	withDialogCollections: async (h, read) => read(collections.dialog),
 }));
-class MockDurabilityError extends Error {}
+const { MockDurabilityError } = vi.hoisted(() => {
+	class MockDurabilityError extends Error {}
+	return { MockDurabilityError };
+});
 vi.mock('@/lib/data/ingest', () => ({
-	sendMutationsAndAwaitShape: (mutations) => sendImpl(mutations),
+	sendMutationsAndAwaitShape: async (mutations) => {
+		const result = await sendImpl(mutations);
+		return { outboxId: 'test-outbox-id', phase: 'accepted', result, acceptance: Promise.resolve({ kind: 'accepted' }) };
+	},
 	DurabilityError: MockDurabilityError,
 	OWNER_FIELD: {
 		dialog_keys: 'sender_hash',
@@ -57,10 +65,25 @@ vi.mock('@/lib/data/ingest', () => ({
 		dialog_message_receipts: 'peer_hash',
 	},
 }));
-vi.mock('@/lib/data/intents', () => ({
-	enqueueIntent: async () => 'test-intent-id',
-	resolveIntent: async () => {},
-}));
+vi.mock('@/lib/data/intents', () => {
+	const store = new Map();
+	let seq = 0;
+	return {
+		enqueueIntent: async (intent, userHash, relation) => {
+			const id = `test-intent-${seq++}`;
+			store.set(id, { id, userHash, relation, intent });
+			return id;
+		},
+		updateIntent: async (id, intent) => {
+			const existing = store.get(id);
+			if (!existing) return false;
+			store.set(id, { ...existing, intent });
+			return true;
+		},
+		resolveIntent: async () => true,
+		getIntent: async (id) => store.get(id) ?? null,
+	};
+});
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: { getInstance: () => ({ exportVaultKeys: async () => HOLDER.vault }) },
 }));
@@ -154,6 +177,16 @@ describe('checkpoint through the store', () => {
 		peer = peerId.userHash;
 		HOLDER.user.currentUserHash = author.userHash;
 		HOLDER.vault = author.vault;
+		stopLeaderElection();
+		startLeaderElection(author.userHash, () => {});
+		_setOwnObservedTailsStorageForTests({
+			_map: new Map(),
+			async get(k) { return this._map.get(k) ?? null; },
+			async set(k, v) { this._map.set(k, v); },
+			async delete(k) { this._map.delete(k); },
+			async keys() { return [...this._map.keys()]; },
+			async clear() { this._map.clear(); },
+		});
 		collections = {
 			cards: makeCollection({ [author.userHash]: author.card, [peer]: peerId.card }),
 			dialog: { keys: makeCollection(), messages: makeCollection(), versions: makeCollection(), reactions: makeCollection(), receipts: makeCollection() },

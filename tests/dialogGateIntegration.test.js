@@ -39,10 +39,25 @@ vi.mock('@/lib/data/ingest', () => ({
 		dialog_message_receipts: 'peer_hash',
 	},
 }));
-vi.mock('@/lib/data/intents', () => ({
-	enqueueIntent: async () => 'test-intent-id',
-	resolveIntent: async () => {},
-}));
+vi.mock('@/lib/data/intents', () => {
+	const store = new Map();
+	let seq = 0;
+	return {
+		enqueueIntent: async (intent, userHash, relation) => {
+			const id = `test-intent-${seq++}`;
+			store.set(id, { id, userHash, relation, intent });
+			return id;
+		},
+		updateIntent: async (id, intent) => {
+			const existing = store.get(id);
+			if (!existing) return false;
+			store.set(id, { ...existing, intent });
+			return true;
+		},
+		resolveIntent: async () => true,
+		getIntent: async (id) => store.get(id) ?? null,
+	};
+});
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: { getInstance: () => ({ exportVaultKeys: async () => ({}) }) },
 }));
