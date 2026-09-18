@@ -82,6 +82,35 @@ describe('outbox durability', () => {
 	});
 });
 
+describe('MAX_OUTBOX_ENTRIES counts active work, not discarded terminal markers', () => {
+	it('1000 discarded markers do not block a fresh active enqueue', async () => {
+		for (let i = 0; i < MAX_OUTBOX_ENTRIES; i++) {
+			storage.map.set(`discarded-${i}`, JSON.stringify({
+				id: `discarded-${i}`, userHash: USER_A, relation: 'dialog_messages',
+				mutations: [], createdAt: 1, attempts: 1, lastError: 'x',
+				status: 'discarded', discardedAt: 1,
+			}));
+		}
+
+		const id = await enqueue([mutation('dialog_messages', 'fresh')], USER_A);
+
+		expect(id).not.toBeNull();
+	});
+
+	it('1000 active pending/quarantined entries still block the next enqueue', async () => {
+		for (let i = 0; i < MAX_OUTBOX_ENTRIES; i++) {
+			storage.map.set(`active-${i}`, JSON.stringify({
+				id: `active-${i}`, userHash: USER_A, relation: 'dialog_messages',
+				mutations: [mutation('dialog_messages', `m${i}`)], createdAt: 1, attempts: 0, lastError: null,
+			}));
+		}
+
+		const id = await enqueue([mutation('dialog_messages', 'overflow')], USER_A);
+
+		expect(id).toBeNull();
+	});
+});
+
 describe('drainOutbox', () => {
 	it('replays in insertion order and clears delivered entries', async () => {
 		await enqueue([mutation('dialog_keys', 'k')], USER_A);
@@ -100,20 +129,23 @@ describe('drainOutbox', () => {
 		expect(await pendingEntries(USER_A)).toHaveLength(0);
 	});
 
-	it('a transient failure stops the drain and keeps everything', async () => {
+	it('a transient failure backs off only that entry — an unrelated ready entry in the same batch still dispatches (docs/main-tanstack-proposal-v3.md, "Ordering операций": no global barrier)', async () => {
 		await enqueue([mutation('dialog_messages', 'first')], USER_A);
 		await enqueue([mutation('dialog_messages', 'second')], USER_A);
 
-		let calls = 0;
-		const result = await drainOutbox(USER_A, async () => {
-			calls++;
-			throw new IngestError('network down', { permanent: false });
+		const delivered: string[] = [];
+		const result = await drainOutbox(USER_A, async (muts) => {
+			const text = (muts[0] as { modified: { text: string } }).modified.text;
+			if (text === 'first') throw new IngestError('network down', { permanent: false });
+			delivered.push(text);
 		});
 
-		// FIFO with dependencies: nothing behind the failure may be attempted.
-		expect(calls).toBe(1);
-		expect(result.stoppedEarly).toBe(true);
-		expect(await pendingEntries(USER_A)).toHaveLength(2);
+		expect(delivered).toEqual(['second']);
+		expect(result).toMatchObject({ sent: 1, dropped: 0, remaining: 1, stoppedEarly: true });
+		expect(await pendingEntries(USER_A)).toHaveLength(1);
+		const [remaining] = await pendingEntries(USER_A);
+		expect((remaining.mutations[0] as { modified: { text: string } }).modified.text).toBe('first');
+		expect(remaining.attempts).toBe(1);
 	});
 
 	it('a permanent rejection drops only that entry and continues', async () => {
