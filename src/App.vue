@@ -5,6 +5,8 @@
 		Offline — showing local data; sending resumes when the network returns
 	</div>
 
+	<QuarantinedWritesBanner v-if="$userPQ.currentUser" />
+
 	<div class="wrapper" v-if="$userPQ.currentUser">
 		<Menu class="_menu" :class="{ _opened: $menuOpened }" />
 
@@ -148,6 +150,7 @@ import { useLoader } from '@/composables/useLoader';
 import { useMenu } from '@/composables/useMenu';
 
 import Loader from './components/Loader.vue';
+import QuarantinedWritesBanner from '@/components/QuarantinedWritesBanner.vue';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';
 import Swal from '@/components/swal/Swal_.vue';

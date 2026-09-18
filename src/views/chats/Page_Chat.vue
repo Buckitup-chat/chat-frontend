@@ -6,7 +6,7 @@
             :downloads="downloadsByFileId" :images="imagesByFileId"
             :availability="availabilityByFileId" :videos="videosByFileId"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
-            @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.removeOptimisticItem(id)"
+            @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.discardFailedItem(id)"
             @show-image="handleShowImage" @play-video="handlePlayVideo"
             :checkpoint-signing="checkpointSigning"
             @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
@@ -57,6 +57,7 @@ import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
 import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
+import { claimPendingEdit, submitPendingEdit, failPendingEdit, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
@@ -940,45 +941,58 @@ const handleSendMessage = (text, replyTo = null) => {
         }, { kind: 'text', text: text.trim() }]
         : text.trim();
 
-    const optimisticId = $dialogs.addOptimisticMessageWithId(dialogHashVal, messageId, text.trim(), nowSec);
-
     (async () => {
+        let captured;
         try {
-            await $dialogs.sendMessage(peerHash.value, content, (status) => {
-                $dialogs.updateOptimisticStatus(optimisticId, status);
-            }, messageId, nowSec);
+            captured = await $dialogs.captureMessageIntent(peerHash.value, content, messageId, nowSec);
         } catch (e) {
-            console.error("Failed to send message:", e);
-            $dialogs.updateOptimisticStatus(optimisticId, 'error');
+            console.error("Failed to store message:", e);
+            $swal.fire({ icon: 'error', title: 'Could not send', text: String(e.message || e) });
+            return;
         }
+        const optimisticId = $dialogs.addOptimisticMessageWithId(dialogHashVal, captured.payload.messageId, text.trim(), nowSec);
+        await $dialogs.dispatchMessageIntent(captured.intentId, captured.payload, captured.token, (status) => {
+            $dialogs.updateOptimisticStatus(optimisticId, status);
+        });
     })();
 };
 
-// A versioned edit can legitimately fail (stale base tip, node unreachable).
-// The editor closes immediately on save, so without this the attempted text
-// would be indistinguishable from an accepted one — only a console line.
-const pendingEdits = ref(new Map()); // message_id -> { text, status, error }
+// A versioned edit can legitimately fail (stale base tip, node unreachable),
+const pendingEdits = ref(new Map()); // message_id -> { text, status, token, targetSignHash, targetOwnerTimestamp, error? }
 
 const handleEditMessage = async (messageId, newText) => {
     if (!peerHash.value || !newText.trim()) return;
     const text = newText.trim();
-    pendingEdits.value.set(messageId, { text, status: 'syncing' });
+    const myToken = claimPendingEdit(pendingEdits.value, messageId, text);
     pendingEdits.value = new Map(pendingEdits.value);
     try {
-        await $dialogs.editMessage(peerHash.value, messageId, text);
-        pendingEdits.value.delete(messageId);
-        pendingEdits.value = new Map(pendingEdits.value);
+        const { signHash, ownerTimestamp } = await $dialogs.editMessage(peerHash.value, messageId, text);
+        if (submitPendingEdit(pendingEdits.value, messageId, myToken, signHash, ownerTimestamp)) {
+            pendingEdits.value = new Map(pendingEdits.value);
+            reconcilePendingEdits();
+        }
     } catch (e) {
         console.error("Failed to edit message:", e);
-        pendingEdits.value.set(messageId, { text, status: 'error', error: e });
-        pendingEdits.value = new Map(pendingEdits.value);
-        $swal.fire({
-            icon: 'error',
-            title: 'Edit not saved',
-            text: 'The edited message could not be sent. The original text is still what others see.',
-        });
+        if (failPendingEdit(pendingEdits.value, messageId, myToken, e)) {
+            pendingEdits.value = new Map(pendingEdits.value);
+            $swal.fire({
+                icon: 'error',
+                title: 'Edit not saved',
+                text: 'The edited message could not be sent. The original text is still what others see.',
+            });
+        }
     }
 };
+
+const reconcilePendingEdits = () => {
+    if (pendingEdits.value.size === 0) return;
+    const verifiedRevisions = decryptedMessages.value
+        .filter((m) => m._verify === 'verified')
+        .map((m) => ({ id: m.id, signHash: m._raw?.sign_hash }));
+    const cleared = reconcilePendingEditsWithVerifiedRows(pendingEdits.value, verifiedRevisions);
+    if (cleared.length) pendingEdits.value = new Map(pendingEdits.value);
+};
+watch(decryptedMessages, reconcilePendingEdits);
 
 const retryEdit = (messageId) => {
     const pending = pendingEdits.value.get(messageId);

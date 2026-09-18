@@ -4,7 +4,13 @@ import {
 	pendingEntries,
 	drainOutbox,
 	_setStorageForTests,
+	readyEntries,
+	blockedEntries,
+	quarantinedEntries,
+	discardEntry,
+	recordFailure,
 } from '@/lib/data/outbox';
+import { IngestError } from '@/lib/data/ingest';
 import { createSecureStore, deriveLocalStorageKey, type StringStore } from '@/lib/data/secureStore';
 
 // Raw store standing in for IndexedDB — this is what ends up on disk.
@@ -108,6 +114,31 @@ describe('encrypted outbox', () => {
 	});
 });
 
+describe('discarded terminal markers round-trip through real encryption (L17-09)', () => {
+	it('a discarded marker leaks nothing in plaintext and still blocks a dependent after a simulated reload', async () => {
+		await useAccount(1);
+		const aId = await enqueue([mutation()], USER_A);
+		await recordFailure(aId, new IngestError('rejected', { permanent: true }));
+
+		await discardEntry(aId as string);
+
+		const onDisk = [...raw.map.values()].join('');
+		expect(onDisk).not.toContain('discarded');
+		expect(onDisk).not.toContain(DIALOG);
+		expect(onDisk).not.toContain(USER_A);
+
+		const bId = await enqueue([mutation()], USER_A, { dependsOn: [aId as string] });
+		expect((await readyEntries(USER_A)).map((e) => e.id)).not.toContain(bId);
+		expect((await blockedEntries(USER_A)).map((e) => e.id)).toContain(bId);
+		expect(await quarantinedEntries(USER_A)).toHaveLength(0); // discarded, not shown as quarantine
+
+		await useAccount(1);
+
+		expect((await readyEntries(USER_A)).map((e) => e.id)).not.toContain(bId);
+		expect((await blockedEntries(USER_A)).map((e) => e.id)).toContain(bId);
+	});
+});
+
 describe('migration of pre-encryption entries', () => {
 	const legacyEntry = (userHash: string) => JSON.stringify({
 		id: '000000001-0000',
@@ -153,6 +184,7 @@ describe('migration of pre-encryption entries', () => {
 		const second = await drainOutbox(USER_A, async (m) => { sent.push(m); });
 		expect(second.sent).toBe(0);
 		expect(sent).toHaveLength(1);
-		expect(raw.map.size).toBe(0);
+		expect(raw.map.size).toBe(1);
+		expect(await pendingEntries(USER_A)).toHaveLength(0);
 	});
 });
