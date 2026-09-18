@@ -69,14 +69,14 @@ beforeEach(() => {
 });
 
 describe('EncryptionManagerPQ.logout(): per-account disk caches (§8.4)', () => {
-	it('wipes the accepted-snapshot store, not just the read-cache', async () => {
+	it('wipes the read-cache but leaves the durable accepted-snapshot base intact', async () => {
 		await recordAccepted('dialog_messages', 'dmsg_1', { message_id: 'dmsg_1', owner_timestamp: 1 });
 		await setCachedRow('user_cards', 'u_' + '1'.repeat(128), { user_hash: 'u_' + '1'.repeat(128) });
 
 		const em = freshManager();
 		await em.logout();
 
-		expect(await getAccepted('dialog_messages', 'dmsg_1')).toBeNull();
+		expect(await getAccepted('dialog_messages', 'dmsg_1')).not.toBeNull();
 		expect(await getCachedRow('user_cards', 'u_' + '1'.repeat(128))).toBeNull();
 	});
 });

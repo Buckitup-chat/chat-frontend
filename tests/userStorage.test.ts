@@ -26,7 +26,10 @@ vi.mock('../src/lib/data/collections', () => ({
 // mock therefore models both halves: the HTTP result AND shape delivery.
 const sendAndAwait = vi.fn(async () => ({ txids: [1], results: [] }));
 vi.mock('../src/lib/data/ingest', () => ({
-	sendMutationsAndAwaitShape: (...args: unknown[]) => sendAndAwait(...(args as [])),
+	sendMutationsAndAwaitShape: async (...args: unknown[]) => {
+		const result = await sendAndAwait(...(args as []));
+		return { outboxId: 'test-outbox-id', phase: 'accepted', result, acceptance: Promise.resolve({ kind: 'accepted' }) };
+	},
 	sendMutationsWithRetry: (...args: unknown[]) => sendAndAwait(...(args as [])),
 }));
 
@@ -102,6 +105,19 @@ describe('upsertStorageRow: server base state', () => {
 		expect((await res.sync).status).toBe('failed');
 		// the user's edit is still kept locally
 		expect(kv.get(`us|${USER}|${SLOT}`)).toMatchObject({ syncStatus: 'failed', row: { value_b64: 'v1' } });
+	});
+
+	it('signs an update against the accepted local base when the server is unavailable after a prior synced write', async () => {
+		await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v1', hashB64: null, signSkey });
+		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('insert');
+
+		collection.preloadError = new Error('node unreachable');
+		const res = await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v2', hashB64: null, signSkey });
+
+		const call = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[1];
+		expect(call?.at(-1)).toBe('update');
+		expect(call?.[9]).toBe('uss_' + 'f'.repeat(128));
+		expect((await res.sync).status).toBe('synced');
 	});
 });
 

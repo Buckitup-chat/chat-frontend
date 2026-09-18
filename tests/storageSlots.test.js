@@ -29,7 +29,7 @@ vi.mock('@/lib/data/collections', () => ({
 	getUserCardsCollection: () => ({ async preload() {}, get: () => undefined, get toArray() { return []; } }),
 }));
 vi.mock('@/lib/data/ingest', () => ({
-	sendMutationsAndAwaitShape: async () => ({ ok: true }),
+	sendMutationsAndAwaitShape: async () => ({ outboxId: 'test-outbox-id', phase: 'accepted', result: { ok: true }, acceptance: Promise.resolve({ kind: 'accepted' }) }),
 	drainPendingWrites: async () => {},
 	stopDrainLoop: () => {},
 }));

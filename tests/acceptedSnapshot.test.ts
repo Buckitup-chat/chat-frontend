@@ -1,5 +1,8 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { recordAccepted, getAccepted, freshestOf, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
+import { startLeaderElection, stopLeaderElection, _setStorageForTests } from '@/lib/data/outbox';
+
+const MY_HASH = 'u_' + 'a'.repeat(128);
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -55,18 +58,40 @@ describe('acceptedSnapshot: record/get', () => {
 		await recordAccepted('dialog_messages', 'dmsg_1', { owner_timestamp: 2, revision: 'second' });
 		expect(await getAccepted('dialog_messages', 'dmsg_1')).toMatchObject({ revision: 'second' });
 	});
+
+	it('does not let a stale (older owner_timestamp) recording overwrite a fresher one already stored', async () => {
+		await recordAccepted('dialog_messages', 'dmsg_1', { owner_timestamp: 2000, revision: 'newer, recorded first' });
+		await recordAccepted('dialog_messages', 'dmsg_1', { owner_timestamp: 1000, revision: 'older, arrives late' });
+		expect(await getAccepted('dialog_messages', 'dmsg_1')).toMatchObject({ revision: 'newer, recorded first' });
+	});
+
+	it('propagates a storage write failure instead of silently losing the accepted base', async () => {
+		const storage = makeStorage();
+		storage.set = async () => { throw new Error('quota exceeded'); };
+		_setAcceptedSnapshotStorageForTests(storage);
+
+		await expect(
+			recordAccepted('dialog_messages', 'dmsg_1', { message_id: 'dmsg_1', sign_hash: 'dms_a', owner_timestamp: 100 })
+		).rejects.toThrow('quota exceeded');
+	});
 });
 
 describe('acceptedSnapshot: recorded by the coordinator on every accepted send (§4.5)', () => {
 	beforeEach(() => {
 		_setAcceptedSnapshotStorageForTests(makeStorage());
+		_setStorageForTests(makeStorage());
+		startLeaderElection(MY_HASH, () => {});
+	});
+
+	afterEach(() => {
+		stopLeaderElection();
 	});
 
 	it('records a dialog_messages row as soon as it is accepted', async () => {
 		const { dispatchMutations } = await import('@/lib/data/coordinator');
 		const mutations = [{
 			type: 'insert',
-			modified: { message_id: 'dmsg_x', dialog_hash: 'dh1', sign_hash: 'dms_x', owner_timestamp: 500 },
+			modified: { message_id: 'dmsg_x', dialog_hash: 'dh1', sender_hash: MY_HASH, sign_hash: 'dms_x', owner_timestamp: 500 },
 			syncMetadata: { relation: 'dialog_messages' },
 		}];
 		await dispatchMutations(mutations, async () => ({ txids: [], results: [] }));
@@ -78,7 +103,7 @@ describe('acceptedSnapshot: recorded by the coordinator on every accepted send (
 		const { dispatchMutations } = await import('@/lib/data/coordinator');
 		const mutations = [{
 			type: 'insert',
-			modified: { receipt_hash: 'rcpt_1', owner_timestamp: 1 },
+			modified: { receipt_hash: 'rcpt_1', peer_hash: MY_HASH, owner_timestamp: 1 },
 			syncMetadata: { relation: 'dialog_message_receipts' },
 		}];
 		await dispatchMutations(mutations, async () => ({ txids: [], results: [] }));

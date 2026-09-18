@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 
 // Backend contract under test (chat/lib/chat/data/user.ex): a user_storage
 // write is authorised through User.get_card(user_hash).sign_pkey, so the card
@@ -53,11 +54,16 @@ vi.mock('@/lib/data/collections', () => ({
 }));
 
 vi.mock('@/lib/data/ingest', () => ({
-	sendMutationsAndAwaitShape: (m) => sendImpl(m),
+	sendMutationsAndAwaitShape: async (m) => {
+		const result = await sendImpl(m);
+		if (result && typeof result === 'object' && 'phase' in result) return result;
+		return { outboxId: 'test-outbox-id', phase: 'accepted', result, acceptance: Promise.resolve({ kind: 'accepted' }) };
+	},
 	// Login triggers a background outbox drain; irrelevant to these tests.
 	drainPendingWrites: async () => {},
 	stopDrainLoop: () => {},
 }));
+
 
 vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async () => null,
@@ -78,6 +84,14 @@ beforeEach(() => {
 	order = [];
 	cardRows = new Map();
 	vaults = new Map();
+	_setAcceptedSnapshotStorageForTests({
+		_map: new Map(),
+		async get(k) { return this._map.get(k) ?? null; },
+		async set(k, v) { this._map.set(k, v); },
+		async delete(k) { this._map.delete(k); },
+		async keys() { return [...this._map.keys()]; },
+		async clear() { this._map.clear(); },
+	});
 	const store = new Map();
 	rawStore = {
 		async get(k) {
@@ -196,3 +210,214 @@ describe('user card owner_timestamp is monotonic', () => {
 		expect([...cardRows.values()][0].name).toBe('Renamed');
 	});
 });
+
+describe('user_cards base does not go stale under shape lag (L17-01/backend-report R4)', () => {
+	it('a second rapid update does not start signing until the first write\'s real acceptance is known (follower/queued path)', async () => {
+		const em = freshManager();
+		await em.createUserVault({ name: MY_NAME });
+
+		const applied = [];
+		let resolveFirstAcceptance;
+		let callCount = 0;
+		sendImpl = async (mutations) => {
+			const row = mutations[0].modified ?? mutations[0].changes;
+			callCount++;
+			if (callCount === 1) {
+				const acceptance = new Promise((resolve) => {
+					resolveFirstAcceptance = () => {
+						cardRows.set(row.user_hash, { ...cardRows.get(row.user_hash), ...row });
+						applied.push(row.owner_timestamp);
+						resolve({ kind: 'accepted' });
+					};
+				});
+				return { outboxId: 'ob-1', phase: 'queued', acceptance };
+			}
+			cardRows.set(row.user_hash, { ...cardRows.get(row.user_hash), ...row });
+			applied.push(row.owner_timestamp);
+			return { txids: [] };
+		};
+
+		const firstUpdate = em.updateOwnUserCardName('Second');
+		await vi.waitFor(() => expect(callCount).toBe(1));
+
+		const secondUpdate = em.updateOwnUserCardName('Third');
+		await new Promise((r) => setTimeout(r, 20));
+		expect(callCount).toBe(1);
+
+		resolveFirstAcceptance();
+		await firstUpdate;
+		await secondUpdate;
+
+		expect(callCount).toBe(2);
+		expect(applied).toHaveLength(2);
+		expect(applied[1]).toBeGreaterThan(applied[0]); // strictly monotonic, not a stale-base collision
+		expect([...cardRows.values()][0].name).toBe('Third');
+	});
+
+	it('a second update computes its base from the locally-accepted card, not a stale shape read', async () => {
+		const em = freshManager();
+		await em.createUserVault({ name: MY_NAME });
+		const userHash = [...cardRows.keys()][0];
+		const staleShapeRow = cardRows.get(userHash);
+
+		const acceptedButNotYetVisible = {
+			...staleShapeRow,
+			name: 'AcceptedElsewhere',
+			owner_timestamp: staleShapeRow.owner_timestamp + 50,
+		};
+		await recordAccepted('user_cards', userHash, acceptedButNotYetVisible);
+
+		let sentTimestamp = null;
+		sendImpl = async (mutations) => {
+			const row = mutations[0].modified ?? mutations[0].changes;
+			sentTimestamp = row.owner_timestamp;
+			return { txids: [] };
+		};
+
+		await em.updateOwnUserCardName('Renamed');
+
+		expect(sentTimestamp).toBeGreaterThan(acceptedButNotYetVisible.owner_timestamp);
+		expect(sentTimestamp).toBeGreaterThan(staleShapeRow.owner_timestamp);
+	});
+});
+
+describe('#pushOwnCard survives a failed local accepted-snapshot write without exposing a stale base to the next call (L17-01/R4)', () => {
+	it('1-6. A is HTTP accepted, its local snapshot write fails, and B still gets a strictly newer timestamp — with no repeated HTTP call for A', async () => {
+		const em = freshManager();
+
+		let snapshotWriteAttempts = 0;
+		let failFirstWrite = true;
+		const map = new Map();
+		_setAcceptedSnapshotStorageForTests({
+			async get(k) { return map.get(k) ?? null; },
+			async set(k, v) {
+				snapshotWriteAttempts++;
+				if (failFirstWrite) { failFirstWrite = false; throw new Error('storage temporarily unavailable'); }
+				map.set(k, v);
+			},
+			async delete(k) { map.delete(k); },
+			async keys() { return [...map.keys()]; },
+			async clear() { map.clear(); },
+		});
+
+		let httpCallCount = 0;
+		let aTimestamp = null;
+		sendImpl = async (mutations) => {
+			httpCallCount++;
+			aTimestamp = (mutations[0].modified ?? mutations[0].changes).owner_timestamp;
+			return { txids: [] };
+		};
+
+		await em.createUserVault({ name: 'Tester' });
+		expect(httpCallCount).toBe(1); // A's own HTTP call
+		expect(cardRows.size).toBe(0); // shape confirmed stale
+
+		expect(httpCallCount).toBe(1);
+
+		let bTimestamp = null;
+		sendImpl = async (mutations) => {
+			httpCallCount++;
+			bTimestamp = (mutations[0].modified ?? mutations[0].changes).owner_timestamp;
+			return { txids: [] };
+		};
+		await em.updateOwnUserCardName('Renamed');
+
+		expect(cardRows.size).toBe(0); // still stale — B's base did not come from the shape
+		expect(bTimestamp).toBeGreaterThan(aTimestamp); // no stale-base collision
+		expect(httpCallCount).toBe(2); // exactly one HTTP call per card write — no bookkeeping-only resend
+		expect(snapshotWriteAttempts).toBeGreaterThanOrEqual(1); // the failed write really was attempted
+	});
+
+	it('7. once local storage recovers, the accepted snapshot eventually reflects the latest accepted row', async () => {
+		const em = freshManager();
+
+		let broken = true;
+		const map = new Map();
+		_setAcceptedSnapshotStorageForTests({
+			async get(k) { return map.get(k) ?? null; },
+			async set(k, v) { if (broken) throw new Error('storage down'); map.set(k, v); },
+			async delete(k) { map.delete(k); },
+			async keys() { return [...map.keys()]; },
+			async clear() { map.clear(); },
+		});
+
+		await em.createUserVault({ name: 'Tester' });
+		const userHash = (await em.getLocalUserCards())[0].user_hash;
+		expect(await getAcceptedUserCard(userHash)).toBeNull(); // still down after A
+
+		broken = false;
+		await em.updateOwnUserCardName('Renamed');
+
+		const accepted = await getAcceptedUserCard(userHash);
+		expect(accepted).toBeTruthy();
+		expect(accepted.name).toBe('Renamed'); // the latest accepted row, not the lost first one — both are covered
+	});
+
+	it('8. an account switch between the failure and reconciliation never records A\'s row under B', async () => {
+		const emA = freshManager();
+		let broken = true;
+		const map = new Map();
+		_setAcceptedSnapshotStorageForTests({
+			async get(k) { return map.get(k) ?? null; },
+			async set(k, v) { if (broken) throw new Error('storage down'); map.set(k, v); },
+			async delete(k) { map.delete(k); },
+			async keys() { return [...map.keys()]; },
+			async clear() { map.clear(); },
+		});
+
+		await emA.createUserVault({ name: 'Alice' });
+		const hashA = (await emA.getLocalUserCards()).find((c) => c.name === 'Alice').user_hash;
+		expect(await getAcceptedUserCard(hashA)).toBeNull();
+
+		broken = false;
+		const emB = freshManager();
+		await emB.createUserVault({ name: 'Bob' });
+		const hashB = (await emB.getLocalUserCards()).find((c) => c.name === 'Bob').user_hash;
+
+		const acceptedB = await getAcceptedUserCard(hashB);
+		expect(acceptedB.name).toBe('Bob');
+		expect(acceptedB.user_hash).toBe(hashB);
+		const acceptedAStill = await getAcceptedUserCard(hashA);
+		if (acceptedAStill) expect(acceptedAStill.user_hash).toBe(hashA); // never resurrected under B
+	});
+
+	it('9. LIMITATION: a reload before the durable snapshot write ever lands loses the session-local continuation and can re-collide on owner_timestamp', async () => {
+		const em = freshManager();
+		let broken = true;
+		const map = new Map();
+		_setAcceptedSnapshotStorageForTests({
+			async get(k) { return map.get(k) ?? null; },
+			async set(k, v) { if (broken) throw new Error('storage down'); map.set(k, v); },
+			async delete(k) { map.delete(k); },
+			async keys() { return [...map.keys()]; },
+			async clear() { map.clear(); },
+		});
+		let aTimestamp = null;
+		sendImpl = async (mutations) => {
+			aTimestamp = (mutations[0].modified ?? mutations[0].changes).owner_timestamp;
+			return { txids: [] }; // cardRows deliberately untouched — shape stays stale
+		};
+		await em.createUserVault({ name: 'Tester' });
+		const userHash = (await em.getLocalUserCards())[0].user_hash;
+		expect(await getAcceptedUserCard(userHash)).toBeNull(); // durable write never landed
+
+		EncryptionManagerPQ._clearAcceptedCardCacheForTests();
+		const em2 = freshManager();
+		await em2.login(userHash); // a real reload logs back in the same account
+
+		let bTimestamp = null;
+		sendImpl = async (mutations) => {
+			bTimestamp = (mutations[0].modified ?? mutations[0].changes).owner_timestamp;
+			return { txids: [] };
+		};
+		await em2.updateOwnUserCardName('Second try');
+
+		expect(bTimestamp).not.toBeNull();
+		expect(aTimestamp).not.toBeNull();
+	});
+});
+
+async function getAcceptedUserCard(userHash) {
+	const { getAccepted } = await import('@/lib/data/acceptedSnapshot');
+	return getAccepted('user_cards', userHash);
+}
