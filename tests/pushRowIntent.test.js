@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { intentsOf, _setIntentStorageForTests, _clearIntentsForTests } from '@/lib/data/intents';
+import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
 
 const makeCollection = (rows = {}) => ({
 	rows: new Map(Object.entries(rows)),
@@ -27,10 +28,16 @@ vi.mock('@/lib/data/collections', () => ({
 	getDialogCollections: () => collections.dialog,
 }));
 
-class MockDurabilityError extends Error {}
+const { MockDurabilityError } = vi.hoisted(() => {
+	class MockDurabilityError extends Error {}
+	return { MockDurabilityError };
+});
 
 vi.mock('@/lib/data/ingest', () => ({
-	sendMutationsAndAwaitShape: (mutations) => sendImpl(mutations),
+	sendMutationsAndAwaitShape: async (mutations) => {
+		const result = await sendImpl(mutations);
+		return { outboxId: 'test-outbox-id', phase: 'accepted', result, acceptance: Promise.resolve({ kind: 'accepted' }) };
+	},
 	DurabilityError: MockDurabilityError,
 	OWNER_FIELD: {
 		dialog_keys: 'sender_hash',
@@ -76,6 +83,8 @@ const { useDialogsStore } = await import('@/store/dialogs.store');
 
 beforeEach(async () => {
 	setActivePinia(createPinia());
+	stopLeaderElection();
+	startLeaderElection(MY_HASH, () => {});
 	collections = {
 		cards: makeCollection({ [PEER_HASH]: { user_hash: PEER_HASH, crypt_pkey: 'peerkey' } }),
 		dialog: { keys: makeCollection(), messages: makeCollection(), reactions: makeCollection(), receipts: makeCollection() },
@@ -105,7 +114,7 @@ describe('pushRow durables an intent before signing (§3.1)', () => {
 		await expect(store.initDialogKeys(PEER_HASH)).rejects.toThrow(/vault/i);
 
 		expect(sent).toHaveLength(0);
-		const intents = await intentsOf(MY_HASH);
+		const { entries: intents } = await intentsOf(MY_HASH);
 		expect(intents).toHaveLength(1);
 		expect(intents[0].relation).toBe('dialog_keys');
 		expect(intents[0].intent.row.sender_hash).toBe(MY_HASH);
@@ -117,16 +126,19 @@ describe('pushRow durables an intent before signing (§3.1)', () => {
 		await store.initDialogKeys(PEER_HASH);
 
 		expect(sent).toHaveLength(1);
-		expect(await intentsOf(MY_HASH)).toEqual([]);
+		expect((await intentsOf(MY_HASH)).entries).toEqual([]);
 	});
 
-	it('a network failure after durability still resolves the intent — outbox.ts owns it from here', async () => {
+	it('a network failure with no durable proof of outbox handoff leaves the intent behind for the next attempt', async () => {
 		sendImpl = async () => { throw new Error('ingest network error'); };
 		const store = useDialogsStore();
 
 		await expect(store.initDialogKeys(PEER_HASH)).rejects.toThrow(/network error/i);
 
-		expect(await intentsOf(MY_HASH)).toEqual([]);
+		const { entries: intents } = await intentsOf(MY_HASH);
+		expect(intents).toHaveLength(1);
+		expect(intents[0].intent.signedMutation).toBeTruthy();
+		expect(intents[0].intent.resolved).toBeFalsy();
 	});
 
 	it('a DurabilityError from the outbox leaves the intent behind — nothing durable happened yet', async () => {
@@ -135,7 +147,7 @@ describe('pushRow durables an intent before signing (§3.1)', () => {
 
 		await expect(store.initDialogKeys(PEER_HASH)).rejects.toThrow();
 
-		expect(await intentsOf(MY_HASH)).toHaveLength(1);
+		expect((await intentsOf(MY_HASH)).entries).toHaveLength(1);
 	});
 
 	it('refuses to sign or send when the intent itself cannot be made durable', async () => {
