@@ -168,20 +168,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         for (const gate of dialogGates.values()) await gate.retryAwaitingCards();
     };
 
-    // The tails the current user observes right now — the refs_map plaintext
-    // for an outgoing message or edit (pq_dialogs.md §Tail calculation).
+    // The refs_map tails for an outgoing message, edit or delete — same rule
+    // as the checkpoint frontier (computeDialogFrontier), by delegation.
     const computeObservedTails = async (dialogHash) => {
         const colls = getDialogCollections(dialogHash);
         await colls.messages.preload().catch(() => {});
-        const loaded = colls.messages.toArray.filter((r) => !r.deleted_flag && r.sign_hash);
-        const withRefs = await Promise.all(
-            loaded.map(async (r) => ({
-                message_id: r.message_id,
-                sign_hash: r.sign_hash,
-                refs: await decryptRefsOf(r),
-            }))
-        );
-        return computeTails(withRefs);
+        return (await computeDialogFrontier(colls.messages.toArray)).frontier;
     };
 
     const formatTimestamp = (ts) => {
@@ -897,13 +889,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return { state, rows: current, unadmitted };
     };
 
+    // The single tail rule (pq_dialogs.md §Tail calculation): every signed
+    // revision is a candidate, deleted ones included — a tombstone is a
+    // revision like any edit, so its pair enters the tail set and the fact
+    // of deletion propagates causally.
     const computeDialogFrontier = async (rows) => {
-        // Same candidate rule as computeObservedTails (pq_dialogs.md §Tail
-        // calculation): the checkpoint's frontier commits to the frontier the
-        // dialog's refs_map actually describe. A row admitted here but not
-        // there (a tombstone) would become a permanent frontier member no
-        // refs_map ever references, skewing the root on identical state.
-        const candidates = rows.filter((r) => !r.deleted_flag && r.sign_hash);
+        const candidates = rows.filter((r) => r.sign_hash);
         const withRefs = await Promise.all(candidates.map(async (r) => ({
             message_id: r.message_id,
             sign_hash: r.sign_hash,

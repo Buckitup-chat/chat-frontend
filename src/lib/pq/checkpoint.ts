@@ -26,7 +26,9 @@
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 
-export const CHECKPOINT_VERSION = 2;
+// v3: frontier candidate rule includes tombstones (pq_dialogs.md §Tail
+// calculation) — roots signed under v2 are incomparable, not "changed".
+export const CHECKPOINT_VERSION = 3;
 export const REDUCER_VERSION = 'dialog-state-v1';
 export const TREE_VERSION = 'dialog-view-tree-v3';
 
