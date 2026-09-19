@@ -141,6 +141,6 @@ Exempt: logs, working notes, investigation and migration reports. Their subject
 
 ## Language
 
-The owner communicates in Russian. Code, comments and commit messages are in
-English. Docs under `docs/` are in Russian unless they are developer-facing
-references (like this file).
+The owner communicates in Russian; everything that lands in the repository —
+code, comments, commit messages, PR descriptions, and every document under
+`docs/` — is written in English.
