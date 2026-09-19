@@ -209,6 +209,16 @@ client has since learned.
 
 Independent writes may be constructed, enqueued, and dispatched concurrently.
 The client must not block them on confirmation of prior unrelated mutations.
+Concurrency here means the dependency contract, not the transport: the
+current transport dispatches ready entries sequentially. Bounded parallel
+transport (a small cap, order preserved only inside real dependency chains)
+remains the target and moves to the backlog until three preconditions hold:
+metrics showing sequential dispatch is an actual bottleneck; a global
+throttle that honours 429/Retry-After as a slow-down signal; and the batch
+contract for /ingest_each (one request, many mutations, server-side order
+guaranteed) — batching delivers most of the win with one challenge and one
+connection, which suits the Pi-class deployment better than parallel
+sockets.
 Two sends observing the same tails — including two sends by the same author —
 produce a fork, which the protocol handles by design (04_ordering.md,
 §Invariants); display order comes from UUIDv7 regardless, and forks must not
@@ -286,6 +296,13 @@ Separating the three properties in §2 exists to keep the interface honest about
 | durability unavailable | an explicit failure — never "sent" |
 
 The last row is the one most easily got wrong: if durable storage is unavailable, a user-visible mutation must fail visibly rather than fall back to a best-effort network send that looks identical to success.
+
+This applies to user-card publication too. It runs before the vault unlocks,
+so the encrypted outbox tier is unavailable — which is not a licence for
+best-effort: the card mutation is durably queued in a plaintext outbox tier
+(metadata needs no local encryption — CTO decision 2026-08-19) and replayed
+by the same coordinator after login. Registration must not fail, and must
+not half-create an identity, because the network was down.
 
 ---
 
