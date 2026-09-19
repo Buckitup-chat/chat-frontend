@@ -13,15 +13,17 @@
 // account key and its key name is derived — another account sharing the
 // browser profile learns neither the pointer nor which dialog it belongs to.
 import { kvGet, kvSet } from './localStore';
-import { buildViewTree, CHECKPOINT_VERSION } from '@/lib/pq/checkpoint';
+import { buildViewTree, CHECKPOINT_SEMANTICS } from '@/lib/pq/checkpoint';
+import { isWireMessageId } from '@/lib/pq/content';
 
 export interface CheckpointPointer {
 	/** Newest checkpoint this user signed in the dialog; null = none found. */
-	/** Checkpoint semantics version the roots were derived under. A stored
-	 * pointer from other semantics is incomparable with freshly derived
-	 * roots — comparing them would light a "changed" dot that nothing can
-	 * ever put out. */
-	v?: number;
+	/** Checkpoint semantics stamp (version|reducer|tree) the roots were
+	 * derived under. A stored pointer from other semantics is incomparable
+	 * with freshly derived roots — comparing them would light a "changed"
+	 * dot that nothing can ever put out. The full stamp, not just the
+	 * envelope version: a tree-only bump changes the bytes too. */
+	sem?: string;
 	checkpoint: {
 		messageId: string;
 		viewRoot: string;
@@ -35,7 +37,7 @@ export interface CheckpointPointer {
 	scannedTo: number;
 }
 
-const EMPTY: CheckpointPointer = { v: CHECKPOINT_VERSION, checkpoint: null, scannedTo: 0 };
+const EMPTY: CheckpointPointer = { sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: 0 };
 
 const key = (userHash: string, dialogHash: string) => `cpptr|${userHash}|${dialogHash}`;
 
@@ -43,9 +45,9 @@ export const loadPointer = async (userHash: string, dialogHash: string): Promise
 	if (!userHash || !dialogHash) return EMPTY;
 	try {
 		const stored = await kvGet<CheckpointPointer>(key(userHash, dialogHash));
-		// Other-version pointers are dropped wholesale (scannedTo included):
+		// Other-semantics pointers are dropped wholesale (scannedTo included):
 		// the rescan re-reads the dialog under current semantics.
-		if (!stored || stored.v !== CHECKPOINT_VERSION) return EMPTY;
+		if (!stored || stored.sem !== CHECKPOINT_SEMANTICS) return EMPTY;
 		return stored;
 	} catch {
 		// Locked vault or another account's record: treat as "nothing known"
@@ -61,7 +63,7 @@ export const savePointer = async (
 ): Promise<void> => {
 	if (!userHash || !dialogHash) return;
 	try {
-		await kvSet(key(userHash, dialogHash), { ...pointer, v: CHECKPOINT_VERSION });
+		await kvSet(key(userHash, dialogHash), { ...pointer, sem: CHECKPOINT_SEMANTICS });
 		// The sweep only visits indexed dialogs, so a pointer that carries a
 		// checkpoint must register its dialog or no alert will ever fire there.
 		if (pointer.checkpoint) await rememberPointerDialog(userHash, dialogHash);
@@ -87,6 +89,10 @@ export interface AlertRow {
  * A row that later fails verification still counts as a change — something
  * happened in that dialog worth looking at.
  */
+// Hostile keys die here, not inside the hasher: this path runs on raw
+// replicated rows (see below), and buildViewTree throws on non-ASCII keys
+// by design. The server's Ecto type makes such an id unreplicable; the
+// filter is the client-side half of that belt.
 export const rawViewState = (
 	rows: AlertRow[],
 	excludeMessageId?: string,
@@ -94,6 +100,7 @@ export const rawViewState = (
 	const state: Record<string, { signHash: string; deleted: boolean }> = {};
 	for (const row of rows) {
 		if (row.message_id === excludeMessageId) continue;
+		if (!isWireMessageId(row.message_id)) continue;
 		state[row.message_id] = { signHash: row.sign_hash, deleted: !!row.deleted_flag };
 	}
 	return state;
@@ -149,13 +156,21 @@ let indexWrite: Promise<void> = Promise.resolve();
 
 export const rememberPointerDialog = (userHash: string, dialogHash: string): Promise<void> => {
 	if (!userHash || !dialogHash) return Promise.resolve();
-	indexWrite = indexWrite.then(async () => {
-		const dialogs = (await pointerDialogs(userHash)) ?? new Set<string>();
+	const task = indexWrite.then(async () => {
+		const dialogs = await pointerDialogs(userHash);
+		// null = the index exists but could not be read. Writing "what we
+		// know" now would replace the whole index with this one dialog —
+		// skip; the next registration (bootstrap is unconditional) retries.
+		if (dialogs === null) return;
 		if (dialogs.has(dialogHash)) return;
 		dialogs.add(dialogHash);
 		await kvSet(indexKey(userHash), [...dialogs]);
-	}).catch((e) => {
+	});
+	// The chain absorbs failures so one bad write cannot wedge the next;
+	// the caller gets THIS task (with its own failure surfaced as a warn),
+	// never the global tail with strangers' writes on it.
+	indexWrite = task.catch(() => { });
+	return task.catch((e) => {
 		console.warn('[checkpointAlerts] pointer index update failed:', e);
 	});
-	return indexWrite;
 };

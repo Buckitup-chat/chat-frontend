@@ -59,7 +59,6 @@ const isTimestampNotNewer = (r: IngestRowResult): boolean => {
 };
 
 const isExistsConflict = (r: IngestRowResult): boolean => r.status === 'exists';
-const isConfirmedDuplicate = (r: IngestRowResult): boolean => r.status === 'exists' && r.conflicted === false;
 
 function validateBatchResults(results: unknown, mutationCount: number, status: number): IngestRowResult[] {
 	if (!Array.isArray(results)) {
@@ -119,15 +118,17 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 
 	const results = validateBatchResults(body?.results, mutations.length, resp.status);
 
-	const failed = results.filter((r) => r.status !== 'ok');
-	if (failed.length > 0) {
-		if (failed.every(isConfirmedDuplicate)) {
-			return {
-				txids: results.filter((r) => typeof r.txid === 'number').map((r) => r.txid as number),
-				results,
-			};
-		}
+	// A PK conflict the server can resolve itself against a registered Shape
+	// module comes back as status "exists" (HTTP 200, not "error"), with its
+	// own verdict on whether our row IS the stored one: `conflicted: false`
+	// is an idempotent retry — already applied by an earlier attempt whose
+	// response we never saw — and must be treated as success, not failure.
+	// `conflicted: true` is a genuine different-revision conflict and, like
+	// the text-matched fallback below, a final verdict worth retrying.
+	const isResolvedConflict = (r: IngestRowResult): boolean => r.status === 'exists' && r.conflicted === false;
 
+	const failed = results.filter((r) => r.status !== 'ok' && !isResolvedConflict(r));
+	if (failed.length > 0) {
 		// A 422 row outcome is the server's final verdict — validation or a
 		// business rule (e.g. "cannot react to own message"). Retrying the
 		// same signed mutation can never change it; only network-level

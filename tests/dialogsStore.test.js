@@ -97,7 +97,9 @@ const { MockDurabilityError, MockIngestError } = vi.hoisted(() => {
 });
 
 vi.mock('@/lib/data/ingest', () => ({
-	sendMutationsAndAwaitShape: async (mutations) => {
+	sendMutationsAndAwaitShape: async (mutations, _skey, opts = {}) => {
+		// the real transport reports durable enqueue before the network wait
+		await opts.onDurable?.('test-outbox-id');
 		const result = await sendImpl(mutations);
 		return { outboxId: 'test-outbox-id', phase: 'accepted', result, acceptance: Promise.resolve({ kind: 'accepted' }) };
 	},
@@ -895,6 +897,10 @@ describe('reaction toggle coalescing', () => {
 		const writes = sent.filter((m) => m.relation === 'dialog_message_reactions');
 		expect(writes.length).toBeGreaterThan(0);
 		expect(writes.at(-1).row.deleted_flag).toBe(true);
+		// A retraction still needs an encrypted, non-empty type_b64 — the
+		// backend rejects a literal '' as blank and the reaction can never be
+		// removed (confirmed live by the backend's own ingest test).
+		expect(writes.at(-1).row.type_b64).toBe('enc()');
 	});
 
 	it('an odd number of clicks ends with the reaction present', async () => {

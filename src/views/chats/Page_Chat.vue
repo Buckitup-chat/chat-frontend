@@ -832,7 +832,10 @@ const handleCreateCheckpoint = async () => {
 
 watch(dialogHash, (dh) => {
     if (!dh || !peerHash.value) return;
-    $dialogs.refreshCheckpointAlert(peerHash.value).catch(() => { });
+    // warn, not swallow: this visit is the index's only bootstrap path, and
+    // a silent failure here means a silently dead alert dot
+    $dialogs.refreshCheckpointAlert(peerHash.value)
+        .catch((e) => console.warn('[chat] checkpoint alert refresh failed:', e));
 }, { immediate: true });
 
 const chatWindowRef = ref(null);

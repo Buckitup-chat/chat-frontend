@@ -33,10 +33,14 @@ const makeStorage = () => {
 	};
 };
 
-const userStorageUpdate = () => ([{
+// user_cards/update: chained like the old user_storage fixture, but at
+// 'accepted' level — user_storage is back on shape visibility until its
+// accepted-base lifecycle exists, which would make this harness (with no
+// collection wired) wait for an echo that cannot come.
+const chainedUpdate = () => ([{
 	type: 'update',
-	modified: { user_hash: MY_HASH, uuid: 'slot-1', content_b64: 'v2' },
-	syncMetadata: { relation: 'user_storage' },
+	modified: { user_hash: MY_HASH, name: 'v2' },
+	syncMetadata: { relation: 'user_cards' },
 }]);
 
 beforeEach(() => {
@@ -52,9 +56,9 @@ afterEach(() => {
 
 describe('sendMutationsAndAwaitShape: leader still waits its turn behind an unresolved chained predecessor (§4.2/§7.1)', () => {
 	it('does not reach the network for a chained write while an older write of the same entity is still pending', async () => {
-		await enqueue(userStorageUpdate(), MY_HASH);
+		await enqueue(chainedUpdate(), MY_HASH);
 
-		const handle = await sendMutationsAndAwaitShape(userStorageUpdate(), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(chainedUpdate(), SKEY, { retries: 0 });
 
 		expect(sent).toHaveLength(0);
 		expect(handle.phase).toBe('queued');
@@ -65,7 +69,7 @@ describe('sendMutationsAndAwaitShape: leader still waits its turn behind an unre
 	});
 
 	it('still dispatches immediately when there is no unresolved predecessor', async () => {
-		const handle = await sendMutationsAndAwaitShape(userStorageUpdate(), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(chainedUpdate(), SKEY, { retries: 0 });
 
 		expect(sent).toHaveLength(1);
 		expect(handle.phase).toBe('accepted');

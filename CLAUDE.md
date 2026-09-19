@@ -22,11 +22,16 @@ Phoenix / Ecto).
    reviewer's claim. Wire fields come from `chat/lib/chat/data/schemas/*.ex`;
    protocol from `chat/docs/reqs/pq_dialogs.md`. When a review says "the backend
    does X", open the backend and check before fixing.
-3. **Branch discipline.** Two developers work on the TanStack migration in
-   separate branches; results are compared when both are ready. Do not merge
-   migration work into `main`. Work branch → `tanstack-migration` (integration,
-   for testing) → owner's decision. "Done" means pushed and visible to the
-   reviewer, not sitting in a local commit.
+3. **Branch discipline.** The TanStack migration is collaborative work with
+   `tanstack-migration` as the shared integration branch. Everyone builds on
+   the same tip: start every working session — and always before opening a
+   PR — with `git fetch origin` and a merge of (or rebase of your unpushed
+   work onto) `origin/tanstack-migration`. A stale base is not a style issue:
+   it reproduces bugs that are already fixed upstream and turns the eventual
+   merge into an archaeology dig. Feature branches fork from the integration
+   tip and merge back into it; `main` stays owner-merged — do not merge
+   migration work there yourself. "Done" means pushed and visible to the
+   others, not sitting in a local commit.
 
 4. **No backward compatibility is owed.** The project is in active development
    with no user base: when a format changes, change it outright. Do not write
@@ -69,6 +74,26 @@ Phoenix / Ecto).
   "re-read after barrier" is tested against a lie.
 - Component tests: `// @vitest-environment jsdom` per file; default env stays
   node so unit tests stay fast.
+
+## Review
+
+For reviewing a branch, PR or release candidate use the `deep-review` skill
+(`/deep-review <branch> --base main`); `deep-review-loop` alternates review
+and fixes until no confirmed critical/high defect remains. Neither is for a
+quick look at a small diff — they fan out subagents and cost real money.
+
+Facts reviewers cannot infer from the code:
+
+- Tests: `npm test` (vitest). If the sandbox has no network or registry
+  access, say so in the limitations — do not invent run results.
+- Feature branches sit on a stack of unmerged migration work. Always compute
+  the merge-base and compare the commit count with what the author claimed.
+- `src/lib/pq/` is the cryptographic layer: diffs touching it get their own
+  security axis and canonicalization checks by execution. Root derivations
+  are pinned byte-for-byte by golden vectors in `tests/pqCheckpoint.test.ts`
+  — a derivation change must bump the version constants and re-pin them.
+- When reading eslint output, the total is the "N problems (X errors, …)"
+  line; the "potentially fixable" line below it is not the error count.
 
 ## Where things live
 
@@ -116,6 +141,6 @@ Exempt: logs, working notes, investigation and migration reports. Their subject
 
 ## Language
 
-The owner communicates in Russian. Code, comments and commit messages are in
-English. Docs under `docs/` are in Russian unless they are developer-facing
-references (like this file).
+The owner communicates in Russian; everything that lands in the repository —
+code, comments, commit messages, PR descriptions, and every document under
+`docs/` — is written in English.

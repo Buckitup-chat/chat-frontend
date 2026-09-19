@@ -114,6 +114,46 @@ describe('sendMutations', () => {
 		expect(err.permanent).toBe(true);
 		expect(err.uniqueConflictOnly).toBe(false);
 	});
+
+	// /ingest_each resolves a PK conflict itself when a Shape module is
+	// registered for the relation: HTTP 200, status "exists", and its own
+	// fingerprint verdict. `conflicted: false` is our own earlier write
+	// arriving again (lost response, retried send) and must read as success —
+	// treating every non-"ok" row as failure retried this identical row
+	// forever, since the retry always lands on the same conflict.
+	it('treats a same-signature "exists" row as success, not a failure to retry', async () => {
+		mockFetchSequence(200, {
+			results: [{ index: 0, status: 'exists', conflicted: false }],
+		});
+		const res = await sendMutations([mutation], signSkey);
+		expect(res.txids).toEqual([]);
+	});
+
+	// `conflicted: true` is a different revision under the same key. It is
+	// not retried blindly: sendMutations flags it for the identity check, and
+	// the retry wrapper either confirms our row landed after all or raises
+	// the permanent conflict (both outcomes pinned by the wrapper's tests).
+	it('routes a different-signature "exists" row to the identity check', async () => {
+		mockFetchSequence(200, {
+			results: [{ index: 0, status: 'exists', conflicted: true }],
+		});
+		const err = await sendMutations([mutation], signSkey).catch((e) => e);
+		expect(err).toBeInstanceOf(IngestError);
+		expect(err.permanent).toBe(false);
+		expect(err.uniqueConflictOnly).toBe(true);
+		expect(err.conflictIndexes).toEqual([0]);
+	});
+
+	it('an idempotent "exists" row does not block other rows in the same batch from returning ok', async () => {
+		mockFetchSequence(200, {
+			results: [
+				{ index: 0, status: 'ok', txid: 9 },
+				{ index: 1, status: 'exists', conflicted: false },
+			],
+		});
+		const res = await sendMutations([mutation, mutation], signSkey);
+		expect(res.txids).toEqual([9]);
+	});
 });
 
 describe('sendMutationsWithRetry', () => {

@@ -36,17 +36,29 @@ beforeEach(async () => {
 });
 
 describe('write contracts pin the agreed barrier table', () => {
-	it('every real relation waits for acceptance only — none stay on shape visibility', () => {
+	it('accepted-level operations wait for acceptance only', () => {
 		for (const [relation, type] of [
 			['user_cards', 'insert'], ['user_cards', 'update'],
-			['dialog_keys', 'insert'],
 			['dialog_messages', 'insert'], ['dialog_messages', 'update'],
 			['dialog_message_reactions', 'insert'], ['dialog_message_reactions', 'update'],
 			['dialog_message_receipts', 'insert'],
-			['user_storage', 'insert'], ['user_storage', 'update'],
 			['files', 'insert'],
 		] as const) {
 			expect(contractFor(relation, type).confirmation, `${relation}/${type}`).toBe('accepted');
+		}
+	});
+
+	// dialog_keys/insert is read back from the shape as this client's own
+	// "do I already have a key row" check, and user_storage still derives
+	// its write base from the shape (no accepted snapshot is recorded for
+	// it) — so these wait for visibility until the accepted-base lifecycle
+	// covers them.
+	it('rows without an accepted local base keep shape visibility', () => {
+		for (const [relation, type] of [
+			['dialog_keys', 'insert'],
+			['user_storage', 'insert'], ['user_storage', 'update'],
+		] as const) {
+			expect(contractFor(relation, type).confirmation, `${relation}/${type}`).toBe('visible');
 		}
 	});
 

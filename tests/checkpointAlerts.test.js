@@ -230,6 +230,22 @@ describe('checkpoint alerts', () => {
 		expect(opened).toEqual([dialogHash]); // now indexed and swept
 	});
 
+	// The index entry can be lost independently of the pointer (a clobbered
+	// write); revisiting the dialog must restore it even though the pointer
+	// itself did not change.
+	it('a revisit restores a lost index entry', async () => {
+		const r1 = await row(M1, [{ kind: 'text', text: 'hi' }]);
+		seed(r1, await row(CP, [checkpointPart([r1])], { [M1]: r1.sign_hash }));
+
+		await store.refreshCheckpointAlert(peer); // indexes the dialog
+		mem.delete(`cpptr-index|${me.userHash}`); // the entry is lost
+
+		await store.refreshCheckpointAlert(peer); // pointer unchanged — but
+		opened = [];
+		await store.scanCheckpointAlerts([peer]);
+		expect(opened).toEqual([dialogHash]); // the index came back
+	});
+
 	it('a dialog whose content will not decrypt raises no alert', async () => {
 		// direct refresh (the probe/manual path): rows exist but their key is
 		// absent, so no checkpoint can be found — and that must mean silence,

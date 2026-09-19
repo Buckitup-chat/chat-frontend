@@ -28,7 +28,14 @@ import { bytesToHex } from '@noble/hashes/utils';
 
 export const CHECKPOINT_VERSION = 2;
 export const REDUCER_VERSION = 'dialog-state-v1';
-export const TREE_VERSION = 'dialog-view-tree-v2';
+export const TREE_VERSION = 'dialog-view-tree-v3';
+
+/** Everything a stored root's meaning depends on, in one stamp. A pointer
+ * saved under a different stamp is incomparable and must be dropped, so a
+ * future bump of ANY component invalidates it — not only the envelope
+ * version. tests/pqCheckpoint golden vectors pin the actual bytes: any
+ * change to the derivation fails there first and forces a conscious bump. */
+export const CHECKPOINT_SEMANTICS = `${CHECKPOINT_VERSION}|${REDUCER_VERSION}|${TREE_VERSION}`;
 
 const FRONTIER_DOMAIN = 'BUCKITUP_DIALOG_FRONTIER_V2';
 const LEAF_DOMAIN = 'BUCKITUP_DIALOG_VIEW_LEAF_V2';
@@ -142,8 +149,13 @@ export const buildViewTree = (state: ViewState): ViewTree => {
 	// orders agree only on ASCII. dmsg_ keys are ASCII by grammar — anything
 	// else is a caller reusing the trie outside its domain, where
 	// buildBranch's divergence scan is not guaranteed to terminate.
+	// Checked per code unit (an \x00-\x7f regex trips no-control-regex):
+	// every unit ≤ 0x7f, at least one unit. NUL and DEL stay allowed as
+	// before; any surrogate half is > 0x7f and rejects.
 	for (const key of Object.keys(state)) {
-		if (!/^[\x00-\x7f]+$/.test(key)) throw new TypeError(`view tree key is not ASCII: ${key}`);
+		let ascii = key.length > 0;
+		for (let i = 0; ascii && i < key.length; i++) ascii = key.charCodeAt(i) <= 0x7f;
+		if (!ascii) throw new TypeError(`view tree key is not ASCII: ${key}`);
 	}
 	const entries: TrieLeaf[] = Object.entries(state)
 		.map(([key, value]) => ({

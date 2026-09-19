@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { _setStoreForTests } from '@/lib/data/localStore';
 import { loadPointer, savePointer, rawViewState, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
-import { buildViewTree, CHECKPOINT_VERSION } from '@/lib/pq/checkpoint';
+import { buildViewTree, CHECKPOINT_SEMANTICS } from '@/lib/pq/checkpoint';
 
 const M1 = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
 const M2 = 'dmsg_0192aabb-0000-7000-8000-000000000002';
@@ -22,7 +22,7 @@ describe('alert decision', () => {
 
 	it('a new message, an edit and a tombstone each alert', () => {
 		const root = rootOf(rows);
-		const added = [...rows, { message_id: 'dmsg_x', sign_hash: sh(3), deleted_flag: false }];
+		const added = [...rows, { message_id: 'dmsg_0192aadd-0000-7000-8000-000000000003', sign_hash: sh(3), deleted_flag: false }];
 		const edited = [rows[0], { ...rows[1], sign_hash: sh(4) }];
 		const deleted = [rows[0], { ...rows[1], deleted_flag: true }];
 		expect(viewMoved(added, root)).toBe(true);
@@ -62,13 +62,13 @@ describe('pointer storage', () => {
 	const DIALOG = 'di_' + 'b'.repeat(128);
 
 	it('round-trips, and an unknown dialog reads as nothing scanned', async () => {
-		expect(await loadPointer(ME, DIALOG)).toEqual({ v: CHECKPOINT_VERSION, checkpoint: null, scannedTo: 0 });
+		expect(await loadPointer(ME, DIALOG)).toEqual({ sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: 0 });
 		const pointer = {
 			checkpoint: { messageId: M1, viewRoot: rootOf(rows), frontierRoot: 'dfr_x', createdAt: 1788470000 },
 			scannedTo: 1788470000123,
 		};
 		await savePointer(ME, DIALOG, pointer);
-		expect(await loadPointer(ME, DIALOG)).toEqual({ ...pointer, v: CHECKPOINT_VERSION });
+		expect(await loadPointer(ME, DIALOG)).toEqual({ ...pointer, sem: CHECKPOINT_SEMANTICS });
 	});
 
 	// Roots from other checkpoint semantics are incomparable with freshly
@@ -76,7 +76,7 @@ describe('pointer storage', () => {
 	// baseline that lights an unquenchable dot.
 	it('a pointer saved under other semantics reads as nothing known', async () => {
 		mem.set(`cpptr|${ME}|${DIALOG}`, JSON.stringify({
-			v: 1,
+			sem: '2|dialog-state-v1|dialog-view-tree-v2', // an older build's stamp
 			checkpoint: { messageId: M1, viewRoot: 'dvr_old', frontierRoot: 'dfr_old', createdAt: 1 },
 			scannedTo: 999,
 		}));
@@ -89,7 +89,7 @@ describe('pointer storage', () => {
 			async keys() { return [...mem.keys()]; },
 			async clear() { mem.clear(); },
 		});
-		expect(await loadPointer(ME, DIALOG)).toEqual({ v: CHECKPOINT_VERSION, checkpoint: null, scannedTo: 0 });
+		expect(await loadPointer(ME, DIALOG)).toEqual({ sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: 0 });
 	});
 
 	// Two dialogs indexed concurrently: the second read-modify-write must not
@@ -134,7 +134,41 @@ describe('pointer storage', () => {
 			async get() { throw new Error('locked vault'); },
 			async set() {}, async delete() {}, async keys() { return []; }, async clear() {},
 		});
-		expect(await loadPointer(ME, DIALOG)).toEqual({ v: CHECKPOINT_VERSION, checkpoint: null, scannedTo: 0 });
+		expect(await loadPointer(ME, DIALOG)).toEqual({ sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: 0 });
+	});
+
+	// One unreadable READ must not become a write that replaces the whole
+	// index with a single dialog — the sweep is gated on this record, and
+	// round 2's own fix taught the reader the difference; the writer has to
+	// keep it.
+	it('a failed index read never clobbers the stored index', async () => {
+		const slow = new Map<string, unknown>();
+		let failNextGet = false;
+		_setStoreForTests({
+			async get(k) {
+				if (failNextGet) { failNextGet = false; throw new Error('locked vault'); }
+				return slow.get(k) ?? null;
+			},
+			async set(k, v) { slow.set(k, v); },
+			async delete(k) { slow.delete(k); },
+			async keys() { return [...slow.keys()]; },
+			async clear() { slow.clear(); },
+		});
+		const D2 = 'di_' + 'e'.repeat(128);
+		await rememberPointerDialog(ME, DIALOG);
+		failNextGet = true;
+		await rememberPointerDialog(ME, D2); // read fails → write skipped
+		expect(await pointerDialogs(ME)).toEqual(new Set([DIALOG]));
+		await rememberPointerDialog(ME, D2); // next attempt merges honestly
+		expect(await pointerDialogs(ME)).toEqual(new Set([DIALOG, D2]));
+	});
+
+	// The raw view path runs on unadmitted replicas: a hostile message_id
+	// must be dropped, not become a trie key that throws in the hasher.
+	it('rawViewState drops out-of-grammar ids instead of throwing later', () => {
+		const hostile = [...rows, { message_id: 'dmsg_ключ', sign_hash: sh(6), deleted_flag: false }];
+		expect(() => viewMoved(hostile, rootOf(rows))).not.toThrow();
+		expect(viewMoved(hostile, rootOf(rows))).toBe(false); // filtered out
 	});
 });
 
@@ -155,7 +189,7 @@ describe('what counts as a change', () => {
 	// account writes after confirming a state is a change like any other.
 	it('a message this account sent afterwards is a change', () => {
 		const root = buildViewTree(rawViewState(rows)).root;
-		const mine = [...rows, { message_id: 'dmsg_mine', sign_hash: sh(5), deleted_flag: false }];
+		const mine = [...rows, { message_id: 'dmsg_0192aaee-0000-7000-8000-000000000005', sign_hash: sh(5), deleted_flag: false }];
 		expect(viewMoved(mine, root, CARRIER)).toBe(true);
 	});
 

@@ -38,9 +38,13 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 		update: { dependencyClass: 'chained', confirmation: 'accepted' },
 	},
 	dialog_keys: {
-		// Prerequisite for messages/reactions in the dialog — the server checks
-		// its own store, not our shape.
-		insert: { dependencyClass: 'prerequisite-provider', confirmation: 'accepted' },
+		// Prerequisite for messages/reactions in the dialog on the SERVER side
+		// — but this client also reads the row back from the shape as its own
+		// "have I published a key yet" check (initDialogKeysUnguarded), so
+		// 'accepted' left a window where a second call in the same dialog saw
+		// "absent" and republished with a fresh (incompatible) key wrapping,
+		// permanently conflicting with itself. Await the echo.
+		insert: { dependencyClass: 'prerequisite-provider', confirmation: 'visible' },
 	},
 	dialog_messages: {
 		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
@@ -55,8 +59,14 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
 	},
 	user_storage: {
-		insert: { dependencyClass: 'chained', confirmation: 'accepted' },
-		update: { dependencyClass: 'chained', confirmation: 'accepted' },
+		// 'visible' until the accepted-base actually exists for this relation:
+		// userStorage.ts reads freshestOf(serverRow, acceptedLocal) as its
+		// write base, but nothing records an accepted snapshot for
+		// user_storage (the coordinator's ENTITY_KEY_FIELD does not cover
+		// it), so under 'accepted' the next slot edit would chain onto a
+		// possibly-stale shape row with no stale-scope protection at all.
+		insert: { dependencyClass: 'chained', confirmation: 'visible' },
+		update: { dependencyClass: 'chained', confirmation: 'visible' },
 	},
 	files: {
 		// the manifest is read back only by resume's salted one-shot reader

@@ -38,18 +38,27 @@ export const useTransfersStore = defineStore('transfers', () => {
 	const patch = (id, changes) => {
 		items.value = items.value.map((it) => (it.id === id ? { ...it, ...changes } : it));
 	};
+	const patchBatch = (id, fn) => {
+		const b = batches.value.get(id);
+		if (!b) return;
+		batches.value = new Map(batches.value).set(id, fn(b));
+	};
 	const byId = (id) => items.value.find((it) => it.id === id);
 
 	// ---------- queueing ----------
 
 	const enqueueBatch = async (peerHash, files, caption = '') => {
 		const batchId = `batch_${++seq}`;
-		batches.value = new Map(batches.value).set(batchId, { peerHash, caption, status: 'open' });
+		// parts live ON the batch, not derived from the row list: rows leave
+		// the list on their own 3s after finishing, and a batch whose slowest
+		// upload lands later than that must still send every finished part.
+		batches.value = new Map(batches.value).set(batchId, { peerHash, caption, status: 'open', parts: [] });
 
 		const newItems = [];
 		for (const file of files) {
 			newItems.push({
 				id: `tr_${++seq}`,
+				order: newItems.length, // compose order, stable across reorder/removal
 				batchId,
 				peerHash,
 				name: file.name,
@@ -130,13 +139,18 @@ export const useTransfersStore = defineStore('transfers', () => {
 				},
 			});
 			patch(id, { status: 'done', part, speed: 0 });
+			patchBatch(item.batchId, (b) => ({ ...b, parts: [...b.parts, { order: item.order, part }] }));
 			scheduleRemoval(id);
 			await maybeSendBatch(item.batchId);
 		} catch (e) {
 			if (pauseRequested.delete(id)) {
 				patch(id, { status: 'paused', speed: 0 });
 			} else if (ctrl.signal.aborted) {
-				removeItem(id); // cancelled — the batch decision runs in cancel()
+				removeItem(id);
+				// cancel() already ran its batch check, but at that moment
+				// this row was still live — the decision has to re-run now
+				// that the abort has settled
+				await maybeSendBatch(item.batchId);
 			} else {
 				console.error('[transfers]', item.name, e);
 				patch(id, { status: 'error', speed: 0 });
@@ -156,9 +170,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 		if (!batch || batch.status !== 'open') return;
 		if (liveOf(batchId).length > 0) return;
 
-		const parts = items.value
-			.filter((it) => it.batchId === batchId && it.part)
-			.map((it) => it.part);
+		const parts = [...batch.parts].sort((a, b) => a.order - b.order).map((p) => p.part);
 		if (!parts.length) {
 			batches.value = new Map(batches.value).set(batchId, { ...batch, status: 'empty' });
 			return;
@@ -213,20 +225,28 @@ export const useTransfersStore = defineStore('transfers', () => {
 		const item = byId(id);
 		if (!item) return;
 		if (item.status === 'active') {
-			aborts.get(id)?.abort(); // runOne removes it and we finish the batch below
-		} else {
-			removeItem(id);
+			aborts.get(id)?.abort(); // the batch decision re-runs when the abort settles
+			return;
 		}
+		if (item.status === 'done') {
+			patchBatch(item.batchId, (b) => ({ ...b, parts: b.parts.filter((p) => p.order !== item.order) }));
+		}
+		removeItem(id);
 		await maybeSendBatch(item.batchId);
 	};
 
 	const cancelAll = async () => {
 		const batchIds = new Set(items.value.map((it) => it.batchId));
+		const closed = new Map(batches.value);
+		for (const b of batchIds) {
+			const batch = closed.get(b);
+			if (batch && batch.status === 'open') closed.set(b, { ...batch, status: 'cancelled' });
+		}
+		batches.value = closed;
 		for (const it of [...items.value]) {
 			if (it.status === 'active') aborts.get(it.id)?.abort();
 			else if (it.status !== 'done') removeItem(it.id);
 		}
-		for (const b of batchIds) await maybeSendBatch(b);
 	};
 
 	const removeItem = (id) => {

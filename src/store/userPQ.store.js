@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, shallowRef, computed, watch } from 'vue';
+import { ref, shallowRef, computed, watch, onScopeDispose } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { preloadWithRetry } from '@/lib/data/attach';
@@ -49,6 +49,20 @@ export const userPQStore = defineStore('userPQ', () => {
     isAuthenticated.value = em.value?.isAuth ?? false;
     currentUserHash.value = em.value?.currentUserHash ?? null;
   };
+  // The manager is a process-wide singleton but this store's closure is
+  // per-instance: without teardown every HMR reload of this file leaves an
+  // orphaned listener writing into dead refs.
+  let boundManager = null;
+  const bindAuthListener = (manager) => {
+    if (boundManager === manager) return;
+    boundManager?.removeEventListener('authChange', syncAuthState);
+    boundManager = manager;
+    manager?.addEventListener('authChange', syncAuthState);
+  };
+  onScopeDispose(() => {
+    boundManager?.removeEventListener('authChange', syncAuthState);
+    boundManager = null;
+  });
 
   const currentUserFull = computed(() => {
     if (!currentUser.value) return null;
@@ -62,7 +76,7 @@ export const userPQStore = defineStore('userPQ', () => {
     em.value = EncryptionManagerPQ.getInstance();
     // Every auth transition dispatches authChange: login, logout,
     // createUserVault (logs in), deleteUserVault (logs out if current).
-    em.value.addEventListener('authChange', syncAuthState);
+    bindAuthListener(em.value);
     await em.value.initialize();
     syncAuthState();
     myLocalUsers.value = await em.value.getLocalUserCards();
@@ -365,6 +379,10 @@ export const userPQStore = defineStore('userPQ', () => {
 
     setEncryptionManager: (manager) => {
       em.value = manager;
+      // a replacement manager is a new event source — rebind or the refs
+      // silently stop tracking auth
+      bindAuthListener(manager);
+      syncAuthState();
     }
   };
 });

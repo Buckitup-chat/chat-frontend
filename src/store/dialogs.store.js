@@ -15,7 +15,7 @@ import { getAccepted, getAllAcceptedForRelation, freshestOf } from '@/lib/data/a
 import { recordOwnObservedTails, getOwnObservedTails, discardOwnObservedTails } from '@/lib/data/ownObservedTails';
 import { quarantinedEntries, discardEntry, currentSessionToken, sameSessionToken } from '@/lib/data/outbox';
 import { feedOrderKey } from '@/lib/data/feedOrder';
-import { loadPointer, savePointer, viewMoved, pointerDialogs } from '@/lib/data/checkpointAlerts';
+import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
 import { encodeContent, decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError } from '@/lib/pq/content';
@@ -681,7 +681,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // just waits on whatever is already there.
         const ctx = { dialogHash, senderHash: $userPQ.currentUserHash };
         let dispatchedWrite = editQueues.get(messageId);
-        if (fresh) {
+        // "fresh" claims queue their own write. A coalescing claim normally
+        // rides the live one — but after a transient failure the intent
+        // survives while the write is gone, and waiting on nothing would
+        // silently drop the newer text (the durable outbox would then replay
+        // the OLD revision). No live write ⇒ dispatch here too.
+        if (fresh || !dispatchedWrite) {
             const previousWrite = dispatchedWrite ?? Promise.resolve();
             const nextWrite = previousWrite.then(
                 () => runEditWrite(messageId, ctx),
@@ -981,6 +986,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
         });
         if (pointer.scannedTo !== stored.scannedTo || pointer.checkpoint !== stored.checkpoint) {
             await savePointer(me, dialogHash, pointer);
+        } else if (pointer.checkpoint) {
+            // Unchanged pointer ≠ registered dialog: the index entry can be
+            // lost independently (a failed write), and this visit is its
+            // only way back — the sweep never looks at unindexed dialogs.
+            await rememberPointerDialog(me, dialogHash);
         }
         if (!pointer.checkpoint) {
             checkpointAlerts.value.delete(peerHash);
@@ -1071,6 +1081,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const state = {};
         const unadmitted = [];
         for (const row of current) {
+            // message_id is signed but a peer signs whatever they like; the
+            // server's Ecto type stops out-of-grammar ids from replicating,
+            // and this is the client half: such a row is unadmitted, never a
+            // trie key (buildViewTree throws on non-ASCII by design).
+            if (!isWireMessageId(row.message_id)) {
+                unadmitted.push(row.message_id);
+                continue;
+            }
             const verdict = await admitMessageRow(row);
             if (verdict.status === 'verified') {
                 state[row.message_id] = { signHash: row.sign_hash, deleted: !!row.deleted_flag };
@@ -1153,7 +1171,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
             else if (status === 'error') settle.reject(new Error('CHECKPOINT_SEND_FAILED', { cause }));
         }, null, null, 'checkpoint');
         await sent;
-        if (!sameSessionToken(token, currentSessionToken())) {
+        // Two independent fences on purpose: the session token catches a
+        // relogin that reuses the same hash, the plain hash compare catches
+        // an account switch even where session tokens are not wired (and
+        // costs nothing where they are). A checkpoint's pointer written
+        // under the new account's keys would be an unquenchable alert for a
+        // carrier that account does not have.
+        if (!sameSessionToken(token, currentSessionToken()) || $userPQ.currentUserHash !== ownerHash) {
             console.warn('[dialogs] checkpoint sent, but the active session changed before pointer/alert write — skipping it for the now-inactive session');
             return { messageId, part };
         }
@@ -1227,9 +1251,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const { frontier } = await computeDialogFrontier(scopedRows);
 
         const historyEqual = deriveFrontierRoot(frontier) === part.frontierRoot;
+        const versionEqual = part.version === CHECKPOINT_VERSION;
         const reducerVersionEqual = part.reducerVersion === REDUCER_VERSION;
         const treeVersionEqual = part.treeVersion === TREE_VERSION;
-        const viewEqual = reducerVersionEqual && treeVersionEqual
+        const viewEqual = versionEqual && reducerVersionEqual && treeVersionEqual
             ? buildViewTree(state).root === part.viewRoot
             : null;
 
@@ -1260,6 +1285,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * gate-verified like everything else.
      */
     const diffDialogCheckpoint = async (peerHash, part) => {
+        // Protocol guard, not a UI courtesy: every caller — present and
+        // future — gets the honest verdict for foreign semantics instead of
+        // a diff built from incomparable roots.
+        if (part.version !== CHECKPOINT_VERSION || part.reducerVersion !== REDUCER_VERSION || part.treeVersion !== TREE_VERSION) {
+            return { status: 'unsupported_version' };
+        }
         const dialogHash = getDialogHash(peerHash);
         const { state: newState, rows } = await computeDialogViewState(dialogHash);
         const { current, versions } = await loadDialogRows(dialogHash);
@@ -1431,7 +1462,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
             reactor_hash: myHash,
         };
 
-        const typeB64 = intent.desiredActive ? await DialogCrypto.encryptContent(myKey, emoji) : '';
+        // A retraction still needs an encrypted, non-empty type_b64: the
+        // backend's own changeset requires the field present (Ecto treats an
+        // empty binary as blank), so a literal '' is rejected 422 forever and
+        // the reaction can never be removed. Encrypt an empty emoji instead.
+        const typeB64 = await DialogCrypto.encryptContent(myKey, intent.desiredActive ? emoji : '');
         const row = {
             ...base,
             type_b64: typeB64,

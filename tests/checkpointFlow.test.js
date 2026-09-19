@@ -22,6 +22,8 @@ import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
+import { _setStoreForTests } from '@/lib/data/localStore';
+import { loadPointer } from '@/lib/data/checkpointAlerts';
 import { deriveFrontierRoot, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@/lib/pq/checkpoint';
 
 const makeCollection = (rows = {}) => ({
@@ -172,6 +174,14 @@ describe('checkpoint through the store', () => {
 	beforeEach(async () => {
 		setActivePinia(createPinia());
 		resetCardRegistry();
+		const mem = new Map();
+		_setStoreForTests({
+			async get(k) { return mem.get(k) ?? null; },
+			async set(k, v) { mem.set(k, v); },
+			async delete(k) { mem.delete(k); },
+			async keys() { return [...mem.keys()]; },
+			async clear() { mem.clear(); },
+		});
 		author = makeIdentity(7);
 		const peerId = makeIdentity(3);
 		peer = peerId.userHash;
@@ -464,6 +474,57 @@ describe('checkpoint through the store', () => {
 		const cmp = await store.compareDialogCheckpoint(peer, part, { pointerMessageId: messageId });
 		expect(cmp.verdict).toBe('EXACT_MATCH');
 		expect(cmp).toMatchObject({ history: { equal: true }, view: { equal: true } });
+	});
+
+	// The send can take minutes; an account switch inside that window must
+	// not write A's checkpoint pointer under B's keys — B would inherit an
+	// unquenchable dot for a carrier that does not exist in B's dialog.
+	it('an account switch during the send leaves the new account untouched', async () => {
+		seed(await makeRow(M1, {}));
+		const other = makeIdentity(21);
+		sendImpl = async (mutations) => {
+			mutations.forEach(applyMutation);
+			HOLDER.user.currentUserHash = other.userHash; // switch mid-flight
+			return { txids: [] };
+		};
+		await store.createDialogCheckpoint(peer);
+		expect(store.checkpointAlerts.size).toBe(0); // nothing planted for B
+		const dialogHashB = store.getDialogHash(peer); // derived under B now
+		const pointerB = await loadPointer(other.userHash, dialogHashB);
+		expect(pointerB.checkpoint).toBe(null);
+	});
+
+	// Version gates guard every protocol entry, not only verify: comparing
+	// or diffing under foreign semantics must say "unverifiable", never
+	// fabricate INCONSISTENT_VIEW from incomparable roots.
+	it('foreign semantics are unverifiable in compare and unsupported in diff', async () => {
+		seed(await makeRow(M1, {}));
+		const { part, messageId } = await store.createDialogCheckpoint(peer);
+		const foreign = { ...part, version: 1 };
+		const cmp = await store.compareDialogCheckpoint(peer, foreign, { pointerMessageId: messageId });
+		expect(cmp.verdict).toBe('VIEW_UNVERIFIABLE');
+		expect(cmp.view.equal).toBe(null);
+		const diff = await store.diffDialogCheckpoint(peer, { ...part, treeVersion: 'dialog-view-tree-v99' });
+		expect(diff.status).toBe('unsupported_version');
+	});
+
+	// A peer signs whatever message_id they like and the gate does not
+	// constrain the field; a tombstone with a hostile id slips past the
+	// frontier (tombstones are no tail candidates) — it must surface as
+	// unadmitted at the reducer, not as a TypeError from the trie.
+	it('a tombstone with an out-of-grammar id blocks signing, without throwing', async () => {
+		const r1 = await makeRow(M1, {});
+		seed(r1);
+		// signed BY the peer's key over the hostile id — the gate verifies it,
+		// and as a tombstone it is no tail candidate, so the frontier tripwire
+		// never sees it either; only the reducer boundary is left
+		const hostile = await makeRow('dmsg_ключ', { [M1]: r1.sign_hash }, {
+			content_b64: null, deleted_flag: true,
+		});
+		seed(hostile);
+		const failure = await store.createDialogCheckpoint(peer).then(() => null, (e) => e);
+		expect(failure?.message).toBe('INCOMPLETE_CAUSAL_HISTORY');
+		expect(failure?.details.unadmitted).toContain('dmsg_ключ');
 	});
 
 	// Session caches are keyed by dialog/peer, not account: a peer present in

@@ -95,6 +95,10 @@ describe('slot resolver', () => {
 		expect(res.created).toBe(false);
 		expect(res.orphaned).toBe('uuid-mine');
 		expect(await r.getSlotUuid('contacts')).toBe('uuid-from-other-device');
+		// losing the race must not lose the payload: the caller tombstones
+		// the orphaned row, so the save only survives if the write was
+		// re-issued against the adopted address before returning
+		expect(s.events).toContain('row:uuid-from-other-device');
 	});
 
 	// Losing the map must not look like "slot never existed": creating a fresh
