@@ -161,19 +161,21 @@ describe('video envelope (§1.4)', () => {
 		durationSeconds: 127,
 	};
 
-	it('round-trips duration at position 9', () => {
+	// 07 registry: duration sits with the media metadata at position 7; the
+	// transport refs (file_id, enc_secret) are the tail of the array.
+	it('round-trips duration at position 7, refs at the tail', () => {
 		const wire = encodeContent([video]);
-		expect(wire).toContain('"c2VjcmV0",127]');
+		expect(wire).toContain(`,127,"${video.fileId}","c2VjcmV0"]`);
 		expect(decodeContent(wire)[0]).toEqual(video);
 	});
 
-	it('reads an envelope without position 9 as unknown duration', () => {
-		const nine = `{"video":[16,9,"YTg4","clip.mp4",52428800,"video/mp4",1715000000,"${video.fileId}","c2VjcmV0"]}`;
-		expect(decodeContent(nine)[0]).toEqual({ ...video, durationSeconds: 0 });
+	it('a malformed envelope with refs at the image positions is rejected', () => {
+		const oldOrder = `{"video":[16,9,"YTg4","clip.mp4",52428800,"video/mp4",1715000000,"${video.fileId}","c2VjcmV0",127]}`;
+		expect(() => decodeContent(oldOrder)).toThrow(ContentDecodeError);
 	});
 
 	it('an unknown duration encodes as 0, not undefined', () => {
 		const wire = encodeContent([{ ...video, durationSeconds: 0 }]);
-		expect(wire).toContain('"c2VjcmV0",0]');
+		expect(wire).toContain(`,0,"${video.fileId}","c2VjcmV0"]`);
 	});
 });

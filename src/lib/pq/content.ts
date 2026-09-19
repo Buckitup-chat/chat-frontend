@@ -133,8 +133,8 @@ const encodePart = (part: ContentPart): unknown => {
 			return {
 				video: [
 					part.widthAspect, part.heightAspect, part.thumbHashB64, part.name, part.size,
-					part.mimeType, part.createdAt, part.fileId, part.encSecretB64,
-					part.durationSeconds || 0,
+					part.mimeType, part.createdAt, part.durationSeconds || 0,
+					part.fileId, part.encSecretB64,
 				],
 			};
 		case 'checkpoint':
@@ -197,8 +197,11 @@ const decodeValue = (value: unknown): ContentPart[] => {
 				}];
 			}
 			if (type === 'image' || type === 'video') {
+				// positions 0–6 are shared media metadata; the tail is per-type:
+				// image ends [7]=file_id [8]=enc_secret,
+				// video ends [7]=duration [8]=file_id [9]=enc_secret
 				const im = obj[type];
-				if (!Array.isArray(im) || im.length < 9 || typeof im[7] !== 'string' || typeof im[8] !== 'string') {
+				if (!Array.isArray(im)) {
 					throw new ContentDecodeError(`malformed ${type} envelope`);
 				}
 				const media = {
@@ -209,12 +212,20 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					size: Number(im[4]),
 					mimeType: String(im[5]),
 					createdAt: Number(im[6]),
-					fileId: im[7],
-					encSecretB64: im[8],
 				};
-				return type === 'video'
-					? [{ kind: 'video', ...media, durationSeconds: Math.max(0, Math.round(Number(im[9]))) || 0 }]
-					: [{ kind: 'image', ...media }];
+				if (type === 'video') {
+					if (im.length < 10 || typeof im[8] !== 'string' || typeof im[9] !== 'string') {
+						throw new ContentDecodeError('malformed video envelope');
+					}
+					return [{
+						kind: 'video', ...media, fileId: im[8], encSecretB64: im[9],
+						durationSeconds: Math.max(0, Math.round(Number(im[7]))) || 0,
+					}];
+				}
+				if (im.length < 9 || typeof im[7] !== 'string' || typeof im[8] !== 'string') {
+					throw new ContentDecodeError('malformed image envelope');
+				}
+				return [{ kind: 'image', ...media, fileId: im[7], encSecretB64: im[8] }];
 			}
 			if (type === 'checkpoint') {
 				const c = obj.checkpoint;

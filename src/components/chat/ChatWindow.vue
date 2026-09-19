@@ -107,7 +107,7 @@
                 <div v-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
                   video failed — tap to retry
                 </div>
-                <!-- Duration travels in the envelope (07 §"video" pos 9), so the
+                <!-- Duration travels in the envelope (07 §"video" pos 7), so the
                      badge shows before any chunk arrives; while playing the
                      native controls own the timeline. -->
                 <span v-if="!videos[v.fileId]?.url && v.durationSeconds" class="msg-video-duration">
