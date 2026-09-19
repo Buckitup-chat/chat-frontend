@@ -22,11 +22,16 @@ Phoenix / Ecto).
    reviewer's claim. Wire fields come from `chat/lib/chat/data/schemas/*.ex`;
    protocol from `chat/docs/reqs/pq_dialogs.md`. When a review says "the backend
    does X", open the backend and check before fixing.
-3. **Branch discipline.** Two developers work on the TanStack migration in
-   separate branches; results are compared when both are ready. Do not merge
-   migration work into `main`. Work branch → `tanstack-migration` (integration,
-   for testing) → owner's decision. "Done" means pushed and visible to the
-   reviewer, not sitting in a local commit.
+3. **Branch discipline.** The TanStack migration is collaborative work with
+   `tanstack-migration` as the shared integration branch. Everyone builds on
+   the same tip: start every working session — and always before opening a
+   PR — with `git fetch origin` and a merge of (or rebase of your unpushed
+   work onto) `origin/tanstack-migration`. A stale base is not a style issue:
+   it reproduces bugs that are already fixed upstream and turns the eventual
+   merge into an archaeology dig. Feature branches fork from the integration
+   tip and merge back into it; `main` stays owner-merged — do not merge
+   migration work there yourself. "Done" means pushed and visible to the
+   others, not sitting in a local commit.
 
 4. **No backward compatibility is owed.** The project is in active development
    with no user base: when a format changes, change it outright. Do not write
