@@ -156,3 +156,9 @@ Pi) — при её отсутствии код сам уходит в in-memory
 - Решение о мерже после сравнения с веткой параллельного разработчика.
 - Проверить PR #26 (`chore/add-typescript`) и #27
   (`ref/dialog-crypto-types-and-tests`).
+- Read-cache fallback для истории/версий/ключей диалогов НЕ достраивать до
+  device-validation OPFS на реальном Raspberry Pi/WebView (приёмку на Pi —
+  первой): стабильный OPFS отменяет фолбэк целиком.
+- Bounded-concurrency транспорт outbox — в бэклоге с предусловиями
+  (ADR §7.2): метрики узкого места, глобальный учёт 429/Retry-After,
+  батч-контракт /ingest_each.

@@ -202,12 +202,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
         ownSentMessageIds.set(dialogHash, set);
     };
 
-    // The tails the current user observes right now — the refs_map plaintext
-    // for an outgoing message or edit (pq_dialogs.md §Tail calculation).
+    // The refs_map tails for an outgoing message, edit or delete. Every signed
+    // revision is a candidate, including tombstones; accepted own writes are
+    // included while their shape rows are still catching up.
     const computeObservedTails = async (dialogHash) => {
         const colls = getDialogCollections(dialogHash);
         await colls.messages.preload().catch(() => {});
-        const loaded = colls.messages.toArray.filter((r) => !r.deleted_flag && r.sign_hash);
+        const loaded = colls.messages.toArray.filter((r) => r.sign_hash);
 
         const ownIds = ownSentMessageIds.get(dialogHash);
         const extra = [];
@@ -216,7 +217,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             for (const id of [...ownIds]) {
                 if (knownIds.has(id)) { ownIds.delete(id); continue; }
                 const accepted = await getAccepted('dialog_messages', id);
-                if (accepted && !accepted.deleted_flag && accepted.sign_hash) extra.push(accepted);
+                if (accepted?.sign_hash) extra.push(accepted);
             }
         }
 
@@ -242,14 +243,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     const captureObservedTails = async (dialogHash, ownerHash) => {
         const colls = getDialogCollections(dialogHash);
-        const resident = colls.messages.toArray.filter((r) => !r.deleted_flag && r.sign_hash);
+        const resident = colls.messages.toArray.filter((r) => r.sign_hash);
         const loaded = resident.filter((r) => isMessageAdmitted(dialogHash, r.message_id, r.sign_hash));
 
         const knownIds = new Set(loaded.map((r) => r.message_id));
         const accepted = await getAllAcceptedForRelation('dialog_messages');
         const extra = accepted.filter((r) =>
             r.dialog_hash === dialogHash && r.sender_hash === ownerHash &&
-            !r.deleted_flag && r.sign_hash && !knownIds.has(r.message_id)
+            r.sign_hash && !knownIds.has(r.message_id)
         );
 
         const withRefs = await Promise.all(
@@ -1099,13 +1100,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return { state, rows: current, unadmitted };
     };
 
+    // The single tail rule (pq_dialogs.md §Tail calculation): every signed
+    // revision is a candidate, deleted ones included — a tombstone is a
+    // revision like any edit, so its pair enters the tail set and the fact
+    // of deletion propagates causally.
     const computeDialogFrontier = async (rows) => {
-        // Same candidate rule as computeObservedTails (pq_dialogs.md §Tail
-        // calculation): the checkpoint's frontier commits to the frontier the
-        // dialog's refs_map actually describe. A row admitted here but not
-        // there (a tombstone) would become a permanent frontier member no
-        // refs_map ever references, skewing the root on identical state.
-        const candidates = rows.filter((r) => !r.deleted_flag && r.sign_hash);
+        const candidates = rows.filter((r) => r.sign_hash);
         const withRefs = await Promise.all(candidates.map(async (r) => ({
             message_id: r.message_id,
             sign_hash: r.sign_hash,

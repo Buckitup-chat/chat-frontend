@@ -160,9 +160,13 @@ const scheduleDecrypt = (newRows) => {
     decryptTimer = setTimeout(async () => {
         if (generation !== dialogGeneration) return;
 
+        // Tombstones go through admission like any row: a deletion is a
+        // signed tip revision that outgoing refs_map entries point at
+        // (pq_dialogs.md §Tail calculation), so a gate that never sees the
+        // tombstone parks everything sent after the deletion forever. Only
+        // the decrypt/receipt work below is skipped for them.
         const pending = [];
         for (const row of newRows) {
-            if (row.deleted_flag) continue;
             const cached = messageCache.get(row.message_id);
             // Undecrypted and unverified entries are retried: the key or the
             // author's card or a missing parent may have arrived since.
@@ -188,7 +192,7 @@ const scheduleDecrypt = (newRows) => {
                 // §4.3 ✓✓: arrival is a fact, so the delivered receipt goes
                 // out automatically once the row verifies — unlike "read",
                 // which stays a deliberate act.
-                if (verdict.status === 'verified' && row.sender_hash !== $userPQ.currentUserHash && row.sign_hash) {
+                if (verdict.status === 'verified' && !row.deleted_flag && row.sender_hash !== $userPQ.currentUserHash && row.sign_hash) {
                     $dialogs.sendDeliveredReceipt(peerHash.value, {
                         messageId: row.message_id, messageSignHash: row.sign_hash,
                     });
@@ -212,6 +216,16 @@ const scheduleDecrypt = (newRows) => {
                         authorName: base.isMine ? 'Me' : name,
                         _decrypted: false,
                         _verifyReason: verdict.reason,
+                    }];
+                }
+                if (row.deleted_flag) {
+                    // Admission was the whole job — the tombstone renders via
+                    // rebuildDecryptedMessages, which never reads this cache.
+                    return [row.message_id, {
+                        ...base,
+                        text: '',
+                        authorName: base.isMine ? 'Me' : name,
+                        _decrypted: true,
                     }];
                 }
                 const decrypted = await $dialogs.decryptMessageRow(row);

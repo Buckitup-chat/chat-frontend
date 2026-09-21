@@ -516,7 +516,7 @@ describe('§1.4 video', () => {
 		expect(w.emitted('playVideo')[0][0]).toMatchObject({ fileId: videoPart.fileId });
 	});
 
-	// Duration comes from the envelope (07 §"video" pos 9) — visible before
+	// Duration comes from the envelope (07 §"video" pos 7) — visible before
 	// any chunk arrives, gone once the player's own controls take over.
 	it('shows the duration badge on the preview frame', () => {
 		const w = renderWith();

@@ -332,18 +332,24 @@ describe('checkpoint through the store', () => {
 		]);
 	});
 
-	// pq_dialogs.md §Tail calculation is the single rule for what a frontier
-	// holds. A tombstone admitted here but excluded from computeObservedTails
-	// would become a permanent frontier member no refs_map ever references —
-	// every checkpoint in the dialog skewed by one entry per deleted message.
-	it('the frontier follows the refs_map tail rule: tombstones stay out', async () => {
+	// pq_dialogs.md §Tail calculation: deleted messages participate — the
+	// tombstone is a signed revision like any edit, so its pair enters the
+	// tail set and the fact of deletion propagates causally. The frontier
+	// follows the same rule, or the roots skew on identical state.
+	it('the frontier follows the refs_map tail rule: tombstones stay in', async () => {
 		const r1 = await makeRow(M1, {});
 		const tomb = await makeRow(M2, { [M1]: r1.sign_hash }, {
 			content_b64: null, deleted_flag: true, owner_timestamp: 1_700_000_700,
 		});
 		seed(r1, tomb);
 		const { part } = await store.createDialogCheckpoint(peer);
-		expect(part.frontier).toEqual({ [M1]: r1.sign_hash });
+		// The tombstone covers M1 through its refs, so it is the sole tail.
+		// This candidate rule is part of what a signed frontierRoot means
+		// (hedged ML-DSA makes the root itself unpinnable): changing which
+		// rows enter this map requires a CHECKPOINT_VERSION bump (v3 =
+		// tombstones in), or old roots read as "history changed" on
+		// identical state.
+		expect(part.frontier).toEqual({ [M2]: tomb.sign_hash });
 	});
 
 	it('describeCheckpointDiff hydrates changes with content and authorship', async () => {
@@ -509,15 +515,14 @@ describe('checkpoint through the store', () => {
 	});
 
 	// A peer signs whatever message_id they like and the gate does not
-	// constrain the field; a tombstone with a hostile id slips past the
-	// frontier (tombstones are no tail candidates) — it must surface as
-	// unadmitted at the reducer, not as a TypeError from the trie.
+	// constrain the field; the hostile row must surface as unadmitted at
+	// the reducer boundary, not as a TypeError from the trie — the
+	// unadmitted throw fires before the frontier tripwire would see it.
 	it('a tombstone with an out-of-grammar id blocks signing, without throwing', async () => {
 		const r1 = await makeRow(M1, {});
 		seed(r1);
-		// signed BY the peer's key over the hostile id — the gate verifies it,
-		// and as a tombstone it is no tail candidate, so the frontier tripwire
-		// never sees it either; only the reducer boundary is left
+		// signed BY the peer's key over the hostile id — the gate verifies
+		// the signature, but the id never entered this store's view state
 		const hostile = await makeRow('dmsg_ключ', { [M1]: r1.sign_hash }, {
 			content_b64: null, deleted_flag: true,
 		});
