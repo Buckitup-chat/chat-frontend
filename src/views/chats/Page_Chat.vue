@@ -132,6 +132,17 @@ const rebuildDecryptedMessages = (newRows) => {
         // §3.2: deletion is a signed revision, not a disappearance. The
         // tombstone stays in the feed; reactions on it stay where they were.
         if (row.deleted_flag) {
+            // ...but only a revision the gate did not reject. A forged
+            // tombstone rendered as "deleted" would erase the peer's text
+            // from view, which is the attack the gate is there to stop, so
+            // an invalid one keeps the gate's warning instead. ('waiting'
+            // is a genuine revision that is merely unplaced — it still
+            // reads as a deletion.)
+            const gated = messageCache.get(row.message_id);
+            if (gated?._verify === 'invalid') {
+                out.push(gated);
+                continue;
+            }
             const date = new Date(row.owner_timestamp * 1000);
             out.push({
                 id: row.message_id,
@@ -189,8 +200,10 @@ const scheduleDecrypt = (newRows) => {
                 const verdict = await $dialogs.admitMessageRow(row);
                 // §4.3 ✓✓: arrival is a fact, so the delivered receipt goes
                 // out automatically once the row verifies — unlike "read",
-                // which stays a deliberate act.
-                if (verdict.status === 'verified' && !row.deleted_flag && row.sender_hash !== $userPQ.currentUserHash && row.sign_hash) {
+                // which stays a deliberate act. A tombstone is a revision
+                // like any other and gets its own receipt: the sender learns
+                // the deletion reached the peer, not just the server.
+                if (verdict.status === 'verified' && row.sender_hash !== $userPQ.currentUserHash && row.sign_hash) {
                     $dialogs.sendDeliveredReceipt(peerHash.value, {
                         messageId: row.message_id, messageSignHash: row.sign_hash,
                     });
@@ -249,6 +262,15 @@ const scheduleDecrypt = (newRows) => {
                 && $dialogs.isMessageAdmitted(entry._raw.dialog_hash, entry._raw.message_id, entry._raw.sign_hash)) {
                 entry._verify = 'verified';
                 entry._dagVerified = true;
+                // The receipt goes out here or never: this row verified
+                // inside the gate rather than at its own admission, and
+                // once it is marked verified the pending filter above
+                // excludes it from every later pass.
+                if (entry._raw.sender_hash !== $userPQ.currentUserHash) {
+                    $dialogs.sendDeliveredReceipt(peerHash.value, {
+                        messageId: entry._raw.message_id, messageSignHash: entry._raw.sign_hash,
+                    });
+                }
             }
         }
 

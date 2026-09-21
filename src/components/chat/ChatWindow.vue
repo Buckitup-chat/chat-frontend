@@ -229,12 +229,16 @@
           </div>
           <div class="message-time text-end mt-1" :class="msg.isMine ? 'text-dark' : 'text-muted'">
             {{ msg.timestamp }}
-            <!-- §4.3: ◌ stored locally → pale ✓ in flight → ✓ server-accepted.
-                 (✓✓ delivered needs delivery receipts; ↻ auto-retry needs the
-                 outbox hook — both arrive with their transports.) -->
+            <!-- §4.3: ◌ stored locally → pale ✓ in flight → ✓ server-accepted
+                 → ✓✓ the peer's delivery receipt landed. A delivered deletion
+                 gets a tombstone rather than ✓✓: what reached the peer is the
+                 retraction, so saying "delivered" about the message would name
+                 the wrong thing. (↻ auto-retry still waits on the outbox hook.) -->
             <span v-if="msg._syncStatus === 'sending'" class="sync-status local" title="Saved locally">◌</span>
             <span v-else-if="msg._syncStatus === 'syncing'" class="sync-status pending" title="Sending…">✓</span>
-            <span v-else-if="msg._syncStatus === 'synced' && msg._deliveredToPeers" class="sync-status delivered" title="Delivered to the recipient">✓✓</span>
+            <span v-else-if="msg._syncStatus === 'synced' && msg._deliveredToPeers"
+              :class="['sync-status', msg._deleted ? 'tombstone' : 'delivered']"
+              :title="msg._deleted ? 'Deletion delivered to the recipient' : 'Delivered to the recipient'">{{ msg._deleted ? '🪦' : '✓✓' }}</span>
             <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Accepted by server">✓</span>
             <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Rejected — not sent">!</span>
             <span v-if="msg._raw && msg._raw.parent_sign_hash" class="msg-edited" role="button"
@@ -1189,7 +1193,8 @@ watch(() => props.messages, () => {
 
 /* ---------- design board: send states (§4.3) ---------- */
 .sync-status.local { color: #9a9c9d; }        /* ◌ stored locally */
-.sync-status.delivered { color: #2e7d32; letter-spacing: -2px; } /* ✓✓ green per board */
+.sync-status.delivered, .sync-status.tombstone { color: #2e7d32; } /* delivered, green per board */
+.sync-status.delivered { letter-spacing: -2px; }  /* tightens the ✓✓ pair */
 .sync-status.pending { opacity: .45; }         /* pale ✓ in flight */
 /* rejected outright: red frame on the bubble itself, not just the glyph */
 .message-error { border: 1.5px solid #dc3545; }

@@ -233,6 +233,10 @@ Telegram — здесь это осознанный акт, а не автома
 отправляется → принято сервером → доставлено собеседнику. Плюс ошибки:
 временная (повторим) и окончательная (не примут никогда).
 
+Deleting adds a fifth state: a retraction the peer's device has confirmed.
+Its mark is a tombstone rather than the delivered double check, because what
+arrived was the deletion and not the message.
+
 **Что решить дизайнеру.** Значки для каждого состояния. Что видит пользователь
 после перезагрузки при неотправленных сообщениях. Как выглядит окончательно
 отклонённое сообщение и какое действие ему доступно. Индикатор «N сообщений
