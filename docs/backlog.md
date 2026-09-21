@@ -162,3 +162,43 @@ Pi) — при её отсутствии код сам уходит в in-memory
 - Bounded-concurrency транспорт outbox — в бэклоге с предусловиями
   (ADR §7.2): метрики узкого места, глобальный учёт 429/Retry-After,
   батч-контракт /ingest_each.
+
+---
+
+## 9. Drag and drop files into the composer (desktop)
+
+**What.** On a desktop browser, dropping files anywhere over an open dialog
+starts the same upload the 📎 button starts today, captioned by whatever is in
+the input.
+
+**Why it is small.** The picker path already does the work: `onFilePicked`
+(`ChatWindow.vue`) turns a `FileList` into `emit('sendFile', files, caption)`,
+and `transfers.store` enqueues and drains it. A drop handler produces the same
+`File[]` and calls the same emit — no new upload code, no protocol change.
+
+**What the change has to get right:**
+
+- **Drop target is the dialog pane**, not the 40 px input — a drop zone the
+  size of a text field is a target users miss. Show an overlay while a file is
+  dragged over it (`Drop to send to <name>`).
+- **`dragover` must call `preventDefault()`.** Without it the browser navigates
+  away to the dropped file and the open dialog is lost — the classic way this
+  feature ships broken.
+- **Ignore drags that carry no files** (dragged text, links, images from
+  another tab arrive with different `dataTransfer` types) and ignore in-app
+  drags, so reordering the upload queue in `TransferPanel` does not turn into a
+  send.
+- **Folders**: `DataTransferItem.webkitGetAsEntry()` — either walk the tree or
+  refuse with a visible reason. Silently dropping a dragged folder on the floor
+  is the one outcome to avoid.
+- **Caption follows the picker rule**: the text in the input becomes the
+  caption of the composed message and the input clears. One behaviour, two
+  entry points.
+- **No open dialog, no drop target.**
+
+**Natural companion, same entry point:** pasting a screenshot from the
+clipboard (`paste` event with `clipboardData.files`). Same `File[]`, same emit;
+worth doing in the same change while the handler is open.
+
+Touch platforms have no file drag and drop, so this is desktop-only by nature —
+nothing to hide or degrade on mobile.
