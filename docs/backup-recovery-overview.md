@@ -145,12 +145,26 @@ where it will not tempt anyone into using it as their backup.
 
 ### Open
 
-**O1. Where the encrypted vault lives.** Proposal: `user_storage` on the
-server, which already syncs per-user rows the server cannot read. Recovery
-assumes every device is gone, so the ciphertext has to be reachable with
-nothing but the recovered key. The cost is a single point of *availability* —
-lose that row and the recovered key opens nothing — so a second copy (the node
-federation, or the helpers) is worth deciding at the same time.
+**O1. Where the second copy of the encrypted vault lives.** The primary copy
+is `user_storage`, which is public-read and authenticated-write
+(pq_user_storage §FR-3): a client with no account can read it, and only the
+owner can write it. Writing happens while the account is alive, so the
+asymmetry costs nothing.
+
+Addressing is the part that needs care, because the row's key is
+`(user_hash, uuid)` and a recovering client has neither — `user_hash` is
+derived from the signing key that was lost. The locator is therefore derived
+from the secret itself: `uuid = SHA3-512(S ‖ "vault-locator")[0..16]`. Gather
+shares, reconstruct S, compute the uuid, fetch by uuid alone, decrypt with S —
+no account anywhere in the chain. The shape endpoint filters on uuid without
+authentication, so this needs no new server surface, and it also means the
+server cannot tell a vault row from any other row, nor tell which accounts
+have a backup at all.
+
+What is left to decide is availability rather than access: that is one row on
+one server, and losing it leaves the recovered key with nothing to open. A
+second copy belongs either with the node federation, which is already in the
+flow behind its timelock, or with the helpers alongside their shares.
 
 **O2. Post-quantum share transport on the node plane.** The social plane is
 answered: shares ride the chat and inherit ML-KEM-1024. The node plane still
