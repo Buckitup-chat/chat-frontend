@@ -93,84 +93,91 @@ current implementation that is a smart contract (Sepolia):
 | Threat model + hardening RFC SI-1…SI-6 | `backitup-smart-contracts/docs/security` | written, not implemented |
 | Audit of every module | `docs/backup-recovery-audit-2026-09.md` | done: 3 critical, 11 high; crypto cores clean |
 
-## 6. Contested points and product questions — FOR APPROVAL
+## 6. Decisions and what is still open
 
-**Q1. What exactly is backed up (the "Compact Secret").**
-Today the prototypes split the JSON of the whole vault (the ML-DSA key alone
-is 4896 bytes); the RFC explicitly requires a compact payload, otherwise the
-shares bloat P2P traffic. Proposal: S = a 32-byte wrap key; the vault itself
-is encrypted under it and can live anywhere (e.g. in `user_storage` on the
-server — it is E2E-encrypted anyway). Decide: adopt the wrap key as canon?
+### Decided
 
-**Q2. Who the "friends" are in the product.**
-The natural answer: chat contacts, with the E2E dialogs themselves as the
-share-delivery channel (a share as a special message type, with the guardian
-confirming receipt). The prototype today is manual copy-paste. Decide:
-contacts + chat channel as canon? Can a guardian be outside BuckitUp
-(QR/file)?
+**The payload is a 32-byte wrap key.** Shamir never touches bulk data — the
+RFC's whole point, since an ML-DSA key alone is 4896 bytes and splitting it
+bloats P2P traffic. The vault is encrypted under the wrap key, and only that
+key is split. There is no password anywhere in the scheme: the secret is full
+entropy rather than something an attacker can guess.
 
-**Q3. Scheme parameters.**
-RFC: nodes 3-of-5 and a 48 h timelock; the live contract: a 10-minute
-timelock minimum; the production federation: 3 nodes with threshold 2.
-Decide the targets: node count/threshold, friend count/threshold (defaults
-and user-adjustable bounds), timelock length (48 h?), and whether the on-chain
-minimum must be raised to the product value.
+**A guardian is a user from the confirmed contact list**, and the delivery
+channel is the E2E dialog itself — a share travels as a message type. Nothing
+exotic for now: no guardians outside BuckitUp, no QR or file hand-off. This
+also settles the post-quantum question for the social plane, since every
+dialog message is already wrapped with ML-KEM-1024.
 
-**Q4. Is the blockchain mandatory.**
-Pros: a neutral arbiter of quorum/timelock/veto, already working. Cons: an
-external dependency (after Sepolia comes mainnet/L2 — a fee for every backup
-and recovery), public round metadata on-chain, and a philosophical conflict
-with the offline-Pi scenario of the messenger. Alternative: a quorum gate
-inside the node federation (no chain), at the price of trusting the
-federation. Decide: stay on-chain (which chain?), or move the gate into the
-federation.
+**Every parameter is customisable within reason.** A simple screen with
+defaults, and an advanced one exposing counts, thresholds and the timelock.
+The circle of helpers can grow *after* the backup exists: shares are generated
+with a reserve and the spares are kept in the account for exactly that.
 
-**Q5. The relayer is a central point.**
-It pays gas, sees every request, and its outage means backup/recovery is
-unavailable. Decide: who hosts it in production, whether a single relayer is
-acceptable at launch, whether a "pay gas yourself" fallback is needed.
+**The chain stays.** What it buys is not storage but an objective, observable
+record of who asked for recovery and who approved or refused — and the ability
+to block a backup or revoke a helper reliably. Eventual consistency does not
+give that.
 
-**Q6. The veto channel.**
-A veto works only if the owner LEARNS about a foreign round within the
-timelock. Decide the notification channel (push to all owner devices? email?
-a message to self in the chat?) — without it the timelock is decorative.
+**Gas: a "pay it yourself" fallback is required**, with the relayer as the
+convenience path rather than a dependency. A relayer can be anyone — ours by
+default, plus alternatives run by users and organisations; a node owner
+offering gas to their trusted users is a natural case. The design must assume
+many relayers, not one.
 
-**Q7. Post-quantum share transport.**
-Shares are encrypted with ECIES/secp256k1 (not PQ); the ephemeral user is
-secp256k1. The "acceptable" argument: a share is useful to an attacker only
-until recovery + reshare, a short window. The "not acceptable" argument: the
-whole chat is PQ and the backup is the most valuable thing in it. Decide:
-migrate share transport to ML-KEM in the final version, or consciously keep
-classical crypto with a threat-model entry.
+**Notifications are a subscription, not a channel.** Email, SMS, messengers —
+the owner subscribes to whichever they want. The notification server follows
+the relayer's shape: run your own, use ours, or attach several at once.
+Without a channel that actually reaches the owner the timelock is decorative,
+so this is part of the veto path, not a nicety.
 
-**Q8. Share lifecycle.**
-Changing the friend circle, a lost guardian, share "staleness", a mandatory
-reshare after every recovery, reminders for the owner to check the circle's
-liveness. Decide the policy (how often, what is automatic, what is manual).
+**Share lifecycle is a second-phase feature.** The case that matters: a
+helper who starts a recovery of their own — with us or elsewhere — makes the
+share they hold questionable, and the owner is told so.
 
-**Q9. Relation to linking a second device (device-link, variant B).**
-These are different operations (recovery = everything is lost; device-link =
-a live device exists), but the user has a single entry point: "I can't get
-in". Decide: a single UX wizard that branches into device-link/recovery, and
-the implementation order.
+**Device-link ships before recovery.** Logging in on a second device is the
+more basic operation and the more common need; recovery is the harder path
+behind the same "I can't get in" door.
 
-**Q10. The fate of manual Shamir and Local File.**
-Do they remain an "expert" fallback next to the network scheme, or get hidden
-once it launches? (Manual-path shares today carry raw keys without an
-envelope; adopting Q1 moves both paths onto the wrap key.)
+**Manual Shamir is a sandbox, not a feature** — scaffolding for the community
+scheme, and it goes when the scheme lands. Local File stays but is tucked away
+where it will not tempt anyone into using it as their backup.
 
-**Q11. Post-quorum behaviour when the recipient is lost.**
-The audit showed: after quorum the only exit from a round belongs to the
-owner — if the elected recipient's key is lost, the social half is locked
-forever (the owner has already lost their keys — that is the very recovery
-scenario). Decide: give guardians the right to reopen a round (keeping the
-timelock), or accept the wedge as the price of strictness.
+### Open
+
+**O1. Where the encrypted vault lives.** Proposal: `user_storage` on the
+server, which already syncs per-user rows the server cannot read. Recovery
+assumes every device is gone, so the ciphertext has to be reachable with
+nothing but the recovered key. The cost is a single point of *availability* —
+lose that row and the recovered key opens nothing — so a second copy (the node
+federation, or the helpers) is worth deciding at the same time.
+
+**O2. Post-quantum share transport on the node plane.** The social plane is
+answered: shares ride the chat and inherit ML-KEM-1024. The node plane still
+encrypts each share with ECIES over secp256k1, to a stealth address derived
+from the recipient's meta key, because that plane is keyed by Ethereum
+addresses and EIP-712 signatures. The exposure is harvest-now-decrypt-later.
+Moving it means a registry mapping address to ML-KEM key (`BackitupKeyRegistry`
+is the natural home), keys held off-chain with an on-chain commitment (an
+ML-KEM-1024 public key is 1568 bytes against 33–65), and an Ephemeral User
+carrying two keypairs — secp256k1 to sign on-chain, ML-KEM to receive shares.
+Decide: do it in the final version, or keep classical crypto here with an
+explicit threat-model entry.
+
+**O3. The post-quorum wedge.** At recovery the client mints an Ephemeral User;
+guardians encrypt their shares to its public key and the contract records it as
+the recipient. If that private key is lost between quorum and reconstruction —
+a closed tab, a reload, a dead device — the released shares are encrypted to a
+key nobody holds, and the round cannot be reset: `_cancelRecovery` requires the
+owner, who is precisely the person that lost their keys. Decide: let a guardian
+quorum close a stuck round, keeping the timelock, or accept the wedge. Either
+way the ephemeral key should survive a reload, which narrows the case without
+closing it.
 
 ## 7. Next
 
 1. The all-module audit report + automatic treatment of confirmed bugs
    (separate document).
-2. Decisions on Q1–Q11 (this document; after approval the answers are edited
-   in place).
+2. The three open points above.
 3. The final implementation plan, phased.
 4. A branch with the full functionality and tests.
