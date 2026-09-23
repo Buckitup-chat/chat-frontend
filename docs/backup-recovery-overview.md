@@ -144,6 +144,14 @@ vault nor which accounts hold a backup. Durability is not this scheme's
 problem: account data is replicated across servers and swept into server-side
 backups like everything else on the platform.
 
+**A stuck recovery is restarted, not rescued.** If the ephemeral key is lost,
+the user mints a new one and runs the round again — no new authority, no
+guardian-held cancel button. Before quorum this already works: a guardian can
+move their vote to the new candidate. After quorum the deployed contract
+forbids it, so v2 gives a round a lifetime: `canDecrypt` gains the window the
+audit already requires (SI-2), and when the window closes the round resets by
+itself. One change buys both the missing window and the restart.
+
 **Share lifecycle is a second-phase feature.** The case that matters: a
 helper who starts a recovery of their own — with us or elsewhere — makes the
 share they hold questionable, and the owner is told so.
@@ -158,27 +166,29 @@ where it will not tempt anyone into using it as their backup.
 
 ### Open
 
-**O1. Post-quantum share transport on the node plane.** The social plane is
-answered: shares ride the chat and inherit ML-KEM-1024. The node plane still
-encrypts each share with ECIES over secp256k1, to a stealth address derived
-from the recipient's meta key, because that plane is keyed by Ethereum
-addresses and EIP-712 signatures. The exposure is harvest-now-decrypt-later.
-Moving it means a registry mapping address to ML-KEM key (`BackitupKeyRegistry`
-is the natural home), keys held off-chain with an on-chain commitment (an
-ML-KEM-1024 public key is 1568 bytes against 33–65), and an Ephemeral User
-carrying two keypairs — secp256k1 to sign on-chain, ML-KEM to receive shares.
-Decide: do it in the final version, or keep classical crypto here with an
-explicit threat-model entry.
+**O1. The node plane on our own platform.** The social plane is answered:
+shares ride the chat and inherit ML-KEM-1024. The node plane is today a
+TypeScript custodian (`backitup-node`) that keeps its share in a file and
+releases it on two gates — a signature that recovers to the claimed recipient,
+and `canDecrypt` read from the contract. It holds no key and no policy of its
+own.
 
-**O2. The post-quorum wedge.** At recovery the client mints an Ephemeral User;
-guardians encrypt their shares to its public key and the contract records it as
-the recipient. If that private key is lost between quorum and reconstruction —
-a closed tab, a reload, a dead device — the released shares are encrypted to a
-key nobody holds, and the round cannot be reset: `_cancelRecovery` requires the
-owner, who is precisely the person that lost their keys. Decide: let a guardian
-quorum close a stuck round, keeping the timelock, or accept the wedge. Either
-way the ephemeral key should survive a reload, which narrows the case without
-closing it.
+The target is that custodian running on our own Raspberry Pi nodes in Elixir,
+talking our post-quantum protocol instead of ECIES over secp256k1. Two things
+that design has to settle, and they are separate:
+
+- **Transport** can go post-quantum cheaply. No address-to-ML-KEM registry is
+  needed here, because the node already demands a fresh signature from the
+  recipient: adding the recipient's ML-KEM public key to that signed message
+  binds the on-chain identity to the PQ key, and the node encrypts its share to
+  it. Nothing goes on-chain, no contract changes.
+- **Policy stays on-chain** by the decision above, which means a node serving a
+  recovery needs to reach an RPC endpoint. That is a real constraint against
+  the offline-Pi scenario and should be stated as a precondition rather than
+  discovered in the field.
+
+Until that design lands, the existing TypeScript nodes with elliptic crypto
+stay in place.
 
 ## 7. Next
 

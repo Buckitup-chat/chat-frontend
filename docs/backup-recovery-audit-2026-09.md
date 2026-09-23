@@ -92,7 +92,7 @@ Severity shorthand: C/H/M/L = critical/high/medium/low.
 - (M) **`canDecrypt` never expires** (still true ten simulated years later —
   T9/SI-2 confirmed).
 - (M) Post-quorum liveness wedge: losing the elected recipient locks the
-  social half forever (see O2 in the overview).
+  social half forever (see the restart rule in the overview).
 - (M) `revokeSecret` mid-round emits no `RecoveryCancelled` → the indexer
   projection drifts (fixable on the backend today).
 
