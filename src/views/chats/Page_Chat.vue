@@ -703,7 +703,7 @@ const checkAvailability = async (fileId) => {
     try {
         const a = await $dialogs.getFileAvailability(fileId);
         availabilityByFileId.value = { ...availabilityByFileId.value, [fileId]: a };
-        // Screen 05 "Ход добора": what this client has observed, when.
+        // Screen 05, backfill progress: what this client has observed, when.
         if (!a.unknown) recordAvailability(fileId, a.present, a.total);
     } catch (e) {
         console.warn('Availability check failed for', fileId, e);
@@ -770,7 +770,7 @@ const handlePlayVideo = async (part) => {
                     [id]: { ...cur, status: cur.url ? cur.status : 'opening', done: p.done, total: p.total },
                 };
             },
-            // §1.4 "играть можно с первого куска": the prefix becomes a
+            // §1.4, playback starts from the first chunk: the prefix becomes a
             // playable src immediately; the full file replaces it when done.
             onPartial: (url) => {
                 videosByFileId.value = {

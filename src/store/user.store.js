@@ -227,14 +227,14 @@ export const userStore = defineStore('user', () => {
 				}
 			});
 			yJs.rtc.on('peer-conn', async ({ peer, webrtcConn }) => {
-				const handshakeOk = await setupSharedSecretAuth(peer); // твоя логіка перевірки
+				const handshakeOk = await setupSharedSecretAuth(peer); // your verification logic
 				if (!handshakeOk) {
 					console.warn('🚫 Peer failed handshake');
 					peer.destroy();
 					return;
 				}
 				console.log('✅ Peer verified');
-				webrtcConn._startSync(); // запускаємо sync вручну
+				webrtcConn._startSync(); // start sync manually
 			});
 
 			yJs.server = new WebsocketProvider('wss://buckitupss.appdev.pp.ua/server', account.value.address, yJs.doc, { privateKey: account.value.privateKey });

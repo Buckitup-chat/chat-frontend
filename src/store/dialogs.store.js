@@ -503,7 +503,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     /**
      * Uploads a file and sends the message referencing it. Progress is in
-     * chunks (§2.1 — "куски, а не проценты-догадки"). Returns the fileId.
+     * chunks (§2.1 — chunks, not guessed percentages). Returns the fileId.
      */
     /**
      * Uploads one attachment and returns its content part.
@@ -910,7 +910,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * Creates and sends a checkpoint over the dialog's current state.
      * Fails (INCOMPLETE_CAUSAL_HISTORY) while anything is unadmitted or any
      * refs blob is still undecryptable: a checkpoint must not attest history
-     * the device has not fully verified (ТЗ §7 — head hashes alone can
+     * the device has not fully verified (spec §7 — head hashes alone can
      * reference data never seen locally).
      */
     const createDialogCheckpoint = async (peerHash) => {

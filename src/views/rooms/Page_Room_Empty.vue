@@ -15,21 +15,21 @@
 </template>
 
 <style lang="scss" scoped>
-/* Стилі самої картки */
+/* the card itself */
 .room-card {
-	background-color: rgba(255, 255, 255, 0.15); /* Напівпрозорий білий фон */
+	background-color: rgba(255, 255, 255, 0.15); /* translucent white background */
 	border-radius: 16px;
 	padding: 32px 40px;
 	max-width: 400px;
 	width: 100%;
 	box-sizing: border-box;
 	text-align: center;
-	/* Легке розмиття фону, якщо підтримується браузером */
+	/* a light backdrop blur where the browser supports it */
 	backdrop-filter: blur(10px); 
 	-webkit-backdrop-filter: blur(10px);
 }
 
-/* Стилі тексту */
+/* text */
 .room-title {
 	color: #ffffff;
 	font-size: 18px;
@@ -39,7 +39,7 @@
 	letter-spacing: 0.3px;
 }
 
-/* Стилі кнопки */
+/* button */
 .create-room-btn {
 	background-color: transparent;
 	border: 1px solid rgba(255, 255, 255, 0.5);
@@ -52,17 +52,17 @@
 	display: flex;
 	justify-content: center;
 	align-items: center;
-	gap: 12px; /* Відстань між текстом та іконкою */
+	gap: 12px; /* gap between the text and the icon */
 	transition: background-color 0.2s ease, border-color 0.2s ease;
 }
 
-/* Ефект при наведенні на кнопку */
+/* button hover */
 .create-room-btn:hover {
 	background-color: rgba(255, 255, 255, 0.1);
 	border-color: rgba(255, 255, 255, 0.8);
 }
 
-/* Вирівнювання іконки */
+/* icon alignment */
 .plus-icon {
 	display: block;
 }

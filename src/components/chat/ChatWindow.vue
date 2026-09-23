@@ -699,7 +699,7 @@ const onFilePicked = (e) => {
   e.target.value = '';
   if (!files.length) return;
   // Everything picked travels as ONE composed message, captioned by whatever
-  // sits in the input (board screen 02: "подпись набирается в том же поле").
+  // sits in the input (board screen 02: the caption is typed in the same field).
   emit('sendFile', files, newMessage.value.trim());
   newMessage.value = '';
   dropDraft();
@@ -714,7 +714,7 @@ const findOriginal = (q) => props.messages.find((m) => m.id === q.messageId);
 const quoteOriginalPresent = (q) => !!findOriginal(q);
 const quoteOriginalDeleted = (q) => !!findOriginal(q)?._deleted;
 
-// §1.2 "Ссылка и переход": scroll to the original, highlight for 1.5s.
+// §1.2, reference and jump: scroll to the original, highlight for 1.5s.
 const jumpToMessage = (messageId) => {
   const el = messagesContainer.value?.querySelector(`[data-msg-id="${messageId}"]`);
   if (!el) return; // original not synced yet — the note under the quote says so

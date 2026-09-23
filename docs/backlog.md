@@ -1,24 +1,24 @@
-# Бэклог
+# Backlog
 
-Живой список. Верхний блок — то, что мешает работать прямо сейчас; ниже —
-продуктовые и технические задачи без указания срочности.
+A living list. The top block is what blocks work right now; below it are product
+and technical tasks with no urgency attached.
 
 ---
 
-## 1. Стенд с автоматизируемым WebAuthn (блокирует автономное тестирование)
+## 1. A rig with automatable WebAuthn (blocks autonomous testing)
 
-**Проблема.** Вход в приложение требует Touch ID. Любая проверка, которой нужен
-живой аккаунт — синхронизация диалогов, доставка сообщений, аватарки, offline →
-online, два аккаунта в одном браузере — упирается в ручное подтверждение
-человеком. Автономно прогнать сценарий нельзя, в CI — тем более. Сейчас каждый
-логин стоит одного отвлечения владельца ноутбука.
+**The problem.** Logging into the app requires Touch ID. Every check that needs
+a live account — dialog sync, message delivery, avatars, offline → online, two
+accounts in one browser — runs into a human pressing a finger. A scenario cannot
+be run autonomously, let alone in CI. Right now every login costs one
+interruption of whoever owns the laptop.
 
-**Что нужно.** Режим, в котором `navigator.credentials.create/get` отвечают без
-участия человека, при этом прод-путь остаётся нетронутым.
+**What is needed.** A mode where `navigator.credentials.create/get` answer
+without a human, while the production path stays untouched.
 
-### Вариант A — виртуальный аутентификатор через CDP (рекомендую)
+### Option A — a virtual authenticator over CDP (recommended)
 
-У Chrome есть штатный `WebAuthn` домен в DevTools Protocol:
+Chrome has a first-class `WebAuthn` domain in the DevTools Protocol:
 
 ```js
 const client = await page.context().newCDPSession(page);
@@ -34,134 +34,139 @@ await client.send('WebAuthn.addVirtualAuthenticator', {
 });
 ```
 
-После этого `create()`/`get()` отрабатывают мгновенно и без подтверждений.
+After that `create()` and `get()` return instantly and without prompts.
 
-- **Плюсы:** ноль изменений в коде приложения — проверяется ровно тот путь,
-  который поедет в прод, включая `@lo-fi/webauthn-local-client` и разблокировку
-  vault. Работает и локально, и в CI.
-- **Минусы:** нужна зависимость `playwright` (или `puppeteer`) плюс загрузка
-  Chromium (~150 МБ) — только в devDependencies.
-- **Объём:** ~день. Хелпер `tests/e2e/authenticator.ts`, фикстура «залогиненный
-  аккаунт», один-два сценария поверх неё.
+- **Upside:** zero changes in application code — what is exercised is exactly
+  the path that ships, including `@lo-fi/webauthn-local-client` and unlocking
+  the vault. Works locally and in CI.
+- **Downside:** a `playwright` (or `puppeteer`) dependency plus a Chromium
+  download (~150 MB) — devDependencies only.
+- **Size:** about a day. A `tests/e2e/authenticator.ts` helper, a "logged-in
+  account" fixture, and one or two scenarios on top of it.
 
-### Вариант B — тестовый флаг в приложении
+### Option B — a test flag in the application
 
-`VITE_FAKE_AUTHENTICATOR=1` подменяет вызовы WebAuthn заглушкой с
-детерминированным ключом.
+`VITE_FAKE_AUTHENTICATOR=1` replaces the WebAuthn calls with a stub holding a
+deterministic key.
 
-- **Плюсы:** без новых зависимостей, работает в любом браузере, в том числе в
-  панели предпросмотра.
-- **Минусы:** проверяется не тот код, что в проде; в кодовую базу попадает
-  ветка, обходящая аутентификацию, — её нельзя случайно собрать в релиз.
-  Требует дисциплины (проверка в CI, что флаг не включён в прод-сборке).
-- **Объём:** полдня.
+- **Upside:** no new dependencies, works in any browser, including the preview
+  panel.
+- **Downside:** what is exercised is not the code that ships, and the codebase
+  gains a branch that bypasses authentication — one that must never be built
+  into a release by accident. It takes discipline (a CI check that the flag is
+  off in the production build).
+- **Size:** half a day.
 
-### Вариант C — фикстуры vault без UI
+### Option C — vault fixtures without the UI
 
-Разложить готовый разблокированный vault прямо в IndexedDB перед стартом
-приложения, минуя экран входа.
+Lay a ready unlocked vault straight into IndexedDB before the app starts,
+skipping the login screen.
 
-- **Плюсы:** быстрее всех, никакого WebAuthn вообще.
-- **Минусы:** не покрывает сам вход и созданиe аккаунта — а это именно тот
-  участок, где чаще всего ломается. Фикстуру придётся чинить при каждом
-  изменении формата vault.
+- **Upside:** the fastest of the three, no WebAuthn at all.
+- **Downside:** it covers neither login nor account creation — which is exactly
+  the stretch that breaks most often. The fixture has to be repaired every time
+  the vault format changes.
 
-**Рекомендация:** A как основной путь, C как ускоритель для тестов, которым вход
-не интересен. B — только если A окажется несовместим со сборкой.
-
----
-
-## 2. Обмен аватарками между пользователями
-
-Сейчас механизма нет. `EncryptionManagerPQ.loadAvatar` читает строку
-`user_storage` **своего** `user_hash` и расшифровывает ключом из **своего**
-`crypt_skey` (соль `avatar-encryption`). Чужую аватарку расшифровать нечем, а в
-`user_cards` поля аватара нет вообще. Аватарка собеседника показывается, только
-если он сохранён в локальных контактах; иначе рисуется генеративная заглушка.
-
-Варианты: класть аватарку в `user_card` открытой (карточки и так публичны) либо
-шифровать ключом диалога вместо личного. Требует продуктового решения.
+**Recommendation:** A as the main route, C as an accelerator for tests that do
+not care about login. B only if A turns out to be incompatible with the build.
 
 ---
 
-## 3. Вес шейпа `user_cards`
+## 2. Exchanging avatars between users
 
-Замеры от 2026-08-14: снапшот 740 КБ на 30 строк (~24 КБ на карточку из-за
-ML-DSA/ML-KEM ключей) плюс догоняющий лог 2.08 МБ на 112 записей — одна карточка
-встречается в логе 27 раз, потому что каждое переименование публикует строку
-целиком. Итого ~2.8 МБ на выход в «up-to-date».
+There is no mechanism today. `EncryptionManagerPQ.loadAvatar` reads the
+`user_storage` row of **its own** `user_hash` and decrypts it with a key from
+**its own** `crypt_skey` (salt `avatar-encryption`). There is nothing to decrypt
+someone else's avatar with, and `user_cards` has no avatar field at all. A
+contact's avatar is shown only if they are saved in local contacts; otherwise a
+generated placeholder is drawn.
 
-Сервер не сжимает: ответ с `Accept-Encoding: gzip, br` того же размера; локально
-gzip -9 срезает 25%. Байты кэшируются браузером (`max-age=604800`), но разбор и
-раскладка в коллекцию повторяются на каждом старте.
-
-Что делать: включить gzip на эндпоинте (сторона бэкенда, польза всем клиентам);
-подумать про компактификацию лога шейпа.
+Options: put the avatar in `user_card` in the clear (cards are public anyway),
+or encrypt it with the dialog key instead of a personal one. Needs a product
+decision.
 
 ---
 
-## 4. Проверка персистентности коллекций (L1) на устройствах
+## 3. The weight of the `user_cards` shape
 
-Слой включён по умолчанию (`309731b`): коллекции поднимаются из SQLite до
-ответа сети, Electric докачивает дельту с сохранённого оффсета.
+Measured 2026-08-14: a 740 KB snapshot over 30 rows (~24 KB per card because of
+the ML-DSA/ML-KEM keys) plus a 2.08 MB catch-up log over 112 entries — one card
+appears in the log 27 times, because every rename publishes the whole row. That
+is ~2.8 MB to reach "up-to-date".
 
-Осталось проверить: поддержка OPFS в целевых браузерах (Safari, WebView на
-Pi) — при её отсутствии код сам уходит в in-memory, но это надо увидеть;
-тёплый старт на живом стейджинге (логин → сообщения → перезагрузка →
-мгновенный рендер → докачка только новых строк); поведение двух вкладок через
+The server does not compress: a response with `Accept-Encoding: gzip, br` is the
+same size, while locally gzip -9 takes off 25%. The bytes are cached by the
+browser (`max-age=604800`), but parsing and loading them into a collection
+repeats on every start.
+
+What to do: enable gzip on the endpoint (backend side, every client benefits);
+think about compacting the shape log.
+
+---
+
+## 4. Verifying collection persistence (L1) on devices
+
+The layer is on by default (`309731b`): collections come up from SQLite before
+the network answers, and Electric fetches the delta from the stored offset.
+
+Still to check: OPFS support in the target browsers (Safari, the WebView on a
+Pi) — without it the code falls back to in-memory by itself, but that needs to
+be seen; a warm start against live staging (log in → messages → reload → instant
+render → only new rows fetched); and how two tabs behave through
 `BrowserCollectionCoordinator`.
 
 ---
 
-## 6. Покрытие миграции старых записей в CI
+## 6. Covering the migration of old records in CI
 
-Миграция записей, созданных до шифрования, проверена только руками в браузере:
-тестовый хук глушит IndexedDB-путь. `fake-indexeddb` уже в devDependencies
-(используется тестами чанк-кэша) — осталось снять хук и увести оба сценария в CI.
-
----
-
-## 7. Скиллы Claude Code для повторяющихся процедур
-
-**Что.** `CLAUDE.md` и `docs/invariants.md` покрывают *знания*: что нельзя
-нарушать и почему. Они не покрывают *процедуры* — многошаговые действия,
-которые повторяются от задачи к задаче и каждый раз воспроизводятся из памяти
-сессии. Для них есть отдельный механизм: `.claude/skills/<name>/SKILL.md`,
-подхватывается по вызову или по контексту задачи.
-
-**Кандидаты** (по опыту этой миграции):
-
-- **Обработка внешнего ревью.** Каждую находку: верифицировать по исходникам
-  бэкенда → починить → написать тест → проверить, что тест падает без фикса →
-  прогнать lint/test/build → запушить в рабочую ветку → влить в интеграционную
-  → запушить её. Три раунда ревью прошли по этой схеме, шаги терялись
-  (не запушено, не влито в интеграционную).
-- **Синхронизация со стейджингом руками.** Поднять dev-сервер, проверить, что
-  бэкенд жив (`/shapes` не 503), пройти сценарий двумя аккаунтами, снять
-  HAR/консоль. Сейчас упирается в WebAuthn (§1) — скилл имеет смысл после его
-  решения.
-- **Добавление таблицы/поля в wire-формат.** Открыть Ecto-схему → сверить
-  поля → обновить `createGenericMutation`/`CHECK_FIELDS` → тест на состав
-  мутации. Один раз уже отправляли `sign_hash` туда, где его нет.
-
-**Когда.** Не отдельной задачей — заводить скилл в момент, когда следующая
-задача снова требует такой процедуры. Первый очевидный триггер — следующий
-раунд внешнего ревью.
+The migration of records written before encryption has only been checked by hand
+in a browser: a test hook mutes the IndexedDB path. `fake-indexeddb` is already
+in devDependencies (the chunk-cache tests use it) — what remains is to drop the
+hook and move both scenarios into CI.
 
 ---
 
-## 8. Ранее зафиксированное
+## 7. Claude Code skills for repeated procedures
 
-- Компонентные тесты `Page_Chat.vue` — главный пробел в покрытии.
-- Решение о мерже после сравнения с веткой параллельного разработчика.
-- Проверить PR #26 (`chore/add-typescript`) и #27
+**What.** `CLAUDE.md` and `docs/invariants.md` cover *knowledge*: what must not
+be broken and why. They do not cover *procedures* — multi-step actions that
+repeat from task to task and are reconstructed from session memory every time.
+There is a separate mechanism for those: `.claude/skills/<name>/SKILL.md`,
+picked up on invocation or by the task's context.
+
+**Candidates** (from the experience of this migration):
+
+- **Handling an external review.** For each finding: verify against the backend
+  source → fix → write a test → check the test fails without the fix → run
+  lint/test/build → push to the working branch → merge into the integration
+  branch → push that. Three rounds of review went through this, and steps kept
+  getting lost (not pushed, not merged into the integration branch).
+- **Syncing with staging by hand.** Start the dev server, check the backend is
+  alive (`/shapes` is not 503), walk a scenario with two accounts, capture the
+  HAR and the console. Today it runs into WebAuthn (§1) — the skill makes sense
+  once that is solved.
+- **Adding a table or field to the wire format.** Open the Ecto schema → check
+  the fields → update `createGenericMutation`/`CHECK_FIELDS` → a test on the
+  mutation's shape. We already sent `sign_hash` somewhere it does not exist.
+
+**When.** Not as a separate task — create a skill at the moment the next task
+needs that procedure again. The obvious first trigger is the next round of
+external review.
+
+---
+
+## 8. Recorded earlier
+
+- Component tests for `Page_Chat.vue` — the biggest gap in coverage.
+- The merge decision after comparing with the parallel developer's branch.
+- Check PR #26 (`chore/add-typescript`) and #27
   (`ref/dialog-crypto-types-and-tests`).
-- Read-cache fallback для истории/версий/ключей диалогов НЕ достраивать до
-  device-validation OPFS на реальном Raspberry Pi/WebView (приёмку на Pi —
-  первой): стабильный OPFS отменяет фолбэк целиком.
-- Bounded-concurrency транспорт outbox — в бэклоге с предусловиями
-  (ADR §7.2): метрики узкого места, глобальный учёт 429/Retry-After,
-  батч-контракт /ingest_each.
+- Do NOT build out the read-cache fallback for dialog history, versions and keys
+  until OPFS device-validation on a real Raspberry Pi / WebView (the Pi
+  acceptance comes first): stable OPFS removes the fallback entirely.
+- Bounded-concurrency transport for the outbox — in the backlog with
+  preconditions (ADR §7.2): metrics for the bottleneck, global accounting of
+  429/Retry-After, and the batch contract for /ingest_each.
 
 ---
 

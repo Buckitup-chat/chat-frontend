@@ -1,88 +1,89 @@
-# План: персистентность локального состояния и outbox
+# Plan: persisting local state and the outbox
 
-**Дата:** 2026-08-12
-**Ветка:** `docs/tanstack-migration`
-**Статус:** план; часть работы уже идёт параллельно (см. §2)
+**Date:** 2026-08-12
+**Branch:** `docs/tanstack-migration`
+**Status:** a plan; part of the work is already running in parallel (see §2)
 
 ---
 
-## 1. Принятые решения
+## 1. Decisions taken
 
-Зафиксировано по ходу обсуждения, чтобы не переоткрывать:
+Recorded during the discussion so they are not reopened:
 
-| Вопрос | Решение |
+| Question | Decision |
 |---|---|
-| Срок жизни неотправленного | **бессрочно** |
-| Отвергнутая навсегда запись в очереди | **продолжать очередь, пропуская записи, зависящие от отвергнутой** |
-| Данные в локальном хранилище | **всё шифруется; каждое отступление обосновывается и согласовывается** |
-| `localStore` (IndexedDB KV) | **шифровать целиком**, включая метаданные |
+| Lifetime of an unsent write | **unlimited** |
+| A permanently rejected record in the queue | **keep going, skipping the records that depend on the rejected one** |
+| Data in local storage | **everything is encrypted; every exception is argued and agreed** |
+| `localStore` (IndexedDB KV) | **encrypt wholesale**, metadata included |
 
 ---
 
-## 2. Что уже в работе (другой агент)
+## 2. What is already in flight (another agent)
 
-В рабочем дереве появилась персистентность коллекций на официальном стеке:
-`@tanstack/browser-db-sqlite-persistence` (wa-sqlite поверх OPFS) +
-`src/lib/data/persistence.ts` + обёртка `persisted()` в `collections.ts`.
-Установлены также `@journeyapps/wa-sqlite` и `@tanstack/offline-transactions`.
-В `vite.config.js` оба sqlite-пакета выведены из pre-bundling (иначе ломается
-OPFS-воркер). `initPersistence()` вызывается в `App.vue` до первой коллекции.
+Collection persistence on the official stack has appeared in the working tree:
+`@tanstack/browser-db-sqlite-persistence` (wa-sqlite over OPFS) +
+`src/lib/data/persistence.ts` + the `persisted()` wrapper in `collections.ts`.
+`@journeyapps/wa-sqlite` and `@tanstack/offline-transactions` are installed as
+well. In `vite.config.js` both sqlite packages are excluded from pre-bundling
+(otherwise the OPFS worker breaks). `initPersistence()` is called in `App.vue`
+before the first collection.
 
-Этот план учитывает ту работу и не дублирует её: §5 (слой L1) описывает, что
-к ней **нужно добавить** ради требования шифрования, а §6–7 — то, что ещё не
-начато (outbox и шифрование KV).
+This plan accounts for that work rather than duplicating it: §5 (layer L1)
+describes what **has to be added** to it for the encryption requirement, and
+§6–7 cover what has not been started (the outbox and KV encryption).
 
 ---
 
-## 3. Три слоя, а не один
+## 3. Three layers, not one
 
-«Персистентность» распадается на три независимых хранилища с разной ценой
-ошибки. Их важно не путать.
+"Persistence" splits into three independent stores with different costs of
+failure. Confusing them is the mistake to avoid.
 
-| | Слой | Что хранит | Цена потери | Статус |
+| | Layer | Holds | Cost of losing it | Status |
 |---|---|---|---|---|
-| **L1** | SQLite/OPFS — кэш коллекций | строки `user_cards`, `user_storage`, `dialog_*` + курсор шейпа | скорость старта, чтение без узла | в работе |
-| **L2** | IndexedDB KV (`localStore.ts`) | локальные ревизии `user_storage` | правки профиля/контактов | не начато |
-| **L3** | Outbox | неотправленные исходящие мутации | **данные пользователя теряются молча** | не начато |
+| **L1** | SQLite/OPFS — the collection cache | rows of `user_cards`, `user_storage`, `dialog_*` + the shape cursor | startup speed, reading without a node | in flight |
+| **L2** | IndexedDB KV (`localStore.ts`) | local `user_storage` revisions | profile and contact edits | not started |
+| **L3** | Outbox | unsent outgoing mutations | **user data is lost silently** | not started |
 
-**L3 — единственный слой, где теряются данные.** L1 — про скорость, L2 — про
-локальную устойчивость настроек. Это определяет приоритет, если придётся
-выбирать.
-
----
-
-## 4. Ключевое ограничение: подпись привязана к состоянию сервера
-
-Определяет устройство очереди, поэтому повторю кратко.
-
-Мутации подписываются ML-DSA против **известной базы**: `parent_sign_hash` —
-это `sign_hash` текущей ревизии на сервере, `owner_timestamp` строго
-возрастает. Мы решили (находка 1 второго ревью) не подписывать от неизвестной
-базы. Отсюда два класса операций:
-
-- **Класс 1, самодостаточные** — новое сообщение: `message_id` генерирует
-  клиент, `parent_sign_hash = null`. Можно подписать сразу.
-- **Класс 2, зависимые от базы** — правка сообщения, реакция, `user_storage`,
-  переименование карточки. Хранить можно только **намерение**; подписывать в
-  момент доставки, когда база известна.
-
-`@tanstack/offline-transactions` устроен ровно под это: персистится **имя**
-зарегистрированной функции (`mutationFnName`), а не готовый HTTP-payload. При
-доставке вызывается наша функция — чтение базы, выбор insert/update, подпись
-происходят в ней. То есть класс 2 поддерживается штатно, без обходных путей.
-
-**Следствие для UX:** подпись требует ключа из vault, а он заперт до WebAuthn.
-Значит очередь флашится **после логина**, а не при загрузке страницы.
+**L3 is the only layer where data is lost.** L1 is about speed, L2 about local
+resilience of settings. That sets the priority if a choice has to be made.
 
 ---
 
-## 5. Требование шифрования по слоям
+## 4. The key constraint: a signature is bound to server state
 
-Здесь главная трудность плана, и она неодинакова для трёх слоёв.
+It shapes the queue, so here it is briefly.
 
-### L3 (outbox) — решается штатно ✅
+Mutations are signed with ML-DSA against a **known base**: `parent_sign_hash` is
+the `sign_hash` of the current revision on the server, and `owner_timestamp`
+strictly increases. We decided (finding 1 of the second review) not to sign
+against an unknown base. That gives two classes of operation:
 
-`StorageAdapter` в `offline-transactions` — строковый интерфейс:
+- **Class 1, self-contained** — a new message: the client generates
+  `message_id`, `parent_sign_hash = null`. It can be signed immediately.
+- **Class 2, base-dependent** — editing a message, a reaction, `user_storage`, a
+  card rename. Only the **intent** can be stored; signing happens at delivery,
+  when the base is known.
+
+`@tanstack/offline-transactions` is built for exactly this: what is persisted is
+the **name** of a registered function (`mutationFnName`), not a ready HTTP
+payload. At delivery our function is called, and reading the base, choosing
+insert or update, and signing all happen inside it. So class 2 is supported
+natively, without workarounds.
+
+**Consequence for UX:** signing needs the key from the vault, and the vault is
+locked until WebAuthn. So the queue flushes **after login**, not on page load.
+
+---
+
+## 5. The encryption requirement, layer by layer
+
+Here is the plan's main difficulty, and it differs across the three layers.
+
+### L3 (outbox) — solved natively ✅
+
+`StorageAdapter` in `offline-transactions` is a string interface:
 
 ```ts
 interface StorageAdapter {
@@ -92,163 +93,165 @@ interface StorageAdapter {
 }
 ```
 
-Библиотека сама сериализует транзакцию в строку. Мы подставляем свой адаптер,
-который шифрует на `set` и расшифровывает на `get` (AES-GCM на ключе из vault).
-Требование выполняется через документированную точку расширения. Ключи записей
-— непрозрачные id транзакций, содержимого не раскрывают.
+The library serialises a transaction to a string itself. We supply an adapter
+that encrypts on `set` and decrypts on `get` (AES-GCM with the vault key). The
+requirement is met through a documented extension point. Record keys are opaque
+transaction ids and reveal nothing about the contents.
 
-### L2 (`localStore`) — решается своими силами ✅
+### L2 (`localStore`) — solved by ourselves ✅
 
-Код наш, поэтому просто оборачиваем значения тем же шифрованием. Заодно
-закрывается уже существующий пробел: **сейчас там в открытом виде лежат**
-`user_hash`, `owner_timestamp`, `sign_hash`, `sign_b64`, `parent_sign_hash`
-(зашифрован только `value_b64`). Это отступление от требования, которое никто
-не согласовывал — оно возникло по недосмотру.
+The code is ours, so the values simply get the same encryption. It also closes
+an existing gap: **today it holds in the clear** `user_hash`, `owner_timestamp`,
+`sign_hash`, `sign_b64`, `parent_sign_hash` (only `value_b64` is encrypted).
+That is a deviation from the requirement nobody agreed to — it came from an
+oversight.
 
-### L1 (SQLite/OPFS) — **штатного способа нет** ⚠️
+### L1 (SQLite/OPFS) — **there is no native way** ⚠️
 
-`openBrowserWASQLiteOPFSDatabase` принимает только `databaseName` и `vfsName`.
-Опции ключа нет; слов `encrypt`/`cipher` в пакете нет вообще. То есть
-**официальная персистентность коллекций пишет на диск открытым текстом**.
+`openBrowserWASQLiteOPFSDatabase` accepts only `databaseName` and `vfsName`.
+There is no key option; the words `encrypt` and `cipher` do not appear in the
+package at all. So **the official collection persistence writes to disk in
+plaintext**.
 
-Что именно оказывается открытым:
+What exactly ends up readable:
 
-- **Содержимое — уже зашифровано** сквозным шифрованием: `content_b64`,
-  `refs_map_b64`, `type_b64`, `value_b64`. Тексты сообщений на диск открытыми
-  не попадают.
-- **Открыто лежат метаданные:** `user_hash`, `dialog_hash`, `sender_hash`,
+- **Contents are already encrypted** end-to-end: `content_b64`,
+  `refs_map_b64`, `type_b64`, `value_b64`. Message text never reaches the disk
+  in the clear.
+- **Metadata is in the clear:** `user_hash`, `dialog_hash`, `sender_hash`,
   `peer_hash`, `reactor_hash`, `message_id`, `owner_timestamp`, `deleted_flag`,
-  подписи и хеши, а также **`user_cards.name` — отображаемые имена**.
+  signatures and hashes, and **`user_cards.name` — the display names**.
 
-То есть на диске в открытом виде оказывается **социальный граф, тайминги,
-объём переписки и имена контактов**. Для privacy-продукта это ровно та часть,
-которая обычно и представляет интерес: содержание защищено, а «кто с кем и
-когда» — нет.
+So what sits on disk in the clear is **the social graph, the timings, the volume
+of correspondence and the contact names**. For a privacy product that is exactly
+the part which usually matters: the content is protected, "who talked to whom
+and when" is not.
 
-Существенная оговорка: те же метаданные лежат открытыми и на сервере — иначе
-Electric не смог бы фильтровать шейпы по `dialog_hash`. Но модель угроз
-разная: сервер — это личный Raspberry Pi пользователя, а устройство с
-браузером может быть общим, потерянным или изъятым.
+An important qualification: the same metadata is in the clear on the server too —
+otherwise Electric could not filter shapes by `dialog_hash`. But the threat model
+differs: the server is the user's own Raspberry Pi, while the device with the
+browser may be shared, lost, or seized.
 
-**Варианты для L1** (нужно решение):
+**Options for L1** (a decision is needed):
 
-| | Вариант | Цена | Соответствие требованию |
+| | Option | Price | Meets the requirement |
 |---|---|---|---|
-| **A** | Свой шифрующий VFS поверх wa-sqlite (`vfsName` — документированная точка) | высокая: собственный крипто-код на уровне страниц БД, который надо тестировать и поддерживать | полное |
-| **B** | Сборка SQLCipher под WASM вместо wa-sqlite | очень высокая: адаптер жёстко завязан на wa-sqlite, нужен форк | полное |
-| **C** | Персистить только несенситивные коллекции (не диалоги) | теряется главная польза — тёплый старт переписки | частичное |
-| **D** | Отложить L1 до решения по шифрованию; сейчас сделать L2+L3 | ноль — L1 просто не включается | требование не нарушается, потому что слоя нет |
-| **E** | Включить с явным обоснованием + меры (очистка при выходе, отключение на общих устройствах) | ноль | **отступление, требует вашего согласования** |
+| **A** | Our own encrypting VFS over wa-sqlite (`vfsName` is a documented hook) | high: our own crypto code at the page level, to be tested and maintained | fully |
+| **B** | Build SQLCipher for WASM instead of wa-sqlite | very high: the adapter is hard-wired to wa-sqlite, a fork is needed | fully |
+| **C** | Persist only non-sensitive collections (not dialogs) | the main benefit is lost — a warm start of the correspondence | partially |
+| **D** | Defer L1 until the encryption decision; do L2+L3 now | none — L1 simply stays off | the requirement is not broken, because the layer is absent |
+| **E** | Turn it on with an explicit argument plus measures (wipe on logout, off on shared devices) | none | **a deviation, needs your agreement** |
 
-**Моя рекомендация — D с последующим A.** Обоснование: L3 (outbox) — это то,
-где реально теряются данные пользователя, и он шифруется штатно. L1 даёт
-скорость, а не сохранность, и именно он единственный конфликтует с
-требованием. Разумно не блокировать outbox ради L1 и не принимать поспешно
-отступление E.
+**My recommendation is D, then A.** The reasoning: L3 (the outbox) is where user
+data is actually lost, and it encrypts natively. L1 buys speed rather than
+safety, and it is the only one that conflicts with the requirement. It is
+sensible not to block the outbox on L1, and not to accept deviation E in haste.
 
-**Важное уточнение, снимающее возражение против шифрования L1:** может
-показаться, что шифрование убивает смысл тёплого старта, раз ключ доступен
-только после логина. Это не так — пользователь всё равно обязан пройти
-WebAuthn, прежде чем увидит хоть что-то. Тёплый старт остаётся тёплым, просто
-отсчитывается от момента разблокировки, а не от загрузки страницы.
+**One clarification that removes the objection to encrypting L1:** it may seem
+that encryption defeats the warm start, since the key is available only after
+login. It does not — the user has to pass WebAuthn before seeing anything at
+all. The warm start stays warm; it is simply measured from the unlock rather
+than from the page load.
 
 ---
 
-## 6. Устройство очереди (L3)
+## 6. How the queue works (L3)
 
-### Что персистится
+### What is persisted
 
 ```
 transaction {
-  id                непрозрачный uuid (имя ключа в хранилище)
-  mutationFnName    имя нашей функции доставки
-  mutations         строки коллекций (содержимое уже зашифровано E2E)
+  id                opaque uuid (the key name in storage)
+  mutationFnName    the name of our delivery function
+  mutations         collection rows (contents already E2E-encrypted)
   attempts, createdAt, ...
 }
 ```
-Всё это библиотека сериализует в строку → наш адаптер шифрует целиком.
+The library serialises all of it to a string → our adapter encrypts it whole.
 
-### Порядок и зависимости
+### Order and dependencies
 
-FIFO из коробки. Поверх него — согласованное правило: **при permanent-отказе
-продолжаем, но пропускаем зависящие записи.** Зависимость определяется просто:
+FIFO out of the box. On top of it, the agreed rule: **on a permanent rejection we
+continue, skipping the records that depend on the rejected one.** Dependency is
+simple to determine:
 
-- правка сообщения зависит от самого сообщения (`message_id`);
-- реакция/квитанция зависят от сообщения (`message_id`);
-- следующая ревизия `user_storage` зависит от предыдущей (тот же слот);
-- сообщения между собой независимы.
+- an edit depends on the message itself (`message_id`);
+- a reaction or receipt depends on the message (`message_id`);
+- the next `user_storage` revision depends on the previous one (same slot);
+- messages are independent of each other.
 
-Реализация: при переводе записи в `failed_permanent` помечаем и все
-последующие записи с тем же «предметом» (message_id / слот) — они бы всё
-равно получили отказ, поскольку их база не появится.
+Implementation: when a record moves to `failed_permanent`, mark every later
+record with the same subject (message_id / slot) — they would be rejected anyway,
+since their base will never appear.
 
-### Мультивкладочность
+### Multiple tabs
 
-Лидер-вкладка и BroadcastChannel — из коробки (`WebLocksLeader` /
-`BroadcastChannelLeader`). Не-лидеры работают в online-only режиме. Это же
-согласуется с `BrowserCollectionCoordinator`, который уже используется в L1.
+A leader tab and BroadcastChannel come out of the box (`WebLocksLeader` /
+`BroadcastChannelLeader`). Non-leaders work online-only. This is consistent with
+`BrowserCollectionCoordinator`, already used in L1.
 
-### Цена внедрения
+### The cost of adopting it
 
-Единственная существенная: сейчас запись **минует** механизм мутаций TanStack
-DB — мы собираем подписанную мутацию сами и шлём напрямую
-(`sendMutationsAndAwaitShape`); в `barrier.ts` это прямо зафиксировано. Чтобы
-использовать `offline-transactions`, запись нужно перевести на
-`collection.insert()/update()` внутри транзакции с нашей `mutationFn`.
+One item is substantial: the write path currently **bypasses** the TanStack DB
+mutation mechanism — we assemble a signed mutation ourselves and send it
+directly (`sendMutationsAndAwaitShape`), which `barrier.ts` states outright. To
+use `offline-transactions`, writes have to move to
+`collection.insert()/update()` inside a transaction with our `mutationFn`.
 
-Это переделка пути, который стабилизировали двумя раундами ревью, — риск
-регрессий реален. Поэтому этап 3 ниже разбит на «сначала одна операция,
-проверить, потом остальные».
+That rebuilds a path settled by two rounds of review, so the regression risk is
+real. Stage 3 below is therefore split into "one operation first, verify, then
+the rest".
 
 ---
 
-## 7. Этапы
+## 7. Stages
 
-### Этап 1 — Крипто-обёртка хранилища
-`src/lib/data/secureStore.ts`: AES-GCM поверх произвольного строкового
-хранилища, ключ из vault (`EncryptionManagerPQ`), namespace по `user_hash`.
-Отдельная соль/nonce на запись.
+### Stage 1 — the storage crypto wrapper
+`src/lib/data/secureStore.ts`: AES-GCM over any string storage, the key from the
+vault (`EncryptionManagerPQ`), namespaced by `user_hash`. A separate salt and
+nonce per write.
 
-**Тесты:** круг «зашифровал → расшифровал»; чужой ключ не читает; отсутствие
-ключа даёт внятную ошибку, а не тихий пустой результат.
+**Tests:** the encrypt-decrypt round trip; another key cannot read it; a missing
+key produces a clear error rather than a silent empty result.
 
-### Этап 2 — Шифрование `localStore` (L2)
-Провести существующий KV через обёртку этапа 1. Миграция: старые открытые
-записи прочитать один раз, перезаписать зашифрованными.
+### Stage 2 — encrypting `localStore` (L2)
+Run the existing KV through the stage 1 wrapper. Migration: read the old
+plaintext records once and rewrite them encrypted.
 
-**Следствие для UX:** `user_storage` становится читаемым только после логина —
-проверить, что ничего не читает его раньше.
+**Consequence for UX:** `user_storage` becomes readable only after login — check
+that nothing reads it earlier.
 
-### Этап 3 — Outbox (L3), поэтапно
-1. Поднять `startOfflineExecutor` с нашим шифрующим адаптером **после логина**.
-2. Перевести на транзакции **только отправку нового сообщения** (класс 1 —
-   самый простой и самый ценный), проверить вживую двумя аккаунтами.
-3. Затем правки, реакции, квитанции (класс 2 — материализация намерения в
+### Stage 3 — the outbox (L3), in steps
+1. Start `startOfflineExecutor` with our encrypting adapter **after login**.
+2. Move **only sending a new message** to transactions (class 1 — the simplest
+   and the most valuable), then verify live with two accounts.
+3. Then edits, reactions and receipts (class 2 — materialising the intent inside
    `mutationFn`).
-4. Затем `user_storage` и переименование карточки.
+4. Then `user_storage` and the card rename.
 
-**Тесты на каждом шаге:** запись при недоступном узле попадает в очередь;
-после восстановления доставляется ровно один раз; permanent-отказ пропускает
-зависящие записи, но не блокирует независимые.
+**Tests at every step:** a write while the node is unreachable lands in the
+queue; after recovery it is delivered exactly once; a permanent rejection skips
+dependent records without blocking independent ones.
 
-### Этап 4 — UI очереди
-Честный статус у неотправленного (не «доставлено»), счётчик «N не
-отправлено», причина у `failed_permanent`. Переиспользовать паттерн
-`reaction-error` из фиксов второго ревью.
+### Stage 4 — queue UI
+An honest status for an unsent message (not "delivered"), an "N unsent" counter,
+a reason on `failed_permanent`. Reuse the `reaction-error` pattern from the
+second review's fixes.
 
-### Этап 5 — Решение по L1
-По итогам §5: либо шифрующий VFS (A), либо согласованное отступление (E),
-либо L1 остаётся выключенным (D). До решения — не включать в прод-сборку.
+### Stage 5 — the L1 decision
+Per §5: either the encrypting VFS (A), or an agreed deviation (E), or L1 stays
+off (D). Until it is decided, keep it out of the production build.
 
 ---
 
-## 8. Что нужно от вас
+## 8. What is needed from you
 
-1. **Решение по L1** (таблица в §5). Это единственный настоящий блокер: работа
-   по нему уже идёт, и без решения непонятно, доводить её до прода или
-   держать за флагом.
-2. Подтвердить, что «после логина» — приемлемый момент для доступа к любым
-   локальным данным (следствие шифрования всех трёх слоёв).
-3. Согласовать риск этапа 3: переделка пути записи ради официального outbox.
-   Альтернатива — свой outbox на нашем KV (~200–300 строк, без переделки
-   пути записи, но мультивкладочность и FIFO делаем сами).
+1. **The L1 decision** (the table in §5). It is the only real blocker: work on it
+   is already under way, and without a decision it is unclear whether to take it
+   to production or keep it behind a flag.
+2. Confirm that "after login" is an acceptable moment for access to any local
+   data (a consequence of encrypting all three layers).
+3. Agree to the risk in stage 3: rebuilding the write path for the sake of the
+   official outbox. The alternative is our own outbox over our KV (~200–300
+   lines, no rebuild of the write path, but multi-tab and FIFO are ours to
+   write).

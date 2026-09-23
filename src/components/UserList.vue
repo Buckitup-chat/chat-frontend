@@ -100,12 +100,12 @@ watch(() => $route?.params?.address, (now, before) => { if (before && !now) scan
         <Account_Item_PQ :account="user" class="w-100" />
         <!-- Screen 11: the dialog a transfer is going to is marked. -->
         <span v-if="$transfers.transferPeers.has(user.user_hash)" class="_transfer_dot" title="Transfer in progress">
-          <span class="_transfer_dot_mark"></span>передача
+          <span class="_transfer_dot_mark"></span>transfer
         </span>
         <!-- The dialog moved since the checkpoint this account signed in it.
              Tapping it opens the dialog on the checkpoint comparison. -->
         <span v-if="$dialogs.alertingPeers.has(user.user_hash)" class="_checkpoint_dot"
-          role="button" title="Изменилось с момента вашей отметки — открыть сравнение"
+          role="button" title="Changed since the checkpoint you signed — open the comparison"
           @click.stop="emit('select', user.user_hash, { checkpoint: $dialogs.checkpointAlerts.get(user.user_hash)?.messageId || true })"></span>
       </div>
     </div>
