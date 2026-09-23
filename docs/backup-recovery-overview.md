@@ -164,31 +164,20 @@ behind the same "I can't get in" door.
 scheme, and it goes when the scheme lands. Local File stays but is tucked away
 where it will not tempt anyone into using it as their backup.
 
-### Open
+**The node plane follows Ethereum, and recovery needs the internet.** The
+policy oracle stays on-chain: it is what makes a recovery request, an approval
+and a refusal objective, and the node reads it rather than holding policy of
+its own. Share transport there keeps the elliptic crypto the chain is keyed by;
+if Ethereum itself goes post-quantum, we migrate with it. The social plane is
+already ML-KEM-1024 through the chat, so the exposure is bounded to the node
+half. A node serving a recovery therefore needs a working internet connection —
+a normal precondition of the operation, not a defect: an offline node still
+carries chat and files, it simply cannot run a recovery round.
 
-**O1. The node plane on our own platform.** The social plane is answered:
-shares ride the chat and inherit ML-KEM-1024. The node plane is today a
-TypeScript custodian (`backitup-node`) that keeps its share in a file and
-releases it on two gates — a signature that recovers to the claimed recipient,
-and `canDecrypt` read from the contract. It holds no key and no policy of its
-own.
-
-The target is that custodian running on our own Raspberry Pi nodes in Elixir,
-talking our post-quantum protocol instead of ECIES over secp256k1. Two things
-that design has to settle, and they are separate:
-
-- **Transport** can go post-quantum cheaply. No address-to-ML-KEM registry is
-  needed here, because the node already demands a fresh signature from the
-  recipient: adding the recipient's ML-KEM public key to that signed message
-  binds the on-chain identity to the PQ key, and the node encrypts its share to
-  it. Nothing goes on-chain, no contract changes.
-- **Policy stays on-chain** by the decision above, which means a node serving a
-  recovery needs to reach an RPC endpoint. That is a real constraint against
-  the offline-Pi scenario and should be stated as a precondition rather than
-  discovered in the field.
-
-Until that design lands, the existing TypeScript nodes with elliptic crypto
-stay in place.
+When that custodian moves to our own Elixir nodes, the transport can go
+post-quantum cheaply without touching the chain: the node already demands a
+fresh signature from the recipient, so the recipient's ML-KEM key rides along in
+that signed message and needs no registry.
 
 ## 7. Next
 
