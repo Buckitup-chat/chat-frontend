@@ -181,8 +181,7 @@ that signed message and needs no registry.
 
 ## 7. Next
 
-1. The all-module audit report + automatic treatment of confirmed bugs
-   (separate document).
-2. The three open points above.
-3. The final implementation plan, phased.
-4. A branch with the full functionality and tests.
+Every point here is decided, so what follows is build work:
+[backup-recovery-plan.md](backup-recovery-plan.md) phases it, and
+[backup-recovery-audit-2026-09.md](backup-recovery-audit-2026-09.md) lists the
+defects it has to close.
