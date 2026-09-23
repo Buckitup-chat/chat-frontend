@@ -131,6 +131,19 @@ the relayer's shape: run your own, use ours, or attach several at once.
 Without a channel that actually reaches the owner the timelock is decorative,
 so this is part of the veto path, not a nicety.
 
+**The vault ciphertext lives in `user_storage`, addressed by the secret.**
+That table is public-read and authenticated-write (pq_user_storage §FR-3), so a
+client with no account can fetch a row; writing happens while the account is
+alive, so the asymmetry costs nothing. What a keyless client cannot do is
+*name* a row — the key is `(user_hash, uuid)` and `user_hash` derives from the
+signing key that was lost — so the locator comes from the secret instead:
+`uuid = SHA3-512(S ‖ "vault-locator")[0..16]`. Gather shares, reconstruct S,
+compute the locator, fetch by uuid alone, decrypt with the same S. No account
+appears anywhere in the chain, and the server can tell neither which row is a
+vault nor which accounts hold a backup. Durability is not this scheme's
+problem: account data is replicated across servers and swept into server-side
+backups like everything else on the platform.
+
 **Share lifecycle is a second-phase feature.** The case that matters: a
 helper who starts a recovery of their own — with us or elsewhere — makes the
 share they hold questionable, and the owner is told so.
@@ -145,28 +158,7 @@ where it will not tempt anyone into using it as their backup.
 
 ### Open
 
-**O1. Where the second copy of the encrypted vault lives.** The primary copy
-is `user_storage`, which is public-read and authenticated-write
-(pq_user_storage §FR-3): a client with no account can read it, and only the
-owner can write it. Writing happens while the account is alive, so the
-asymmetry costs nothing.
-
-Addressing is the part that needs care, because the row's key is
-`(user_hash, uuid)` and a recovering client has neither — `user_hash` is
-derived from the signing key that was lost. The locator is therefore derived
-from the secret itself: `uuid = SHA3-512(S ‖ "vault-locator")[0..16]`. Gather
-shares, reconstruct S, compute the uuid, fetch by uuid alone, decrypt with S —
-no account anywhere in the chain. The shape endpoint filters on uuid without
-authentication, so this needs no new server surface, and it also means the
-server cannot tell a vault row from any other row, nor tell which accounts
-have a backup at all.
-
-What is left to decide is availability rather than access: that is one row on
-one server, and losing it leaves the recovered key with nothing to open. A
-second copy belongs either with the node federation, which is already in the
-flow behind its timelock, or with the helpers alongside their shares.
-
-**O2. Post-quantum share transport on the node plane.** The social plane is
+**O1. Post-quantum share transport on the node plane.** The social plane is
 answered: shares ride the chat and inherit ML-KEM-1024. The node plane still
 encrypts each share with ECIES over secp256k1, to a stealth address derived
 from the recipient's meta key, because that plane is keyed by Ethereum
@@ -178,7 +170,7 @@ carrying two keypairs — secp256k1 to sign on-chain, ML-KEM to receive shares.
 Decide: do it in the final version, or keep classical crypto here with an
 explicit threat-model entry.
 
-**O3. The post-quorum wedge.** At recovery the client mints an Ephemeral User;
+**O2. The post-quorum wedge.** At recovery the client mints an Ephemeral User;
 guardians encrypt their shares to its public key and the contract records it as
 the recipient. If that private key is lost between quorum and reconstruction —
 a closed tab, a reload, a dead device — the released shares are encrypted to a
