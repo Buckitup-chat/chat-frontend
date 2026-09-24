@@ -88,7 +88,7 @@ current implementation that is a smart contract (Sepolia):
 | Relayer | Railway, live — `https://secret-recovery-production.up.railway.app` | no tests |
 | Nodes ×3 | Railway, live — `node-a-production-b16b`, `node-b-production-991a`, `generous-essence-production` (`.up.railway.app`), threshold 2 | no tests |
 | E2E of the whole chain | `/workspace/harness` | 10/10 scenarios, 7 full recoveries (July) |
-| Client: Local File + manual Shamir | `src/views/backup` | works; declared sufficient for its purpose |
+| Client: sealed vault in `user_storage` under a wrap key, found by the key alone; Local File; the key split by hand (dev builds) | `src/lib/recovery`, `src/lib/pq/vaultEnvelope.ts`, `src/views/backup` | Phase 1 of the plan; the split is scaffolding for Phase 2 |
 | Threat model + hardening RFC SI-1…SI-6 | `backitup-smart-contracts/docs/security` | written, not implemented |
 | Audit of every module | `docs/backup-recovery-audit-2026-09.md` | done: 3 critical, 11 high; crypto cores clean |
 
@@ -102,9 +102,13 @@ entropy rather than something an attacker can guess.
 
 **A guardian is a user from the confirmed contact list**, and the delivery
 channel is the E2E dialog itself — a share travels as a message type. Nothing
-exotic for now: no guardians outside BuckitUp, no QR or file hand-off. This
-also settles the post-quantum question for the social plane, since every
-dialog message is already wrapped with ML-KEM-1024.
+exotic for now: no guardians outside BuckitUp, no QR or file hand-off on the
+way out. This also settles the post-quantum question for the social plane,
+since every dialog message is already wrapped with ML-KEM-1024. The one
+exception is on the way back: when the dialog is unavailable during a
+recovery, a share may return as a sealed text block pasted from another
+messenger, with a spoken code guarding the paste
+(`chat/docs/pq/reqs/pq_recovery_shares.proposed.md` § Manual return).
 
 **Every parameter is customisable within reason.** A simple screen with
 defaults, and an advanced one exposing counts, thresholds and the timelock.
