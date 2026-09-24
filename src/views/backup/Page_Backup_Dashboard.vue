@@ -76,11 +76,6 @@
 								<i class="bi bi-arrow-clockwise"></i> Restore
 							</button>
 						</div>
-						<div v-if="teststandAvailable" class="mt-3 text-center">
-							<router-link :to="{ name: 'account_backup_teststand' }" class="btn btn-sm btn-outline-info w-100">
-								🧪 Open Architecture Teststand (Vernam + Shamir)
-							</router-link>
-						</div>
 					</div>
 				</div>
 
@@ -114,10 +109,8 @@ const $userPQ = userPQStore();
 const $modal = inject('$modal');
 
 import { isModalAvailable } from '@/components/modal/registry';
-import { useRouter } from 'vue-router';
 
 const sharesAvailable = isModalAvailable('account_backup_shamir_create');
-const teststandAvailable = useRouter().hasRoute('account_backup_teststand');
 
 const openModal = (modalId) => {
 	$modal.value.open({ id: modalId });
