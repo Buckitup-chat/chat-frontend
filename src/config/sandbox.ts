@@ -1,14 +1,13 @@
-// Surfaces that exist to build the community recovery scheme, not to be used
-// for backing up an account: splitting a key by hand into raw Shamir fragments
-// moved around by copy-paste. (The architecture teststand was the other one,
-// and it is gone rather than gated.)
+// Splitting a key by hand into raw Shamir fragments moved around by copy-paste:
+// scaffolding for the community recovery scheme, not a way to back up an
+// account. It goes when that scheme lands (docs/backup-recovery-overview.md).
 //
-// Read in exactly one place, and it owns reachability rather than appearance:
-// the modal registry (src/components/modal/registry.js). Screens that would
-// render a button ask isModalAvailable instead of re-reading this flag, because
-// a gate repeated per entry point is a gate that gets half-lifted.
+// The gate owns reachability rather than appearance, and lives in the modal
+// registry (src/components/modal/registry.js). Screens that would render a
+// button ask isModalAvailable instead of re-reading this flag, because a gate
+// repeated per entry point is a gate that gets half-lifted.
 //
 // Deliberately the dev server and nothing else: a staging build is a public
-// deployment, and these surfaces drive live Sepolia and the relayer from
-// buttons.
+// deployment, and a screen that hands out raw key fragments must not read there
+// as an offered way to back up an account.
 export const SANDBOX_SURFACES = import.meta.env.DEV;

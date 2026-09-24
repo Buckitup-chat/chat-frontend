@@ -83,13 +83,12 @@ current implementation that is a smart contract (Sepolia):
 | Component | Where | State |
 |---|---|---|
 | Architecture RFC | `docs/restoration.livemd` | adopted as the basis of this work |
-| Contracts (SecretRecovery + KeyRegistry) | Sepolia, deployed | 62/62 tests; live since July |
+| Contracts (SecretRecovery + KeyRegistry) | Sepolia `0xe6342a319AA534d15D0aFA5cd947a6aF0Bc423c3` / `0x04FA3aa8A23501A70768E220A5Df684D6249EDe7` | 62/62 tests; live since July |
 | SDK (split/ECIES/stealth/EIP-712) | `backitup-secret-recovery-sdk` | 15/15 tests |
-| Relayer | Railway, live | no tests |
-| Nodes ×3 | Railway, live | no tests |
+| Relayer | Railway, live — `https://secret-recovery-production.up.railway.app` | no tests |
+| Nodes ×3 | Railway, live — `node-a-production-b16b`, `node-b-production-991a`, `generous-essence-production` (`.up.railway.app`), threshold 2 | no tests |
 | E2E of the whole chain | `/workspace/harness` | 10/10 scenarios, 7 full recoveries (July) |
 | Client: Local File + manual Shamir | `src/views/backup` | works; declared sufficient for its purpose |
-| Client: network-mode teststand | `Page_Backup_ShamirTestbed` | prototype against the live stack |
 | Threat model + hardening RFC SI-1…SI-6 | `backitup-smart-contracts/docs/security` | written, not implemented |
 | Audit of every module | `docs/backup-recovery-audit-2026-09.md` | done: 3 critical, 11 high; crypto cores clean |
 

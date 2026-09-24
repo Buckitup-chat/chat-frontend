@@ -1,7 +1,6 @@
 // EVM helpers used by account activation and the Shamir backup flow.
-// The legacy Lit Protocol recovery flow was removed; the node-based
-// Compartmented Secret Sharing recovery is not built yet — the teststand that
-// stood in for it was scaffolding and has been deleted (docs/backup-recovery-plan.md).
+// Node-based Compartmented Secret Sharing recovery is not built yet — see
+// docs/backup-recovery-plan.md.
 
 import { defineStore } from 'pinia';
 import { BuckItUpClient } from 'buckitup-sdk';

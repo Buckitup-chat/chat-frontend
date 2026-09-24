@@ -32,14 +32,17 @@ The only phase that blocks nothing and is blocked by nothing.
   `Modal_Account_Backup_Local.vue` — and into `Modal_Account_Restore_Local.vue`.
   Only the new format is written: old files are test data (invariant §1a), so
   there is no legacy read path.
-- **F-H3 — keys in `localStorage`.** `src/lib/testbed/network.ts` keeps
-  `testbed.backups` and `testbed.guardians` in the clear and never cleans up.
-  Stop writing them, and wipe both keys on logout.
-- **F-H2, and the decision that manual Shamir is scaffolding — retire the sandbox surfaces.** The teststand route
-  (`/account/teststand`, `Page_Backup_ShamirTestbed.vue`) and the manual Shamir
-  modals are scaffolding for the community scheme, not features. Put both
-  behind a dev flag. Local File stays a real feature but moves out of the
-  primary path so it does not read as the recommended backup.
+- **F-H3 — keys in `localStorage`.** Nothing writes `testbed.backups` or
+  `testbed.guardians` any more, but builds that registered the teststand route
+  unconditionally left them in real profiles, and nothing in the app clears
+  localStorage. `endSession` removes both once; the two lines go after a build
+  containing them has shipped.
+- **F-H2, and the decision that manual Shamir is scaffolding — retire the sandbox surfaces.** The teststand
+  is deleted outright rather than gated — with the design settled it had nothing
+  left to demonstrate. The manual Shamir modals stay behind the dev flag until
+  the community scheme lands, since they are still the only share-restore path
+  in the tree. Local File stays a real feature but moves out of the primary path
+  so it does not read as the recommended backup.
 - **F-H1 dissolves with them.** The finding is about raw key fragments handed
   around by copy-paste; once the manual path is dev-only and the payload is a
   wrap key (Phase 1), there is nothing left to envelope.
@@ -127,10 +130,9 @@ foreign round within the timelock.
 
 ## Phase 5 — one stealth implementation, in the SDK
 
-- **S-H1** — pick the spending/viewing canon against production vectors, then
-  delete the other two implementations (`buckitup.js`, the testbed) and import
-  the SDK's. Fixing one swap without the other orphans existing backups, so this
-  lands as one change.
+- **S-H1** — pick the spending/viewing canon and import the SDK's
+  implementation. The other two are already gone: `buckitup.js` and the testbed
+  were deleted in Phase 0, leaving the SDK as the only one.
 - **F-H4** dissolves here: the broken add-versus-multiply derivation goes away
   with the file that holds it.
 - `hexToBytes` rejects garbage instead of turning it into zeros; `threshold = 1`

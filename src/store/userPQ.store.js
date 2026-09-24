@@ -175,14 +175,21 @@ export const userPQStore = defineStore('userPQ', () => {
     console.log('[userStore] User logged out');
   };
 
-  // Ending the session for good, which logout() is not: anything a device
-  // should stop holding once its owner walks away goes here, and callers that
-  // mean "the session is over" call this instead of remembering the list. The
-  // list is empty since the teststand — whose plaintext guardian keys were its
-  // first entry — was deleted; the seam stays because the next such store will
-  // want it and the callers already say what they mean.
+  // Device-lifetime material is wiped here and never in logout(): logout() is
+  // also the first half of signing in, so a wipe there would destroy material
+  // the next session still needs. Callers that mean "the session is over" call
+  // this instead of remembering what has to go.
   const endSession = async () => {
     await logout();
+    // A one-time reaper, not testbed code. Builds up to this one registered the
+    // teststand route unconditionally, so a profile that opened it holds
+    // guardian EOA and spending private keys in localStorage as plaintext —
+    // and nothing else in the app clears localStorage. Drop these two lines
+    // once a build containing them has shipped.
+    try {
+      localStorage.removeItem('testbed.guardians');
+      localStorage.removeItem('testbed.backups');
+    } catch { /* no storage in this environment */ }
   };
 
   const deleteAccount = async (userHash) => {
