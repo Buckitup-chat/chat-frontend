@@ -9,8 +9,9 @@
 // conflict as applied only after proving the server row carries our exact
 // signature (see confirm.ts).
 import { api } from '@/api/client';
-import { mutationAppliedOnServer } from './confirm';
-import { dispatchMutations, dependenciesFor, reconcileAccepted } from './coordinator';
+import { mutationAppliedOnServer, type MutationLike } from './confirm';
+import { dispatchMutations, dependenciesFor, reconcileAccepted, AlreadyDispatchingError } from './coordinator';
+import { StaleBaseError } from './staleBase';
 import { OWNER_FIELD } from './writeContracts';
 import { enqueue, recordFailure, ensureDrainLoop, stopDrainLoop, isLeader, awaitEntryOutcome, type EntryOutcome } from './outbox';
 import type { IngestRowResult } from './types';
@@ -159,7 +160,7 @@ export interface RetryOptions {
 	baseDelayMs?: number;
 	maxDelayMs?: number;
 	/** Identity check for unique-key conflicts; overridable for tests. */
-	confirmApplied?: (mutation: unknown) => Promise<boolean>;
+	confirmApplied?: (mutation: MutationLike, opts?: { attempts?: number; delayMs?: number }) => Promise<boolean>;
 }
 
 /**
@@ -191,7 +192,7 @@ export async function sendMutationsWithRetry(
 
 			if (e instanceof IngestError && e.uniqueConflictOnly) {
 				const confirmations = await Promise.all(
-					e.conflictIndexes.map((index) => confirmApplied(mutations[index]))
+					e.conflictIndexes.map((index) => confirmApplied(mutations[index] as MutationLike))
 				);
 				if (confirmations.every(Boolean)) {
 					const txids = (e.results ?? [])
@@ -269,13 +270,21 @@ export async function sendMutationsAndAwaitShape(
 		durability?: 'required' | 'best-effort';
 		onDurable?: (outboxId: string) => void | Promise<void>;
 		sourceIntentId?: string;
+		excludeFromDependencies?: string[];
+		recordAcceptedSnapshot?: boolean;
 	} = {}
 ): Promise<DeliveryHandle> {
 	// Durability first: the signed mutations hit IndexedDB before the network,
 	// so a reload or crash mid-send replays them on the next login instead of
 	// losing them. The entry is removed only after the server confirms.
 	const owner = ownerOf(mutations);
-	const dependsOn = await dependenciesFor(mutations, owner);
+	let dependsOn: string[];
+	try {
+		dependsOn = await dependenciesFor(mutations, owner, opts.excludeFromDependencies);
+	} catch (e) {
+		if (e instanceof StaleBaseError) throw e;
+		dependsOn = [];
+	}
 	const outboxId = await enqueue(mutations, owner, { dependsOn, sourceIntentId: opts.sourceIntentId });
 
 	// ADR §11: when durable storage is unavailable, a user-visible mutation
@@ -301,8 +310,22 @@ export async function sendMutationsAndAwaitShape(
 
 	let result: SendResult;
 	try {
-		result = await dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, opts), outboxId);
+		result = await dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, opts), outboxId, {
+			recordAcceptedSnapshot: opts.recordAcceptedSnapshot,
+		});
 	} catch (e) {
+		if (e instanceof AlreadyDispatchingError) {
+			ensureDrainLoop(owner, (queued) => sendMutationsWithRetry(queued, signSkey, { retries: 1 }),
+				{ reconcile: reconcileAccepted },
+			);
+			return {
+				outboxId,
+				phase: 'queued',
+				acceptance: outboxId
+					? awaitEntryOutcome(outboxId, owner)
+					: Promise.resolve({ kind: 'rejected', error: 'not durably queued' } as const),
+			};
+		}
 		// Permanent rejections die in the outbox too; transient failures stay
 		// for the next drain. Either way the caller sees the same error as
 		// before the outbox existed.

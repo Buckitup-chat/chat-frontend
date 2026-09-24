@@ -4,7 +4,7 @@
 // no uplink. This exercises the real path — sendMutationsAndAwaitShape with a
 // transport that throws the way fetch does when offline — and then the replay
 // that happens on reconnect.
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const MY_HASH = 'u_' + 'a'.repeat(128);
 
@@ -31,11 +31,12 @@ vi.mock('@/api/client', () => ({
 vi.mock('@/lib/data/barrier', () => ({
 	awaitShapeVisibility: async () => true,
 	collectionForRelation: () => null,
-	scopeForRelation: (relation) => relation,
+	scopeForRelation: (relation: string) => relation,
 }));
 
 const { sendMutationsAndAwaitShape, drainPendingWrites } = await import('@/lib/data/ingest');
-const { pendingEntries, _setStorageForTests } = await import('@/lib/data/outbox');
+const { pendingEntries, _setStorageForTests, _setLeaderForTests } = await import('@/lib/data/outbox');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -73,6 +74,12 @@ beforeEach(() => {
 	sent.length = 0;
 	storage = makeStorage();
 	_setStorageForTests(storage);
+	_setLeaderForTests(true);
+	_setAcceptedSnapshotStorageForTests(makeStorage());
+});
+
+afterEach(() => {
+	_setLeaderForTests(null);
 });
 
 describe('writing with no network', () => {

@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // that reads the same collection as its base — until the committed txid has
 // been delivered to that collection (review 2026-08-11, finding 1).
 
-const awaitTxId = vi.fn(async () => true);
+const awaitTxId = vi.fn<(txid: number, timeoutMs?: number) => Promise<boolean>>(async () => true);
 const storageCollection = { utils: { awaitTxId } };
 const messagesCollection = { utils: { awaitTxId } };
 
@@ -83,7 +83,7 @@ describe('awaitShapeVisibility', () => {
 			.mockImplementationOnce(async () => true);
 		await expect(awaitShapeVisibility(storageCollection, [7])).resolves.toBe(true);
 		expect(awaitTxId).toHaveBeenCalledTimes(2);
-		expect(awaitTxId.mock.calls[0][1]).toBeLessThan(awaitTxId.mock.calls[1][1]);
+		expect(awaitTxId.mock.calls[0][1]).toBeLessThan(awaitTxId.mock.calls[1][1]!);
 	});
 
 	it('is a no-op without a collection or txids', async () => {

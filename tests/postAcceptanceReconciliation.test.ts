@@ -7,6 +7,20 @@ const SKEY = new Uint8Array(32);
 let online = true;
 const sent: unknown[][] = [];
 
+let ambientUserHash: string | null = null;
+vi.mock('@/libs/EncryptionManagerPQ', () => ({
+	EncryptionManagerPQ: {
+		getInstance: () => ({
+			get currentUserHash() { return ambientUserHash; },
+			exportVaultKeys: async () => ({
+				sign_skey: 'AAAA',
+				crypt_skey: btoa((ambientUserHash === MY_HASH ? '11' : '22').repeat(16)),
+				evm_skey: 'cc',
+			}),
+		}),
+	},
+}));
+
 vi.mock('@/api/client', () => ({
 	api: {
 		ingestWithAuthEach: async (mutations: unknown[]) => {
@@ -32,7 +46,7 @@ const {
 	startLeaderElection, stopLeaderElection,
 	stopDrainLoop, _setStorageForTests, _setLeaderForTests,
 } = await import('@/lib/data/outbox');
-const { getAccepted, _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
+const { getAccepted, _setAcceptedSnapshotStorageForTests, _setRawAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
 const makeMemoryStore = () => {
 	const map = new Map<string, string>();
@@ -114,6 +128,7 @@ afterEach(() => {
 	_setLeaderForTests(null);
 	stopLeaderElection();
 	stopDrainLoop();
+	ambientUserHash = null;
 });
 
 describe('L17-10 A: accepted snapshot (local reconciliation) failure never repeats transport', () => {
@@ -312,30 +327,34 @@ describe('L17-10 E: account/session fencing on reconciliation', () => {
 	it('a late reconciliation for account A while B is the active session never applies A\'s base, and A\'s own relogin resumes it', async () => {
 		startLeaderElection(MY_HASH, () => {});
 		_setLeaderForTests(true);
+		ambientUserHash = MY_HASH;
 		const failing = { value: true };
-		_setAcceptedSnapshotStorageForTests(makeToggleFailStore(failing));
+		_setRawAcceptedSnapshotStorageForTests(makeToggleFailStore(failing));
 
 		const handle = await sendMutationsAndAwaitShape(message('fenced', MY_HASH), SKEY, { retries: 0 });
 		expect((await pendingReconciliation(MY_HASH)).map((e) => e.id)).toContain(handle.outboxId);
 
 		startLeaderElection(OTHER_HASH, () => {});
+		ambientUserHash = OTHER_HASH;
 		failing.value = false;
 		drainPendingWrites(MY_HASH, SKEY);
 		await new Promise((r) => setTimeout(r, 30));
 
-		expect(await getAccepted('dialog_messages', 'dmsg_fenced')).toBeNull();
+		expect(await getAccepted('dialog_messages', 'dmsg_fenced', MY_HASH)).toBeNull();
 		expect((await pendingReconciliation(MY_HASH)).map((e) => e.id)).toContain(handle.outboxId);
 
 		startLeaderElection(MY_HASH, () => {});
+		ambientUserHash = MY_HASH;
 		drainPendingWrites(MY_HASH, SKEY);
 		await vi.waitFor(async () => expect(await pendingReconciliation(MY_HASH)).toHaveLength(0));
-		expect((await getAccepted('dialog_messages', 'dmsg_fenced'))?.message_id).toBe('dmsg_fenced');
+		expect((await getAccepted('dialog_messages', 'dmsg_fenced', MY_HASH))?.message_id).toBe('dmsg_fenced');
 	});
 });
 
 describe('L17-10 G: the queued/replay path (drainOutbox itself) never compacts on a local reconciliation failure', () => {
 	it('reconcile() throwing inside drainOutbox leaves the entry stuck in server_accepted_pending_reconcile with its mutations, never ready/quarantined/terminal, and the next drain finishes it with no second HTTP call', async () => {
 		_setLeaderForTests(true);
+		startLeaderElection(MY_HASH, () => {});
 		const outboxId = await enqueue(message('replay-reconcile-fail'), MY_HASH, {});
 		expect(outboxId).toBeTruthy();
 

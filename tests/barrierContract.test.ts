@@ -2,7 +2,7 @@
 // server confirmation, a 'visible' write awaits its shape echo. Holding a
 // receipt for 30s of replication lag bought nothing — nothing ever reads a
 // receipt back as a write base.
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const awaitShapeVisibility = vi.fn(async () => true);
 
@@ -23,7 +23,7 @@ vi.mock('@/lib/data/barrier', () => ({
 }));
 
 const { sendMutationsAndAwaitShape } = await import('@/lib/data/ingest');
-const { _setStorageForTests } = await import('@/lib/data/outbox');
+const { _setStorageForTests, _setLeaderForTests } = await import('@/lib/data/outbox');
 
 const MY = 'u_' + 'a'.repeat(128);
 const SKEY = new Uint8Array(32);
@@ -41,6 +41,11 @@ beforeEach(() => {
 		async keys() { return [...map.keys()]; },
 		async clear() { map.clear(); },
 	});
+	_setLeaderForTests(true);
+});
+
+afterEach(() => {
+	_setLeaderForTests(null);
 });
 
 describe('contract-driven barrier', () => {

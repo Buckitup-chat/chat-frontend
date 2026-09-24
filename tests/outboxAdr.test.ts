@@ -4,11 +4,12 @@
 // queue — the retry carries its own timer. T-QUEUE-05: a permanent rejection
 // is quarantined, never silently deleted. §11: durability unavailable means a
 // visible failure, not a best-effort send that looks like success.
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { IngestError } from '@/lib/data/ingest';
 import {
 	_setStorageForTests,
 	_clearOutboxForTests,
+	_setLeaderForTests,
 	enqueue,
 	drainOutbox,
 	pendingEntries,
@@ -19,6 +20,10 @@ import {
 	ensureDrainLoop,
 	stopDrainLoop,
 } from '@/lib/data/outbox';
+
+afterEach(() => {
+	_setLeaderForTests(null);
+});
 
 const MY = 'u_' + 'a'.repeat(128);
 
@@ -40,6 +45,7 @@ describe('T-QUEUE-05: permanent rejection quarantines', () => {
 	beforeEach(async () => {
 		_setStorageForTests(makeStorage());
 		await _clearOutboxForTests();
+		_setLeaderForTests(true);
 	});
 
 	it('keeps the signed mutations and the verdict instead of deleting', async () => {
@@ -95,6 +101,7 @@ describe('T-QUEUE-04: the retry carries its own timer', () => {
 	beforeEach(async () => {
 		_setStorageForTests(makeStorage());
 		await _clearOutboxForTests();
+		_setLeaderForTests(true);
 		vi.useFakeTimers();
 	});
 

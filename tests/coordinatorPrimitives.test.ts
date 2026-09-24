@@ -1,11 +1,11 @@
 // Acceptance contract for the phase-3 dispatch coordinator (ADR §7 v2,
 // main-tanstack-proposal-v2 acceptance section). Written before the
 // coordinator: an implementation is done when these pass, not when it demos.
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { contractFor } from '@/lib/data/writeContracts';
 import { IngestError } from '@/lib/data/ingest';
 import {
-	_setStorageForTests, _clearOutboxForTests,
+	_setStorageForTests, _clearOutboxForTests, _setLeaderForTests,
 	enqueue, recordFailure, resolveEntry, readyEntries, blockedEntries,
 	pendingEntries, drainOutbox, ensureDrainLoop, stopDrainLoop,
 } from '@/lib/data/outbox';
@@ -33,6 +33,11 @@ beforeEach(async () => {
 	storage = makeStorage();
 	_setStorageForTests(storage);
 	await _clearOutboxForTests();
+	_setLeaderForTests(true);
+});
+
+afterEach(() => {
+	_setLeaderForTests(null);
 });
 
 describe('write contracts pin the agreed barrier table', () => {
@@ -43,22 +48,10 @@ describe('write contracts pin the agreed barrier table', () => {
 			['dialog_message_reactions', 'insert'], ['dialog_message_reactions', 'update'],
 			['dialog_message_receipts', 'insert'],
 			['files', 'insert'],
+			['user_storage', 'insert'], ['user_storage', 'update'],
+			['dialog_keys', 'insert'],
 		] as const) {
 			expect(contractFor(relation, type).confirmation, `${relation}/${type}`).toBe('accepted');
-		}
-	});
-
-	// dialog_keys/insert is read back from the shape as this client's own
-	// "do I already have a key row" check, and user_storage still derives
-	// its write base from the shape (no accepted snapshot is recorded for
-	// it) — so these wait for visibility until the accepted-base lifecycle
-	// covers them.
-	it('rows without an accepted local base keep shape visibility', () => {
-		for (const [relation, type] of [
-			['dialog_keys', 'insert'],
-			['user_storage', 'insert'], ['user_storage', 'update'],
-		] as const) {
-			expect(contractFor(relation, type).confirmation, `${relation}/${type}`).toBe('visible');
 		}
 	});
 

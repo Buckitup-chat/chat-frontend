@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { recordAccepted, getAccepted, freshestOf, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
+import { recordAccepted, getAccepted, getAllAcceptedForRelation, freshestOf, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { startLeaderElection, stopLeaderElection, _setStorageForTests } from '@/lib/data/outbox';
 
 const MY_HASH = 'u_' + 'a'.repeat(128);
@@ -76,6 +76,46 @@ describe('acceptedSnapshot: record/get', () => {
 	});
 });
 
+describe('acceptedSnapshot: a genuine read/storage failure is never mistaken for "snapshot absent"', () => {
+	beforeEach(() => {
+		_setAcceptedSnapshotStorageForTests(makeStorage());
+	});
+
+	it('getAccepted propagates a raw storage read failure instead of returning null', async () => {
+		const storage = makeStorage();
+		storage.get = async () => { throw new Error('IndexedDB blocked'); };
+		_setAcceptedSnapshotStorageForTests(storage);
+
+		await expect(getAccepted('dialog_messages', 'dmsg_1')).rejects.toThrow('IndexedDB blocked');
+	});
+
+	it('getAccepted propagates corrupted (non-JSON) stored content instead of returning null', async () => {
+		const storage = makeStorage();
+		storage.map.set('dialog_messages:dmsg_1', 'not valid json{{{');
+		_setAcceptedSnapshotStorageForTests(storage);
+
+		await expect(getAccepted('dialog_messages', 'dmsg_1')).rejects.toThrow();
+	});
+
+	it('recordAccepted does not silently treat an unreadable existing record as absent and overwrite it', async () => {
+		const storage = makeStorage();
+		storage.get = async () => { throw new Error('IndexedDB blocked'); };
+		_setAcceptedSnapshotStorageForTests(storage);
+
+		await expect(
+			recordAccepted('dialog_messages', 'dmsg_1', { owner_timestamp: 1, revision: 'new' })
+		).rejects.toThrow('IndexedDB blocked');
+	});
+
+	it('getAllAcceptedForRelation propagates a genuine per-entry failure instead of silently dropping that row', async () => {
+		const storage = makeStorage();
+		storage.map.set('dialog_messages:dmsg_1', 'not valid json{{{');
+		_setAcceptedSnapshotStorageForTests(storage);
+
+		await expect(getAllAcceptedForRelation('dialog_messages')).rejects.toThrow();
+	});
+});
+
 describe('acceptedSnapshot: recorded by the coordinator on every accepted send (§4.5)', () => {
 	beforeEach(() => {
 		_setAcceptedSnapshotStorageForTests(makeStorage());
@@ -99,15 +139,23 @@ describe('acceptedSnapshot: recorded by the coordinator on every accepted send (
 		expect(await getAccepted('dialog_messages', 'dmsg_x')).toMatchObject({ sign_hash: 'dms_x', owner_timestamp: 500 });
 	});
 
-	it('never records a relation with no entity-identity field (e.g. a receipt)', async () => {
+	it('records an accepted receipt under its receipt_hash, exactly as signed', async () => {
+		const { dispatchMutations } = await import('@/lib/data/coordinator');
+		const row = { receipt_hash: 'rcpt_1', peer_hash: MY_HASH, type: 'delivered', owner_timestamp: 1, sign_b64: 'c2ln' };
+		const mutations = [{ type: 'insert', modified: row, syncMetadata: { relation: 'dialog_message_receipts' } }];
+		await dispatchMutations(mutations, async () => ({ txids: [], results: [] }));
+		expect(await getAccepted('dialog_message_receipts', 'rcpt_1', MY_HASH)).toEqual(row);
+	});
+
+	it('never records a relation with no entity-identity field', async () => {
 		const { dispatchMutations } = await import('@/lib/data/coordinator');
 		const mutations = [{
 			type: 'insert',
-			modified: { receipt_hash: 'rcpt_1', peer_hash: MY_HASH, owner_timestamp: 1 },
-			syncMetadata: { relation: 'dialog_message_receipts' },
+			modified: { some_id: 'x_1', peer_hash: MY_HASH, owner_timestamp: 1 },
+			syncMetadata: { relation: 'unidentified_relation' },
 		}];
 		await dispatchMutations(mutations, async () => ({ txids: [], results: [] }));
-		expect(await getAccepted('dialog_message_receipts', 'rcpt_1')).toBeNull();
+		expect(await getAccepted('unidentified_relation', 'x_1')).toBeNull();
 	});
 });
 

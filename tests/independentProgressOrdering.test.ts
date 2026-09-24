@@ -80,7 +80,7 @@ describe('independent progress: a transient failure blocks only its own dependen
 		expect((await readyEntries(MY)).map((e) => e.id)).not.toContain(aId);
 	});
 
-	it('once A\'s retry is later accepted, B becomes ready and is dispatched on the following drain trigger', async () => {
+	it('once A\'s retry is accepted, B becomes ready and is dispatched in the SAME drain (bounded scheduler fills the freed slot immediately)', async () => {
 		const aId = await enqueue([mutation('A')], MY);
 		const bId = await enqueue([mutation('B')], MY, { dependsOn: [aId!] });
 
@@ -98,12 +98,8 @@ describe('independent progress: a transient failure blocks only its own dependen
 		failA = false;
 		await forceEntryDue(aId!);
 		const second = await drainOutbox(MY, send);
-		expect(sent).toEqual(['A']);
-		expect(second.sent).toBe(1);
-
-		const third = await drainOutbox(MY, send);
 		expect(sent).toEqual(['A', 'B']);
-		expect(third.sent).toBe(1);
+		expect(second.sent).toBe(2);
 
 		expect(await pendingEntries(MY)).toHaveLength(0);
 		expect((await pendingEntries(MY)).some((e) => e.id === bId)).toBe(false);

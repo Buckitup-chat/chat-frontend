@@ -49,6 +49,8 @@ export interface SecureStoreOptions {
 	keyNameSalt?: string;
 }
 
+export class DecryptFailedError extends Error {}
+
 const IV_BYTES = 12;
 
 const toBase64 = (bytes: Uint8Array): string => {
@@ -99,13 +101,14 @@ export function createSecureStore(inner: StringStore, opts: SecureStoreOptions):
 			const stored = await inner.get(await mapKey(key));
 			if (stored === null) return null;
 
+			const key_ = await getKey();
 			try {
 				const blob = fromBase64(stored);
 				const iv = blob.slice(0, IV_BYTES);
 				const ciphertext = blob.slice(IV_BYTES);
 				const plain = await crypto.subtle.decrypt(
 					{ name: 'AES-GCM', iv },
-					await getKey(),
+					key_,
 					ciphertext
 				);
 				return new TextDecoder().decode(plain);
@@ -113,7 +116,7 @@ export function createSecureStore(inner: StringStore, opts: SecureStoreOptions):
 				// Wrong key or tampered record. Returning null would look like
 				// "no such record" and could silently drop a pending write, so
 				// this fails loudly.
-				throw new Error(`[secureStore] cannot decrypt record: ${e}`);
+				throw new DecryptFailedError(`[secureStore] cannot decrypt record: ${e}`);
 			}
 		},
 

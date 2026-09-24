@@ -39,12 +39,16 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 	},
 	dialog_keys: {
 		// Prerequisite for messages/reactions in the dialog on the SERVER side
-		// — but this client also reads the row back from the shape as its own
-		// "have I published a key yet" check (initDialogKeysUnguarded), so
-		// 'accepted' left a window where a second call in the same dialog saw
-		// "absent" and republished with a fresh (incompatible) key wrapping,
-		// permanently conflicting with itself. Await the echo.
-		insert: { dependencyClass: 'prerequisite-provider', confirmation: 'visible' },
+		// (v3 "HTTP → shape barrier" table): the dependent write only needs
+		// this key accepted, never visible in the shape. This client's own
+		// "have I already published a key" check (ensureOwnDialogKeyPublished
+		// in messageIntent.ts) does read the shape row first, but falls back
+		// to the durable accepted snapshot (acceptedSnapshot.ts, recorded by
+		// coordinator.ts's reconcileAccepted on every acceptance regardless of
+		// this confirmation level) before ever minting a fresh wrap — so a
+		// shape that hasn't caught up yet, including right after a reload,
+		// does not risk a second, PK-conflicting randomized wrap.
+		insert: { dependencyClass: 'prerequisite-provider', confirmation: 'accepted' },
 	},
 	dialog_messages: {
 		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
@@ -59,14 +63,16 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
 	},
 	user_storage: {
-		// 'visible' until the accepted-base actually exists for this relation:
-		// userStorage.ts reads freshestOf(serverRow, acceptedLocal) as its
-		// write base, but nothing records an accepted snapshot for
-		// user_storage (the coordinator's ENTITY_KEY_FIELD does not cover
-		// it), so under 'accepted' the next slot edit would chain onto a
-		// possibly-stale shape row with no stale-scope protection at all.
-		insert: { dependencyClass: 'chained', confirmation: 'visible' },
-		update: { dependencyClass: 'chained', confirmation: 'visible' },
+		// 'accepted' is sufficient: coordinator.ts's reconcileAccepted records
+		// an accepted snapshot for user_storage (keyed by user_hash|uuid), and
+		// storageIntent.ts's materializeStorageIntent reads that snapshot plus
+		// the outbox's own not-yet-accepted entry for the same slot
+		// (pendingChainRow) as the write base — never the replicated shape.
+		// A shape-visibility wait would only matter for a caller that reads
+		// the row back from the shape as its base; nothing does (unlike
+		// dialog_keys, whose own republish check does read the shape).
+		insert: { dependencyClass: 'chained', confirmation: 'accepted' },
+		update: { dependencyClass: 'chained', confirmation: 'accepted' },
 	},
 	files: {
 		// the manifest is read back only by resume's salted one-shot reader

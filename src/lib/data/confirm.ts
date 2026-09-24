@@ -9,7 +9,7 @@
 import { getDialogCollections, getUserCardsCollection, getUserStorageCollection } from './collections';
 import { toBytes } from '@/lib/pq/signature';
 
-interface MutationLike {
+export interface MutationLike {
 	type?: string;
 	modified?: Record<string, unknown>;
 	changes?: Record<string, unknown>;
@@ -98,7 +98,7 @@ export async function mutationAppliedOnServer(mutation: MutationLike, opts: { at
 		try {
 			const remote = await lookup(relation, row);
 			if (remote) {
-				return sameSignature(remote.sign_b64, row.sign_b64);
+				return sameSignature(remote.sign_b64 as string | Uint8Array | null | undefined, row.sign_b64 as string | Uint8Array | null | undefined);
 			}
 		} catch (e) {
 			console.warn('[data] confirm lookup failed:', e);

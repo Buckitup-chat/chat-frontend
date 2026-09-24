@@ -30,7 +30,9 @@ import { IngestError } from './ingest';
 import { createSecureStore, type StringStore } from './secureStore';
 
 const DB_NAME = 'buckitup-outbox';
+
 const LOCK_NAME = 'buckitup-outbox-drain';
+const SEND_LOCK_NAME = 'buckitup-outbox-send';
 
 export interface OutboxEntry {
 	id: string;
@@ -93,13 +95,17 @@ let onBecomeLeader: (() => void) | null = null;
 
 export function isLeader(): boolean {
 	if (leaderOverrideForTests !== null) return leaderOverrideForTests;
-	if (!WebLocksLeader.isSupported()) return true;
+	if (!WebLocksLeader.isSupported()) return fallbackIsLeader;
 	return leader?.isLeader() ?? true;
 }
 
 let leaderOverrideForTests: boolean | null = null;
 export function _setLeaderForTests(value: boolean | null): void {
 	leaderOverrideForTests = value;
+}
+
+export function _setActiveSessionForTests(userHash: string | null): void {
+	leaderUserHash = userHash;
 }
 
 export function startLeaderElection(userHash: string, becomeLeader: () => void): void {
@@ -110,7 +116,18 @@ export function startLeaderElection(userHash: string, becomeLeader: () => void):
 	stopLeaderElection();
 	leaderUserHash = userHash;
 	onBecomeLeader = becomeLeader;
-	if (!WebLocksLeader.isSupported()) return;
+	if (!WebLocksLeader.isSupported()) {
+		const generation = sessionGeneration;
+		void tryAcquireFallbackLease(userHash, generation).then((won) => {
+			if (!won) return;
+			if (generation === sessionGeneration) {
+				onBecomeLeader?.();
+				return;
+			}
+			void releaseFallbackLease(userHash, generation);
+		});
+		return;
+	}
 	leader = new WebLocksLeader(`${LOCK_NAME}:${userHash}`);
 	leader.onLeadershipChange((becameLeader) => {
 		if (becameLeader) onBecomeLeader?.();
@@ -121,8 +138,14 @@ export function startLeaderElection(userHash: string, becomeLeader: () => void):
 export function stopLeaderElection(): void {
 	leader?.releaseLeadership();
 	leader = null;
+	if (!WebLocksLeader.isSupported() && leaderUserHash && fallbackIsLeader) {
+		const releasingUserHash = leaderUserHash;
+		const releasingGeneration = sessionGeneration;
+		void drainFallbackOperations(releasingUserHash).then(() => releaseFallbackLease(releasingUserHash, releasingGeneration));
+	}
 	leaderUserHash = null;
 	onBecomeLeader = null;
+	fallbackIsLeader = false;
 	sessionGeneration++;
 }
 
@@ -146,10 +169,217 @@ export function sameSessionToken(a: SessionToken | null, b: SessionToken | null)
 
 export class SessionFencedError extends Error {}
 
+export interface FallbackLease {
+	instanceId: string;
+	expiresAt: number;
+}
+
+export interface AtomicLeaseStore {
+	claim(userHash: string, candidate: FallbackLease, now: number): Promise<FallbackLease>;
+	release(userHash: string, ownerId: string): Promise<void>;
+}
+
+const LEASE_DB_NAME = 'buckitup-outbox-leader-lease';
+const LEASE_STORE_NAME = 'lease';
+let leaseDbPromise: Promise<IDBDatabase> | null = null;
+
+function openLeaseDb(): Promise<IDBDatabase> {
+	if (!leaseDbPromise) {
+		leaseDbPromise = new Promise((resolve, reject) => {
+			const req = indexedDB.open(LEASE_DB_NAME, 1);
+			req.onupgradeneeded = () => {
+				if (!req.result.objectStoreNames.contains(LEASE_STORE_NAME)) req.result.createObjectStore(LEASE_STORE_NAME);
+			};
+			req.onsuccess = () => resolve(req.result);
+			req.onerror = () => reject(req.error);
+		});
+	}
+	return leaseDbPromise;
+}
+
+const indexedDbLeaseStore: AtomicLeaseStore = {
+	claim(userHash, candidate, now) {
+		return openLeaseDb().then((db) => new Promise<FallbackLease>((resolve, reject) => {
+			const tx = db.transaction(LEASE_STORE_NAME, 'readwrite');
+			const store = tx.objectStore(LEASE_STORE_NAME);
+			let winner: FallbackLease;
+			const getReq = store.get(userHash);
+			getReq.onsuccess = () => {
+				const current = getReq.result as FallbackLease | undefined;
+				winner = current && current.instanceId !== candidate.instanceId && current.expiresAt > now
+					? current
+					: candidate;
+				store.put(winner, userHash);
+			};
+			tx.oncomplete = () => resolve(winner);
+			tx.onabort = () => reject(tx.error ?? new Error('lease claim transaction aborted'));
+			tx.onerror = () => reject(tx.error ?? new Error('lease claim transaction failed'));
+		}));
+	},
+	release(userHash, ownerId) {
+		return openLeaseDb().then((db) => new Promise<void>((resolve, reject) => {
+			const tx = db.transaction(LEASE_STORE_NAME, 'readwrite');
+			const store = tx.objectStore(LEASE_STORE_NAME);
+			const getReq = store.get(userHash);
+			getReq.onsuccess = () => {
+				const current = getReq.result as FallbackLease | undefined;
+				if (!current || current.instanceId !== ownerId) return;
+				store.delete(userHash);
+			};
+			tx.oncomplete = () => resolve();
+			tx.onabort = () => reject(tx.error ?? new Error('lease release transaction aborted'));
+			tx.onerror = () => reject(tx.error ?? new Error('lease release transaction failed'));
+		}));
+	},
+};
+
+let atomicLeaseStoreOverride: AtomicLeaseStore | null = null;
+export function _setAtomicLeaseStoreForTests(store: AtomicLeaseStore | null): void {
+	atomicLeaseStoreOverride = store;
+}
+
+function currentAtomicLeaseStore(): AtomicLeaseStore | null {
+	if (atomicLeaseStoreOverride) return atomicLeaseStoreOverride;
+	return typeof indexedDB !== 'undefined' ? indexedDbLeaseStore : null;
+}
+
+const FALLBACK_LEASE_TTL_MS = 30_000;
+const FALLBACK_LEASE_RENEW_INTERVAL_MS = Math.floor(FALLBACK_LEASE_TTL_MS / 3);
+const fallbackInstanceId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+function fallbackOwnerId(generation: number): string {
+	return `${fallbackInstanceId}:${generation}`;
+}
+
+let fallbackIsLeader = false;
+
+async function tryAcquireFallbackLease(userHash: string, generation: number, now: number = Date.now()): Promise<boolean> {
+	const store = currentAtomicLeaseStore();
+	let won: boolean;
+	if (!store) {
+		won = false;
+	} else {
+		try {
+			const ownerId = fallbackOwnerId(generation);
+			const candidate: FallbackLease = { instanceId: ownerId, expiresAt: now + FALLBACK_LEASE_TTL_MS };
+			const result = await store.claim(userHash, candidate, now);
+			won = result.instanceId === ownerId;
+		} catch {
+			won = false;
+		}
+	}
+	if (generation === sessionGeneration) fallbackIsLeader = won;
+	return won;
+}
+
+async function releaseFallbackLease(userHash: string, generation: number): Promise<void> {
+	const store = currentAtomicLeaseStore();
+	if (!store) return;
+	try {
+		await store.release(userHash, fallbackOwnerId(generation));
+	} catch {
+	}
+}
+
+const activeFallbackOperations = new Map<string, Set<Promise<unknown>>>();
+
+function trackFallbackOperation(userHash: string, operation: Promise<unknown>): void {
+	let ops = activeFallbackOperations.get(userHash);
+	if (!ops) {
+		ops = new Set();
+		activeFallbackOperations.set(userHash, ops);
+	}
+	ops.add(operation);
+	const forget = () => {
+		ops!.delete(operation);
+		if (ops!.size === 0) activeFallbackOperations.delete(userHash);
+	};
+	operation.then(forget, forget);
+}
+
+async function drainFallbackOperations(userHash: string): Promise<void> {
+	const ops = activeFallbackOperations.get(userHash);
+	if (!ops || ops.size === 0) return;
+	await Promise.allSettled([...ops]);
+}
+
+export async function withAcquiredLeadership<T>(
+	userHash: string,
+	fn: () => Promise<T>
+): Promise<{ acquired: true; result: T } | { acquired: false }> {
+	if (leaderOverrideForTests !== null) {
+		if (!leaderOverrideForTests) return { acquired: false };
+		return { acquired: true, result: await fn() };
+	}
+	if (leaderUserHash !== userHash) return { acquired: false };
+	if (WebLocksLeader.isSupported()) {
+		return await navigator.locks.request(
+			`${SEND_LOCK_NAME}:${userHash}`,
+			{ ifAvailable: true },
+			async (lock): Promise<{ acquired: true; result: T } | { acquired: false }> => {
+				if (!lock) return { acquired: false };
+				return { acquired: true, result: await fn() };
+			}
+		);
+	}
+	const generation = sessionGeneration;
+	const won = await tryAcquireFallbackLease(userHash, generation);
+	if (!won) return { acquired: false };
+	if (generation !== sessionGeneration || (leaderUserHash !== null && leaderUserHash !== userHash)) {
+		await releaseFallbackLease(userHash, generation);
+		return { acquired: false };
+	}
+	let stopped = false;
+	let renewTimer: ReturnType<typeof setTimeout> | null = null;
+	const scheduleRenew = () => {
+		renewTimer = setTimeout(() => {
+			if (stopped) return;
+			void tryAcquireFallbackLease(userHash, generation).then((stillOurs) => {
+				if (stopped) return;
+				if (!stillOurs) { stopped = true; return; }
+				scheduleRenew();
+			});
+		}, FALLBACK_LEASE_RENEW_INTERVAL_MS);
+	};
+	scheduleRenew();
+	let settleTracking!: () => void;
+	const trackingPromise = new Promise<void>((resolve) => { settleTracking = resolve; });
+	trackFallbackOperation(userHash, trackingPromise);
+	let fnPromise: Promise<T>;
+	try {
+		fnPromise = fn();
+	} catch (e) {
+		settleTracking();
+		stopped = true;
+		if (renewTimer) clearTimeout(renewTimer);
+		throw e;
+	}
+	fnPromise.then(settleTracking, settleTracking);
+	try {
+		const result = await fnPromise;
+		return { acquired: true, result };
+	} finally {
+		stopped = true;
+		if (renewTimer) clearTimeout(renewTimer);
+	}
+}
+
 const WAKE_CHANNEL_NAME = 'buckitup-outbox-wake';
 const wakeChannel: BroadcastChannel | null =
 	typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(WAKE_CHANNEL_NAME) : null;
 const localWakeListeners = new Set<(userHash: string) => void>();
+
+const changeListeners = new Set<(userHash: string) => void>();
+
+function notifyQueueChange(userHash: string): void {
+	for (const handler of changeListeners) {
+		try {
+			handler(userHash);
+		} catch (e) {
+			console.warn('[outbox] onOutboxChange subscriber threw:', e);
+		}
+	}
+}
 
 function notifyOtherTabs(userHash: string): void {
 	wakeChannel?.postMessage({ userHash });
@@ -166,6 +396,7 @@ function notifyLocalSubscribers(userHash: string): void {
 }
 
 function wakeRetry(userHash: string): void {
+	notifyQueueChange(userHash);
 	notifyLocalSubscribers(userHash);
 	notifyOtherTabs(userHash);
 }
@@ -191,6 +422,7 @@ const outcomeChannel: BroadcastChannel | null =
 const outcomeListeners = new Set<(userHash: string) => void>();
 
 function notifyOutcomeChange(userHash: string): void {
+	notifyQueueChange(userHash);
 	for (const handler of outcomeListeners) {
 		try {
 			handler(userHash);
@@ -213,6 +445,24 @@ function onOutcomeChange(handler: (userHash: string) => void): () => void {
 	outcomeChannel?.addEventListener('message', listener);
 	return () => {
 		outcomeListeners.delete(handler);
+		outcomeChannel?.removeEventListener('message', listener);
+	};
+}
+
+export function onOutboxChange(handler: (userHash: string) => void): () => void {
+	changeListeners.add(handler);
+	const listener = (ev: MessageEvent<{ userHash: string }>) => {
+		try {
+			handler(ev.data.userHash);
+		} catch (e) {
+			console.warn('[outbox] onOutboxChange subscriber threw:', e);
+		}
+	};
+	wakeChannel?.addEventListener('message', listener);
+	outcomeChannel?.addEventListener('message', listener);
+	return () => {
+		changeListeners.delete(handler);
+		wakeChannel?.removeEventListener('message', listener);
 		outcomeChannel?.removeEventListener('message', listener);
 	};
 }
@@ -259,6 +509,39 @@ async function currentOutcome(id: string, userHash: string): Promise<EntryOutcom
 	if (result.entry.status === 'discarded') return { kind: 'discarded' };
 	if (result.entry.status === 'quarantined') return { kind: 'rejected', error: result.entry.lastError ?? 'rejected by the server' };
 	return 'pending';
+}
+
+export async function awaitServerAccepted(id: string, userHash: string): Promise<EntryOutcome> {
+	const transportOutcome = async (): Promise<EntryOutcome | null> => {
+		const outcome = await currentOutcome(id, userHash);
+		if (outcome !== 'pending' && outcome !== 'unknown') return outcome;
+		const result = await readEntry(id);
+		const serverAccepted = result.kind === 'entry' && result.entry.userHash === userHash
+			&& result.entry.status === 'server_accepted_pending_reconcile';
+		return serverAccepted ? { kind: 'accepted' } : null;
+	};
+
+	const immediate = await transportOutcome();
+	if (immediate) return immediate;
+
+	return new Promise<EntryOutcome>((resolve) => {
+		let settled = false;
+		const recheck = () => {
+			if (settled) return;
+			void transportOutcome().then((outcome) => {
+				if (!outcome || settled) return;
+				settled = true;
+				unsubscribe();
+				clearInterval(failsafeTimer);
+				resolve(outcome);
+			});
+		};
+		const unsubscribe = onOutboxChange((changedUserHash) => {
+			if (changedUserHash === userHash) recheck();
+		});
+		const failsafeTimer = setInterval(recheck, FAILSAFE_RECHECK_MS);
+		recheck();
+	});
 }
 
 /**
@@ -327,6 +610,7 @@ export async function enqueue(mutations: unknown[], userHash: string, opts: Enqu
 		};
 		await storage.set(entry.id, JSON.stringify(entry));
 		notifyOtherTabs(userHash);
+		notifyQueueChange(userHash);
 		return entry.id;
 	} catch (e) {
 		console.warn('[outbox] storage unavailable, write is not durable:', e);
@@ -344,6 +628,7 @@ export async function markServerAccepted(id: string | null): Promise<void> {
 	entry.status = 'server_accepted_pending_reconcile';
 	entry.serverAcceptedAt = Date.now();
 	await storage.set(id, JSON.stringify(entry));
+	notifyQueueChange(entry.userHash);
 }
 
 export async function markReconciled(id: string | null): Promise<void> {
@@ -416,6 +701,7 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 		}
 		await storage.set(id, JSON.stringify(entry));
 		if (entry.status === 'quarantined') notifyOutcomeChange(entry.userHash);
+		else notifyQueueChange(entry.userHash);
 	} catch {
 		/* diagnostics only — never let bookkeeping break the send path */
 	}
@@ -490,24 +776,20 @@ async function rewriteEncrypted(key: string, entry: OutboxEntry): Promise<void> 
 }
 
 async function entriesOf(userHash: string): Promise<OutboxEntry[]> {
-	try {
-		const keys = await storage.keys();
-		const entries: OutboxEntry[] = [];
-		for (const key of keys) {
-			const result = await readEntry(key);
-			if (result.kind === 'corrupt') {
-				await plainStorage.delete(key).catch(() => {});
-				continue;
-			}
-			if (result.kind !== 'entry') continue;
-			if (result.entry.userHash !== userHash) continue;
-			if (result.legacy) await rewriteEncrypted(key, result.entry);
-			entries.push(result.entry);
+	const keys = await storage.keys();
+	const entries: OutboxEntry[] = [];
+	for (const key of keys) {
+		const result = await readEntry(key);
+		if (result.kind === 'corrupt') {
+			await plainStorage.delete(key).catch(() => {});
+			continue;
 		}
-		return entries.sort((a, b) => (a.id < b.id ? -1 : 1));
-	} catch {
-		return [];
+		if (result.kind !== 'entry') continue;
+		if (result.entry.userHash !== userHash) continue;
+		if (result.legacy) await rewriteEncrypted(key, result.entry);
+		entries.push(result.entry);
 	}
+	return entries.sort((a, b) => (a.id < b.id ? -1 : 1));
 }
 
 export async function findEntryBySourceIntentId(
@@ -594,6 +876,22 @@ export async function readyEntries(userHash: string, now: number = Date.now()): 
 	});
 }
 
+export function transitiveDependencyClosure(entries: OutboxEntry[], seedIds: string[]): Set<string> {
+	const excluded = new Set(seedIds);
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const e of entries) {
+			if (excluded.has(e.id)) continue;
+			if ((e.dependsOn ?? []).some((dep) => excluded.has(dep))) {
+				excluded.add(e.id);
+				changed = true;
+			}
+		}
+	}
+	return excluded;
+}
+
 /** Pending entries held back by an unresolved, quarantined, discarded, or
  * unresolvable (see dependencyState) dependency. */
 export async function blockedEntries(userHash: string): Promise<OutboxEntry[]> {
@@ -656,13 +954,83 @@ export interface DrainResult {
 }
 
 /**
- * Replay pending writes for one account, oldest first.
+ * Bounded parallelism for independent ready writes (v3 "Ordering of operations":
+ * independent writes may dispatch concurrently, bounded, while dependent
+ * chains stay serialized). Kept small and fixed rather than tuned for
+ * throughput: browsers already cap same-origin connections around 6, and the
+ * low end of the target range (Raspberry Pi / embedded WebView, see
+ * CLAUDE.md) favors a conservative bound over maximizing parallel requests.
+ * No proposal-mandated value exists; this is a deliberately conservative
+ * constant, not a measured optimum.
+ */
+export const DRAIN_CONCURRENCY = 4;
+
+/**
+ * Entry ids with a network dispatch currently in flight — the ONE
+ * authoritative ownership registry for "at most one active send per outbox
+ * entry id, per tab", shared by every path that can issue that network
+ * request:
  *
- * Strictly sequential, because writes depend on each other: a user card must
- * land before the profile that references it, a message before the edit that
- * supersedes it. A transient failure stops the drain — the network is down
- * and everything behind this entry would only pile up attempts. A permanent
- * failure drops that entry and continues.
+ *   - `drainOutbox`'s worker pool (below), for replay;
+ *   - `dispatchMutations` (coordinator.ts), for the live leader-with-no-
+ *     dependencies path that dispatches immediately instead of going
+ *     through a drain.
+ *
+ * Module-level, not per-call, so the guard holds across separate
+ * `drainOutbox` invocations (scheduler loops, wakeups, retries), across a
+ * live send racing a concurrently triggered drain for the very same
+ * freshly enqueued entry, and across a coordinator restart
+ * (`stopDrainLoop`/`stopLeaderElection` do not clear it, so a new drain
+ * chain still sees an older one's still-completing send as claimed).
+ * `tryClaimOutboxEntry`/`releaseOutboxEntry` are the only way this set is
+ * touched — never exposed directly — and every caller releases in a
+ * `finally`, so an id can never be left claimed forever by an exception
+ * path.
+ */
+const inFlightEntryIds = new Set<string>();
+
+/**
+ * Claims `id` for a network dispatch attempt. Returns true if the caller now
+ * owns it — and must release with `releaseOutboxEntry`, in a `finally`, once
+ * its attempt settles — or false if another path (the live send, or a drain
+ * worker) already owns it right now. `null` (a mutation sent without a
+ * durable outbox entry, e.g. best-effort durability) always "succeeds":
+ * there is nothing to own, so it never blocks that caller.
+ */
+export function tryClaimOutboxEntry(id: string | null): boolean {
+	if (id === null) return true;
+	if (inFlightEntryIds.has(id)) return false;
+	inFlightEntryIds.add(id);
+	return true;
+}
+
+/** Releases a claim taken by `tryClaimOutboxEntry`. Idempotent, and a no-op
+ * for `null` — safe to call unconditionally in a `finally`. */
+export function releaseOutboxEntry(id: string | null): void {
+	if (id === null) return;
+	inFlightEntryIds.delete(id);
+}
+
+/** Test hook: in-flight claims are module state and must not leak between
+ * test cases that reuse entry ids or share a module instance. */
+export function _clearInFlightForTests(): void {
+	inFlightEntryIds.clear();
+}
+
+/**
+ * Replay pending writes for one account.
+ *
+ * A bounded pool of workers each repeatedly claim the next entry that is
+ * ready (§7.3: past its scheduled attempt, every dependency resolved) and
+ * not already claimed by another worker, dispatch it, and loop — so a
+ * dependent that becomes ready only once its predecessor is accepted is
+ * picked up as soon as a slot frees, without waiting for a separate drain
+ * trigger. Readiness is recomputed from persisted state on every claim
+ * (`readyEntries`, unchanged) rather than tracked separately here, so the
+ * existing dependency graph — not a new heuristic — is what decides
+ * eligibility. A transient failure only ever affects its own entry: unlike
+ * the old single sequential pass, one worker's failure never stops the
+ * other workers' entries from being tried in the same drain.
  *
  * Cross-tab: only the Web Locks leader drains, so two tabs never replay the
  * same entry concurrently.
@@ -670,8 +1038,7 @@ export interface DrainResult {
  * No delay before an attempt. A drain runs because something said conditions
  * changed — login, or the `online` event — and pacing the first replay would
  * only keep the user's message undelivered for seconds after the network came
- * back. Hammering is prevented by stopping the whole drain on the first
- * transient failure: one request per trigger, at most.
+ * back.
  */
 async function reconcileStuckEntries(userHash: string, reconcile: (mutations: unknown[]) => Promise<void>): Promise<void> {
 	for (const entry of await pendingReconciliation(userHash)) {
@@ -691,61 +1058,72 @@ export async function drainOutbox(
 	reconcile?: (mutations: unknown[], result?: unknown) => Promise<void>,
 	isCurrent?: () => boolean,
 ): Promise<DrainResult> {
-	const hasLeadership = leaderOverrideForTests !== null
-		? leaderOverrideForTests
-		: WebLocksLeader.isSupported() ? await (leader?.requestLeadership() ?? Promise.resolve(true)) : true;
-
 	if (reconcile) await reconcileStuckEntries(userHash, reconcile);
 
-	if (!hasLeadership) {
+	const outcome = await withAcquiredLeadership(userHash, async () => {
+		let sent = 0;
+		let dropped = 0;
+		let hadTransientFailure = false;
+
+		const processEntry = async (entry: OutboxEntry): Promise<void> => {
+			try {
+				const result = await send(entry.mutations);
+				await markServerAccepted(entry.id);
+				sent++;
+
+				if (!reconcile) {
+					await markReconciled(entry.id);
+					await resolveEntry(entry.id);
+					return;
+				}
+
+				try {
+					await reconcile(entry.mutations, result);
+					await markReconciled(entry.id);
+					await resolveEntry(entry.id);
+				} catch (e) {
+					console.warn('[outbox] reconciliation pending after server acceptance (L17-10):', entry.id, e);
+				}
+			} catch (e) {
+				if (e instanceof IngestError && e.permanent) {
+					// Out of the replay path but never silently gone: the entry
+					// keeps its signed mutations and the server's verdict.
+					await recordFailure(entry.id, e);
+					dropped++;
+					return;
+				}
+				await recordFailure(entry.id, e);
+				hadTransientFailure = true;
+			}
+		};
+
+		const worker = async (): Promise<void> => {
+			for (;;) {
+				if (isCurrent && !isCurrent()) return;
+				const ready = await readyEntries(userHash);
+				const next = ready.find((e) => !inFlightEntryIds.has(e.id));
+				if (!next) return;
+				if (!tryClaimOutboxEntry(next.id)) continue;
+				try {
+					await processEntry(next);
+				} finally {
+					releaseOutboxEntry(next.id);
+				}
+			}
+		};
+
+		await Promise.all(Array.from({ length: DRAIN_CONCURRENCY }, worker));
+		return { sent, dropped, hadTransientFailure };
+	});
+
+	if (!outcome.acquired) {
 		return { sent: 0, dropped: 0, remaining: await pendingCount(userHash), stoppedEarly: false, wasLeader: false };
 	}
-
-	// Only entries whose schedule has come due and whose dependencies are
-	// resolved (§7.3). Scheduled and blocked entries stay put — they are
-	// "remaining", not failures, and they hold back nobody else.
-	const entries = await readyEntries(userHash);
-	let sent = 0;
-	let dropped = 0;
-	let hadTransientFailure = false;
-
-	for (const entry of entries) {
-		if (isCurrent && !isCurrent()) break; // superseded mid-batch — see isCurrent's doc comment
-		try {
-			const result = await send(entry.mutations);
-			await markServerAccepted(entry.id);
-			sent++;
-
-			if (!reconcile) {
-				await markReconciled(entry.id);
-				await resolveEntry(entry.id);
-				continue;
-			}
-
-			try {
-				await reconcile(entry.mutations, result);
-				await markReconciled(entry.id);
-				await resolveEntry(entry.id);
-			} catch (e) {
-				console.warn('[outbox] reconciliation pending after server acceptance (L17-10):', entry.id, e);
-			}
-		} catch (e) {
-			if (e instanceof IngestError && e.permanent) {
-				// Out of the replay path but never silently gone: the entry
-				// keeps its signed mutations and the server's verdict.
-				await recordFailure(entry.id, e);
-				dropped++;
-				continue;
-			}
-			await recordFailure(entry.id, e);
-			hadTransientFailure = true;
-		}
-	}
 	return {
-		sent,
-		dropped,
+		sent: outcome.result.sent,
+		dropped: outcome.result.dropped,
 		remaining: await pendingCount(userHash),
-		stoppedEarly: hadTransientFailure,
+		stoppedEarly: outcome.result.hadTransientFailure,
 		wasLeader: true,
 	};
 }

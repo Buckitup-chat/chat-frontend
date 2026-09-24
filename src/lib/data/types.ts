@@ -14,6 +14,7 @@ export interface UserCardRow {
 	deleted_flag: boolean;
 	owner_timestamp: number | null;
 	sign_b64: string | null;
+	[key: string]: unknown;
 }
 
 // Exactly the server schema (chat: lib/chat/data/schemas/user_storage.ex).
@@ -30,6 +31,7 @@ export interface UserStorageRow {
 	sign_hash: string | null;
 	owner_timestamp: number | null;
 	sign_b64: string | null;
+	[key: string]: unknown;
 }
 
 export interface DialogKeyRow {
@@ -41,6 +43,7 @@ export interface DialogKeyRow {
 	owner_timestamp: number | null;
 	deleted_flag: boolean;
 	sign_b64: string | null;
+	[key: string]: unknown;
 }
 
 export interface DialogMessageRow {
@@ -54,6 +57,7 @@ export interface DialogMessageRow {
 	owner_timestamp: number;
 	sign_b64: string | null;
 	sign_hash: string | null;
+	[key: string]: unknown;
 }
 
 export interface DialogMessageVersionRow {
@@ -67,6 +71,7 @@ export interface DialogMessageVersionRow {
 	parent_sign_hash: string | null;
 	owner_timestamp: number;
 	sign_b64: string | null;
+	[key: string]: unknown;
 }
 
 export interface DialogMessageReactionRow {
@@ -79,6 +84,7 @@ export interface DialogMessageReactionRow {
 	deleted_flag: boolean;
 	owner_timestamp: number;
 	sign_b64: string | null;
+	[key: string]: unknown;
 }
 
 export interface DialogMessageReceiptRow {
@@ -90,6 +96,7 @@ export interface DialogMessageReceiptRow {
 	message_sign_hash: string | null;
 	owner_timestamp: number;
 	sign_b64: string | null;
+	[key: string]: unknown;
 }
 
 /** Per-row outcome of POST /ingest_each. */

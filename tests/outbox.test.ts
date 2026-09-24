@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
 	enqueue,
 	pendingEntries,
 	drainOutbox,
 	resolveEntry,
 	_setStorageForTests,
+	_setLeaderForTests,
 	MAX_OUTBOX_ENTRIES,
 } from '@/lib/data/outbox';
 import { IngestError } from '@/lib/data/ingest';
@@ -47,6 +48,11 @@ beforeEach(() => {
 	storage = makeStorage();
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	_setStorageForTests(storage as any);
+	_setLeaderForTests(true);
+});
+
+afterEach(() => {
+	_setLeaderForTests(null);
 });
 
 describe('outbox durability', () => {
@@ -129,7 +135,7 @@ describe('drainOutbox', () => {
 		expect(await pendingEntries(USER_A)).toHaveLength(0);
 	});
 
-	it('a transient failure backs off only that entry — an unrelated ready entry in the same batch still dispatches (docs/main-tanstack-proposal-v3.md, "Ordering операций": no global barrier)', async () => {
+	it('a transient failure backs off only that entry — an unrelated ready entry in the same batch still dispatches (docs/main-tanstack-proposal-v3.md, "Ordering of operations": no global barrier)', async () => {
 		await enqueue([mutation('dialog_messages', 'first')], USER_A);
 		await enqueue([mutation('dialog_messages', 'second')], USER_A);
 

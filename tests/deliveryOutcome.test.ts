@@ -27,7 +27,9 @@ const {
 	enqueue, recordFailure, discardEntry, resolveEntry, awaitEntryOutcome,
 	quarantinedEntries, pendingEntries,
 	stopDrainLoop, _setStorageForTests, _setLeaderForTests,
+	startLeaderElection, stopLeaderElection,
 } = await import('@/lib/data/outbox');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -57,16 +59,19 @@ beforeEach(() => {
 	online = true;
 	sent.length = 0;
 	_setStorageForTests(makeStorage());
+	_setAcceptedSnapshotStorageForTests(makeStorage());
 });
 
 afterEach(() => {
 	_setLeaderForTests(null);
+	stopLeaderElection();
 	stopDrainLoop();
 });
 
 describe('DeliveryHandle: leader with no dependency', () => {
 	it('1. direct transport; acceptance settles on exact success; exactly one transport call', async () => {
 		_setLeaderForTests(true);
+		startLeaderElection(MY_HASH, () => {});
 
 		const handle = await sendMutationsAndAwaitShape(message('leader-direct'), SKEY, { retries: 0 });
 
@@ -80,6 +85,7 @@ describe('DeliveryHandle: leader with no dependency', () => {
 describe('DeliveryHandle: follower', () => {
 	it('2. durable enqueue completes with phase:queued; acceptance stays pending until the leader drain actually accepts it', async () => {
 		_setLeaderForTests(false);
+		startLeaderElection(MY_HASH, () => {});
 
 		const handle = await sendMutationsAndAwaitShape(message('follower'), SKEY, { retries: 0 });
 		expect(handle.phase).toBe('queued');
@@ -102,14 +108,12 @@ describe('DeliveryHandle: follower', () => {
 describe('DeliveryHandle: dependency', () => {
 	it('3. B queued behind A: acceptance does not settle until A resolves and B is drained', async () => {
 		_setLeaderForTests(true);
+		startLeaderElection(MY_HASH, () => {});
 		const aId = await enqueue(editMessage('msg_dep', 'a'), MY_HASH);
 
 		const bHandle = await sendMutationsAndAwaitShape(editMessage('msg_dep', 'b'), SKEY, { retries: 0 });
 		expect(bHandle.phase).toBe('queued'); // durably queued, not yet known — B never jumps its own recorded dependency
 		expect(sent).toHaveLength(0);
-
-		await vi.waitFor(() => expect(sent).toHaveLength(1));
-		drainPendingWrites(MY_HASH, SKEY);
 
 		await expect(bHandle.acceptance).resolves.toEqual({ kind: 'accepted' });
 
@@ -232,6 +236,7 @@ describe('awaitEntryOutcome: races and durability', () => {
 		const backing = makeStorage();
 		_setStorageForTests(backing);
 		_setLeaderForTests(false);
+		startLeaderElection(MY_HASH, () => {});
 
 		const handle = await sendMutationsAndAwaitShape(message('reload-boundary'), SKEY, { retries: 0 });
 		expect(handle.phase).toBe('queued');

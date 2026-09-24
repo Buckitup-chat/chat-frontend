@@ -1,7 +1,7 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
 	enqueue, resolveEntry, awaitEntryOutcome, pendingEntries, drainOutbox,
-	_setStorageForTests,
+	_setStorageForTests, _setLeaderForTests,
 } from '@/lib/data/outbox';
 import { createSecureStore, deriveLocalStorageKey } from '@/lib/data/secureStore';
 
@@ -26,7 +26,12 @@ const makeStorage = () => {
 	};
 };
 
+beforeEach(() => {
+	_setLeaderForTests(true);
+});
+
 afterEach(() => {
+	_setLeaderForTests(null);
 	vi.useRealTimers();
 });
 

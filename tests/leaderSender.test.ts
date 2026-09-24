@@ -26,6 +26,7 @@ const {
 	enqueue, onOutboxWake, pendingEntries, quarantinedEntries, requeueEntry, recordFailure,
 	stopDrainLoop, _setStorageForTests, _setLeaderForTests,
 } = await import('@/lib/data/outbox');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -48,6 +49,7 @@ beforeEach(() => {
 	online = true;
 	sent.length = 0;
 	_setStorageForTests(makeStorage());
+	_setAcceptedSnapshotStorageForTests(makeStorage());
 });
 
 afterEach(() => {

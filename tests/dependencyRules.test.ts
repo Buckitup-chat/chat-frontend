@@ -95,6 +95,38 @@ describe('dependenciesFor: §7.3 server-enforced existence prerequisites', () =>
 		const deps = await dependenciesFor(userCard(MY_HASH), MY_HASH);
 		expect(deps).toEqual([]);
 	});
+
+	it('does NOT depend on a pending user_cards UPDATE — only insert is an existence prerequisite', async () => {
+		await enqueue([{
+			type: 'update',
+			modified: { user_hash: MY_HASH, card_b64: 'renamed' },
+			syncMetadata: { relation: 'user_cards' },
+		}], MY_HASH);
+		const deps = await dependenciesFor(dialogMessage('dh1'), MY_HASH);
+		expect(deps).toEqual([]);
+	});
+
+	it('does NOT depend on a permanently quarantined user_cards UPDATE either', async () => {
+		const updateId = await enqueue([{
+			type: 'update',
+			modified: { user_hash: MY_HASH, card_b64: 'renamed' },
+			syncMetadata: { relation: 'user_cards' },
+		}], MY_HASH);
+		await recordFailure(updateId, new IngestError('rejected', { permanent: true }));
+		const deps = await dependenciesFor(dialogMessage('dh1'), MY_HASH);
+		expect(deps).toEqual([]);
+	});
+
+	it('still depends on a pending user_cards INSERT alongside an unrelated pending UPDATE', async () => {
+		const insertId = await enqueue(userCard(MY_HASH), MY_HASH);
+		await enqueue([{
+			type: 'update',
+			modified: { user_hash: MY_HASH, card_b64: 'renamed' },
+			syncMetadata: { relation: 'user_cards' },
+		}], MY_HASH);
+		const deps = await dependenciesFor(dialogMessage('dh1'), MY_HASH);
+		expect(deps).toEqual([insertId]);
+	});
 });
 
 describe('end-to-end through the real outbox: independent dispatch, chained block', () => {

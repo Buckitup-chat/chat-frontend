@@ -25,7 +25,8 @@ vi.mock('@/api/client', () => ({
 
 const { signAndDispatchIntent } = await import('@/lib/data/intentRecovery');
 const { enqueueIntent, getIntent, _setIntentStorageForTests, _clearIntentsForTests } = await import('@/lib/data/intents');
-const { _setStorageForTests, stopDrainLoop } = await import('@/lib/data/outbox');
+const { _setStorageForTests, stopDrainLoop, _setLeaderForTests } = await import('@/lib/data/outbox');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -46,6 +47,8 @@ beforeEach(async () => {
 	_setIntentStorageForTests(intentStorage);
 	await _clearIntentsForTests();
 	_setStorageForTests(makeStorage());
+	_setLeaderForTests(true);
+	_setAcceptedSnapshotStorageForTests(makeStorage());
 	sent.length = 0;
 	releaseNetwork = null;
 });

@@ -36,6 +36,38 @@ async function pinnedWriteStorage(expectedUserHash: string): Promise<StringStore
 	const { getLocalStorageKeyFor } = await import('./localCrypto');
 	return createSecureStore(rawStorage, { getKey: () => getLocalStorageKeyFor(expectedUserHash) });
 }
+const CHANGE_CHANNEL_NAME = 'buckitup-intents-change';
+const changeChannel: BroadcastChannel | null =
+	typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(CHANGE_CHANNEL_NAME) : null;
+const changeListeners = new Set<(userHash: string) => void>();
+
+function notifyIntentChange(userHash: string): void {
+	for (const handler of changeListeners) {
+		try {
+			handler(userHash);
+		} catch (e) {
+			console.warn('[intents] onIntentChange subscriber threw:', e);
+		}
+	}
+	changeChannel?.postMessage({ userHash });
+}
+
+export function onIntentChange(handler: (userHash: string) => void): () => void {
+	changeListeners.add(handler);
+	const listener = (ev: MessageEvent<{ userHash: string }>) => {
+		try {
+			handler(ev.data.userHash);
+		} catch (e) {
+			console.warn('[intents] onIntentChange subscriber threw:', e);
+		}
+	};
+	changeChannel?.addEventListener('message', listener);
+	return () => {
+		changeListeners.delete(handler);
+		changeChannel?.removeEventListener('message', listener);
+	};
+}
+
 const tabNonce = Math.random().toString(36).slice(2, 6).padStart(4, '0');
 let seq = 0;
 const nextId = (): string => `intent-${Date.now().toString(36)}-${(seq++).toString(36)}-${tabNonce}`;
@@ -46,6 +78,7 @@ export async function enqueueIntent<T>(intent: T, userHash: string, relation: st
 		const entry: IntentEntry<T> = { id: nextId(), userHash, relation, intent, createdAt: Date.now() };
 		const writeStore = await pinnedWriteStorage(userHash);
 		await writeStore.set(entry.id, JSON.stringify(entry));
+		notifyIntentChange(userHash);
 		return entry.id;
 	} catch (e) {
 		console.warn('[intents] intent is not durable (storage unavailable or the active account no longer matches its owner):', e);
@@ -79,6 +112,7 @@ export async function updateIntent<T>(id: string, intent: T): Promise<boolean> {
 	try {
 		const writeStore = await pinnedWriteStorage(existing.userHash);
 		await writeStore.set(id, JSON.stringify(existing));
+		notifyIntentChange(existing.userHash);
 		return true;
 	} catch (e) {
 		console.warn('[intents] update is not durable (storage unavailable or the active account no longer matches its owner):', e);
@@ -116,6 +150,7 @@ export async function resolveIntent(id: string, outcome: ResolvedIntentOutcome):
 	try {
 		const writeStore = await pinnedWriteStorage(existing.userHash);
 		await writeStore.set(id, JSON.stringify(marker));
+		notifyIntentChange(existing.userHash);
 		return true;
 	} catch (e) {
 		console.warn('[intents] could not durably write the terminal marker — retried by the next recovery pass:', id, e);

@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { dependenciesFor } from '@/lib/data/coordinator';
 import {
 	enqueue, recordFailure, discardEntry, requeueEntry, resolveEntry,
 	readyEntries, blockedEntries, quarantinedEntries, pendingEntries, drainOutbox,
-	_setStorageForTests,
+	_setStorageForTests, _setLeaderForTests,
 } from '@/lib/data/outbox';
 import { IngestError } from '@/lib/data/ingest';
 
@@ -38,6 +38,11 @@ const storageSlot = (uuid: string) => ([{
 
 beforeEach(() => {
 	_setStorageForTests(makeStorage());
+	_setLeaderForTests(true);
+});
+
+afterEach(() => {
+	_setLeaderForTests(null);
 });
 
 describe('§4.9 audit fix: chained dependency is per-entity, not per-dialog/per-account', () => {

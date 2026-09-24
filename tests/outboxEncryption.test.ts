@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
 	enqueue,
 	pendingEntries,
 	drainOutbox,
 	_setStorageForTests,
+	_setLeaderForTests,
 	readyEntries,
 	blockedEntries,
 	quarantinedEntries,
@@ -44,7 +45,14 @@ const useAccount = async (seed: number) => {
 	_setStorageForTests(createSecureStore(raw, { getKey: async () => key }), raw);
 };
 
-beforeEach(() => { raw = makeRaw(); });
+beforeEach(() => {
+	raw = makeRaw();
+	_setLeaderForTests(true);
+});
+
+afterEach(() => {
+	_setLeaderForTests(null);
+});
 
 describe('encrypted outbox', () => {
 	it('leaves nothing readable on disk', async () => {

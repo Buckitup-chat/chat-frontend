@@ -21,6 +21,7 @@ vi.mock('@/api/client', () => ({
 
 const { sendMutationsAndAwaitShape } = await import('@/lib/data/ingest');
 const { enqueue, pendingEntries, stopDrainLoop, _setStorageForTests, _setLeaderForTests } = await import('@/lib/data/outbox');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -47,6 +48,7 @@ beforeEach(() => {
 	sent.length = 0;
 	_setStorageForTests(makeStorage());
 	_setLeaderForTests(true);
+	_setAcceptedSnapshotStorageForTests(makeStorage());
 });
 
 afterEach(() => {
