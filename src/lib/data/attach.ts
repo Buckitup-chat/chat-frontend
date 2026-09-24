@@ -21,7 +21,8 @@ interface PreloadableCollection {
 export async function preloadWithRetry(
 	coll: PreloadableCollection,
 	isCancelled: () => boolean = () => false,
-	label = 'shape'
+	label = 'shape',
+	onAttemptFailed?: (attempt: number, error: unknown) => void
 ): Promise<boolean> {
 	for (let attempt = 0; ; attempt++) {
 		if (isCancelled()) return false;
@@ -29,6 +30,7 @@ export async function preloadWithRetry(
 			await coll.preload();
 			return !isCancelled();
 		} catch (e) {
+			onAttemptFailed?.(attempt, e);
 			const delay = RETRY_DELAYS_MS[attempt] ?? IDLE_RETRY_MS;
 			console.warn(`[data] ${label} preload failed (attempt ${attempt + 1}), retrying in ${delay / 1000}s:`, e);
 			await sleep(delay);

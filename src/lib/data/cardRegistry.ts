@@ -9,7 +9,9 @@
 
 import { verifyUserCard } from '@/lib/pq/verifyCard';
 import { getUserCardsCollection } from './collections';
-import { getCachedRow } from './readCache';
+import { isTouched } from './readCache';
+import { readCachedCard } from './userCardsCache';
+import { settled } from './shapeLink';
 import type { UserCardRow } from './types';
 
 const verified = new Map<string, string>(); // user_hash -> signPkeyB64 (padded)
@@ -20,14 +22,15 @@ export const getVerifiedSignPkey = async (userHash: string): Promise<string | nu
 	if (hit) return hit;
 
 	const coll = getUserCardsCollection();
+	await settled(coll as unknown as Parameters<typeof settled>[0]);
+	let liveRow: UserCardRow | undefined;
 	try {
-		await coll.preload();
+		liveRow = coll.get(userHash) as UserCardRow | undefined;
 	} catch {
-		return null; // collection unavailable ≠ card invalid; retry later
+		liveRow = undefined;
 	}
-	const row = (coll.get(userHash) as UserCardRow | undefined)
-		?? (await getCachedRow('user_cards', userHash) as UserCardRow | null)
-		?? undefined;
+	const cachedRow = liveRow || isTouched('user_cards', userHash) ? null : await readCachedCard(userHash);
+	const row = liveRow ?? cachedRow ?? undefined;
 	if (!row) return null;
 
 	const verdict = verifyUserCard(row);

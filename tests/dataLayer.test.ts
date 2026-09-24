@@ -342,11 +342,24 @@ describe('dialog collection registry', () => {
 // Update mutations must carry `original` with the row's identifying fields —
 // the server routes them to update_changeset (edit/tombstone semantics),
 // while inserts on an existing PK are rejected outright.
+interface UpdateMutationResult {
+	type: string;
+	original: Record<string, unknown>;
+	changes: Record<string, unknown>;
+}
+const createGenericMutation = api.createGenericMutation as unknown as (...args: unknown[]) => UpdateMutationResult;
+
+interface InsertStorageMutationResult {
+	type: string;
+	modified: Record<string, unknown> & { sign_b64: string; sign_hash: string };
+}
+const createStorageMutation = api.createStorageMutation as unknown as (...args: unknown[]) => InsertStorageMutationResult;
+
 describe('createGenericMutation update shape', () => {
 	const { secretKey } = ml_dsa87.keygen();
 
 	it('builds an update with original identity fields', () => {
-		const m = api.createGenericMutation('dialog_message_reactions', {
+		const m = createGenericMutation('dialog_message_reactions', {
 			reaction_hash: 'dmr_' + 'cd'.repeat(64),
 			dialog_hash: 'di_' + 'ab'.repeat(64),
 			message_id: 'dmsg_1',
@@ -368,7 +381,7 @@ describe('createGenericMutation update shape', () => {
 	});
 
 	it('builds a dialog_messages edit as update with parent_sign_hash', () => {
-		const m = api.createGenericMutation('dialog_messages', {
+		const m = createGenericMutation('dialog_messages', {
 			message_id: 'dmsg_2',
 			dialog_hash: 'di_' + 'ab'.repeat(64),
 			sender_hash: 'u_' + 'ab'.repeat(64),
@@ -412,7 +425,7 @@ describe('createStorageMutation signing', () => {
 			.join('');
 
 	const build = () =>
-		api.createStorageMutation(
+		createStorageMutation(
 			userHash, uuid, valueB64, null, 0, ownerTimestamp,
 			secretKey, false, false, null, null, null, 'insert'
 		);

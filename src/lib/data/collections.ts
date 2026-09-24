@@ -11,6 +11,10 @@ import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persiste
 import { getPersistence } from './persistence';
 import { alwaysActiveVisibility } from './visibility';
 import { mirrorInto } from './readCache';
+import { mirrorDialogTable } from './dialogCache';
+import { userCardsFetch, reportUserCardsStreamError, userCardsShapeLink } from './userCardsLink';
+import { mirrorUserCards } from './userCardsCache';
+import { createShapeLink, registerShapeLink, type ShapeLink } from './shapeLink';
 import type {
 	UserCardRow,
 	UserStorageRow,
@@ -96,6 +100,11 @@ const buildUserCards = () =>
 				url: electricUrl('/shapes'),
 				params: { table: 'user_cards' },
 				...shapeDefaults,
+				fetchClient: userCardsFetch,
+				onError: () => {
+					reportUserCardsStreamError();
+					return {};
+				},
 			},
 			getKey: (r) => r.user_hash,
 		}))
@@ -104,7 +113,8 @@ const buildUserCards = () =>
 export function getUserCardsCollection() {
 	if (!userCards) {
 		userCards = buildUserCards();
-		mirrorInto(userCards, 'user_cards');
+		registerShapeLink(userCards, userCardsShapeLink);
+		mirrorUserCards(userCards);
 	}
 	return userCards;
 }
@@ -171,19 +181,25 @@ export interface DialogCollections {
 	receipts: ReturnType<typeof buildDialogCollections>['receipts'];
 }
 
-const dialogShape = (table: string, dialogHash: string) => ({
+const dialogShape = (table: string, dialogHash: string, link: ShapeLink) => ({
 	url: electricUrl('/shapes'),
 	params: { table, where: `dialog_hash = '${assertDialogHash(dialogHash)}'` },
 	...shapeDefaults,
+	fetchClient: link.fetchClient,
+	onError: link.onError,
 });
 
 const buildDialogCollections = (dialogHash: string) => {
 	const suffix = dialogHash.slice(0, 24);
-	return {
+	const links = {
+		keys: createShapeLink(), messages: createShapeLink(), versions: createShapeLink(),
+		reactions: createShapeLink(), receipts: createShapeLink(),
+	};
+	const colls = {
 		keys: createCollection(
 			persisted(electricCollectionOptions<DialogKeyRow>({
 				id: `dk-${suffix}`,
-				shapeOptions: dialogShape('dialog_keys', dialogHash),
+				shapeOptions: dialogShape('dialog_keys', dialogHash, links.keys),
 				getKey: (r) => `${r.dialog_hash}|${r.sender_hash}`,
 				gcTime: DIALOG_GC_MS,
 			}))
@@ -191,7 +207,7 @@ const buildDialogCollections = (dialogHash: string) => {
 		messages: createCollection(
 			persisted(electricCollectionOptions<DialogMessageRow>({
 				id: `dm-${suffix}`,
-				shapeOptions: dialogShape('dialog_messages', dialogHash),
+				shapeOptions: dialogShape('dialog_messages', dialogHash, links.messages),
 				getKey: (r) => r.message_id,
 				gcTime: DIALOG_GC_MS,
 			}))
@@ -199,7 +215,7 @@ const buildDialogCollections = (dialogHash: string) => {
 		versions: createCollection(
 			persisted(electricCollectionOptions<DialogMessageVersionRow>({
 				id: `dmv-${suffix}`,
-				shapeOptions: dialogShape('dialog_messages_versions', dialogHash),
+				shapeOptions: dialogShape('dialog_messages_versions', dialogHash, links.versions),
 				getKey: (r) => `${r.message_id}|${r.sign_hash}`,
 				gcTime: DIALOG_GC_MS,
 			}))
@@ -207,7 +223,7 @@ const buildDialogCollections = (dialogHash: string) => {
 		reactions: createCollection(
 			persisted(electricCollectionOptions<DialogMessageReactionRow>({
 				id: `dmr-${suffix}`,
-				shapeOptions: dialogShape('dialog_message_reactions', dialogHash),
+				shapeOptions: dialogShape('dialog_message_reactions', dialogHash, links.reactions),
 				getKey: (r) => r.reaction_hash,
 				gcTime: DIALOG_GC_MS,
 			}))
@@ -215,12 +231,14 @@ const buildDialogCollections = (dialogHash: string) => {
 		receipts: createCollection(
 			persisted(electricCollectionOptions<DialogMessageReceiptRow>({
 				id: `dmc-${suffix}`,
-				shapeOptions: dialogShape('dialog_message_receipts', dialogHash),
+				shapeOptions: dialogShape('dialog_message_receipts', dialogHash, links.receipts),
 				getKey: (r) => r.receipt_hash,
 				gcTime: DIALOG_GC_MS,
 			}))
 		),
 	};
+	for (const k of Object.keys(links) as Array<keyof typeof links>) registerShapeLink(colls[k], links[k]);
+	return colls;
 };
 
 const DIALOG_TABLES: Record<keyof DialogCollections, string> = {
@@ -233,7 +251,7 @@ const DIALOG_TABLES: Record<keyof DialogCollections, string> = {
 
 const mirrorDialogCollections = (entry: DialogCollections): (() => void) => {
 	const unsubs = (Object.keys(DIALOG_TABLES) as Array<keyof DialogCollections>)
-		.map((k) => mirrorInto(entry[k], DIALOG_TABLES[k]));
+		.map((k) => mirrorDialogTable(entry[k], DIALOG_TABLES[k] as Parameters<typeof mirrorDialogTable>[1]));
 	return () => unsubs.forEach((u) => u());
 };
 

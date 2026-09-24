@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
 	setCachedRow, deleteCachedRow, getCachedRow, getCachedRows,
-	markTouched, isTouched, mirrorInto, clearReadCache,
+	markTouched, isTouched, mirrorInto, clearReadCache, reconcileWithCache,
 	_setReadCacheStorageForTests, _resetTouchedForTests,
 } from '@/lib/data/readCache';
 
@@ -147,6 +147,55 @@ describe('mirrorInto: keeps the cache current from a collection\'s own changes',
 		await Promise.resolve();
 
 		expect(storage.map.has('dialog_messages:later')).toBe(false);
+	});
+});
+
+describe('reconcileWithCache: the IndexedDB read-cache fallback boundary (v3 "IndexedDB read cache")', () => {
+	const byMessageId = (r: { message_id: string }) => r.message_id;
+
+	it('fills in previously mirrored rows of the requested dialog when the live set is empty (offline reload)', async () => {
+		await setCachedRow('dialog_messages', 'a', { message_id: 'a', dialog_hash: 'd1' });
+		await setCachedRow('dialog_messages', 'b', { message_id: 'b', dialog_hash: 'd1' });
+
+		const merged = await reconcileWithCache('dialog_messages', [], byMessageId, (r) => r.dialog_hash === 'd1');
+
+		expect(merged.map(byMessageId).sort()).toEqual(['a', 'b']);
+	});
+
+	it('never mixes in a cached row of a different dialog_hash', async () => {
+		await setCachedRow('dialog_messages', 'a', { message_id: 'a', dialog_hash: 'd1' });
+		await setCachedRow('dialog_messages', 'other', { message_id: 'other', dialog_hash: 'd2' });
+
+		const merged = await reconcileWithCache('dialog_messages', [], byMessageId, (r) => r.dialog_hash === 'd1');
+
+		expect(merged.map(byMessageId)).toEqual(['a']);
+	});
+
+	it('a live row always wins over a stale cached row with the same key (canonical priority)', async () => {
+		await setCachedRow('dialog_messages', 'a', { message_id: 'a', dialog_hash: 'd1', content_b64: 'stale' });
+		const live = [{ message_id: 'a', dialog_hash: 'd1', content_b64: 'fresh' }];
+
+		const merged = await reconcileWithCache('dialog_messages', live, byMessageId, (r) => r.dialog_hash === 'd1');
+
+		expect(merged).toEqual([{ message_id: 'a', dialog_hash: 'd1', content_b64: 'fresh' }]);
+	});
+
+	it('a key touched (updated or deleted) by this session never resurrects from the disk cache', async () => {
+		await setCachedRow('dialog_messages', 'a', { message_id: 'a', dialog_hash: 'd1' });
+		markTouched('dialog_messages', 'a');
+
+		const merged = await reconcileWithCache('dialog_messages', [], byMessageId, (r) => r.dialog_hash === 'd1');
+
+		expect(merged).toEqual([]);
+	});
+
+	it('with no predicate, merges every untouched cached row of the table', async () => {
+		await setCachedRow('dialog_messages', 'a', { message_id: 'a', dialog_hash: 'd1' });
+		await setCachedRow('dialog_messages', 'b', { message_id: 'b', dialog_hash: 'd2' });
+
+		const merged = await reconcileWithCache('dialog_messages', [], byMessageId);
+
+		expect(merged.map(byMessageId).sort()).toEqual(['a', 'b']);
 	});
 });
 

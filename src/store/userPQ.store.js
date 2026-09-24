@@ -3,12 +3,16 @@ import { ref, shallowRef, computed, watch, onScopeDispose } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { preloadWithRetry } from '@/lib/data/attach';
+import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache } from '@/lib/data/userCardsLink';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
   const isInitialized = ref(false);
   // separate from isInitialized: local vault readiness vs network attachment
   const networkAttached = ref(false);
+  const showingCachedCards = ref(false);
+  const userCardsFallback = computed(() => showingCachedCards.value && !networkAttached.value);
+  let networkUsersStarted = false;
   const localDataReady = ref(false);
   const isOnline = ref(typeof navigator !== 'undefined' ? navigator.onLine : true);
   if (typeof window !== 'undefined') {
@@ -86,7 +90,7 @@ export const userPQStore = defineStore('userPQ', () => {
     initNetworkUsers();
   };
 
-  const readCards = (coll) => coll.toArray
+  const readCards = (rows) => rows
     .filter((r) => !r.deleted_flag)
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
@@ -99,18 +103,38 @@ export const userPQStore = defineStore('userPQ', () => {
     isInitialized.value = true;
     console.log(`[userStore] Initialized | Local users: ${myLocalUsers.value.length}`);
 
-    if (networkAttached.value) return;
+    if (networkAttached.value || networkUsersStarted) return;
+    networkUsersStarted = true;
     const coll = getUserCardsCollection();
-    const attached = await preloadWithRetry(coll, () => networkAttached.value, 'user_cards');
-    if (!attached) return;
+    const live = whenUserCardsLive(coll);
 
-    allNetworkUsers.value = readCards(coll);
+    let fallbackShown = false;
+    const showCacheFallback = ({ evenIfEmpty }) => {
+      if (fallbackShown || networkAttached.value) return;
+      void userCardsWithCache(coll.toArray).then((rows) => {
+        if (fallbackShown || networkAttached.value) return;
+        if (!rows.length && !evenIfEmpty) return;
+        fallbackShown = true;
+        allNetworkUsers.value = readCards(rows);
+        showingCachedCards.value = true;
+      });
+    };
+    const onStreamFailure = () => showCacheFallback({ evenIfEmpty: true });
+    const stopErrorWatch = onUserCardsStreamError(onStreamFailure);
+    showCacheFallback({ evenIfEmpty: false });
+
+    void preloadWithRetry(coll, () => networkAttached.value, 'user_cards', onStreamFailure);
+
+    await live;
+    stopErrorWatch();
+    allNetworkUsers.value = readCards(coll.toArray);
     if (!cardsSub) {
       cardsSub = coll.subscribeChanges(() => {
-        allNetworkUsers.value = readCards(coll);
+        allNetworkUsers.value = readCards(coll.toArray);
       });
     }
     networkAttached.value = true;
+    showingCachedCards.value = false;
   };
 
   const registerNewUser = async ({ name = "Anonymous", notes, avatar, avatarDataUrl }) => {
@@ -196,7 +220,8 @@ export const userPQStore = defineStore('userPQ', () => {
   };
 
   const refreshNetworkUsers = async () => {
-    allNetworkUsers.value = readCards(getUserCardsCollection());
+    if (!networkAttached.value) return;
+    allNetworkUsers.value = readCards(getUserCardsCollection().toArray);
   };
 
   // One logical operation: persist the local vault registry AND publish the
@@ -348,6 +373,7 @@ export const userPQStore = defineStore('userPQ', () => {
     currentUser: currentUserFull,
     myLocalUsers,
     allNetworkUsers,
+    userCardsFallback,
     isOnline,
 
     pqUserCards,

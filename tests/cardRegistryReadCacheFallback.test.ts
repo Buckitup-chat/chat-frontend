@@ -1,3 +1,4 @@
+import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
@@ -5,12 +6,18 @@ import * as secp from '@noble/secp256k1';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, toBase64 } from '@/lib/pq/signature';
-import { _setReadCacheStorageForTests, _resetTouchedForTests, setCachedRow } from '@/lib/data/readCache';
+import { _setReadCacheStorageForTests, _resetTouchedForTests } from '@/lib/data/readCache';
+import { writeAsMain, clearMainCache } from './helpers/mainUserCache';
+
+const setCachedCard = (card: Record<string, unknown>) => writeAsMain([card]);
 
 const emptyCollection = { async preload() {}, get: () => undefined };
+let preloadError: unknown = null;
+const flakyCollection = { async preload() { if (preloadError) throw preloadError; }, get: () => undefined };
+let activeCollection = emptyCollection;
 
 vi.mock('@/lib/data/collections', () => ({
-	getUserCardsCollection: () => emptyCollection,
+	getUserCardsCollection: () => activeCollection,
 }));
 
 const { getVerifiedSignPkey, resetCardRegistry } = await import('@/lib/data/cardRegistry');
@@ -47,16 +54,19 @@ const makeStorage = () => {
 	};
 };
 
-beforeEach(() => {
+beforeEach(async () => {
+	await clearMainCache();
 	_setReadCacheStorageForTests(makeStorage());
 	_resetTouchedForTests();
 	resetCardRegistry();
+	activeCollection = emptyCollection;
+	preloadError = null;
 });
 
 describe('getVerifiedSignPkey: read-cache fallback when the live collection is empty (§7.3)', () => {
 	it('verifies a card served only from the disk fallback', async () => {
 		const { userHash, card, signPkeyB64 } = makeCard(1);
-		await setCachedRow('user_cards', userHash, card);
+		await setCachedCard(card);
 
 		expect(await getVerifiedSignPkey(userHash)).toBe(signPkeyB64);
 	});
@@ -67,8 +77,24 @@ describe('getVerifiedSignPkey: read-cache fallback when the live collection is e
 
 	it('still runs the disk-fallback row through full verification — a tampered cached card is rejected, not trusted', async () => {
 		const { userHash, card } = makeCard(2);
-		await setCachedRow('user_cards', userHash, { ...card, name: 'tampered-after-cache' });
+		await setCachedCard({ ...card, name: 'tampered-after-cache' });
 
 		expect(await getVerifiedSignPkey(userHash)).toBeNull();
+	});
+
+	it('falls back to the disk cache when preload() itself throws (offline), not just when it succeeds empty', async () => {
+		const { userHash, card, signPkeyB64 } = makeCard(3);
+		await setCachedCard(card);
+		activeCollection = flakyCollection;
+		preloadError = new Error('network unreachable');
+
+		expect(await getVerifiedSignPkey(userHash)).toBe(signPkeyB64);
+	});
+
+	it('a preload() failure with nothing cached still returns null, not a thrown error', async () => {
+		activeCollection = flakyCollection;
+		preloadError = new Error('network unreachable');
+
+		await expect(getVerifiedSignPkey('u_' + 'z'.repeat(128))).resolves.toBeNull();
 	});
 });

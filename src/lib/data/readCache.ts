@@ -75,6 +75,30 @@ export async function getCachedRows(
 	return rows;
 }
 
+export function mergeLiveWithCached<T extends Record<string, unknown>>(
+	table: string,
+	liveRows: T[],
+	cachedRows: T[],
+	getRowKey: (row: T) => string
+): T[] {
+	const liveKeys = new Set(liveRows.map(getRowKey));
+	const fromCache = cachedRows.filter((row) => {
+		const key = getRowKey(row);
+		return !liveKeys.has(key) && !isTouched(table, key);
+	});
+	return [...fromCache, ...liveRows];
+}
+
+export async function reconcileWithCache<T extends Record<string, unknown>>(
+	table: string,
+	liveRows: T[],
+	getRowKey: (row: T) => string,
+	predicate?: (row: Record<string, unknown>) => boolean
+): Promise<T[]> {
+	const cached = (await getCachedRows(table, predicate)) as T[];
+	return mergeLiveWithCached(table, liveRows, cached, getRowKey);
+}
+
 interface MirrorableCollection {
 	subscribeChanges(
 		callback: (changes: Array<{ key: unknown; value?: Record<string, unknown>; type: string }>) => void,
@@ -108,7 +132,17 @@ export function mirrorInto(collection: MirrorableCollection, table: string): () 
 	};
 }
 
-export async function clearReadCache(): Promise<void> {
-	touchedKeys.clear();
-	await storage.clear().catch(() => {});
+export async function clearReadCache(opts: { keep?: string[] } = {}): Promise<void> {
+	const keep = opts.keep ?? [];
+	if (keep.length === 0) {
+		touchedKeys.clear();
+		await storage.clear().catch(() => {});
+		return;
+	}
+	const isKept = (fullKey: string) => keep.some((table) => fullKey.startsWith(`${table}:`));
+	for (const key of [...touchedKeys]) {
+		if (!isKept(key)) touchedKeys.delete(key);
+	}
+	const keys = await storage.keys().catch(() => [] as string[]);
+	await Promise.all(keys.filter((k) => !isKept(k)).map((k) => storage.delete(k).catch(() => {})));
 }
