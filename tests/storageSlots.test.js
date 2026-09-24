@@ -28,6 +28,12 @@ vi.mock('@/lib/data/collections', () => ({
 	resetUserStorageCollection: () => {},
 	getUserCardsCollection: () => ({ async preload() {}, get: () => undefined, get toArray() { return []; } }),
 }));
+const kv = new Map();
+vi.mock('@/lib/data/localStore', () => ({
+	kvGet: async (k) => kv.get(k),
+	kvSet: async (k, v) => { kv.set(k, v); },
+	kvDelete: async (k) => { kv.delete(k); },
+}));
 vi.mock('@/lib/data/ingest', () => ({
 	sendMutationsAndAwaitShape: async () => ({ outboxId: 'test-outbox-id', phase: 'accepted', result: { ok: true }, acceptance: Promise.resolve({ kind: 'accepted' }) }),
 	drainPendingWrites: async () => {},
@@ -37,6 +43,18 @@ vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async (_userHash, uuid) =>
 		rows.has(uuid) ? { uuid, value_b64: rows.get(uuid), deleted_flag: false } : null,
 	upsertStorageRow: async ({ uuid, valueB64 }) => {
+		rows.set(uuid, valueB64);
+		return { sync: Promise.resolve({ status: 'synced' }) };
+	},
+	upsertStorageJsonPatch: async ({ uuid, jsonPatch }) => {
+		const { _getStorageJsonCodecForTests } = await import('@/lib/data/storageIntent');
+		const codec = _getStorageJsonCodecForTests();
+		const existing = rows.has(uuid) ? await codec.decrypt(rows.get(uuid)) : null;
+		const merged = { ...(existing ?? {}), ...jsonPatch };
+		const baseSlots = existing?.slots ?? {};
+		const patchSlots = jsonPatch.slots ?? {};
+		if (existing?.slots || jsonPatch.slots) merged.slots = { ...baseSlots, ...patchSlots };
+		const { valueB64 } = await codec.encrypt(merged);
 		rows.set(uuid, valueB64);
 		return { sync: Promise.resolve({ status: 'synced' }) };
 	},
@@ -54,6 +72,7 @@ describe('user_storage slot addressing', () => {
 	beforeEach(() => {
 		rows = new Map();
 		vaults = new Map();
+		kv.clear();
 		const store = new Map();
 		rawStore = {
 			async get(k) { return store.get(k); },

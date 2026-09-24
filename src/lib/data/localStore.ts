@@ -58,16 +58,23 @@ const rawStore: StringStore = {
 	},
 };
 
+const KEY_NAME_SALT = 'buckitup-local-store-v1';
+
 // The key module is imported lazily: it reaches into the vault, which pulls in
 // the whole crypto stack, and this module must stay cheap to import.
-let store: StringStore = createSecureStore(rawStore, {
-	getKey: async () => (await import('./localCrypto')).getLocalStorageKey(),
+const ambientGetKey = async () => (await import('./localCrypto')).getLocalStorageKey();
+
+let backing: StringStore = rawStore;
+
+let store: StringStore = createSecureStore(backing, {
+	getKey: ambientGetKey,
 	hashKeys: true,
-	keyNameSalt: 'buckitup-local-store-v1',
+	keyNameSalt: KEY_NAME_SALT,
 });
 
 /**
- * Test hook: swap the backing store (node has no IndexedDB). Migration of
+ * Test hook: swap the backing store (node has no IndexedDB) with encryption
+ * bypassed entirely — `replacement` is used verbatim, unwrapped. Migration of
  * pre-encryption records is switched off with it — there is no object store to
  * migrate from.
  */
@@ -75,6 +82,25 @@ let migrateLegacy = true;
 export function _setStoreForTests(replacement: StringStore): void {
 	store = replacement;
 	migrateLegacy = false;
+}
+
+export function _setRawStoreForTests(adapter: StringStore): void {
+	backing = adapter;
+	migrateLegacy = false;
+	store = createSecureStore(backing, {
+		getKey: ambientGetKey,
+		hashKeys: true,
+		keyNameSalt: KEY_NAME_SALT,
+	});
+}
+
+function pinnedStore(ownerHash?: string): StringStore {
+	if (!ownerHash) return store;
+	return createSecureStore(backing, {
+		getKey: async () => (await import('./localCrypto')).getLocalStorageKeyFor(ownerHash),
+		hashKeys: true,
+		keyNameSalt: KEY_NAME_SALT,
+	});
 }
 
 /**
@@ -109,8 +135,8 @@ export async function kvGet<T>(key: string): Promise<T | undefined> {
 	return legacy as T;
 }
 
-export async function kvSet(key: string, value: unknown): Promise<void> {
-	await store.set(key, JSON.stringify(value));
+export async function kvSet(key: string, value: unknown, ownerHash?: string): Promise<void> {
+	await pinnedStore(ownerHash).set(key, JSON.stringify(value));
 }
 
 export async function kvDelete(key: string): Promise<void> {

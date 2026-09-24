@@ -12,8 +12,10 @@ const store = (initial: RootRecord | null = null) => {
 		access: {
 			read: async () => (root ? structuredClone(root) : null),
 			write: async (next: RootRecord) => {
-				events.push(`map:${Object.values(next.slots ?? {}).join(',')}`);
-				root = structuredClone(next);
+				const merged: RootRecord = { ...(root ?? {}), ...next };
+				if (root?.slots || next.slots) merged.slots = { ...(root?.slots ?? {}), ...(next.slots ?? {}) };
+				root = structuredClone(merged);
+				events.push(`map:${Object.values(root.slots ?? {}).join(',')}`);
 			},
 		},
 		writeRow: async (uuid: string) => {
@@ -115,6 +117,43 @@ describe('slot resolver', () => {
 		await r.ensureSlotUuid('contacts', opts(s, () => 'uuid-a'));
 		// the profile fields survive the map write
 		expect(s.peek()).toMatchObject({ name: 'Alice', avatarUuid: 'av-1', slots: { contacts: 'uuid-a' } });
+	});
+
+	describe('durable slot -> root continuation survives a crash between slot acceptance and the root mapping (v3 §7)', () => {
+		it('recovers the already-accepted slot uuid instead of minting a second, orphaning one', async () => {
+			const s = store();
+			let pendingMint: string | null = null;
+			const opts = (mint: () => string) => ({
+				mint,
+				writeRow: s.writeRow,
+				recallPendingMint: async () => pendingMint,
+				rememberPendingMint: async (uuid: string) => { pendingMint = uuid; },
+				forgetPendingMint: async () => { pendingMint = null; },
+			});
+
+			const crashingAccess = {
+				read: s.access.read,
+				write: async () => { throw new Error('crash before root mapping'); },
+			};
+			const r1 = createSlotResolver(crashingAccess);
+			await expect(r1.ensureSlotUuid('contacts', opts(() => 'uuid-minted-first'))).rejects.toThrow('crash before root mapping');
+			expect([...s.rows]).toEqual(['uuid-minted-first']);
+			expect(s.peek()?.slots ?? {}).toEqual({});
+
+			const r2 = createSlotResolver(s.access);
+			const result = await r2.ensureSlotUuid('contacts', opts(() => 'uuid-minted-SECOND-should-never-be-used'));
+
+			expect(result.uuid).toBe('uuid-minted-first');
+			expect([...s.rows]).toEqual(['uuid-minted-first']);
+			expect(s.peek()?.slots).toEqual({ contacts: 'uuid-minted-first' });
+		});
+
+		it('without a durable pendingMint record, behavior is unchanged (backward compatible)', async () => {
+			const s = store();
+			const r = createSlotResolver(s.access);
+			const first = await r.ensureSlotUuid('contacts', { mint: () => 'uuid-a', writeRow: s.writeRow });
+			expect(first).toEqual({ uuid: 'uuid-a', created: true });
+		});
 	});
 
 	// Cached addresses belong to one account; carrying them past logout would

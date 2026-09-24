@@ -93,6 +93,6 @@ describe('this is what protects intents.ts/outbox.ts while locked (§3.7 conclus
 			{ getKey: getLocalStorageKey }
 		);
 
-		await expect(store.get('k')).rejects.toThrow(/cannot decrypt record/i);
+		await expect(store.get('k')).rejects.toThrow(/no unlocked account/i);
 	});
 });

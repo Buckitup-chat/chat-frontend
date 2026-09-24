@@ -16,9 +16,12 @@ import { recoverIntents } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { freshestOf, getAccepted, recordAccepted } from '@/lib/data/acceptedSnapshot';
 import { getUserCardsCollection } from '@/lib/data/collections';
-import { getStorageRow, upsertStorageRow } from '@/lib/data/userStorage';
+import { getStorageRow, upsertStorageRow, upsertStorageJsonPatch } from '@/lib/data/userStorage';
+import { setStorageJsonCodec } from '@/lib/data/storageIntent';
+import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
+import { clearDialogCache } from '@/lib/data/dialogCache';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
 
@@ -110,13 +113,13 @@ export class EncryptionManagerPQ extends EventTarget {
       const sessionCard = EncryptionManagerPQ.#acceptedCardCache.get(userHash) ?? null;
       if (sessionCard) {
         try {
-          await recordAccepted('user_cards', userHash, sessionCard);
+          await recordAccepted('user_cards', userHash, sessionCard, userHash);
         } catch {
         }
       }
 
       const serverCard = getUserCardsCollection().get(userHash);
-      const acceptedCard = await getAccepted('user_cards', userHash);
+      const acceptedCard = await getAccepted('user_cards', userHash, userHash);
       const baseCard = freshestOf(freshestOf(serverCard, acceptedCard), sessionCard);
       const ownerTimestamp = nextOwnerTimestamp(baseCard?.owner_timestamp);
 
@@ -134,18 +137,18 @@ export class EncryptionManagerPQ extends EventTarget {
       // Best-effort durability: card publication runs while the vault may
       // still be locked (no key to encrypt the outbox with), and a lost card
       // write is recoverable — the identity republishes on the next login.
-      const handle = await sendMutationsAndAwaitShape([mutation], key, { durability: 'best-effort' });
+      const unlocked = this.#currentUserHash === userHash;
+      const handle = await sendMutationsAndAwaitShape([mutation], key, {
+        durability: 'best-effort',
+        recordAcceptedSnapshot: unlocked,
+      });
       const outcome = handle.phase === 'accepted' ? { kind: 'accepted' } : await handle.acceptance;
       if (outcome.kind !== 'accepted') {
         const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
         throw new Error(`User card ${isUpdate ? 'update' : 'creation'} was not accepted: ${reason}`);
       }
       EncryptionManagerPQ.#acceptedCardCache.set(userHash, signedRow);
-      try {
-        await recordAccepted('user_cards', userHash, signedRow);
-      } catch (e) {
-        console.warn('[EncryptionManagerPQ] could not record accepted card snapshot locally (L17-10-adjacent — session-local continuation still covers this account):', e);
-      }
+      if (unlocked) await this.#recordSessionCard(userHash);
       return handle;
     };
 
@@ -160,6 +163,7 @@ export class EncryptionManagerPQ extends EventTarget {
     return next;
   }
 
+  /** @returns {EncryptionManagerPQ} always lazily initialized, never null. */
   static getInstance() {
     if (!EncryptionManagerPQ.instance) {
       EncryptionManagerPQ.instance = new EncryptionManagerPQ();
@@ -242,6 +246,8 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await this.#saveLocalUserCards();
 
+    startLeaderElection(userHash, () => drainPendingWrites(userHash, signSkey));
+
     // The backend refuses a user_storage write until this card exists, so
     // the profile save below must not start before it is accepted.
     await this.#pushOwnCard({ ...identity, name }, { signSkey });
@@ -283,6 +289,9 @@ export class EncryptionManagerPQ extends EventTarget {
     // against the previous account's addresses.
     this.#slotResolver = null;
     resetUserStorageCollection();
+    if (this.#currentUserHash !== null && this.#currentUserHash !== userHash) {
+      await this.#clearAccountReadCache();
+    }
 
     await this.#loadLocalUserCards();
 
@@ -322,7 +331,14 @@ export class EncryptionManagerPQ extends EventTarget {
 
     this.#currentUserHash = userHash;
 
+    setStorageJsonCodec({
+      decrypt: (valueB64) => this.#decryptJson(valueB64),
+      encrypt: (value) => this.#encryptJson(value),
+    });
+
     console.log(`Logged in: ${identity.name} (${userHash})`);
+
+    await this.#recordSessionCard(userHash);
 
     this.#dispatchAuthChange();
 
@@ -340,6 +356,20 @@ export class EncryptionManagerPQ extends EventTarget {
   #outboxOnlineListener = null;
   #outboxWakeUnsubscribe = null;
 
+  #recoverIntents(userHash, signSkey) {
+    Promise.all([
+      import('@/lib/data/messageIntent'),
+      import('@/lib/data/storageIntent'),
+    ]).then(([{ materializeMessageIntent }, { materializeStorageIntent }]) =>
+      recoverIntents(userHash, signSkey, {
+        materializeMessage: materializeMessageIntent,
+        materializeStorage: materializeStorageIntent,
+      })
+    ).catch((e) =>
+      console.warn('[EncryptionManagerPQ] intent recovery failed:', e)
+    );
+  }
+
   #startOutboxDrain() {
     const userHash = this.#currentUserHash;
     const signSkey = this.#signSkey;
@@ -347,21 +377,22 @@ export class EncryptionManagerPQ extends EventTarget {
 
     this.#stopOutboxDrain();
     startLeaderElection(userHash, () => drainPendingWrites(userHash, signSkey));
-    
-    import('@/lib/data/messageIntent').then(({ materializeMessageIntent }) =>
-      recoverIntents(userHash, signSkey, { materializeMessage: materializeMessageIntent })
-    ).catch((e) =>
-      console.warn('[EncryptionManagerPQ] intent recovery failed:', e)
-    );
 
+    this.#recoverIntents(userHash, signSkey);
     drainPendingWrites(userHash, signSkey);
 
-    this.#outboxOnlineListener = () => drainPendingWrites(userHash, signSkey);
+    this.#outboxOnlineListener = () => {
+      drainPendingWrites(userHash, signSkey);
+      this.#recoverIntents(userHash, signSkey);
+    };
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.#outboxOnlineListener);
     }
     this.#outboxWakeUnsubscribe = onOutboxWake((wokenUserHash) => {
-      if (wokenUserHash === userHash) drainPendingWrites(userHash, signSkey);
+      if (wokenUserHash === userHash) {
+        drainPendingWrites(userHash, signSkey);
+        this.#recoverIntents(userHash, signSkey);
+      }
     });
   }
 
@@ -376,8 +407,25 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#outboxWakeUnsubscribe = null;
   }
 
+  async #clearAccountReadCache() {
+    await clearReadCache({ keep: ['user_cards'] }).catch((e) => console.warn('[EncryptionManagerPQ] read-cache clear failed:', e));
+    await clearDialogCache();
+  }
+
+  async #recordSessionCard(userHash) {
+    const card = EncryptionManagerPQ.#acceptedCardCache.get(userHash);
+    if (!card || this.#currentUserHash !== userHash) return;
+    try {
+      await recordAccepted('user_cards', userHash, card, userHash);
+    } catch (e) {
+      console.warn('[EncryptionManagerPQ] could not record accepted card snapshot locally (session-local continuation still covers this account):', e);
+    }
+  }
+
   async logout() {
+    const hadActiveAccount = this.#currentUserHash !== null;
     this.#stopOutboxDrain();
+    setStorageJsonCodec(null);
     if (this.#signSkey) {
       this.#signSkey.fill(0);
       this.#signSkey = null;
@@ -395,8 +443,8 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#slotResolver = null;
     resetUserStorageCollection();
 
-    clearReadCache().catch((e) => console.warn('[EncryptionManagerPQ] read-cache clear failed:', e));
-    
+    if (hadActiveAccount) await this.#clearAccountReadCache();
+
     console.log('Logged out — secret key wiped');
     this.#dispatchAuthChange();
   }
@@ -620,17 +668,15 @@ export class EncryptionManagerPQ extends EventTarget {
     }
   }
 
-  async #writeRoot(record) {
-    const { valueB64, hashB64 } = await this.#encryptJson(record);
-    const write = await upsertStorageRow({
+  async #writeRootPatch(patch) {
+    const write = await upsertStorageJsonPatch({
       userHash: this.#currentUserHash,
       uuid: this.#rootSlotUuid(),
-      valueB64,
-      hashB64,
+      jsonPatch: patch,
       signSkey: this.#signSkey,
     });
     const sync = await write.sync;
-    if (sync.status === 'failed') {
+    if (sync.status !== 'synced') {
       throw new Error('Storage saved locally but failed to sync to the server');
     }
   }
@@ -644,7 +690,7 @@ export class EncryptionManagerPQ extends EventTarget {
       signSkey: this.#signSkey,
     });
     const sync = await write.sync;
-    if (sync.status === 'failed') {
+    if (sync.status !== 'synced') {
       throw new Error('Saved locally but failed to sync to the server');
     }
   }
@@ -672,7 +718,7 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#slotResolver) {
       this.#slotResolver = createSlotResolver({
         read: () => this.#readRoot(),
-        write: (next) => this.#writeRoot(next),
+        write: (patch) => this.#writeRootPatch(patch),
       });
     }
     return this.#slotResolver;
@@ -681,6 +727,10 @@ export class EncryptionManagerPQ extends EventTarget {
   /** Address of a named slot, or null when it has never been created. */
   async #slotUuid(name) {
     return this.#slots().getSlotUuid(name);
+  }
+
+  #pendingSlotMintKey(name) {
+    return `pending-slot-mint|${this.#currentUserHash}|${name}`;
   }
 
   /**
@@ -692,6 +742,9 @@ export class EncryptionManagerPQ extends EventTarget {
     const { uuid, orphaned } = await this.#slots().ensureSlotUuid(name, {
       mint: randomSlotUuid,
       writeRow: (uuid) => this.#writeSlotRow(uuid, valueB64, hashB64),
+      recallPendingMint: () => kvGet(this.#pendingSlotMintKey(name)),
+      rememberPendingMint: (uuid) => kvSet(this.#pendingSlotMintKey(name), uuid),
+      forgetPendingMint: () => kvDelete(this.#pendingSlotMintKey(name)),
     });
     if (orphaned) {
       await this.#tombstoneSlotRow(orphaned);
@@ -710,13 +763,19 @@ export class EncryptionManagerPQ extends EventTarget {
     }
 
     // 1. Encrypt profile and save to DB.
-    // The root record also carries the slot map, so the profile fields are
-    // merged into what is already there — writing only the profile would
-    // drop the map and strand every slot it points at.
-    const existingRoot = await this.#readRoot();
-    // Profile is a user-visible "saved" action: #writeRoot waits for the
+    // A field left undefined here (e.g. avatarUuid on a plain name/notes
+    // save) must be omitted from the patch, not written as undefined — a
+    // full-record spread would have serialized it away and silently erased
+    // the existing value. Merging (storageIntent.ts's mergeJsonPatch) also
+    // means the slot map and any other field written by another device
+    // concurrently is preserved rather than needing a fresh read here.
+    const patch = {};
+    if (name !== undefined) patch.name = name;
+    if (notes !== undefined) patch.notes = notes;
+    if (avatarUuid !== undefined) patch.avatarUuid = avatarUuid;
+    // Profile is a user-visible "saved" action: #writeRootPatch waits for the
     // server verdict instead of reporting success while the write stays local.
-    await this.#writeRoot({ ...(existingRoot || {}), name, notes, avatarUuid });
+    await this.#writeRootPatch(patch);
 
     // 2. Update local cards
     const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
@@ -873,7 +932,7 @@ export class EncryptionManagerPQ extends EventTarget {
       signSkey: this.#signSkey,
     });
     const avatarSync = await avatarWrite.sync;
-    if (avatarSync.status === 'failed') {
+    if (avatarSync.status !== 'synced') {
       throw new Error('Avatar saved locally but failed to sync to the server');
     }
 

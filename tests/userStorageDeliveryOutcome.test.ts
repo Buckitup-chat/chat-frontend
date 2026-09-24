@@ -43,7 +43,12 @@ vi.mock('@/api/client', () => ({
 }));
 
 const { upsertStorageRow, getStorageSyncStatus } = await import('@/lib/data/userStorage');
-const { _setStorageForTests, _setLeaderForTests, stopDrainLoop, quarantinedEntries, discardEntry } = await import('@/lib/data/outbox');
+const {
+	_setStorageForTests, _setLeaderForTests, stopDrainLoop, quarantinedEntries, discardEntry,
+	startLeaderElection, stopLeaderElection,
+} = await import('@/lib/data/outbox');
+const { _setIntentStorageForTests, _clearIntentsForTests } = await import('@/lib/data/intents');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -56,16 +61,21 @@ const makeStorage = () => {
 	};
 };
 
-beforeEach(() => {
+beforeEach(async () => {
 	kv.clear();
 	collection.rows.clear();
 	sent = [];
 	_setStorageForTests(makeStorage());
+	_setIntentStorageForTests(makeStorage());
+	await _clearIntentsForTests();
+	_setAcceptedSnapshotStorageForTests(makeStorage());
+	startLeaderElection(USER, () => {});
 });
 
 afterEach(() => {
 	_setLeaderForTests(null);
 	stopDrainLoop();
+	stopLeaderElection();
 });
 
 describe('userStorage: synced means exact acceptance, not durable queueing (L17-01)', () => {

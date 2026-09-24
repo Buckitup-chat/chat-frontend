@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { _setStorageForTests as setOutboxStorage, currentSessionUserHash } from '@/lib/data/outbox';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { _setStorageForTests as setOutboxStorage, _setLeaderForTests, currentSessionUserHash } from '@/lib/data/outbox';
 import { getAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 
 const makeMemoryStore = () => {
@@ -52,6 +52,7 @@ vi.mock('@/lib/data/collections', () => ({
 vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async () => null,
 	upsertStorageRow: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
+	upsertStorageJsonPatch: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
 }));
 
 let ingestImpl: (mutations: unknown[]) => Promise<Response>;
@@ -95,6 +96,11 @@ beforeEach(() => {
 	setOutboxStorage(makeMemoryStore());
 	_setAcceptedSnapshotStorageForTests(makeMemoryStore());
 	ingestImpl = acceptEverything;
+	_setLeaderForTests(true);
+});
+
+afterEach(() => {
+	_setLeaderForTests(null);
 });
 
 describe('pre-login user_cards acceptance is recorded through the real coordinator (L17-01/R4)', () => {
@@ -110,6 +116,21 @@ describe('pre-login user_cards acceptance is recorded through the real coordinat
 		expect(accepted).toBeTruthy();
 		expect(accepted!.name).toBe('Tester');
 		expect(cardRows.size).toBe(0);
+	});
+
+	it('the leader-election session for the new account is already active by the time the card push reaches the network, not only after login() completes', async () => {
+		let sessionDuringPush: string | null | undefined;
+		const baseIngest = ingestImpl;
+		ingestImpl = async (mutations) => {
+			sessionDuringPush = currentSessionUserHash();
+			return baseIngest(mutations);
+		};
+
+		const em = freshManager();
+		await em.createUserVault({ name: 'Tester' });
+		const userHash = (await em.getLocalUserCards())[0].user_hash;
+
+		expect(sessionDuringPush).toBe(userHash);
 	});
 
 	it('an update issued right after creation gets a timestamp strictly greater than the accepted insert, even though the shape is still stale', async () => {

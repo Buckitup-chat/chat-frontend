@@ -41,7 +41,11 @@ vi.mock('@/api/client', () => ({
 }));
 
 const { upsertStorageRow } = await import('@/lib/data/userStorage');
-const { _setStorageForTests, _setLeaderForTests, stopDrainLoop } = await import('@/lib/data/outbox');
+const {
+	_setStorageForTests, _setLeaderForTests, stopDrainLoop, startLeaderElection, stopLeaderElection,
+} = await import('@/lib/data/outbox');
+const { _setIntentStorageForTests, _clearIntentsForTests } = await import('@/lib/data/intents');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -66,17 +70,22 @@ const writeSlotRow = async (uuid: string, tag: string) => {
 const rootWrites = () => sent.filter((m) => m.uuid === ROOT_UUID);
 const slotWrites = () => sent.filter((m) => m.uuid === SLOT_UUID);
 
-beforeEach(() => {
+beforeEach(async () => {
 	kv.clear();
 	collection.rows.clear();
 	sent = [];
 	rootRecord = null;
 	_setStorageForTests(makeStorage());
+	_setIntentStorageForTests(makeStorage());
+	await _clearIntentsForTests();
+	_setAcceptedSnapshotStorageForTests(makeStorage());
+	startLeaderElection(USER, () => {});
 });
 
 afterEach(() => {
 	_setLeaderForTests(null);
 	stopDrainLoop();
+	stopLeaderElection();
 });
 
 describe('slot -> root mapping only builds on the slot\'s real acceptance (L17-01, slot creation ordering)', () => {

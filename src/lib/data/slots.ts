@@ -18,8 +18,14 @@ export interface RootRecord {
 export interface RootAccess {
 	/** Decrypted root record, or null when the account has none yet. */
 	read(): Promise<RootRecord | null>;
-	/** Persists the root record and waits for the write to be durable. */
-	write(next: RootRecord): Promise<void>;
+	/**
+	 * Persists a field-level patch onto the root record and waits for the
+	 * write to be durable. A patch, not a full replacement: the caller merges
+	 * it onto whatever the freshest known base is at write time (including on
+	 * a conflict-reconciliation retry), so a slot another device concurrently
+	 * added is never dropped by a stale full-row read.
+	 */
+	write(patch: RootRecord): Promise<void>;
 }
 
 export class SlotMapError extends Error {}
@@ -69,7 +75,13 @@ export function createSlotResolver(access: RootAccess) {
 	 */
 	const ensureSlotUuid = async (
 		name: string,
-		{ mint, writeRow }: { mint: () => string; writeRow: (uuid: string) => Promise<void> },
+		{ mint, writeRow, recallPendingMint, rememberPendingMint, forgetPendingMint }: {
+			mint: () => string;
+			writeRow: (uuid: string) => Promise<void>;
+			recallPendingMint?: () => Promise<string | null>;
+			rememberPendingMint?: (uuid: string) => Promise<void>;
+			forgetPendingMint?: () => Promise<void>;
+		},
 	): Promise<{ uuid: string; created: boolean; orphaned?: string }> =>
 		serialize(async () => {
 			const known = (await loadMap())[name];
@@ -86,11 +98,14 @@ export function createSlotResolver(access: RootAccess) {
 				return { uuid: beforeWrite, created: false };
 			}
 
-			const uuid = mint();
+			const recalled = await recallPendingMint?.() ?? null;
+			const uuid = recalled ?? mint();
+			if (!recalled) await rememberPendingMint?.(uuid);
 			await writeRow(uuid);
 
 			const nextSlots = { ...(root.slots ?? {}), [name]: uuid };
-			await access.write({ ...root, slots: nextSlots });
+			await access.write({ slots: { [name]: uuid } });
+			await forgetPendingMint?.();
 			cached = nextSlots;
 
 			const confirmed = (await access.read())?.slots?.[name];
