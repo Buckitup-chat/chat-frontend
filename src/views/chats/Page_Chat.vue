@@ -58,6 +58,7 @@ import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
 import { claimPendingEdit, submitPendingEdit, failPendingEdit, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
+import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
 import { v7 as uuidv7 } from 'uuid';
 
 const $route = useRoute();
@@ -94,13 +95,25 @@ const avatarHash = computed(() => peerHash.value || '');
 // Electric shape → TanStack DB collections for this dialog (lazy, per-dialog)
 const dialogCollections = computed(() => (dialogHash.value ? getDialogCollections(dialogHash.value) : null));
 
-// Live rows for messages (deleted rows are filtered in the decrypt pipeline)
-const { rows: rawMessages } = useCollectionRows(computed(() => dialogCollections.value?.messages ?? null));
+// Live rows for messages (deleted rows are filtered in the decrypt pipeline).
+// The readCache option is the offline-reload fallback (main-tanstack-
+// proposal-v3.md, "IndexedDB read cache"): when SQLite/OPFS is unavailable
+// and preload genuinely fails, previously mirrored rows of this exact dialog
+// fill the gap until the shape catches up — a live row always wins per key,
+// so a working persistence sees no change in behavior. getRowKey mirrors
+// collections.ts's own getKey for this table.
+const { rows: rawMessages } = useCollectionRows(
+    computed(() => dialogCollections.value?.messages ?? null),
+    { readCache: { table: 'dialog_messages', dialogHash: () => dialogHash.value, getRowKey: (r) => r.message_id } }
+);
 
 // Sender keys stream in independently of the messages they unlock: the peer
 // creates its dialog_keys row at the same moment it sends its first message,
 // so a message can arrive before the key that decrypts it.
-const { rows: rawKeys } = useCollectionRows(computed(() => dialogCollections.value?.keys ?? null));
+const { rows: rawKeys } = useCollectionRows(
+    computed(() => dialogCollections.value?.keys ?? null),
+    { readCache: { table: 'dialog_keys', dialogHash: () => dialogHash.value, getRowKey: (r) => `${r.dialog_hash}|${r.sender_hash}` } }
+);
 
 // Author cards are a verification dependency, not just display data: a
 // message from a first-time sender parks in the gate until their card
@@ -131,23 +144,14 @@ watch(dialogHash, () => {
 const rebuildDecryptedMessages = (newRows) => {
     const out = [];
     for (const row of newRows) {
-        // §3.2: deletion is a signed revision, not a disappearance. The
-        // tombstone stays in the feed; reactions on it stay where they were.
-        if (row.deleted_flag) {
-            const date = new Date(row.owner_timestamp * 1000);
-            out.push({
-                id: row.message_id,
-                text: '',
-                parts: [],
-                _deleted: true,
-                isMine: row.sender_hash === $userPQ.currentUserHash,
-                authorName: row.sender_hash === $userPQ.currentUserHash ? 'Me' : chatName.value,
-                timestamp: `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`,
-                _syncStatus: 'synced',
-                _raw: row,
-            });
-            continue;
-        }
+        // §3.2: deletion is a signed revision, not a disappearance — but it
+        // is still a revision, and only messageCache (populated below by
+        // scheduleDecrypt, past admitMessageRow) knows whether THIS row's
+        // signature actually verified. Reading row.deleted_flag directly
+        // here would render "Message deleted" for a forged tombstone before
+        // — or even without ever — checking it against the gate; a row not
+        // yet processed (or one that failed verification and belongs to a
+        // still-live message) must not display as an authentic deletion.
         const entry = messageCache.get(row.message_id);
         if (entry) out.push(entry);
     }
@@ -169,9 +173,12 @@ const scheduleDecrypt = (newRows) => {
         for (const row of newRows) {
             const cached = messageCache.get(row.message_id);
             // Undecrypted and unverified entries are retried: the key or the
-            // author's card or a missing parent may have arrived since.
+            // author's card or a missing parent may have arrived since. A
+            // changed fingerprint (not just content_b64 — see
+            // presentedRowFingerprint's own comment) means this is not the
+            // row the cached verdict was ever computed for, verified or not.
             if (!cached || !cached._decrypted || cached._verify !== 'verified'
-                || cached._contentB64 !== row.content_b64) pending.push(row);
+                || cached._fingerprint !== presentedRowFingerprint(row)) pending.push(row);
         }
 
         if (pending.length > 0) {
@@ -204,7 +211,7 @@ const scheduleDecrypt = (newRows) => {
                     isMine: row.sender_hash === $userPQ.currentUserHash,
                     timestamp,
                     _syncStatus: 'synced',
-                    _contentB64: row.content_b64,
+                    _fingerprint: presentedRowFingerprint(row),
                     _verify: verdict.status,
                     _dagVerified: verdict.status === 'verified' ? verdict.dagVerified : false,
                     _raw: row
@@ -216,11 +223,26 @@ const scheduleDecrypt = (newRows) => {
                         authorName: base.isMine ? 'Me' : name,
                         _decrypted: false,
                         _verifyReason: verdict.reason,
+                        _verifyTerminal: verdict.terminal === true,
+                    }];
+                }
+                if (row.deleted_flag && verdict.status === 'verified') {
+                    return [row.message_id, {
+                        ...base,
+                        text: '',
+                        authorName: base.isMine ? 'Me' : name,
+                        _decrypted: true,
+                        _deleted: true,
                     }];
                 }
                 if (row.deleted_flag) {
-                    // Admission was the whole job — the tombstone renders via
-                    // rebuildDecryptedMessages, which never reads this cache.
+                    // Still 'waiting' on a causal dependency: not yet a
+                    // canonical deletion, so it must not retire an existing
+                    // optimistic projection or hide whatever legitimate state
+                    // this message otherwise has — the same rule a waiting
+                    // non-tombstone revision already gets below. Once the
+                    // missing dependency arrives, the reconcile pass further
+                    // down (or this row's own reprocessing) promotes it.
                     return [row.message_id, {
                         ...base,
                         text: '',
@@ -247,15 +269,32 @@ const scheduleDecrypt = (newRows) => {
         // with the gate's own cascade, so a child can be drained to verified
         // inside the gate after its UI entry was already written as waiting.
         for (const entry of messageCache.values()) {
+            if (entry._verify === 'waiting' && $dialogs.blockedByOf(entry._raw?.dialog_hash, entry._raw)) {
+                entry._verify = 'blocked';
+                continue;
+            }
             if (entry._verify === 'waiting' && entry._raw?.sign_hash
-                && $dialogs.isMessageAdmitted(entry._raw.dialog_hash, entry._raw.message_id, entry._raw.sign_hash)) {
+                && $dialogs.isRowAdmitted(entry._raw.dialog_hash, entry._raw)) {
                 entry._verify = 'verified';
                 entry._dagVerified = true;
+                if (entry._raw.deleted_flag) entry._deleted = true;
             }
         }
 
         rebuildDecryptedMessages(newRows);
+        refreshVerifiedVersions();
     }, 200);
+};
+
+const refreshVerifiedVersions = () => {
+    const rows = rawVersions.value || [];
+    const keys = new Set(verifiedVersionKeys.value);
+    let changed = false;
+    for (const row of rows) {
+        const key = `${row.message_id}|${row.sign_hash}`;
+        if (!keys.has(key) && $dialogs.isRowAdmitted(row.dialog_hash, row)) { keys.add(key); changed = true; }
+    }
+    if (changed) verifiedVersionKeys.value = keys;
 };
 
 watch(() => rawMessages.value, (newRows, _, onCleanup) => {
@@ -277,10 +316,17 @@ watch(() => rawMessages.value, (newRows, _, onCleanup) => {
 
 // §3.1: archived revisions per message. The count rides on the "edited"
 // label; the decrypted list loads on demand when the user opens it.
-const { rows: rawVersions } = useCollectionRows(computed(() => dialogCollections.value?.versions ?? null));
+const { rows: rawVersions } = useCollectionRows(
+    computed(() => dialogCollections.value?.versions ?? null),
+    { readCache: { table: 'dialog_messages_versions', dialogHash: () => dialogHash.value, getRowKey: (r) => `${r.message_id}|${r.sign_hash}` } }
+);
+const verifiedVersionKeys = ref(new Set());
 const versionCountByMsgId = computed(() => {
     const out = {};
-    for (const v of rawVersions.value || []) out[v.message_id] = (out[v.message_id] || 0) + 1;
+    for (const v of rawVersions.value || []) {
+        if (!verifiedVersionKeys.value.has(`${v.message_id}|${v.sign_hash}`)) continue;
+        out[v.message_id] = (out[v.message_id] || 0) + 1;
+    }
     return out;
 });
 
@@ -291,11 +337,16 @@ const versionCountByMsgId = computed(() => {
 // those refs resolve and drains whatever was parked on them; the decrypt
 // pass then reconciles any entry still marked waiting.
 watch(() => rawVersions.value, async (rows) => {
-    if (!rows?.length) return;
+    if (!rows?.length) { verifiedVersionKeys.value = new Set(); return; }
+    const keys = new Set();
     for (const row of rows) {
-        try { await $dialogs.admitMessageRow(row); }
+        try {
+            const verdict = await $dialogs.admitMessageRow(row);
+            if (verdict.status === 'verified') keys.add(`${row.message_id}|${row.sign_hash}`);
+        }
         catch (e) { console.warn('Version admission failed:', row.message_id, e); }
     }
+    verifiedVersionKeys.value = keys;
     if (rawMessages.value?.length) scheduleDecrypt(rawMessages.value);
 }, { immediate: true });
 
@@ -329,7 +380,10 @@ const handleShowHistory = async (messageId) => {
 watch(dialogHash, () => { editHistory.value = null; });
 
 // Reactions (deleted rows filtered below — the shape carries the full table slice)
-const { rows: rawAllReactions } = useCollectionRows(computed(() => dialogCollections.value?.reactions ?? null));
+const { rows: rawAllReactions } = useCollectionRows(
+    computed(() => dialogCollections.value?.reactions ?? null),
+    { readCache: { table: 'dialog_message_reactions', dialogHash: () => dialogHash.value, getRowKey: (r) => r.reaction_hash } }
+);
 
 // A reaction belongs to a specific message revision. Editing a message
 // produces a new revision, and reactions made on the previous one are NOT
@@ -363,7 +417,10 @@ const rawReactions = computed(() =>
 // Read receipts. Plaintext by design (the server answers unread counts without
 // keys), append-only, and bound to one message revision — an edited message
 // needs its own acknowledgement.
-const { rows: rawReceipts } = useCollectionRows(computed(() => dialogCollections.value?.receipts ?? null));
+const { rows: rawReceipts } = useCollectionRows(
+    computed(() => dialogCollections.value?.receipts ?? null),
+    { readCache: { table: 'dialog_message_receipts', dialogHash: () => dialogHash.value, getRowKey: (r) => r.receipt_hash } }
+);
 
 // message_id -> { mine: bool, peers: [user_hash] } for the displayed revision
 // Same admission as reactions: a read receipt is a signed claim by a peer,
@@ -501,12 +558,26 @@ watch(() => rawKeys.value, () => {
 // Merge optimistic messages with server rows
 const displayMessages = computed(() => {
     const dbIds = new Set((rawMessages.value || []).map(r => r.message_id));
-    const decryptedIds = new Set(decryptedMessages.value.map(m => m.id));
+    const canonicalIds = new Set(
+        decryptedMessages.value.filter((m) => m._verify === 'verified' || m._deleted
+            || m._verify === 'blocked' || (m._verify === 'invalid' && m._verifyTerminal)).map((m) => m.id)
+    );
+    const verifiedRevisionOf = new Map(decryptedMessages.value
+        .filter((m) => m._verify === 'verified' && !m._deleted && m._raw?.sign_hash).map((m) => [m.id, m._raw.sign_hash]));
+    const activeOptimisticIds = new Set();
     const activeOptimistic = [];
     for (const item of $dialogs.optimisticItems.values()) {
         if (item.type !== 'message' || item.dialogHash !== dialogHash.value) continue;
-        // If decrypted entry is ready, drop the optimistic placeholder
-        if (dbIds.has(item.id) && decryptedIds.has(item.id)) continue;
+        // If a verified (or tombstone) canonical entry is ready, drop the
+        // optimistic placeholder in its favor — for a verified entry, only
+        // the exact revision this placeholder signed (not any row that merely
+        // shares its message_id).
+        if (dbIds.has(item.id) && canonicalIds.has(item.id)) {
+            const verifiedRevision = verifiedRevisionOf.get(item.id);
+            // tombstone / terminal verdict: final by id; verified: exact revision only
+            if (!verifiedRevision || verifiedRevision === item.signHash) continue;
+        }
+        activeOptimisticIds.add(item.id);
         activeOptimistic.push({
             id: item.id,
             text: item.text,
@@ -521,8 +592,12 @@ const displayMessages = computed(() => {
 
     // Overlay in-flight / failed edits: show the attempted text and mark its
     // state, so a rejected versioned edit is not indistinguishable from an
-    // accepted one.
-    const withEdits = decryptedMessages.value.map((m) => {
+    // accepted one. A row still shadowed by an active optimistic placeholder
+    // above is skipped here — otherwise a still-unverified echo would render
+    // side by side with the placeholder that already represents it.
+    const withEdits = decryptedMessages.value
+        .filter((m) => !activeOptimisticIds.has(m.id))
+        .map((m) => {
         const pending = pendingEdits.value.get(m.id);
         const base = pending ? { ...m, text: pending.text, _editStatus: pending.status } : { ...m };
         const receipt = receiptsByMsgId.value[m.id];
@@ -539,6 +614,15 @@ const displayMessages = computed(() => {
     return [...activeOptimistic, ...withEdits].sort((a, b) =>
         feedOrderKey(a.id, a._raw?.owner_timestamp || a.ownerTimestamp || 0)
         - feedOrderKey(b.id, b._raw?.owner_timestamp || b.ownerTimestamp || 0));
+});
+
+watch(dialogHash, (hash) => { if (hash) void $dialogs.ensureProjectionsHydrated(); }, { immediate: true });
+
+watch(() => decryptedMessages.value, (entries) => {
+    if (!dialogHash.value) return;
+    const verified = new Map(entries.filter((m) => m._verify === 'verified' && !m._deleted && m._raw?.sign_hash).map((m) => [m.id, m._raw.sign_hash]));
+    const final = new Set(entries.filter((m) => m._deleted || m._verify === 'blocked' || (m._verify === 'invalid' && m._verifyTerminal)).map((m) => m.id));
+    if (verified.size || final.size) $dialogs.retireProjections(dialogHash.value, verified, final);
 });
 
 // Merge optimistic reactions with aggregated reactions

@@ -33,7 +33,7 @@
           :class="[msg.isMine ? 'message-mine' : 'message-peer', {
             'message-pending': msg._syncStatus && msg._syncStatus !== 'synced' && msg._syncStatus !== 'error',
             'message-error': msg._syncStatus === 'error',
-            'message-unplaced': msg._verify === 'waiting',
+            'message-unplaced': msg._verify === 'waiting' || msg._verify === 'blocked',
           }]"
           style="max-width: 75%; min-width: 150px;" @contextmenu.prevent="openContextMenu($event, msg)"
           @touchstart="startLongPress($event, msg)" @touchend="cancelLongPress"
@@ -211,6 +211,7 @@
             </div>
             <!-- §4.2: admitted but causally unplaced — say why, quietly. -->
             <div v-if="msg._verify === 'waiting'" class="msg-unplaced-note">waiting for earlier messages…</div>
+            <div v-else-if="msg._verify === 'blocked'" class="msg-unplaced-note msg-blocked-note">can't be placed: it follows a message that failed verification</div>
           </div>
           <div v-if="reactions[msg.id] && Object.keys(reactions[msg.id]).length > 0"
             class="reactions-container d-flex flex-wrap gap-1 mt-1">
@@ -229,11 +230,17 @@
           </div>
           <div class="message-time text-end mt-1" :class="msg.isMine ? 'text-dark' : 'text-muted'">
             {{ msg.timestamp }}
-            <!-- §4.3: ◌ stored locally → pale ✓ in flight → ✓ server-accepted.
-                 (✓✓ delivered needs delivery receipts; ↻ auto-retry needs the
-                 outbox hook — both arrive with their transports.) -->
-            <span v-if="msg._syncStatus === 'sending'" class="sync-status local" title="Saved locally">◌</span>
+            <!-- §4.3: ◌ stored locally → pale ✓ in flight → ✓ server-accepted
+                 → ✓✓ delivery receipt. ↻ = durably queued in the outbox, or
+                 an intent kept for recovery before it got there; 🔒 = waiting
+                 for the vault; ! only for a permanent rejection. -->
+            <!-- a terminal verification failure outranks any transport ✓ -->
+            <span v-if="msg._verify === 'blocked' || (msg._verify === 'invalid' && msg._verifyTerminal)" class="sync-status error" title="Delivered, but it failed verification in this conversation">!</span>
+            <span v-else-if="msg._syncStatus === 'sending'" class="sync-status local" title="Saved locally">◌</span>
             <span v-else-if="msg._syncStatus === 'syncing'" class="sync-status pending" title="Sending…">✓</span>
+            <span v-else-if="msg._syncStatus === 'queued'" class="sync-status local" title="Queued — will retry automatically">↻</span>
+            <span v-else-if="msg._syncStatus === 'awaiting_unlock'" class="sync-status local" title="Waiting for unlock">🔒</span>
+            <span v-else-if="msg._syncStatus === 'awaiting_recovery'" class="sync-status local" title="Not sent yet — kept on this device, retried on reconnect or next login">↻</span>
             <span v-else-if="msg._syncStatus === 'synced' && msg._deliveredToPeers" class="sync-status delivered" title="Delivered to the recipient">✓✓</span>
             <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Accepted by server">✓</span>
             <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Rejected — not sent">!</span>

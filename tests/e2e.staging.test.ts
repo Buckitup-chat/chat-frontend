@@ -6,26 +6,305 @@
 //   E2E=1 npx vitest run tests/e2e.staging.test.ts
 //
 // Two fresh accounts hold a conversation: keys are wrapped and unwrapped for
-// real, messages travel through /ingest and come back through shapes, the
-// receive side admits rows through the gate before trusting them, a reply
-// carries its quote snapshot, an edit archives a version, and a file round-
-// trips through the chunk endpoints byte-identical.
-import { describe, it, expect } from 'vitest';
+// real, messages travel through the real production write path — the
+// coordinator's dispatchMutations, its durable outbox, exact SERVER_ACCEPTED
+// classification and accepted-snapshot reconciliation, over the real
+// /ingest_each endpoint (src/lib/data/ingest.ts's sendMutationsAndAwaitShape,
+// the same entry point dialogs.store.js's sendMessage funnels every live send
+// through) — and come back through shapes, the receive side admits rows
+// through the gate before trusting them, a reply carries its quote snapshot,
+// an edit archives a version, and a file round-trips through the chunk
+// endpoints byte-identical.
+import { describe, it, expect, vi } from 'vitest';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex, randomBytes } from '@noble/hashes/utils';
 import { v7 as uuidv7 } from 'uuid';
+import { ShapeStream, isChangeMessage } from '@electric-sql/client';
 import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
 import { encodeContent, decodeContent, contentToText, type ContentPart } from '@/lib/pq/content';
 import { verifyUserCard } from '@/lib/pq/verifyCard';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { uploadFile, downloadFile, prepareUpload } from '@/lib/data/fileTransfer';
 import { DialogCrypto } from '@/libs/DialogCrypto';
+import { sendMutationsAndAwaitShape, sendMutationsWithRetry, type SendResult } from '@/lib/data/ingest';
+import {
+	_setStorageForTests as _setOutboxStorageForTests, _setLeaderForTests, enqueue, drainOutbox,
+} from '@/lib/data/outbox';
+import { _setAcceptedSnapshotStorageForTests, getAccepted } from '@/lib/data/acceptedSnapshot';
+import { reconcileAccepted } from '@/lib/data/coordinator';
 
 const BASE = 'https://buckitup.xyz/electric/v1';
 (globalThis as Record<string, unknown>).ELECTRIC_API_URL = BASE;
+
+const makeMemStore = () => {
+	const map = new Map<string, string>();
+	return {
+		async get(k: string) { return map.get(k) ?? null; },
+		async set(k: string, v: string) { map.set(k, v); },
+		async delete(k: string) { map.delete(k); },
+		async keys() { return [...map.keys()]; },
+		async clear() { map.clear(); },
+	};
+};
+
+interface MinimalShapeStream {
+	readonly isUpToDate: boolean;
+	subscribe(
+		callback: (messages: unknown[]) => void,
+		onError?: (error: unknown) => void
+	): () => void;
+}
+type ShapeStreamFactory = (opts: {
+	url: string;
+	params: { table: string; where: string };
+	signal: AbortSignal;
+}) => MinimalShapeStream;
+
+interface DialogKeysStream {
+	awaitTxId: (txId: number, timeoutMs?: number) => Promise<void>;
+	ready: Promise<void>;
+	dispose: () => void;
+}
+
+const dialogKeysStreams = new Map<string, DialogKeysStream>();
+
+function ensureDialogKeysStream(
+	dialogHash: string,
+	streamFactory: ShapeStreamFactory = (opts) => new ShapeStream(opts)
+): DialogKeysStream {
+	const existing = dialogKeysStreams.get(dialogHash);
+	if (existing) return existing;
+
+	const seenTxids = new Set<number>();
+	const pending = new Map<number, { resolve: () => void; reject: (err: unknown) => void }>();
+	const controller = new AbortController();
+	let readyResolve!: () => void;
+	let readyFired = false;
+	const ready = new Promise<void>((resolve) => { readyResolve = resolve; });
+
+	const stream = streamFactory({
+		url: `${BASE}/shapes`,
+		params: { table: 'dialog_keys', where: `dialog_hash = '${dialogHash}'` },
+		signal: controller.signal,
+	});
+
+	const unsubscribe = stream.subscribe(
+		(messages) => {
+			for (const m of messages) {
+				if (!isChangeMessage(m as never)) continue;
+				const txids = (m as { headers: { txids?: number[] } }).headers.txids;
+				if (!txids) continue;
+				for (const txId of txids) {
+					seenTxids.add(txId);
+					const waiter = pending.get(txId);
+					if (waiter) {
+						pending.delete(txId);
+						waiter.resolve();
+					}
+				}
+			}
+			if (!readyFired && stream.isUpToDate) {
+				readyFired = true;
+				readyResolve();
+			}
+		},
+		(err) => {
+			if (controller.signal.aborted) return;
+			for (const [, waiter] of pending) waiter.reject(err);
+			pending.clear();
+		}
+	);
+
+	const dispose = () => {
+		unsubscribe();
+		controller.abort();
+		for (const [, waiter] of pending) waiter.reject(new Error(`dialog_keys visibility stream for ${dialogHash} disposed`));
+		pending.clear();
+		dialogKeysStreams.delete(dialogHash);
+	};
+
+	const awaitTxId = (txId: number, timeoutMs = 10_000): Promise<void> => {
+		if (seenTxids.has(txId)) return Promise.resolve();
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => {
+				pending.delete(txId);
+				reject(new Error(
+					`[e2e] dialog_keys visibility: txid ${txId} not observed on the persistent stream for dialog_hash=${dialogHash} within ${timeoutMs}ms`
+				));
+			}, timeoutMs);
+			pending.set(txId, {
+				resolve: () => { clearTimeout(timer); resolve(); },
+				reject: (err) => { clearTimeout(timer); reject(err); },
+			});
+		});
+	};
+
+	const result: DialogKeysStream = { awaitTxId, ready, dispose };
+	dialogKeysStreams.set(dialogHash, result);
+	return result;
+}
+
+function disposeAllDialogKeysStreams(): void {
+	for (const stream of dialogKeysStreams.values()) stream.dispose();
+	dialogKeysStreams.clear();
+}
+
+function makeShapeVisibilityCollection(dialogHash: string) {
+	return { utils: { awaitTxId: (txId: number, timeoutMs?: number) => ensureDialogKeysStream(dialogHash).awaitTxId(txId, timeoutMs) } };
+}
+
+function makeLookupCollection(table: string, dialogHash: string, key: (row: Record<string, string>) => string) {
+	let cache: Map<string, Record<string, string>> | null = null;
+	return {
+		async preload() {
+			if (cache) return;
+			const rows = await shapeRows(table, `dialog_hash = '${dialogHash}'`);
+			cache = new Map(rows.map((r) => [key(r), r]));
+		},
+		get(k: string) {
+			return cache?.get(k);
+		},
+	};
+}
+
+vi.mock('@/lib/data/collections', () => ({
+	getDialogCollections: (dialogHash: string) => ({
+		keys: makeShapeVisibilityCollection(dialogHash),
+		messages: makeLookupCollection('dialog_messages', dialogHash, (r) => String(r.message_id)),
+		versions: undefined, reactions: undefined, receipts: undefined,
+	}),
+	getUserCardsCollection: () => {
+		throw new Error('e2e harness: user_cards never needs shape-visibility or identity-conflict confirmation — this seam should not be reached');
+	},
+	getUserStorageCollection: () => {
+		throw new Error('e2e harness: user_storage is not exercised by this E2E flow');
+	},
+}));
+
+describe('ensureDialogKeysStream (local harness correctness, no network)', () => {
+	let nextHash = 0;
+	const freshHash = () => `di_test_${++nextHash}`;
+	const change = (txids: number[]) => ({ key: 'k', value: {}, headers: { operation: 'insert', txids } });
+
+	const makeFakeFactory = () => {
+		let deliver: (messages: unknown[]) => void = () => {};
+		let raiseError: (err: unknown) => void = () => {};
+		let unsubscribed = 0;
+		let upToDate = false;
+		let capturedSignal: AbortSignal | undefined;
+		const factory: ShapeStreamFactory = (opts) => {
+			capturedSignal = opts.signal;
+			return {
+				get isUpToDate() { return upToDate; },
+				subscribe(callback, onError) {
+					deliver = callback;
+					raiseError = onError ?? (() => {});
+					return () => { unsubscribed++; };
+				},
+			};
+		};
+		return {
+			factory,
+			deliver: (messages: unknown[]) => deliver(messages),
+			raiseError: (err: unknown) => raiseError(err),
+			setUpToDate: (v: boolean) => { upToDate = v; },
+			get unsubscribed() { return unsubscribed; },
+			get signal() { return capturedSignal; },
+		};
+	};
+
+	it('race: txid observed AFTER awaitTxId() is called — the pending waiter resolves', async () => {
+		const dialogHash = freshHash();
+		const fake = makeFakeFactory();
+		const stream = ensureDialogKeysStream(dialogHash, fake.factory);
+		const p = stream.awaitTxId(42, 1000);
+		fake.deliver([change([1, 42, 3])]);
+		await expect(p).resolves.toBeUndefined();
+		stream.dispose();
+		expect(fake.unsubscribed).toBe(1);
+		expect(fake.signal?.aborted).toBe(true);
+	});
+
+	it('race: txid observed BEFORE awaitTxId() is called, after the persistent stream started — served from cache', async () => {
+		const dialogHash = freshHash();
+		const fake = makeFakeFactory();
+		const stream = ensureDialogKeysStream(dialogHash, fake.factory);
+		fake.deliver([change([99])]);
+		const p = stream.awaitTxId(99, 1000);
+		await expect(p).resolves.toBeUndefined();
+		stream.dispose();
+	});
+
+	it('the same dialog_hash reuses one persistent stream — no second ShapeStream is created', async () => {
+		const dialogHash = freshHash();
+		let factoryCalls = 0;
+		const fake = makeFakeFactory();
+		const countingFactory: ShapeStreamFactory = (opts) => { factoryCalls++; return fake.factory(opts); };
+		const a = ensureDialogKeysStream(dialogHash, countingFactory);
+		const b = ensureDialogKeysStream(dialogHash, countingFactory);
+		expect(b).toBe(a);
+		expect(factoryCalls).toBe(1);
+		a.dispose();
+	});
+
+	it('ready resolves once the stream reports isUpToDate, not merely once row data arrives', async () => {
+		const dialogHash = freshHash();
+		const fake = makeFakeFactory();
+		const stream = ensureDialogKeysStream(dialogHash, fake.factory);
+		let readyFired = false;
+		void stream.ready.then(() => { readyFired = true; });
+		fake.deliver([change([1])]);
+		await Promise.resolve();
+		expect(readyFired).toBe(false);
+		fake.setUpToDate(true);
+		fake.deliver([]);
+		await stream.ready;
+		expect(readyFired).toBe(true);
+		stream.dispose();
+	});
+
+	it('rejects — never resolves — when the target txid is never observed before the timeout', async () => {
+		const dialogHash = freshHash();
+		const fake = makeFakeFactory();
+		const stream = ensureDialogKeysStream(dialogHash, fake.factory);
+		await expect(stream.awaitTxId(42, 30)).rejects.toThrow(/not observed/);
+		stream.dispose();
+	});
+
+	it('an unrelated txid does not settle a pending waiter — it still times out normally, not early', async () => {
+		const dialogHash = freshHash();
+		const fake = makeFakeFactory();
+		const stream = ensureDialogKeysStream(dialogHash, fake.factory);
+		const p = stream.awaitTxId(42, 30);
+		fake.deliver([change([999])]);
+		await expect(p).rejects.toThrow(/not observed/);
+		stream.dispose();
+	});
+
+	it('a stream error rejects every pending waiter', async () => {
+		const dialogHash = freshHash();
+		const fake = makeFakeFactory();
+		const stream = ensureDialogKeysStream(dialogHash, fake.factory);
+		const p = stream.awaitTxId(42, 1000);
+		fake.raiseError(new Error('stream exploded'));
+		await expect(p).rejects.toThrow('stream exploded');
+		stream.dispose();
+	});
+
+	it('dispose() cleans up (unsubscribe + abort) exactly once and rejects any still-pending waiter', async () => {
+		const dialogHash = freshHash();
+		const fake = makeFakeFactory();
+		const stream = ensureDialogKeysStream(dialogHash, fake.factory);
+		const p = stream.awaitTxId(42, 1000);
+		stream.dispose();
+		await expect(p).rejects.toThrow(/disposed/);
+		expect(fake.unsubscribed).toBe(1);
+		expect(fake.signal?.aborted).toBe(true);
+	});
+});
 
 const runIf = process.env.E2E === '1' ? describe : describe.skip;
 
@@ -38,16 +317,17 @@ interface Account {
 	card: Record<string, unknown>;
 }
 
-const ingest = async (mutations: unknown[], signSkey: Uint8Array) => {
-	const ch = await (await fetch(`${BASE}/challenge`)).json();
-	const signature = toBase64(ml_dsa87.sign(new TextEncoder().encode(ch.challenge), signSkey)).replace(/=+$/, '');
-	const r = await fetch(`${BASE}/ingest`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ auth: { challenge_id: ch.challenge_id, signature }, mutations }),
-	});
-	if (r.status !== 200) throw new Error(`ingest ${r.status}: ${(await r.text()).slice(0, 200)}`);
-	return r.json();
+const ingest = async (mutations: unknown[], signSkey: Uint8Array): Promise<SendResult> => {
+	const handle = await sendMutationsAndAwaitShape(mutations, signSkey);
+	if (handle.phase !== 'accepted' || !handle.result) {
+		throw new Error(`mutation not accepted synchronously: phase=${handle.phase}`);
+	}
+	const outcome = await handle.acceptance;
+	if (outcome.kind !== 'accepted') {
+		const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
+		throw new Error(`mutation not accepted: ${reason}`);
+	}
+	return handle.result;
 };
 
 /** The shape trails ingest by seconds — poll until the predicate holds. */
@@ -120,18 +400,36 @@ const sendDialogMessage = async (
 	};
 	const sign_b64 = signFields(fields as never, author.sign.secretKey);
 	const row = { ...fields, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64) };
-	await ingest([{
+	const mutation = {
 		type: overrides.parent_sign_hash ? 'update' : 'insert',
 		syncMetadata: { relation: 'dialog_messages' },
 		...(overrides.parent_sign_hash
 			? { original: { message_id: messageId, sender_hash: author.userHash, dialog_hash: dialogHash }, changes: row }
 			: { modified: row }),
-	}], author.sign.secretKey);
-	return row;
+	};
+	const sendResult = await ingest([mutation], author.sign.secretKey);
+	return { ...row, sendResult, mutation };
 };
 
 runIf('E2E: two accounts hold a conversation on staging', () => {
 	it('keys, messages, gate, reply with quote, edit, file — end to end', async () => {
+		const outboxStore = makeMemStore();
+		const acceptedStore = makeMemStore();
+		_setOutboxStorageForTests(outboxStore);
+		_setAcceptedSnapshotStorageForTests(acceptedStore);
+		_setLeaderForTests(true);
+		try {
+			await runE2E();
+		} finally {
+			_setLeaderForTests(null);
+			await outboxStore.clear();
+			await acceptedStore.clear();
+			disposeAllDialogKeysStreams();
+		}
+	}, 300000);
+});
+
+async function runE2E() {
 		// ---- 1. two fresh identities, cards verified from the shape ----
 		const alice = await createAccount('e2e-alice');
 		const bob = await createAccount('e2e-bob');
@@ -150,6 +448,7 @@ runIf('E2E: two accounts hold a conversation on staging', () => {
 			peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
 			owner_timestamp: Math.floor(Date.now() / 1000), deleted_flag: false,
 		};
+		await ensureDialogKeysStream(dialogHash).ready;
 		await ingest([{
 			type: 'insert', syncMetadata: { relation: 'dialog_keys' },
 			modified: { ...keyFields, sign_b64: signFields(keyFields as never, alice.sign.secretKey) },
@@ -167,6 +466,25 @@ runIf('E2E: two accounts hold a conversation on staging', () => {
 		const m1text = contentToText(decodeContent(
 			await DialogCrypto.decryptContent(bobsViewOfAliceKey, m1row.content_b64)));
 		expect(m1text).toBe('Скинь, пожалуйста, схему');
+
+		expect(m1.sendResult.results).toMatchObject([{ status: 'ok' }]);
+		expect(m1.sendResult.txids.length).toBe(1);
+		const acceptedM1 = await getAccepted('dialog_messages', m1.message_id, alice.userHash);
+		expect(acceptedM1?.sign_hash).toBe(m1.sign_hash);
+		expect(acceptedM1?.message_id).toBe(m1.message_id);
+
+		const replayOutboxId = await enqueue([m1.mutation], alice.userHash);
+		if (!replayOutboxId) throw new Error('replay setup: durable outbox unavailable');
+		const drainResult = await drainOutbox(
+			alice.userHash,
+			(queued) => sendMutationsWithRetry(queued, alice.sign.secretKey, { retries: 1 }),
+			reconcileAccepted
+		);
+		expect(drainResult.dropped).toBe(0);
+		expect(drainResult.sent).toBe(1);
+		expect(drainResult.remaining).toBe(0);
+		const acceptedAfterReplay = await getAccepted('dialog_messages', m1.message_id, alice.userHash);
+		expect(acceptedAfterReplay?.sign_hash).toBe(m1.sign_hash);
 
 		// ---- 4. Bob's receive side admits through the gate ----
 		const gate = createDialogGate({
@@ -196,6 +514,7 @@ runIf('E2E: two accounts hold a conversation on staging', () => {
 			peer_wrapped_msg_key_b64: wrappedForAlice.peerWrappedMsgKeyB64,
 			owner_timestamp: Math.floor(Date.now() / 1000), deleted_flag: false,
 		};
+		await ensureDialogKeysStream(dialogHash).ready;
 		await ingest([{
 			type: 'insert', syncMetadata: { relation: 'dialog_keys' },
 			modified: { ...bobKeyFields, sign_b64: signFields(bobKeyFields as never, bob.sign.secretKey) },
@@ -281,5 +600,4 @@ runIf('E2E: two accounts hold a conversation on staging', () => {
 			messages: (await shapeRows('dialog_messages', `dialog_hash='${dialogHash}'`)).length,
 			file: up.fileId,
 		});
-	}, 300000);
-});
+}

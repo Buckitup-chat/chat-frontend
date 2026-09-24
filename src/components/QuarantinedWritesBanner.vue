@@ -2,7 +2,7 @@
 	<div v-if="entries.length || blockedIssues.length" class="quarantine-banner">
 		<div v-for="entry in entries" :key="entry.id" class="quarantine-banner-row">
 			<span class="quarantine-banner-text">
-				{{ labelFor(entry.relation) }} could not be delivered — {{ entry.lastError || 'rejected by the server' }}
+				{{ labelFor(entry) }} could not be delivered — {{ entry.lastError || 'rejected by the server' }}
 			</span>
 			<button type="button" class="quarantine-banner-action" @click="retry(entry.id)">Retry</button>
 			<button type="button" class="quarantine-banner-action quarantine-banner-discard" @click="discard(entry.id)">Discard</button>
@@ -28,12 +28,18 @@ const POLL_MS = 10_000;
 const RELATION_LABELS = {
 	dialog_messages: 'A message',
 	dialog_message_reactions: 'A reaction',
-	dialog_message_receipts: 'A read receipt',
 	dialog_keys: 'A dialog key',
 	user_storage: 'A profile/contacts update',
 	user_cards: 'Your profile card',
 };
-const labelFor = (relation) => RELATION_LABELS[relation] || 'A change';
+const RECEIPT_LABELS = { read: 'A read receipt', delivered: 'A delivery receipt' };
+const labelFor = (entry) => {
+	if (entry.relation === 'dialog_message_receipts') {
+		const m = entry.mutations?.[0];
+		return RECEIPT_LABELS[(m?.modified ?? m?.changes)?.type] || 'A receipt';
+	}
+	return RELATION_LABELS[entry.relation] || 'A change';
+};
 
 const blockerReason = (blockers) => {
 	const quarantinedCount = blockers.filter((b) => b.status === 'quarantined').length;
@@ -47,7 +53,7 @@ const blockerReason = (blockers) => {
 };
 
 const blockedText = (issue) => {
-	const label = labelFor(issue.entry.relation);
+	const label = labelFor(issue.entry);
 	const quarantinedCount = issue.blockers.filter((b) => b.status === 'quarantined').length;
 	const discardedCount = issue.blockers.filter((b) => b.status === 'discarded').length;
 	const unknownCount = issue.blockers.filter((b) => b.status === 'unknown').length;

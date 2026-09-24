@@ -2,8 +2,9 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { getDialogCollections, withDialogCollections } from '@/lib/data/collections';
-import { OWNER_FIELD } from '@/lib/data/ingest';
-import { enqueueIntent, updateIntent } from '@/lib/data/intents';
+import { OWNER_FIELD, IngestError, DurabilityError } from '@/lib/data/ingest';
+import { enqueueIntent, updateIntent, getIntent, intentsOf, resolveIntent, onIntentChange } from '@/lib/data/intents';
+import { saveProjection, updateProjection, removeProjection, projectionsOf } from '@/lib/data/messageProjections';
 import { signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import {
     materializeMessageIntent, ensureOwnDialogKeyPublished, ownSenderMsgKey,
@@ -13,7 +14,7 @@ import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
 import { getAccepted, getAllAcceptedForRelation, freshestOf } from '@/lib/data/acceptedSnapshot';
 import { recordOwnObservedTails, getOwnObservedTails, discardOwnObservedTails } from '@/lib/data/ownObservedTails';
-import { quarantinedEntries, discardEntry, currentSessionToken, sameSessionToken } from '@/lib/data/outbox';
+import { quarantinedEntries, discardEntry, currentSessionToken, sameSessionToken, pendingEntries, awaitServerAccepted, onOutboxChange } from '@/lib/data/outbox';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
@@ -27,6 +28,9 @@ import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib
 import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
 import { openVideo } from '@/lib/data/videoStream';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
+import { mergeLiveWithCached } from '@/lib/data/readCache';
+import { readDialogRow, readDialogRows } from '@/lib/data/dialogCache';
+import { settled } from '@/lib/data/shapeLink';
 import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
@@ -174,21 +178,32 @@ export const useDialogsStore = defineStore('dialogs', () => {
         await msgColl.preload();
         const shapeRow = msgColl.get(messageId) || null;
         const verifiedShapeRow = shapeRow && (await admitMessageRow(shapeRow)).status === 'verified' ? shapeRow : null;
-        return freshestOf(verifiedShapeRow, await getAccepted('dialog_messages', messageId));
+        return freshestOf(verifiedShapeRow, await getAccepted('dialog_messages', messageId, $userPQ.currentUserHash));
     };
 
     const getVerifiedReactionBase = async (dialogHash, reactionHash) => {
         const shapeRow = getDialogCollections(dialogHash).reactions.get(reactionHash) || null;
         const verifiedShapeRow = shapeRow && (await admitReactionRow(shapeRow)) ? shapeRow : null;
-        return freshestOf(verifiedShapeRow, await getAccepted('dialog_message_reactions', reactionHash));
+        return freshestOf(verifiedShapeRow, await getAccepted('dialog_message_reactions', reactionHash, $userPQ.currentUserHash));
     };
 
-    /** True when the gate has already admitted this exact revision — used by
-     * the render path to reconcile a stale 'waiting' snapshot after a batch:
-     * a child admitted before its parent parks, the parent's arrival drains
-     * it inside the gate, and the UI entry written earlier must catch up. */
+    /** True when the gate has admitted ANY presentation for this (message_id,
+     * sign_hash) reference — a DAG-reference / "does a revision with this
+     * identity exist at all" question. Not exact-row-aware: two different
+     * presentations can share a reference (one reusing another's spent
+     * sign_hash/sign_b64 over changed fields), so this alone must never
+     * promote a *specific* cached UI entry — see isRowAdmitted below. */
     const isMessageAdmitted = (dialogHash, messageId, signHash) =>
         dialogGates.get(dialogHash)?.isAdmitted(messageId, signHash) ?? false;
+
+    const blockedByOf = (dialogHash, row) =>
+        (row?.sign_hash && dialogGates.get(dialogHash)?.getBlockedBy(row.message_id, row.sign_hash)) || null;
+
+    const isRevisionTerminal = (dialogHash, messageId, signHash) =>
+        dialogGates.get(dialogHash)?.isTerminal(messageId, signHash) ?? false;
+
+    const isRowAdmitted = (dialogHash, row) =>
+        dialogGates.get(dialogHash)?.isRowAdmitted(row) ?? false;
 
     /** Re-checks rows parked on absent author cards; call when user_cards sync. */
     const retryCardAdmissions = async () => {
@@ -216,7 +231,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             const knownIds = new Set(loaded.map((r) => r.message_id));
             for (const id of [...ownIds]) {
                 if (knownIds.has(id)) { ownIds.delete(id); continue; }
-                const accepted = await getAccepted('dialog_messages', id);
+                const accepted = await getAccepted('dialog_messages', id, $userPQ.currentUserHash);
                 if (accepted?.sign_hash) extra.push(accepted);
             }
         }
@@ -250,11 +265,27 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const accepted = await getAllAcceptedForRelation('dialog_messages');
         const extra = accepted.filter((r) =>
             r.dialog_hash === dialogHash && r.sender_hash === ownerHash &&
-            r.sign_hash && !knownIds.has(r.message_id)
+            r.sign_hash && !knownIds.has(r.message_id) &&
+            !isRevisionTerminal(dialogHash, r.message_id, r.sign_hash)
         );
+        for (const r of extra) knownIds.add(r.message_id);
+
+        const pending = await pendingEntries(ownerHash);
+        const extraPending = [];
+        for (const entry of pending) {
+            if (entry.relation !== 'dialog_messages') continue;
+            for (const mutation of entry.mutations) {
+                const row = mutation?.modified ?? mutation?.changes ?? null;
+                if (!row || row.dialog_hash !== dialogHash || row.sender_hash !== ownerHash) continue;
+                if (!row.sign_hash || knownIds.has(row.message_id)) continue;
+                if (isRevisionTerminal(dialogHash, row.message_id, row.sign_hash)) continue;
+                knownIds.add(row.message_id);
+                extraPending.push(row);
+            }
+        }
 
         const withRefs = await Promise.all(
-            [...loaded, ...extra].map(async (r) => ({
+            [...loaded, ...extra, ...extraPending].map(async (r) => ({
                 message_id: r.message_id,
                 sign_hash: r.sign_hash,
                 refs: await verifiedRefsOf(r, ownerHash),
@@ -318,6 +349,158 @@ export const useDialogsStore = defineStore('dialogs', () => {
         if (item) item.status = status;
     };
 
+    const sessionProjections = new Map();
+
+    const setProjectionSignHash = (owner, messageId, signHash) => {
+        const item = optimisticItems.value.get(messageId);
+        if (item) item.signHash = signHash;
+        const tracked = sessionProjections.get(messageId);
+        if (tracked) tracked.signHash = signHash;
+        updateProjection(owner, messageId, { signHash }).catch((e) =>
+            console.error('[dialogs] could not record the signed revision on the projection of', messageId, e));
+    };
+
+    const messageIdOfRow = (m) => (m?.modified ?? m?.changes)?.message_id;
+
+    const lifecycleOfProjections = async (owner, ids) => {
+        const want = new Set(ids);
+        const out = new Map();
+        const [pending, quarantined, intents] = await Promise.all([
+            pendingEntries(owner), quarantinedEntries(owner), intentsOf(owner),
+        ]);
+        for (const e of pending) {
+            if (e.relation !== 'dialog_messages') continue;
+            for (const m of e.mutations || []) {
+                const id = messageIdOfRow(m);
+                if (!want.has(id)) continue;
+                const accepted = e.status === 'server_accepted_pending_reconcile' || !!e.reconciledAt;
+                out.set(id, { status: accepted ? 'synced' : 'queued', signHash: (m.modified ?? m.changes)?.sign_hash ?? null });
+            }
+        }
+        for (const e of quarantined) {
+            if (e.relation !== 'dialog_messages') continue;
+            for (const m of e.mutations || []) {
+                const id = messageIdOfRow(m);
+                if (want.has(id)) out.set(id, { status: 'error', signHash: (m.modified ?? m.changes)?.sign_hash ?? null });
+            }
+        }
+        for (const i of intents.entries) {
+            if (i.relation !== 'dialog_messages') continue;
+            const id = i.intent?.messageId ?? i.intent?.row?.message_id;
+            if (!want.has(id) || out.has(id)) continue;
+            const signed = i.intent?.signedMutation;
+            out.set(id, { status: signed ? 'queued' : 'awaiting_recovery', signHash: (signed?.modified ?? signed?.changes)?.sign_hash ?? null });
+        }
+        for (const id of want) {
+            if (out.has(id)) continue;
+            const accepted = await getAccepted('dialog_messages', id, owner);
+            if (accepted?.sign_hash) out.set(id, { status: 'synced', signHash: accepted.sign_hash });
+        }
+        return out;
+    };
+
+    const refreshProjectionStatuses = async (owner) => {
+        const hydrated = [...optimisticItems.value.values()].filter((i) => i.type === 'message' && i.hydrated);
+        if (!hydrated.length) return;
+        const lifecycle = await lifecycleOfProjections(owner, hydrated.map((i) => i.id));
+        if ($userPQ.currentUserHash !== owner) return;
+        for (const item of hydrated) {
+            const state = lifecycle.get(item.id);
+            if (!state) continue;
+            item.status = state.status;
+            if (state.signHash) item.signHash = state.signHash;
+        }
+    };
+
+    const hydration = { owner: null, done: false, attempt: 0, timer: null, running: null };
+    const HYDRATION_RETRY_MS = [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000, 30000];
+
+    const scheduleHydrationRetry = (owner) => {
+        if (hydration.timer || hydration.owner !== owner) return;
+        const delay = HYDRATION_RETRY_MS[hydration.attempt];
+        if (delay === undefined) {
+            console.error('[dialogs] message projections could not be restored after repeated attempts');
+            return;
+        }
+        hydration.attempt++;
+        hydration.timer = setTimeout(() => {
+            hydration.timer = null;
+            void hydrateProjections(owner);
+        }, delay);
+    };
+
+    const hydrateProjections = (owner) => {
+        if (!owner || $userPQ.currentUserHash !== owner) return Promise.resolve();
+        if (hydration.owner === owner && hydration.running) return hydration.running;
+        hydration.owner = owner;
+        hydration.running = (async () => {
+            let unresolved = 0;
+            try {
+                const { projections } = await projectionsOf(owner);
+                if ($userPQ.currentUserHash !== owner) return;
+                const pending = projections.filter((p) => !optimisticItems.value.has(p.messageId));
+                const lifecycle = pending.length ? await lifecycleOfProjections(owner, pending.map((p) => p.messageId)) : new Map();
+                if ($userPQ.currentUserHash !== owner) return;
+                for (const p of pending) {
+                    const state = lifecycle.get(p.messageId);
+                    if (!state) { unresolved++; continue; }
+                    sessionProjections.set(p.messageId, { dialogHash: p.dialogHash, signHash: state.signHash ?? p.signHash ?? null });
+                    optimisticItems.value.set(p.messageId, {
+                        type: 'message', id: p.messageId, dialogHash: p.dialogHash, text: p.text,
+                        authorName: 'Me', isMine: true, timestamp: formatTimestamp(p.ownerTimestamp),
+                        ownerTimestamp: p.ownerTimestamp, status: state.status,
+                        signHash: state.signHash ?? p.signHash ?? null, hydrated: true,
+                    });
+                }
+                hydration.done = unresolved === 0;
+                if (hydration.done) hydration.attempt = 0;
+            } catch (e) {
+                console.warn('[dialogs] message projections not restorable yet — retrying:', e?.message ?? e);
+                hydration.done = false;
+            } finally {
+                hydration.running = null;
+            }
+            if (!hydration.done) scheduleHydrationRetry(owner);
+        })();
+        return hydration.running;
+    };
+
+    const ensureProjectionsHydrated = () => {
+        const owner = $userPQ.currentUserHash;
+        if (!owner || (hydration.owner === owner && hydration.done)) return Promise.resolve();
+        return hydrateProjections(owner);
+    };
+
+    const retireProjections = (dialogHash, verifiedRevisions, finalIds = new Set()) => {
+        const candidates = new Map(sessionProjections);
+        for (const item of optimisticItems.value.values()) {
+            if (item.type === 'message') candidates.set(item.id, { dialogHash: item.dialogHash, signHash: item.signHash ?? candidates.get(item.id)?.signHash ?? null });
+        }
+        for (const [id, p] of candidates) {
+            if (p.dialogHash !== dialogHash) continue;
+            const exact = !!p.signHash && verifiedRevisions.get(id) === p.signHash;
+            if (!exact && !finalIds.has(id)) continue;
+            optimisticItems.value.delete(id);
+            if (!sessionProjections.has(id)) continue;
+            sessionProjections.delete(id);
+            removeProjection(id).catch((e) =>
+                console.error('[dialogs] retired projection not removed from disk (retired again after the next reload):', id, e));
+        }
+    };
+
+    let projectionRefresh = null;
+    const scheduleProjectionRefresh = (changedOwner) => {
+        const owner = $userPQ.currentUserHash;
+        if (!owner || changedOwner !== owner || projectionRefresh) return;
+        projectionRefresh = Promise.resolve()
+            .then(() => (hydration.done ? null : hydrateProjections(owner)))
+            .then(() => refreshProjectionStatuses(owner))
+            .catch((e) => console.warn('[dialogs] projection status refresh failed:', e))
+            .finally(() => { projectionRefresh = null; });
+    };
+    onOutboxChange(scheduleProjectionRefresh);
+    onIntentChange(scheduleProjectionRefresh);
+
     const removeOptimisticItem = (id) => {
         optimisticItems.value.delete(id);
     };
@@ -332,12 +515,24 @@ export const useDialogsStore = defineStore('dialogs', () => {
         }
     };
 
+    const discardMessageLifecycle = async (messageId) => {
+        await removeProjection(messageId);
+        sessionProjections.delete(messageId);
+        await discardQuarantinedFor('dialog_messages', 'message_id', messageId);
+        const owner = $userPQ.currentUserHash;
+        if (!owner) return;
+        for (const i of (await intentsOf(owner)).entries) {
+            if (i.relation !== 'dialog_messages') continue;
+            if ((i.intent?.messageId ?? i.intent?.row?.message_id) === messageId) await resolveIntent(i.id, { outcome: 'discarded' });
+        }
+    };
+
     const discardFailedItem = (id) => {
         const item = optimisticItems.value.get(id);
         removeOptimisticItem(id);
         if (!item) return;
         const cleanup = item.type === 'message'
-            ? discardQuarantinedFor('dialog_messages', 'message_id', id)
+            ? discardMessageLifecycle(id)
             : item.type === 'reaction'
                 ? discardQuarantinedFor('dialog_message_reactions', 'reaction_hash', item.reactionHash)
                 : null;
@@ -409,8 +604,22 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
         const promise = (async () => {
             const dialogColls = colls ?? getDialogCollections(dialogHash);
-            await dialogColls.keys.preload().catch(() => {});
-            const keyRow = dialogColls.keys.get(`${dialogHash}|${authorHash}`);
+            const rowKey = `${dialogHash}|${authorHash}`;
+            let liveRow;
+            let preloadFailed = false;
+            try {
+                const keysState = await settled(dialogColls.keys);
+                if (keysState.state === 'failed') throw keysState.error;
+                liveRow = dialogColls.keys.get(rowKey);
+            } catch {
+                preloadFailed = true;
+                try {
+                    liveRow = dialogColls.keys.get(rowKey);
+                } catch {
+                    liveRow = undefined;
+                }
+            }
+            const keyRow = liveRow ?? (preloadFailed ? await readDialogRow('dialog_keys', rowKey) : null);
             if (!keyRow || keyRow.deleted_flag) return null;
 
             // Is it our own key?
@@ -465,17 +674,51 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
         await recordOwnObservedTails(messageId, observedTails, ownerHash);
 
+        const notStored = () => new Error('This action could not be stored for sending. Nothing was sent — try again.');
+        if (kind === 'message') {
+            try {
+                await saveProjection({
+                    messageId, owner: ownerHash, relation: 'dialog_messages', dialogHash, peerHash,
+                    ownerTimestamp: nowSec, createdAt: Date.now(), text: contentToText(parts), signHash: null,
+                });
+            } catch (e) {
+                console.error('[dialogs] message projection not durable — the send is refused:', e);
+                await discardOwnObservedTails(messageId, ownerHash);
+                throw notStored();
+            }
+            sessionProjections.set(messageId, { dialogHash, signHash: null });
+        }
+
         const payload = { kind, relation: 'dialog_messages', peerHash, dialogHash, messageId, ownerHash, ownerTimestamp: nowSec, parts, observedTails };
         const intentId = await enqueueIntent(payload, ownerHash, 'dialog_messages');
         if (intentId === null) {
             await discardOwnObservedTails(messageId, ownerHash);
-            throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
+            if (kind === 'message') {
+                sessionProjections.delete(messageId);
+                await removeProjection(messageId).catch((e) => console.error('[dialogs] orphan projection left behind (never shown):', messageId, e));
+            }
+            throw notStored();
         }
         trackOwnSentMessage(dialogHash, messageId);
         return { intentId, payload, token };
     };
 
+    const intentAwaitsRecovery = async (intentId, ownerHash) => {
+        const entry = await getIntent(intentId).catch(() => null);
+        return !!entry && entry.userHash === ownerHash && entry.intent?.resolved !== true;
+    };
+
     const dispatchMessageIntent = async (intentId, payload, token, onStatus) => {
+        const reportOutcome = (acceptance) => acceptance.then((outcome) => {
+            try {
+                assertSessionUnchanged(token, 'dispatchMessageIntent:acceptanceCallback');
+            } catch {
+                return;
+            }
+            if (outcome.kind === 'accepted') onStatus?.('synced');
+            else onStatus?.('error', outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery');
+        });
+        let durableOutboxId = null;
         try {
             assertSessionUnchanged(token, 'dispatchMessageIntent:start');
             onStatus?.('syncing');
@@ -485,7 +728,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 throw new VaultLockedError(String(e?.message ?? e));
             });
             assertSessionUnchanged(token, 'dispatchMessageIntent:afterSignSkey');
-            const handle = await signAndDispatchIntent(intentId, readyRow, signSkey, { token });
+            const handle = await signAndDispatchIntent(intentId, readyRow, signSkey, {
+                token,
+                onDurable: (outboxId) => { durableOutboxId = outboxId; },
+                onSigned: (mutation) => {
+                    const signHash = (mutation?.modified ?? mutation?.changes)?.sign_hash;
+                    if (signHash) setProjectionSignHash(payload.ownerHash, payload.messageId, signHash);
+                },
+            });
             if (handle.phase === 'accepted') {
                 try {
                     assertSessionUnchanged(token, 'dispatchMessageIntent:beforeAcceptedCallback');
@@ -494,15 +744,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 }
                 onStatus?.('synced');
             } else {
-                handle.acceptance.then((outcome) => {
-                    try {
-                        assertSessionUnchanged(token, 'dispatchMessageIntent:acceptanceCallback');
-                    } catch {
-                        return;
-                    }
-                    if (outcome.kind === 'accepted') onStatus?.('synced');
-                    else onStatus?.('error', outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery');
-                });
+                reportOutcome(handle.outboxId ? awaitServerAccepted(handle.outboxId, payload.ownerHash) : handle.acceptance);
             }
         } catch (e) {
             if (e instanceof VaultLockedError) {
@@ -513,6 +755,18 @@ export const useDialogsStore = defineStore('dialogs', () => {
             if (e instanceof SessionFencedError) {
                 console.warn('[dialogs] dispatchMessageIntent aborted (session fenced):', e.message);
                 onStatus?.('error', e);
+                return;
+            }
+            if (durableOutboxId && !(e instanceof IngestError && e.permanent)) {
+                console.warn('[dialogs] dispatchMessageIntent queued for retry:', e);
+                onStatus?.('queued', e);
+                reportOutcome(awaitServerAccepted(durableOutboxId, payload.ownerHash));
+                return;
+            }
+            const permanent = e?.permanent === true || e instanceof DurabilityError;
+            if (!durableOutboxId && !permanent && await intentAwaitsRecovery(intentId, payload.ownerHash)) {
+                console.warn('[dialogs] dispatchMessageIntent left for recovery:', e);
+                onStatus?.('awaiting_recovery', e);
                 return;
             }
             console.error('[dialogs] dispatchMessageIntent failed:', e);
@@ -540,7 +794,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             await msgColl.preload().catch(() => {});
             const shapeRow = msgColl.get(messageId) || null;
             const verifiedShapeRow = shapeRow && (await admitMessageRow(shapeRow)).status === 'verified' ? shapeRow : null;
-            const freshBase = freshestOf(verifiedShapeRow, await getAccepted('dialog_messages', messageId));
+            const freshBase = freshestOf(verifiedShapeRow, await getAccepted('dialog_messages', messageId, ctx.senderHash));
             const parentSignHash = freshBase ? freshBase.sign_hash : intent.parentSignHash;
             const ownerTimestamp = freshBase ? nextOwnerTimestamp(freshBase.owner_timestamp) : intent.ownerTimestamp;
             const row = {
@@ -714,7 +968,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     /**
      * Uploads a file and sends the message referencing it. Progress is in
-     * chunks (§2.1 — "куски, а не проценты-догадки"). Returns the fileId.
+     * chunks (§2.1 — "chunks, not percentage guesses"). Returns the fileId.
      */
     /**
      * Uploads one attachment and returns its content part.
@@ -853,8 +1107,17 @@ export const useDialogsStore = defineStore('dialogs', () => {
      */
     const getMessageHistory = async (dialogHash, messageId) => {
         const colls = getDialogCollections(dialogHash);
-        await colls.versions.preload().catch(() => {});
-        const rows = colls.versions.toArray.filter((v) => v.message_id === messageId);
+        let rows;
+        try {
+            const versionsState = await settled(colls.versions);
+            if (versionsState.state === 'failed') throw versionsState.error;
+            rows = colls.versions.toArray.filter((v) => v.message_id === messageId);
+        } catch {
+            const live = colls.versions.toArray.filter((v) => v.message_id === messageId);
+            const cached = (await readDialogRows('dialog_messages_versions', dialogHash))
+                .filter((r) => r.message_id === messageId);
+            rows = mergeLiveWithCached('dialog_messages_versions', live, cached, (r) => `${r.message_id}|${r.sign_hash}`);
+        }
 
         const out = [];
         for (const row of rows) {
@@ -912,7 +1175,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         dialogGates.clear();
         ownSentMessageIds.clear();
         optimisticItems.value = new Map();
+        sessionProjections.clear();
+        if (hydration.timer) clearTimeout(hydration.timer);
+        Object.assign(hydration, { owner: null, done: false, attempt: 0, timer: null, running: null });
+        if ($userPQ.currentUserHash) void hydrateProjections($userPQ.currentUserHash);
     });
+    if ($userPQ.currentUserHash) void hydrateProjections($userPQ.currentUserHash);
 
     /** Peers whose latest checkpoint no longer matches the dialog. */
     const alertingPeers = computed(() => {
@@ -1121,7 +1389,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * Creates and sends a checkpoint over the dialog's current state.
      * Fails (INCOMPLETE_CAUSAL_HISTORY) while anything is unadmitted or any
      * refs blob is still undecryptable: a checkpoint must not attest history
-     * the device has not fully verified (ТЗ §7 — head hashes alone can
+     * the device has not fully verified (spec §7 — head hashes alone can
      * reference data never seen locally).
      */
     const createDialogCheckpoint = async (peerHash) => {
@@ -1168,7 +1436,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const sent = new Promise((resolve, reject) => { settle = { resolve, reject }; });
         const messageId = await sendMessage(peerHash, [part], (status, cause) => {
             if (status === 'synced') settle.resolve();
-            else if (status === 'error') settle.reject(new Error('CHECKPOINT_SEND_FAILED', { cause }));
+            else if (status === 'error' || status === 'queued' || status === 'awaiting_recovery') settle.reject(new Error('CHECKPOINT_SEND_FAILED', { cause }));
         }, null, null, 'checkpoint');
         await sent;
         // Two independent fences on purpose: the session token catches a
@@ -1585,22 +1853,58 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * Bound to message_sign_hash: an edited message is a new revision and
      * needs its own acknowledgement.
      */
+    const receiptOps = new Map();
+
+    const rowOfMutation = (m) => m?.modified ?? m?.changes ?? null;
+    const isReceiptEntry = (receiptHash) => (entry) =>
+        entry.relation === 'dialog_message_receipts'
+        && (entry.mutations || []).some((m) => rowOfMutation(m)?.receipt_hash === receiptHash);
+
+    const knownReceipt = async (receiptHash, myHash) => {
+        if (await getAccepted('dialog_message_receipts', receiptHash, myHash)) return { kind: 'exists' };
+        const cached = await readDialogRow('dialog_message_receipts', receiptHash);
+        if (cached && cached.peer_hash === myHash && await admitReceiptRow(cached)) return { kind: 'exists' };
+        const { entries: intents } = await intentsOf(myHash);
+        const intent = intents.find((e) => e.relation === 'dialog_message_receipts' && e.intent?.row?.receipt_hash === receiptHash);
+        if (intent) return { kind: 'intent', intent };
+        if ((await pendingEntries(myHash)).some(isReceiptEntry(receiptHash))) return { kind: 'queued' };
+        if ((await quarantinedEntries(myHash)).some(isReceiptEntry(receiptHash))) return { kind: 'rejected' };
+        return null;
+    };
+
     const sendReceipt = async (peerHash, { messageId, messageSignHash }, type) => {
         if (!messageSignHash) {
             throw new Error('Cannot acknowledge: message revision is not synced yet');
         }
-
-        const dialogHash = await initDialogKeys(peerHash);
         const myHash = $userPQ.currentUserHash;
-
         const receiptHash = DialogCrypto.computeReceiptHash(messageId, messageSignHash, myHash, type);
+        const opKey = `${myHash}|${receiptHash}`;
+        const inFlight = receiptOps.get(opKey);
+        if (inFlight) return inFlight;
+        const op = sendReceiptOnce(peerHash, { messageId, messageSignHash }, type, myHash, receiptHash)
+            .finally(() => { if (receiptOps.get(opKey) === op) receiptOps.delete(opKey); });
+        receiptOps.set(opKey, op);
+        return op;
+    };
+
+    const sendReceiptOnce = async (peerHash, { messageId, messageSignHash }, type, myHash, receiptHash) => {
+        const dialogHash = await initDialogKeys(peerHash);
 
         const dialogColls = getDialogCollections(dialogHash);
         await dialogColls.receipts.preload().catch(() => {});
-        const existing = dialogColls.receipts.get(receiptHash);
         // Already acknowledged: the deterministic hash makes this a no-op
         // rather than a duplicate insert the server would reject.
-        if (existing) return receiptHash;
+        if (dialogColls.receipts.get(receiptHash)) return receiptHash;
+
+        const known = await knownReceipt(receiptHash, myHash);
+        if (known?.kind === 'exists' || known?.kind === 'queued') return receiptHash;
+        if (known?.kind === 'rejected') {
+            throw new Error('This receipt was rejected earlier — retry or discard it in the failed-writes banner.');
+        }
+        if (known?.kind === 'intent') {
+            await signAndDispatchIntent(known.intent.id, known.intent.intent, await getSignSkeyBytes());
+            return receiptHash;
+        }
 
         await pushRow('dialog_message_receipts', {
             receipt_hash: receiptHash,
@@ -1677,6 +1981,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         refreshCheckpointAlert,
         admitMessageRow,
         isMessageAdmitted,
+        blockedByOf,
+        isRowAdmitted,
         admitReactionRow,
         admitReceiptRow,
         retryCardAdmissions,
@@ -1690,6 +1996,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         addOptimisticMessageWithId,
         addOptimisticReaction,
         updateOptimisticStatus,
+        retireProjections,
+        ensureProjectionsHydrated,
         removeOptimisticItem,
         discardFailedItem,
     };

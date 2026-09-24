@@ -111,6 +111,7 @@ vi.mock('@/lib/data/intents', () => {
 	const store = new Map<string, { id: string; userHash: string; relation: string; intent: unknown }>();
 	let seq = 0;
 	return {
+		onIntentChange: () => () => {},
 		enqueueIntent: async (intent: unknown, userHash: string, relation: string) => {
 			const id = `test-intent-${seq++}`;
 			store.set(id, { id, userHash, relation, intent });
@@ -124,6 +125,7 @@ vi.mock('@/lib/data/intents', () => {
 		},
 		resolveIntent: async () => true,
 		getIntent: async (id: string) => store.get(id) ?? null,
+		intentsOf: async (userHash: string) => ({ entries: [...store.values()].filter((e) => e.userHash === userHash), issues: [] }),
 	};
 });
 

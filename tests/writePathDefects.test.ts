@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { toBase64 } from '@/lib/pq/signature';
 import { assertFreshBase, markUnconfirmed, clearUnconfirmed, isUnconfirmed, StaleBaseError, _resetStaleBase } from '@/lib/data/staleBase';
 import { scopeForRelation } from '@/lib/data/barrier';
+import type { MutationLike } from '@/lib/data/confirm';
 
 // 91 bytes: not a multiple of three, so base64 really does carry padding —
 // the only case where the two spellings differ.
@@ -24,7 +25,7 @@ describe('defect 1: signature identity across encodings', () => {
 	const DIALOG = 'di_' + 'a'.repeat(128);
 
 	let remoteRow: Record<string, unknown> | undefined;
-	let mutationAppliedOnServer: (m: unknown) => Promise<boolean>;
+	let mutationAppliedOnServer: (m: MutationLike, opts?: { attempts?: number; delayMs?: number }) => Promise<boolean>;
 
 	beforeEach(async () => {
 		vi.resetModules();

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 
 vi.mock('@/lib/pq/signature', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('@/lib/pq/signature')>();
@@ -39,7 +39,8 @@ afterAll(() => {
 });
 
 const { uploadFile, prepareUpload } = await import('@/lib/data/fileTransfer');
-const { pendingEntries, _setStorageForTests } = await import('@/lib/data/outbox');
+const { pendingEntries, _setStorageForTests, _setLeaderForTests } = await import('@/lib/data/outbox');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -52,10 +53,16 @@ const makeStorage = () => {
 	};
 };
 
+afterEach(() => {
+	_setLeaderForTests(null);
+});
+
 beforeEach(() => {
 	ingestOnline = false;
 	ingestCalls.length = 0;
 	_setStorageForTests(makeStorage());
+	_setLeaderForTests(true);
+	_setAcceptedSnapshotStorageForTests(makeStorage());
 });
 
 describe('file manifest commit goes through the durable mutation lifecycle (§4.8)', () => {

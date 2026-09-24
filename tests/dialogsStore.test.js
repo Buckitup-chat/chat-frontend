@@ -8,6 +8,7 @@ import * as secp from '@noble/secp256k1';
 import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
 import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { _setOwnObservedTailsStorageForTests, _setRawOwnObservedTailsStorageForTests, getOwnObservedTails } from '@/lib/data/ownObservedTails';
+import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import { clearLocalStorageKey } from '@/lib/data/localCrypto';
 import { enqueue, recordFailure, quarantinedEntries, discardEntry, _setStorageForTests, startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
 import { IngestError } from '@/lib/data/ingest';
@@ -128,10 +129,12 @@ const updateIntentSpy = vi.fn(async (id, intent) => {
 });
 const getIntentSpy = vi.fn(async (id) => intentStore.get(id) ?? null);
 vi.mock('@/lib/data/intents', () => ({
+	onIntentChange: () => () => {},
 	enqueueIntent: (...args) => enqueueIntentSpy(...args),
 	updateIntent: (...args) => updateIntentSpy(...args),
 	resolveIntent: async () => {},
 	getIntent: (...args) => getIntentSpy(...args),
+	intentsOf: async (userHash) => ({ entries: [...intentStore.values()].filter((e) => e.userHash === userHash), issues: [] }),
 }));
 
 const createGenericMutationSpy = vi.fn((relation, row, _skey, type) => ({
@@ -213,6 +216,11 @@ const COLLECTION_FOR = {
 	dialog_message_receipts: () => collections.dialog.receipts,
 };
 
+const signDialogMessageRow = (row) => {
+	const sign_b64 = signFields(row, myIdentity.sign.secretKey);
+	return { ...row, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64) };
+};
+
 const applyMutation = (m) => {
 	const pk = PRIMARY_KEY[m.relation];
 	const coll = COLLECTION_FOR[m.relation]?.();
@@ -226,7 +234,8 @@ const applyMutation = (m) => {
 		err.permanent = true;
 		throw err;
 	}
-	coll.rows.set(key, { ...coll.rows.get(key), ...m.row });
+	const merged = { ...coll.rows.get(key), ...m.row };
+	coll.rows.set(key, m.relation === 'dialog_messages' ? signDialogMessageRow(merged) : merged);
 };
 
 // sendMessage awaits a dynamic import() for uuid before it does anything, so
@@ -266,6 +275,7 @@ beforeEach(() => {
 		async keys() { return [...this._map.keys()]; },
 		async clear() { this._map.clear(); },
 	});
+	_setProjectionStorageForTests((() => { const m = new Map(); return { get: async (k) => m.get(k) ?? null, set: async (k, v) => { m.set(k, v); }, delete: async (k) => { m.delete(k); }, keys: async () => [...m.keys()], clear: async () => { m.clear(); } }; })());
 	_setOwnObservedTailsStorageForTests({
 		_map: new Map(),
 		async get(k) { return this._map.get(k) ?? null; },
@@ -389,7 +399,7 @@ describe('two first messages in a fresh dialog', () => {
 		expect(statuses.filter(([, s]) => s === 'synced')).toHaveLength(2);
 	});
 
-	it('reports an error on both sends when the key row cannot be read', async () => {
+	it('leaves both sends for recovery, not failed, when the key row cannot be read', async () => {
 		const store = useDialogsStore();
 		collections.dialog.keys.preload = async () => {
 			throw new Error('shape unavailable');
@@ -398,10 +408,12 @@ describe('two first messages in a fresh dialog', () => {
 
 		store.sendMessage(PEER_HASH, 'first', (s) => statuses.push(s));
 		store.sendMessage(PEER_HASH, 'second', (s) => statuses.push(s));
-		await waitFor(() => statuses.filter((s) => s === 'error').length === 2, 'both sends to fail');
+		await waitFor(() => statuses.filter((s) => s === 'awaiting_recovery').length === 2, 'both sends to settle');
 
 		expect(sent.filter((m) => m.relation === 'dialog_messages')).toHaveLength(0);
-		expect(statuses.filter((s) => s === 'error')).toHaveLength(2);
+		expect(statuses.filter((s) => s === 'error')).toHaveLength(0);
+		const unresolved = [...intentStore.values()].filter((e) => e.relation === 'dialog_messages' && e.intent?.resolved !== true);
+		expect(unresolved).toHaveLength(2);
 	});
 });
 
@@ -490,6 +502,44 @@ describe('causal scope: signing moment separated from intent creation (§4.4)', 
 			.filter((m) => m.relation === 'dialog_messages')
 			.find((m) => m.row.message_id === secondId);
 		expect(decodeRefsMap(secondMutation.row.refs_map_b64)).toEqual({ [firstId]: SIGN_HASH });
+	});
+
+	it('observes its own SIGNED-but-not-yet-accepted messages as tails, with transitive reduction, and never waits on SERVER_ACCEPTED (main-tanstack-proposal-v3.md:439,694,713)', async () => {
+		const store = useDialogsStore();
+		const statuses = [];
+
+		const unsettled = [];
+		sendImpl = async (mutations) => {
+			if (mutations[0]?.relation === 'dialog_keys') {
+				mutations.forEach(applyMutation);
+				return { txids: [] };
+			}
+			await enqueue(mutations, MY_HASH);
+			sent.push(...mutations);
+			return new Promise((resolve) => unsettled.push(() => resolve({ txids: [] })));
+		};
+
+		const messageMutation = (id) => sent.find((m) => m.relation === 'dialog_messages' && m.row.message_id === id);
+
+		const firstId = await store.sendMessage(PEER_HASH, 'first', (s) => statuses.push(['first', s]));
+		await waitFor(() => !!messageMutation(firstId), 'first to be signed and durably outbox-pending');
+		expect(statuses).not.toContainEqual(['first', 'synced']);
+		expect(collections.dialog.messages.rows.has(firstId)).toBe(false);
+		const firstSignHash = messageMutation(firstId).changes.sign_hash;
+
+		const secondId = await store.sendMessage(PEER_HASH, 'second', (s) => statuses.push(['second', s]));
+		await waitFor(() => !!messageMutation(secondId), 'second to be signed and durably outbox-pending');
+		expect(statuses).not.toContainEqual(['second', 'synced']);
+		const secondMutation = messageMutation(secondId);
+		expect(decodeRefsMap(secondMutation.row.refs_map_b64)).toEqual({ [firstId]: firstSignHash });
+		const secondSignHash = secondMutation.changes.sign_hash;
+
+		const thirdId = await store.sendMessage(PEER_HASH, 'third', (s) => statuses.push(['third', s]));
+		await waitFor(() => !!messageMutation(thirdId), 'third to be signed and durably outbox-pending');
+		expect(decodeRefsMap(messageMutation(thirdId).row.refs_map_b64)).toEqual({ [secondId]: secondSignHash });
+
+		unsettled.forEach((settle) => settle());
+		await flush();
 	});
 });
 
@@ -1269,8 +1319,9 @@ describe('editMessage coalescing is durable, not just in-memory (§3.1 Target li
 		]);
 
 		expect(enqueueIntentSpy).toHaveBeenCalledTimes(1);
-		expect(updateIntentSpy).toHaveBeenCalledTimes(3);
+		expect(updateIntentSpy).toHaveBeenCalledTimes(4);
 		expect(updateIntentSpy.mock.calls[0][1].row.content_b64).toContain('edit B');
+		expect(createGenericMutationSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it('a non-overlapping later edit enqueues its own fresh durable intent, not an update of the finished one', async () => {
@@ -1284,13 +1335,11 @@ describe('editMessage coalescing is durable, not just in-memory (§3.1 Target li
 		await store.editMessage(PEER_HASH, MSG_ID, 'edit B');
 
 		expect(enqueueIntentSpy).toHaveBeenCalledTimes(2);
-		expect(updateIntentSpy).toHaveBeenCalledTimes(4);
-		expect(updateIntentSpy.mock.calls.map((c) => c[1].row.content_b64)).toEqual([
-			expect.stringContaining('edit A'),
-			expect.stringContaining('edit A'),
-			expect.stringContaining('edit B'),
-			expect.stringContaining('edit B'),
-		]);
+		expect(updateIntentSpy).toHaveBeenCalledTimes(6);
+		const contents = updateIntentSpy.mock.calls.map((c) => c[1].row.content_b64);
+		expect(contents.filter((c) => c.includes('edit A'))).toHaveLength(3);
+		expect(contents.filter((c) => c.includes('edit B'))).toHaveLength(3);
+		expect(createGenericMutationSpy).toHaveBeenCalledTimes(2);
 	});
 });
 

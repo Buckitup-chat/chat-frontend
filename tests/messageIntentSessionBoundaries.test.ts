@@ -64,7 +64,9 @@ vi.mock('@/lib/data/collections', () => ({
 }));
 
 vi.mock('@/lib/data/intents', () => ({
+	onIntentChange: () => () => {},
 	enqueueIntent: async () => { enqueueIntentCalls++; return 'intent-should-not-happen'; },
+	intentsOf: async () => ({ entries: [], issues: [] }),
 }));
 
 const { ensureOwnDialogKeyPublished, pinActiveSession } = await import('@/lib/data/messageIntent');

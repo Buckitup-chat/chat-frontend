@@ -8,6 +8,7 @@ import * as secp from '@noble/secp256k1';
 import { signFields, toBase64 } from '@/lib/pq/signature';
 import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
+import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import {
 	_setStorageForTests, _setLeaderForTests, stopDrainLoop,
 	pendingEntries, quarantinedEntries, startLeaderElection, stopLeaderElection,
@@ -93,6 +94,7 @@ vi.mock('@/lib/data/intents', () => {
 	const store = new Map<string, { id: string; userHash: string; relation: string; intent: unknown }>();
 	let seq = 0;
 	return {
+		onIntentChange: () => () => {},
 		enqueueIntent: async (intent: unknown, userHash: string, relation: string) => {
 			const id = `test-intent-${seq++}`;
 			store.set(id, { id, userHash, relation, intent });
@@ -106,6 +108,7 @@ vi.mock('@/lib/data/intents', () => {
 		},
 		resolveIntent: async () => true,
 		getIntent: async (id: string) => store.get(id) ?? null,
+		intentsOf: async (userHash: string) => ({ entries: [...store.values()].filter((e) => e.userHash === userHash), issues: [] }),
 	};
 });
 
@@ -159,6 +162,7 @@ beforeEach(() => {
 	rejectKeyPermanently = false;
 	_setAcceptedSnapshotStorageForTests(makeMemoryStore());
 	_setStorageForTests(makeMemoryStore());
+	_setProjectionStorageForTests((() => { const m = new Map(); return { get: async (k) => m.get(k) ?? null, set: async (k, v) => { m.set(k, v); }, delete: async (k) => { m.delete(k); }, keys: async () => [...m.keys()], clear: async () => { m.clear(); } }; })());
 	_setOwnObservedTailsStorageForTests(makeMemoryStore());
 	collections = {
 		cards: makeCollection({ [MY_HASH]: myIdentity.card, [PEER_HASH]: peerIdentity.card }),

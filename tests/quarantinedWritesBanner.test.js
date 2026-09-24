@@ -60,6 +60,19 @@ describe('QuarantinedWritesBanner (§F-L10)', () => {
 		expect(w.findAll('.quarantine-banner-action')).toHaveLength(2); // Retry + Discard
 	});
 
+	it('names a quarantined receipt by the type in its own signed row: delivery vs read', async () => {
+		const receipt = (id, type) => ({
+			id, relation: 'dialog_message_receipts', lastError: 'conflict',
+			mutations: [{ type: 'insert', modified: { receipt_hash: `dmrc_${id}`, type }, syncMetadata: { relation: 'dialog_message_receipts' } }],
+		});
+		entries = [receipt('d1', 'delivered'), receipt('r1', 'read')];
+		const w = mount(QuarantinedWritesBanner);
+		await flushPromises();
+		const texts = w.findAll('.quarantine-banner-text').map((t) => t.text());
+		expect(texts[0]).toMatch(/^A delivery receipt could not be delivered/);
+		expect(texts[1]).toMatch(/^A read receipt could not be delivered/);
+	});
+
 	it('retry requeues the entry and drops it from the list', async () => {
 		entries = [{ id: 'e1', relation: 'dialog_messages', lastError: 'boom' }];
 		const w = mount(QuarantinedWritesBanner);

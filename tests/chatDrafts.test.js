@@ -2,7 +2,7 @@
 // The draft lifecycle through the real component and the real drafts module
 // (only the IndexedDB layer is swapped for memory): restore on open, debounced
 // save while typing, clear on send, flush-and-restore on a dialog switch.
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { _setStoreForTests } from '@/lib/data/localStore';
@@ -28,11 +28,21 @@ beforeEach(() => {
 const seed = (peer, draft) => mem.set(draftKey(peer), JSON.stringify(draft));
 const stored = (peer) => (mem.has(draftKey(peer)) ? JSON.parse(mem.get(draftKey(peer))) : null);
 
-const mountChat = (peerHash = PEER) =>
-	mount(ChatWindow, {
+let wrappers = [];
+const mountChat = (peerHash = PEER) => {
+	const w = mount(ChatWindow, {
 		props: { title: 'Ирина', myHash: MY, peerHash, messages: [], reactions: {} },
 		global: { stubs: { Avatar: true } },
 	});
+	wrappers.push(w);
+	return w;
+};
+
+afterEach(() => {
+	wrappers.splice(0).forEach((w) => {
+		try { w.unmount(); } catch { }
+	});
+});
 
 const flush = () => new Promise((r) => setTimeout(r));
 
@@ -88,6 +98,8 @@ describe('input drafts', () => {
 			expect(stored(PEER)?.text).toBe('первому, не дописано'); // saved without waiting out the debounce
 			expect(w.find('input[type="text"]').element.value).toBe('черновик второго диалога');
 		});
+		await new Promise((r) => setTimeout(r, 350));
+		expect(stored(PEER)?.text).toBe('первому, не дописано');
 	});
 
 	it('unmount flushes the pending draft', async () => {

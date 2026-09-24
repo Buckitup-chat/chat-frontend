@@ -1,7 +1,13 @@
 import { getDialogCollections, getUserCardsCollection } from './collections';
+import { getAccepted } from './acceptedSnapshot';
+import { readDialogRow } from './dialogCache';
+import { readCachedCard } from './userCardsCache';
+import { settled } from './shapeLink';
+import { verifyUserCard } from '@/lib/pq/verifyCard';
 import { enqueueIntent } from './intents';
 import { signAndDispatchIntent, type MessageIntentPayload, type ReadyRowIntent } from './intentRecovery';
-import { currentSessionToken, sameSessionToken, SessionFencedError, type SessionToken } from './outbox';
+import type { SessionToken } from './outbox';
+import { pinActiveSession, assertSessionUnchanged, SessionFencedError } from './sessionGuard';
 import { nextOwnerTimestamp } from './time';
 import type { UserCardRow } from './types';
 import { DialogCrypto } from '@/libs/DialogCrypto';
@@ -15,23 +21,9 @@ function decode(str: string, fieldName: string): Uint8Array {
 	return result;
 }
 
-export { SessionFencedError };
+export { SessionFencedError, pinActiveSession, assertSessionUnchanged };
 
 export class VaultLockedError extends Error {}
-
-export function pinActiveSession(ownerHash: string, step: string): SessionToken {
-	const token = currentSessionToken();
-	if (!token || token.userHash !== ownerHash) {
-		throw new SessionFencedError(`${step}: fenced — no active session bound to ${ownerHash}`);
-	}
-	return token;
-}
-
-export function assertSessionUnchanged(pinned: SessionToken, step: string): void {
-	if (!sameSessionToken(pinned, currentSessionToken())) {
-		throw new SessionFencedError(`${step}: fenced — active session changed since this intent's session was pinned`);
-	}
-}
 
 async function vaultKeys() {
 	let em: InstanceType<typeof EncryptionManagerPQ> | null;
@@ -93,17 +85,27 @@ async function ensureOwnDialogKeyPublishedUnguarded(
 		);
 	}
 	const dialogColls = getDialogCollections(dialogHash);
-	await dialogColls.keys.preload();
-	const myKeyRow = dialogColls.keys.get(`${dialogHash}|${myHash}`);
+	const keysState = await settled(dialogColls.keys as unknown as Parameters<typeof settled>[0]);
+	const myKeyRow = dialogColls.keys.get(`${dialogHash}|${myHash}`)
+		?? (keysState.state === 'failed' ? await readDialogRow('dialog_keys', `${dialogHash}|${myHash}`) : null);
 	if (myKeyRow && !myKeyRow.deleted_flag) return;
+
+	const acceptedKey = await getAccepted('dialog_keys', `${dialogHash}|${myHash}`, myHash);
+	if (acceptedKey && !acceptedKey.deleted_flag) return;
+	assertSessionUnchanged(token, 'ensureOwnDialogKeyPublished:afterAcceptedSnapshotLookup');
+	if (keysState.state === 'failed') {
+		throw new Error(`Dialog keys are not readable yet — the message waits for recovery: ${String((keysState.error as Error)?.message ?? keysState.error)}`, { cause: keysState.error });
+	}
 
 	assertSessionUnchanged(token, 'ensureOwnDialogKeyPublished:beforeVaultAccess');
 	const senderMsgKey = await ownSenderMsgKey(peerHash);
 	assertSessionUnchanged(token, 'ensureOwnDialogKeyPublished:afterVaultExport');
 	const cards = getUserCardsCollection();
-	await cards.preload();
+	const cardsState = await settled(cards as unknown as Parameters<typeof settled>[0]);
 	assertSessionUnchanged(token, 'ensureOwnDialogKeyPublished:afterPeerCardPreload');
-	const peerCard = (cards.get(peerHash) as UserCardRow | undefined) ?? null;
+	const cachedPeerCard = cardsState.state === 'failed' && !cards.get(peerHash) ? await readCachedCard(peerHash) : null;
+	const peerCard = (cards.get(peerHash) as UserCardRow | undefined)
+		?? (cachedPeerCard && verifyUserCard(cachedPeerCard).status === 'verified' ? cachedPeerCard : null);
 	if (!peerCard || !peerCard.crypt_pkey) {
 		throw new Error('Peer crypt_pkey not found');
 	}
