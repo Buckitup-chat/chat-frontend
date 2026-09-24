@@ -1,14 +1,21 @@
 <template>
   <div class="sync-status">
-    <span class="status-dot" :class="{ 'synced': props.isSynced }" />
-    <span class="status-text">
-      {{ props.isSynced ? 'Synced' : 'Not synced' }}
-    </span>
+    <span class="status-dot" :class="props.state" />
+    <span class="status-text">{{ LABELS[props.state] }}</span>
   </div>
 </template>
 
 <script setup lang="ts">
-const props = defineProps(['isSynced'])
+import type { AccountSyncState } from '@/composables/useAccountSyncStatus'
+
+const props = defineProps<{ state: AccountSyncState }>()
+
+const LABELS: Record<AccountSyncState, string> = {
+  offline: 'Offline',
+  syncing: 'Syncing',
+  needs_attention: 'Needs attention',
+  synced: 'Synced',
+}
 </script>
 
 <style scoped>
@@ -39,6 +46,15 @@ const props = defineProps(['isSynced'])
   background-color: #22c55e;
   /* зелений — синхронізовано */
   box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+}
+
+.status-dot.offline {
+  background-color: #94a3b8;
+}
+
+.status-dot.needs_attention {
+  background-color: #ef4444;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
 }
 
 .last-sync {

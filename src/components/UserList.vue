@@ -5,6 +5,8 @@ import SyncStatus from './SyncStatus.vue'
 import { ref, computed, onMounted, onBeforeUnmount, watch, inject } from 'vue'
 import { userPQStore } from '@/store/userPQ.store'
 import { useDialogsStore } from '@/store/dialogs.store'
+import { useAccountSyncStatus } from '@/composables/useAccountSyncStatus'
+import type { UserCardRow } from '@/lib/data/types'
 
 const emit = defineEmits<{ select: [address: string, opts?: { checkpoint?: boolean | string }] }>()
 
@@ -18,17 +20,21 @@ const search = ref('')
 
 // Electric-synced user cards (rows in the collection are server-confirmed,
 // so there is no "locally modified, not yet synced" set anymore)
-const users: any = computed(() => $userPQ.allNetworkUsers)
+const users = computed<UserCardRow[]>(() => $userPQ.allNetworkUsers)
 
-const usersLocal: any = computed(() => [])
+const syncState = useAccountSyncStatus(
+  () => $userPQ.currentUserHash,
+  () => $userPQ.isOnline,
+  () => $userPQ.userCardsFallback,
+)
 
 const hasUsers = computed(() => users.value.length > 0)
 
-const isSelected = (address) => {
+const isSelected = (address: string) => {
   return selected.findIndex((a) => a === address) > -1
 }
 
-const select = (address) => {
+const select = (address: string) => {
   emit('select', address)
 }
 
@@ -58,8 +64,8 @@ const scanAlerts = () => {
   if (peers.length) $dialogs.scanCheckpointAlerts(peers)
 }
 
-const $route = inject('$route', null)
-let rescanTimer = null
+const $route = inject<{ params?: { address?: string } } | null>('$route', null)
+let rescanTimer: ReturnType<typeof setInterval> | null = null
 const onVisible = () => { if (document.visibilityState === 'visible') scanAlerts() }
 
 onMounted(() => {
@@ -72,7 +78,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisible)
-  clearInterval(rescanTimer)
+  if (rescanTimer) clearInterval(rescanTimer)
 })
 watch(() => filtered.value.length, scanAlerts)
 watch(() => $route?.params?.address, (now, before) => { if (before && !now) scanAlerts() })
@@ -82,7 +88,7 @@ watch(() => $route?.params?.address, (now, before) => { if (before && !now) scan
   <div class="_users_list" :class="{ _has_users: hasUsers }">
     <div v-if="hasUsers">
       <div class="flex align-center mb-1 w-full" v-if="hasUsers">
-        <SyncStatus :isSynced="usersLocal.length == 0" />
+        <SyncStatus :state="syncState" />
       </div>
 
       <div class="_search mb-1">

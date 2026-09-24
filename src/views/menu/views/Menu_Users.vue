@@ -1,5 +1,5 @@
 <template>
-	<div class="fs-5 text-center mb-2 mt-2" v-if="!hasUsers">Network users list is empty</div>
+	<div class="fs-5 text-center mb-2 mt-2" v-if="!hasUsers">{{ emptyText }}</div>
 
 	<Users_List @select="select" :selected="selected" />
 </template>
@@ -25,6 +25,7 @@ const select = (address) => {
 };
 
 const hasUsers = computed(() => $userPQ.allNetworkUsers.length > 0);
+const emptyText = computed(() => ($userPQ.userCardsFallback ? 'No cached users available offline' : 'Network users list is empty'));
 
 onMounted(async () => {
 	if ($menuOpened.value && $route.params.address) checkSelection();

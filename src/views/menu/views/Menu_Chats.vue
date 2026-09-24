@@ -4,7 +4,7 @@
 			<span class="visually-hidden">Loading...</span>
 		</div>
 	</div>
-	<div class="fs-5 text-center mb-2 mt-4 text-muted" v-else-if="!hasUsers">Network users list is empty</div>
+	<div class="fs-5 text-center mb-2 mt-4 text-muted" v-else-if="!hasUsers">{{ emptyText }}</div>
 
 	<Chats_List @select="(address, opts) => select(address, opts)" :selected="selected" v-show="hasUsers" />
 </template>
@@ -38,6 +38,7 @@ const select = (address, opts = {}) => {
 const isLoading = computed(() => !$userPQ.isInitialized);
 
 const hasUsers = computed(() => $userPQ.allNetworkUsers.length > 0);
+const emptyText = computed(() => ($userPQ.userCardsFallback ? 'No cached users available offline' : 'Network users list is empty'));
 
 onMounted(async () => {
 	if ($menuOpened.value && $route.params.address) checkSelection();
