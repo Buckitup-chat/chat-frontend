@@ -24,8 +24,10 @@ import {
 } from '@/lib/pq/fileCrypto';
 import { api } from '@/api/client';
 import { getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
+import { readShapeOnce } from './shapeRead';
+import { wireBool } from '@/lib/pq/schema';
 
-declare const ELECTRIC_API_URL: string;
+declare const ELECTRIC_API_URL: string; // the chunk endpoints below are not shapes
 
 export interface UploadProgress {
 	fileId: string;
@@ -60,20 +62,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const existingChunks = async (fileId: string): Promise<Map<number, { sign_b64: string }>> => {
 	const out = new Map<number, { sign_b64: string }>();
 	try {
-		// The where clause carries a random no-op condition on purpose: shapes
-		// are cached per (table, where), and a shape with no live subscriber
-		// does not advance its log — a plain snapshot re-read can miss rows
-		// committed seconds earlier (verified against staging: a same-where
-		// read missed a fresh insert for 30s+ while a fresh-where read saw it
-		// instantly). A unique where forces a fresh snapshot.
-		const salt = `${Date.now() % 100000}=${Date.now() % 100000}`;
-		const r = await fetch(
-			`${ELECTRIC_API_URL}/shapes?table=file_chunks&where=${encodeURIComponent(`file_id='${fileId}' AND ${salt}`)}&offset=-1`,
+		const rows = await readShapeOnce<{ chunk_index: number | string; sign_b64: string }>(
+			'file_chunks', `file_id='${fileId}'`,
 		);
-		if (!r.ok) return out;
-		for (const m of (await r.json()) as Array<{ value?: { chunk_index: number | string; sign_b64: string } }>) {
-			if (m.value) out.set(Number(m.value.chunk_index), { sign_b64: m.value.sign_b64 });
-		}
+		for (const row of rows) out.set(Number(row.chunk_index), { sign_b64: row.sign_b64 });
 	} catch {
 		/* unreachable shape = empty map; the PUTs below are idempotent anyway */
 	}
@@ -227,15 +219,8 @@ export interface FileAvailability {
  * the signed manifest for the total, the chunk rows for what is here.
  */
 export const fileAvailability = async (fileId: string): Promise<FileAvailability> => {
-	const salt = `${Date.now() % 100000}=${Date.now() % 100000}`;
-	const manifests = await fetch(
-		`${ELECTRIC_API_URL}/shapes?table=files&where=${encodeURIComponent(`file_id='${fileId}' AND ${salt}`)}&offset=-1`,
-	)
-		.then((r) => (r.ok ? r.json() : []))
-		.catch(() => []);
-	const manifest = (manifests as Array<{ value?: Record<string, unknown> }>)
-		.map((m) => m.value)
-		.find((v) => v && v.file_id === fileId);
+	const manifests = await readShapeOnce<Record<string, unknown>>('files', `file_id='${fileId}'`).catch(() => []);
+	const manifest = manifests.find((v) => v.file_id === fileId);
 	if (!manifest) return { present: 0, total: 0, unknown: true, deleted: false };
 
 	const chunks = await existingChunks(fileId);
@@ -243,7 +228,7 @@ export const fileAvailability = async (fileId: string): Promise<FileAvailability
 		present: chunks.size,
 		total: Number(manifest.chunk_count) || 0,
 		unknown: false,
-		deleted: manifest.deleted_flag === true || manifest.deleted_flag === 'true',
+		deleted: wireBool(manifest.deleted_flag),
 	};
 };
 
@@ -269,15 +254,10 @@ export const downloadFile = async (opts: {
 	const { fileId, encSecretB64, onProgress, signal } = opts;
 	const secret = fromBase64(encSecretB64);
 
-	const mr = await fetch(`${ELECTRIC_API_URL}/shapes?table=files&where=file_id='${fileId}'&offset=-1`, { signal });
-	if (!mr.ok) throw new Error(`manifest fetch failed: HTTP ${mr.status}`);
-	const manifest = ((await mr.json()) as Array<{ value?: Record<string, unknown> }>)
-		.map((m) => m.value)
-		.find((v) => v && v.file_id === fileId);
+	const manifests = await readShapeOnce<Record<string, unknown>>('files', `file_id='${fileId}'`, signal);
+	const manifest = manifests.find((v) => v.file_id === fileId);
 	if (!manifest) throw new Error('file manifest not found');
-	if (manifest.deleted_flag === true || manifest.deleted_flag === 'true') {
-		throw new Error('file was deleted by its uploader');
-	}
+	if (wireBool(manifest.deleted_flag)) throw new Error('file was deleted by its uploader');
 	const total = Number(manifest.chunk_count);
 
 	requestPersistentStorage();

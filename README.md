@@ -61,9 +61,11 @@ netlify/        Netlify redirect function for SPA preview hosting
 
 ## Account recovery (status)
 
-Current backup options: encrypted local file export and distributed Shamir shares. The old on-chain flow (Lit Protocol + IPFS/Infura) was removed — the Lit network it relied on is offline.
+The one backup option a released build offers is the encrypted local file export: the vault JSON under a password (PBKDF2-SHA-256, 600k → AES-256-GCM). The old on-chain flow (Lit Protocol + IPFS/Infura) was removed — the Lit network it relied on is offline.
 
-The upcoming node-based flow — Compartmented Multi-Secret Sharing across helper contacts and independent nodes, with a smart-contract condition layer — is under development. See [docs/restoration.livemd](docs/restoration.livemd) and the [RFC](https://github.com/Community-secret-sharing/backitup-smart-contracts/blob/main/RFC_COMPARTMENTED_RECOVERY_WITH_CONTRACT.md); frontend integration lives in `src/lib/testbed/` (reachable via the Backup Teststand page).
+The manual Shamir split and the Backup Teststand exist in the tree but are development surfaces only: both are gated behind `SANDBOX_SURFACES` (`src/config/sandbox.ts`), which is the dev server and nothing else, because the teststand drives live Sepolia, the relayer and the custodian nodes from buttons.
+
+The node-based flow that replaces them — Compartmented Multi-Secret Sharing across helper contacts and independent nodes, with a smart-contract condition layer — is under development. See [docs/backup-recovery-overview.md](docs/backup-recovery-overview.md), [docs/backup-recovery-plan.md](docs/backup-recovery-plan.md) and the [RFC](https://github.com/Community-secret-sharing/backitup-smart-contracts/blob/main/RFC_COMPARTMENTED_RECOVERY_WITH_CONTRACT.md).
 
 ## Deployment
 

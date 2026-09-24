@@ -76,7 +76,7 @@ current implementation that is a smart contract (Sepolia):
    secrecy: even a later device compromise does not expose the recovery
    traffic).
 6. The recommended finale: **reshare** — old shares are invalidated and the
-   circle is reissued (see question Q8).
+   circle is reissued (see the share-lifecycle decision).
 
 ## 5. What already exists (September 2026)
 
@@ -93,9 +93,7 @@ current implementation that is a smart contract (Sepolia):
 | Threat model + hardening RFC SI-1…SI-6 | `backitup-smart-contracts/docs/security` | written, not implemented |
 | Audit of every module | `docs/backup-recovery-audit-2026-09.md` | done: 3 critical, 11 high; crypto cores clean |
 
-## 6. Decisions and what is still open
-
-### Decided
+## 6. Decisions
 
 **The payload is a 32-byte wrap key.** Shamir never touches bulk data — the
 RFC's whole point, since an ML-DSA key alone is 4896 bytes and splitting it
@@ -137,8 +135,11 @@ client with no account can fetch a row; writing happens while the account is
 alive, so the asymmetry costs nothing. What a keyless client cannot do is
 *name* a row — the key is `(user_hash, uuid)` and `user_hash` derives from the
 signing key that was lost — so the locator comes from the secret instead:
-`uuid = SHA3-512(S ‖ "vault-locator")[0..16]`. Gather shares, reconstruct S,
-compute the locator, fetch by uuid alone, decrypt with the same S. No account
+`uuid = uuidv8(HKDF(S, "buckitup/vault-locator/v1", "locator", 16))`. Gather
+shares, reconstruct S, compute the locator, fetch by uuid alone, and decrypt
+with a separate branch of the same secret —
+`HKDF(S, "buckitup/vault-seal/v1", "seal", 32)` — so the address, which becomes
+public the moment a share is handed out, says nothing about the key. No account
 appears anywhere in the chain, and the server can tell neither which row is a
 vault nor which accounts hold a backup. Durability is not this scheme's
 problem: account data is replicated across servers and swept into server-side

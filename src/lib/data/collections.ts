@@ -20,15 +20,7 @@ import type {
 	DialogMessageReceiptRow,
 } from './types';
 
-declare const ELECTRIC_API_URL: string; // build-time define (vite.config.js)
-
-const electricUrl = (path: string): string => {
-	const base = typeof ELECTRIC_API_URL !== 'undefined' ? ELECTRIC_API_URL : '/api';
-	const u = `${base}${path}`;
-	if (u.startsWith('http')) return u;
-	const origin = typeof location !== 'undefined' ? location.origin : 'http://localhost';
-	return `${origin}${u}`;
-};
+import { electricUrl } from './shapeRead';
 
 // Electric serializes Postgres bigint (int8) as string; timestamps fit in 2^53.
 const parser = { int8: (v: string) => Number(v) };

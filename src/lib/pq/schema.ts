@@ -16,18 +16,26 @@ import { SIGNABLE, type FieldType, type SignableSchema } from './schema.generate
 export { SIGNABLE, type FieldType, type SignableSchema };
 
 /**
+ * What a Postgres boolean means after a trip through the wire.
+ *
+ * SQLite has no boolean, so a persisted `deleted_flag` returns as 0/1, and the
+ * shape endpoint hands back Postgres's own `'t'`. Any reader that accepts a
+ * narrower set than this one reads a tombstone as a live row.
+ */
+export const wireBool = (value: unknown): boolean =>
+	typeof value === 'boolean' ? value : value === 1 || value === '1' || value === 't' || value === 'true';
+
+/**
  * Coerces a value back to what the column means.
  *
- * SQLite has no boolean, so a persisted `deleted_flag` returns as 0/1 and
- * would encode as "0" where the signer wrote "false" — the single-character
- * difference that makes an honest row look forged.
+ * A boolean encoded as "0" where the signer wrote "false" is the
+ * single-character difference that makes an honest row look forged.
  */
 const coerce = (value: unknown, type: FieldType): unknown => {
 	if (value === null || value === undefined) return null;
 	switch (type) {
 		case 'bool':
-			if (typeof value === 'boolean') return value;
-			return value === 1 || value === '1' || value === 't' || value === 'true';
+			return wireBool(value);
 		case 'int':
 			return typeof value === 'number' ? value : Number(value);
 		default:

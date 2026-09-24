@@ -26,15 +26,16 @@ Three rules decide the order, in this priority:
 
 The only phase that blocks nothing and is blocked by nothing.
 
-- **F-C1 — the Local File KDF.** `src/lib/backupCrypto.ts` is already written
-  and tested (PBKDF2-SHA-256 600k → AES-256-GCM, a versioned header, an
-  anti-downgrade floor on the iteration count) but nothing imports it. Wire it
-  into `Page_Backup_ExportLocal.vue` and the restore path. Write the new format
-  only: old files are test data (invariant §1a), so no legacy read path.
+- **F-C1 — the Local File KDF.** `src/lib/backupCrypto.ts` (PBKDF2-SHA-256 600k
+  → AES-256-GCM, a versioned header, an anti-downgrade floor on the iteration
+  count) is wired into the export screens — `Account_Backup.vue` and
+  `Modal_Account_Backup_Local.vue` — and into `Modal_Account_Restore_Local.vue`.
+  Only the new format is written: old files are test data (invariant §1a), so
+  there is no legacy read path.
 - **F-H3 — keys in `localStorage`.** `src/lib/testbed/network.ts` keeps
   `testbed.backups` and `testbed.guardians` in the clear and never cleans up.
   Stop writing them, and wipe both keys on logout.
-- **F-H2 + Q10 — retire the sandbox surfaces.** The teststand route
+- **F-H2, and the decision that manual Shamir is scaffolding — retire the sandbox surfaces.** The teststand route
   (`/account/teststand`, `Page_Backup_ShamirTestbed.vue`) and the manual Shamir
   modals are scaffolding for the community scheme, not features. Put both
   behind a dev flag. Local File stays a real feature but moves out of the
@@ -55,9 +56,10 @@ The foundation the two planes split. Nothing below works without it.
 - `S` is 32 random bytes, the wrap key. The vault is encrypted under it with
   AES-256-GCM.
 - The ciphertext goes to `user_storage`, addressed by
-  `uuid = uuidv8(SHA3-512(S ‖ "buckitup/vault-locator/v1")[0..16])`. Reads are
-  public and unauthenticated, so a recovering client with no account can fetch
-  it; writes stay owner-signed and happen while the account is alive.
+  `uuid = uuidv8(HKDF(S, "buckitup/vault-locator/v1", "locator", 16))` — the
+  same derivation shape the root slot address already uses. Reads are public
+  and unauthenticated, so a recovering client with no account can fetch it;
+  writes stay owner-signed and happen while the account is alive.
 - Recovery order: gather shares → reconstruct `S` → compute the locator → fetch
   → decrypt.
 
@@ -77,7 +79,7 @@ every dialog message is wrapped with ML-KEM-1024.
 - **Client:** issue shares to selected contacts as messages; the guardian's
   client recognises the type, stores the share, and confirms receipt; the owner
   sees who holds what.
-- **Spares (Q3):** generate shares with a reserve at backup time and keep the
+- **Spares:** generate shares with a reserve at backup time and keep the
   unissued ones in the account, so the circle can grow later without a reshare.
 
 Acceptance: two accounts on staging — one issues shares, the other receives and
@@ -111,10 +113,10 @@ reproduce; a replayed deposit and a replayed release are both rejected.
 - **The `/notifications?wallet=` leak** — it hands the owner's Telegram chat id
   to anyone who asks. Close it, and require proof of wallet ownership before a
   subscription is created.
-- **Q5 — pay your own gas.** A client path that signs and submits directly, with
+- **Paying your own gas.** A client path that signs and submits directly, with
   the relayer as the default convenience. The relayer endpoint becomes
   configuration, not a constant: a node owner can run one for their users.
-- **Q6 — notification channels.** Email, SMS and messengers as subscriptions the
+- **Notification channels.** Email, SMS and messengers as subscriptions the
   owner composes; the notification server is pluggable the same way the relayer
   is. This is the veto path — without a channel that reaches the owner, the
   timelock decorates nothing.
@@ -159,11 +161,11 @@ Acceptance: the audit's contract probes (rollback, pinning, ten-year
 
 ## Phase 7 — the product surface
 
-- **Q3** — a simple screen with defaults and an advanced one exposing counts,
+- **Parameters** — a simple screen with defaults and an advanced one exposing counts,
   thresholds and the timelock.
-- **Q8** — share lifecycle: notify the owner when a guardian starts a recovery
+- **Share lifecycle**: notify the owner when a guardian starts a recovery
   of their own, since the share they hold becomes questionable.
-- **Q9** — device-link ships before recovery: logging in on a second device is
+- **Device-link** ships before recovery: logging in on a second device is
   the more basic need, and both live behind the same "I can't get in" door.
 
 ## Sequencing
