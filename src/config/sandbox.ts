@@ -8,6 +8,8 @@
 // repeated per entry point is a gate that gets half-lifted.
 //
 // Deliberately the dev server and nothing else: a staging build is a public
-// deployment, and a screen that hands out raw key fragments must not read there
-// as an offered way to back up an account.
+// deployment, and this screen splits the vault JSON itself, so each fragment is
+// part of the plaintext — unlike the local-file export, which splits nothing
+// and seals under a derived key. It must not read there as an offered way to
+// back up an account.
 export const SANDBOX_SURFACES = import.meta.env.DEV;

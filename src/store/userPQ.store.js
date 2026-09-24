@@ -71,6 +71,7 @@ export const userPQStore = defineStore('userPQ', () => {
 
   const initialize = async () => {
     if (isInitialized.value) return;
+    reapTestbedKeys();
 
     // Phase 1: local vault registry (fast, offline)
     em.value = EncryptionManagerPQ.getInstance();
@@ -181,16 +182,28 @@ export const userPQStore = defineStore('userPQ', () => {
   // this instead of remembering what has to go.
   const endSession = async () => {
     await logout();
-    // A one-time reaper, not testbed code. Builds up to this one registered the
-    // teststand route unconditionally, so a profile that opened it holds
-    // guardian EOA and spending private keys in localStorage as plaintext —
-    // and nothing else in the app clears localStorage. Drop these two lines
-    // once a build containing them has shipped.
-    try {
-      localStorage.removeItem('testbed.guardians');
-      localStorage.removeItem('testbed.backups');
-    } catch { /* no storage in this environment */ }
   };
+
+  /**
+   * A one-time reaper, not testbed code. Builds up to this one registered the
+   * teststand route unconditionally, so a profile that opened it holds guardian
+   * EOA and spending private keys in localStorage as plaintext, alongside a
+   * payload carrying the owner key and the master secret. Nothing else in the
+   * app clears localStorage.
+   *
+   * It runs on boot rather than on sign-out because most profiles never sign
+   * out — they close the tab — and the keys have to go from those too. Each key
+   * is removed on its own: if one throw took the other with it, the half left
+   * behind would be the half holding the payload. Drop this once a build
+   * containing it has shipped.
+   */
+  function reapTestbedKeys() {
+    for (const key of ['testbed.guardians', 'testbed.backups']) {
+      try {
+        localStorage.removeItem(key);
+      } catch { /* no storage in this environment */ }
+    }
+  }
 
   const deleteAccount = async (userHash) => {
     if (em.value) {
