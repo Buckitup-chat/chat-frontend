@@ -8,7 +8,7 @@
 
 import { SANDBOX_SURFACES } from '@/config/sandbox';
 
-// Splitting a key by hand into raw fragments is scaffolding for the community
+// Splitting the wrap key by hand into shares is scaffolding for the community
 // scheme, not a backup method (see config/sandbox). The gate belongs here rather
 // than on the buttons, because any component can emit modal::open with an id:
 // hiding an entry point would leave the modal itself reachable. The chunks do
@@ -27,14 +27,6 @@ const SANDBOX_MODALS = {
 		component: 'Modal_Backup_Shamir_Create',
 		modalClass: 'modal-md',
 		title: 'Shamir Shares Backup',
-		icon: '_icon_shares',
-		modalStatic: true,
-	},
-	account_backup_shamir_restore: {
-		header: true,
-		component: 'Modal_Backup_Shamir_Restore',
-		modalClass: 'modal-md',
-		title: 'Restore from Shares',
 		icon: '_icon_shares',
 		modalStatic: true,
 	},

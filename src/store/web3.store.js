@@ -1,4 +1,4 @@
-// EVM helpers used by account activation and the Shamir backup flow.
+// EVM helpers used by account activation.
 // Node-based Compartmented Secret Sharing recovery is not built yet — see
 // docs/backup-recovery-plan.md.
 

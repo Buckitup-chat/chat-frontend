@@ -13,7 +13,8 @@ import { api } from '@/api/client';
 import { sendMutationsAndAwaitShape, drainPendingWrites, stopDrainLoop } from '@/lib/data/ingest';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { getUserCardsCollection } from '@/lib/data/collections';
-import { getStorageRow, upsertStorageRow } from '@/lib/data/userStorage';
+import { getStorageRow, putStorageRow } from '@/lib/data/userStorage';
+import { publishVault } from '@/lib/recovery/vault';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
@@ -579,13 +580,18 @@ export class EncryptionManagerPQ extends EventTarget {
     return JSON.parse(new TextDecoder().decode(decrypted));
   }
 
-  /** Decrypted root record, or null when this account has none yet. */
-  async #readRoot() {
+  /**
+   * Decrypted root record, or null when this account has none yet. A row that
+   * is there but does not decrypt is null for a reader and an error for a
+   * writer: a patch built on that null would sign a root with no slot map.
+   */
+  async #readRoot({ strict = false } = {}) {
     const row = await getStorageRow(this.#currentUserHash, this.#rootSlotUuid());
     if (!row || !row.value_b64) return null;
     try {
       return await this.#decryptJson(row.value_b64);
     } catch (e) {
+      if (strict) throw new Error('The account record on the server cannot be read; nothing was written', { cause: e });
       console.error('Failed to decrypt the user_storage root record:', e);
       return null;
     }
@@ -593,45 +599,49 @@ export class EncryptionManagerPQ extends EventTarget {
 
   async #writeRoot(record) {
     const { valueB64, hashB64 } = await this.#encryptJson(record);
-    const write = await upsertStorageRow({
-      userHash: this.#currentUserHash,
-      uuid: this.#rootSlotUuid(),
-      valueB64,
-      hashB64,
-      signSkey: this.#signSkey,
+    await this.#writeSlotRow(this.#rootSlotUuid(), valueB64, hashB64);
+  }
+
+  // Root read-modify-writes are serialized here: the per-slot queue under
+  // upsertStorageRow orders the writes only, and two callers that both read
+  // the root before either wrote it would each drop the other's field.
+  #rootQueue = Promise.resolve();
+
+  #patchRoot(mutate) {
+    const run = this.#rootQueue.then(async () => {
+      const root = (await this.#readRoot({ strict: true })) || {};
+      await this.#writeRoot(await mutate(root));
     });
-    const sync = await write.sync;
-    if (sync.status === 'failed') {
-      throw new Error('Storage saved locally but failed to sync to the server');
-    }
+    this.#rootQueue = run.catch(() => undefined);
+    return run;
   }
 
   async #writeSlotRow(uuid, valueB64, hashB64) {
-    const write = await upsertStorageRow({
+    await putStorageRow({
       userHash: this.#currentUserHash,
       uuid,
       valueB64,
       hashB64,
       signSkey: this.#signSkey,
     });
-    const sync = await write.sync;
-    if (sync.status === 'failed') {
-      throw new Error('Saved locally but failed to sync to the server');
-    }
   }
 
-  /** Signed tombstone for a slot row another client's map won over. */
+  /** Signed tombstone; deletion is a revision like any other and fails like one. */
+  async #tombstoneRow(uuid) {
+    await putStorageRow({
+      userHash: this.#currentUserHash,
+      uuid,
+      valueB64: '',
+      hashB64: null,
+      signSkey: this.#signSkey,
+      deletedFlag: true,
+    });
+  }
+
+  /** Tombstone for a slot row another client's map won over. */
   async #tombstoneSlotRow(uuid) {
     try {
-      const write = await upsertStorageRow({
-        userHash: this.#currentUserHash,
-        uuid,
-        valueB64: '',
-        hashB64: null,
-        signSkey: this.#signSkey,
-        deletedFlag: true,
-      });
-      await write.sync;
+      await this.#tombstoneRow(uuid);
     } catch (e) {
       // The row is already unreferenced; failing to mark it is not worth
       // failing the user's save over.
@@ -643,7 +653,9 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#slotResolver) {
       this.#slotResolver = createSlotResolver({
         read: () => this.#readRoot(),
-        write: (next) => this.#writeRoot(next),
+        // Through the queue like every other root patch, taking only the map
+        // from the resolver's copy: its read happened outside the queue.
+        write: (next) => this.#patchRoot((root) => ({ ...root, slots: next.slots })),
       });
     }
     return this.#slotResolver;
@@ -667,6 +679,60 @@ export class EncryptionManagerPQ extends EventTarget {
     if (orphaned) await this.#tombstoneSlotRow(orphaned);
   }
 
+  /**
+   * Seals the account under a wrap key and publishes it where only that key
+   * can find it (lib/recovery/vault). The root record names the current vault
+   * and every earlier one not yet retired: the keys inside never change, so a
+   * vault left live would keep an old set of shares able to open the account,
+   * and a tombstone that fails is kept on the list for the next attempt
+   * rather than forgotten.
+   *
+   * Vault first, root second, tombstones last. A crash before the root write
+   * leaves the new vault live and unreferenced, which is safe only because
+   * its key is never shown before this returns (userPQ.store
+   * createRecoveryBackup); a failure after the root write leaves the previous
+   * backup usable, since nothing is retired until the new one is on record.
+   */
+  async publishRecoveryVault(wrapKey, json) {
+    const userHash = this.#currentUserHash;
+    if (!userHash || !this.#signSkey || !this.#cryptSkey) {
+      throw new Error('No user is currently logged in');
+    }
+    // The root patches run later, from the queue; an account switched in
+    // between would have them sign another account's root with its keys.
+    const sameAccount = () => {
+      if (this.#currentUserHash !== userHash) throw new Error('The account changed while the backup was being written');
+    };
+    const uuid = await publishVault({ userHash, signSkey: this.#signSkey, wrapKey, json });
+    await this.#patchRoot((root) => {
+      sameAccount();
+      const stale = root.staleVaults ?? [];
+      const previous = root.vaultUuid && root.vaultUuid !== uuid ? [root.vaultUuid] : [];
+      return { ...root, vaultUuid: uuid, staleVaults: [...stale, ...previous] };
+    });
+    await this.#retireStaleVaults(sameAccount);
+  }
+
+  /** Tombstones every vault the root lists as retired-pending; the ones that
+   * fail stay listed for the next attempt, and the failure is reported. */
+  async #retireStaleVaults(check) {
+    let failure = null;
+    await this.#patchRoot(async (root) => {
+      check();
+      const left = [];
+      for (const uuid of root.staleVaults ?? []) {
+        try {
+          await this.#tombstoneRow(uuid);
+        } catch (e) {
+          failure = e;
+          left.push(uuid);
+        }
+      }
+      return { ...root, staleVaults: left };
+    });
+    if (failure) throw new Error('An earlier backup could not be retired; create the backup again to retry.', { cause: failure });
+  }
+
   // Update User Storage
 
   async updateUserStorage({ name, notes, avatarUuid, avatarDataUrl }) {
@@ -678,13 +744,12 @@ export class EncryptionManagerPQ extends EventTarget {
     }
 
     // 1. Encrypt profile and save to DB.
-    // The root record also carries the slot map, so the profile fields are
-    // merged into what is already there — writing only the profile would
-    // drop the map and strand every slot it points at.
-    const existingRoot = await this.#readRoot();
-    // Profile is a user-visible "saved" action: #writeRoot waits for the
-    // server verdict instead of reporting success while the write stays local.
-    await this.#writeRoot({ ...(existingRoot || {}), name, notes, avatarUuid });
+    // The root record also carries the slot map and the vault's address, so
+    // the profile fields are merged into what is already there — writing only
+    // the profile would drop the map and strand every slot it points at.
+    // Profile is a user-visible "saved" action: the write waits for the server
+    // verdict instead of reporting success while it stays local.
+    await this.#patchRoot((root) => ({ ...root, name, notes, avatarUuid }));
 
     // 2. Update local cards
     const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
@@ -833,17 +898,7 @@ export class EncryptionManagerPQ extends EventTarget {
     // avatar must be accepted by the server FIRST — otherwise a profile can
     // sync successfully while pointing at an avatar row that never landed,
     // and another device renders a broken reference.
-    const avatarWrite = await upsertStorageRow({
-      userHash: this.#currentUserHash,
-      uuid,
-      valueB64: combined,
-      hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
-      signSkey: this.#signSkey,
-    });
-    const avatarSync = await avatarWrite.sync;
-    if (avatarSync.status === 'failed') {
-      throw new Error('Avatar saved locally but failed to sync to the server');
-    }
+    await this.#writeSlotRow(uuid, combined, bytesToHex(sha256(new Uint8Array(encryptedData))));
 
     return uuid;
   }

@@ -1,10 +1,13 @@
 // Slot addressing end to end through EncryptionManagerPQ: which uuid does a
 // profile or contacts write actually land on?
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { deriveVaultLocator } from '@/lib/pq/vaultEnvelope';
 
-let rows;          // uuid -> value_b64  (stand-in for the server + local KV)
+let rows;          // uuid -> value_b64, null once tombstoned  (stand-in for the server + local KV)
 let vaults;
 let rawStore;
+let refuseTombstones; // the server rejecting deletions, as it may any write
+let onRowWritten;     // hook run after each write; a test switches accounts from it
 
 const makeVault = (id) => {
 	const data = new Map();
@@ -35,10 +38,12 @@ vi.mock('@/lib/data/ingest', () => ({
 }));
 vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async (_userHash, uuid) =>
-		rows.has(uuid) ? { uuid, value_b64: rows.get(uuid), deleted_flag: false } : null,
-	upsertStorageRow: async ({ uuid, valueB64 }) => {
-		rows.set(uuid, valueB64);
-		return { sync: Promise.resolve({ status: 'synced' }) };
+		rows.has(uuid) ? { uuid, value_b64: rows.get(uuid), deleted_flag: rows.get(uuid) === null } : null,
+	putStorageRow: async ({ uuid, valueB64, deletedFlag }) => {
+		if (deletedFlag && refuseTombstones) throw new Error('rejected');
+		rows.set(uuid, deletedFlag ? null : valueB64);
+		await onRowWritten?.(uuid);
+		return { uuid, value_b64: valueB64 };
 	},
 }));
 
@@ -54,6 +59,8 @@ describe('user_storage slot addressing', () => {
 	beforeEach(() => {
 		rows = new Map();
 		vaults = new Map();
+		refuseTombstones = false;
+		onRowWritten = null;
 		const store = new Map();
 		rawStore = {
 			async get(k) { return store.get(k); },
@@ -151,5 +158,58 @@ describe('user_storage slot addressing', () => {
 		await em.updateContacts([{ hash: 'a' }, { hash: 'b' }]);
 		expect([...rows.keys()].sort()).toEqual(afterFirst);
 		expect(await em.loadContacts()).toHaveLength(2);
+	});
+});
+
+describe('the recovery vault', () => {
+	const key = () => crypto.getRandomValues(new Uint8Array(32));
+	const at = (s) => rows.get(deriveVaultLocator(s));
+
+	it('lands at the address the key derives, and the next backup retires it', async () => {
+		const em = await login();
+		const s1 = key();
+		await em.publishRecoveryVault(s1, '{"v":1}');
+		expect(at(s1)).toBeTruthy();
+		expect(at(s1)).not.toContain('"v":1');
+
+		const s2 = key();
+		await em.publishRecoveryVault(s2, '{"v":2}');
+		expect(at(s1)).toBeNull();
+		expect(at(s2)).toBeTruthy();
+	});
+
+	it('keeps a vault it could not retire on the list and retries it next time', async () => {
+		const em = await login();
+		const s1 = key();
+		await em.publishRecoveryVault(s1, '{}');
+
+		refuseTombstones = true;
+		await expect(em.publishRecoveryVault(key(), '{}')).rejects.toThrow(/could not be retired/);
+		expect(at(s1)).toBeTruthy();
+
+		refuseTombstones = false;
+		await em.publishRecoveryVault(key(), '{}');
+		expect(at(s1)).toBeNull();
+	});
+
+	it('does not patch a root record it cannot read', async () => {
+		const em = await login();
+		await em.updateUserStorage({ name: 'A', notes: '', avatarUuid: null });
+		// Every row of the account, the root among them, replaced by bytes
+		// that decrypt to nothing.
+		const before = [...rows.keys()];
+		for (const uuid of before) rows.set(uuid, 'bm90IGEgcmVjb3Jk');
+		await expect(em.publishRecoveryVault(key(), '{}')).rejects.toThrow(/cannot be read/);
+		for (const uuid of before) expect(rows.get(uuid)).toBe('bm90IGEgcmVjb3Jk');
+	});
+
+	it('refuses to finish under an account other than the one it started with', async () => {
+		const em = await login();
+		onRowWritten = async () => {
+			onRowWritten = null;
+			await em.logout();
+			await em.createUserVault({ name: 'Other' });
+		};
+		await expect(em.publishRecoveryVault(key(), '{}')).rejects.toThrow(/account changed/);
 	});
 });

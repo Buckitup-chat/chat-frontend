@@ -217,6 +217,19 @@ export function upsertStorageRow(opts: UpsertOptions): Promise<UpsertResult> {
 	return enqueueForSlot(kvKey(opts.userHash, opts.uuid), () => upsertStorageRowSerial(opts));
 }
 
+/**
+ * A write that counts only once the server has it. "Saved on this device" is
+ * not something to tell a person who just pressed Save, nor a vault the
+ * shares would find, so every caller with a person or a key behind it uses
+ * this; upsertStorageRow is for the ones that can live with a local-only row.
+ */
+export async function putStorageRow(opts: UpsertOptions): Promise<UserStorageRow> {
+	const write = await upsertStorageRow(opts);
+	const sync = await write.sync;
+	if (sync.status === 'failed') throw new Error('Saved on this device, but the server did not take it', { cause: sync.error });
+	return write.row;
+}
+
 /** Sync status of the locally stored revision, for UI indicators. */
 export async function getStorageSyncStatus(userHash: string, uuid: string): Promise<StorageSyncStatus | null> {
 	const local = await getLocalEntry(userHash, uuid);

@@ -58,18 +58,15 @@
 <style lang="scss" scoped></style>
 
 <script setup>
-import { userPQStore } from '@/store/userPQ.store';
 import { decryptBackupFile, isEncryptedBackupFile } from '@/lib/backupCrypto';
-
+import { parseBackupContents } from '@/lib/backupContents';
+import { useRestoreAccount } from '@/composables/useRestoreAccount';
 
 import { ref, inject } from 'vue';
 import errorMessage from '@/utils/errorMessage';
 
 const $swal = inject('$swal');
-const $userPQ = userPQStore();
-const $mitt = inject('$mitt');
-const $router = inject('$router');
-const $swalModal = inject('$swalModal');
+const { restore } = useRestoreAccount();
 
 const fileString = ref();
 const requestDecrypt = ref();
@@ -164,36 +161,10 @@ const decrypt = async () => {
 
 const applyBackup = async (data) => {
 	try {
-		if (!data.identity || !data.keys || !data.identity.user_hash) {
-			$swal.fire({
-				icon: 'error',
-				title: 'Invalid backup format',
-				text: 'This backup file is not compatible with the current version.',
-				timer: 10000,
-			});
+		if (!(await restore(parseBackupContents(data)))) {
+			fileInput.value = null;
 			fileInputKey.value++;
-			return;
 		}
-
-		const existing = $userPQ.myLocalUsers?.find(u => u.user_hash === data.identity.user_hash);
-		if (existing) {
-			const confirmed = await $swalModal.value.open({
-				id: 'confirm',
-				title: 'Account restore',
-				content: `Account <strong>${data.identity.name}</strong> already exists. Replace it?`,
-			});
-			if (!confirmed) {
-				fileInput.value = null;
-				fileInputKey.value++;
-				return;
-			}
-		}
-
-		await $userPQ.importBackup({ identity: data.identity, keys: data.keys });
-
-		$mitt.emit('account::created');
-		$mitt.emit('modal::close');
-		$router.replace({ name: 'account_info' });
 	} catch (error) {
 		console.error('applyBackup error:', error);
 		$swal.fire({
@@ -202,6 +173,7 @@ const applyBackup = async (data) => {
 			text: errorMessage(error),
 			timer: 15000,
 		});
+		fileInputKey.value++;
 	}
 };
 </script>

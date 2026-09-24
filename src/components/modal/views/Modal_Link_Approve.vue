@@ -170,7 +170,6 @@ const approve = async () => {
 	const current = session.value;
 	try {
 		const backup = await $userPQ.exportBackup();
-		if (!backup) throw new DeviceLinkError('Not signed in.');
 		const sealed = await sealPayload(current.key, JSON.stringify(backup));
 		// The socket may have dropped during the export; fail() has already
 		// spoken for that case and torn the session down.

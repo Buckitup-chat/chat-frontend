@@ -30,7 +30,7 @@ vi.mock('../src/lib/data/ingest', () => ({
 	sendMutationsWithRetry: (...args: unknown[]) => sendAndAwait(...(args as [])),
 }));
 
-const { upsertStorageRow, getStorageRow } = await import('../src/lib/data/userStorage');
+const { upsertStorageRow, getStorageRow, putStorageRow } = await import('../src/lib/data/userStorage');
 
 const USER = 'u_' + 'ab'.repeat(64);
 // Slot addresses are per-account now, so any valid uuid stands in here.
@@ -131,6 +131,21 @@ describe('upsertStorageRow: failure is reported to the caller', () => {
 		// the write is already decided by the time the caller gets the result
 		expect(settled).toBe(true);
 		expect((await res.sync).status).toBe('synced');
+	});
+});
+
+describe('putStorageRow: the write is the server verdict', () => {
+	it('throws when the server rejects, carrying the rejection', async () => {
+		sendAndAwait.mockImplementationOnce(async () => {
+			throw Object.assign(new Error('rejected'), { permanent: true });
+		});
+		await expect(putStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v', hashB64: null, signSkey }))
+			.rejects.toThrow(/server did not take it/);
+	});
+
+	it('resolves to the row once the server has it', async () => {
+		const row = await putStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v', hashB64: null, signSkey });
+		expect(row).toMatchObject({ user_hash: USER, uuid: SLOT, value_b64: 'v' });
 	});
 });
 

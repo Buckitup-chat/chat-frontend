@@ -76,7 +76,6 @@ export function useLocalBackupExport() {
 		processing.value = true;
 		try {
 			const vault = await $userPQ.exportBackup();
-			if (!vault) throw new Error('Unable to export backup data. Make sure you are logged in.');
 
 			const json = JSON.stringify(vault, null, 2);
 			// PBKDF2-SHA-256 600k → AES-256-GCM (src/lib/backupCrypto.ts). The

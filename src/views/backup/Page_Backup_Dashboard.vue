@@ -55,10 +55,10 @@
 					</div>
 				</div>
 
-				<!-- Splitting a key by hand is the sandbox the community scheme is
+				<!-- Splitting the key by hand is the sandbox the community scheme is
 				     being built from, not a way to back up an account: the shares are
-				     raw fragments moved around by copy-paste. The card asks whether
-				     its destinations exist rather than re-reading the build flag. -->
+				     moved around by copy-paste. The card asks whether its destinations
+				     exist rather than re-reading the build flag. -->
 				<div v-if="sharesAvailable" class="card mb-3 shadow-sm border-0">
 					<div class="card-body">
 						<div class="d-flex align-items-center mb-2">
@@ -66,13 +66,13 @@
 							<h5 class="card-title mb-0 fw-bold">Distributed Shares (Shamir)</h5>
 						</div>
 						<p class="card-text text-secondary mb-3">
-							Split your key among trusted contacts or devices.
+							Seal the account on the server and split the key to it among trusted contacts or devices.
 						</p>
 						<div class="d-flex gap-2">
 							<button class="btn btn-outline-dark flex-fill" @click="openModal('account_backup_shamir_create')">
 								+ Create Backup
 							</button>
-							<button class="btn btn-dark flex-fill" @click="openModal('account_backup_shamir_restore')">
+							<button class="btn btn-dark flex-fill" @click="openModal('account_restore_shares')">
 								<i class="bi bi-arrow-clockwise"></i> Restore
 							</button>
 						</div>

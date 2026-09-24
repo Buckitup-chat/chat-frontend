@@ -66,12 +66,16 @@ any device, and needing neither a registry in the vault nor a scan of strings.
 Rotating `crypt_skey` in this protocol means changing identity, so the address
 will not drift.
 
-The root record's value is today's profile plus the slot map:
+The root record's value is today's profile, the slot map, the address of the
+current sealed vault and those of earlier vaults not yet tombstoned — kept so
+a backup retires its predecessors, and retries the ones it could not
+(`EncryptionManagerPQ.publishRecoveryVault`):
 
 ```json
 {
   "name": "…", "notes": "…", "avatarUuid": "…",
-  "slots": { "contacts": "0f8c…-…" }
+  "slots": { "contacts": "0f8c…-…" },
+  "vaultUuid": "3b1e…-…", "staleVaults": []
 }
 ```
 

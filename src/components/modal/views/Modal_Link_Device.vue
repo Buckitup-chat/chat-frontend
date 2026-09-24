@@ -65,6 +65,7 @@ import QRCode from 'qrcode';
 import { userPQStore } from '@/store/userPQ.store';
 import { useLinkRoom } from '@/composables/useLinkRoom';
 import copyToClipboard from '@/utils/copyToClipboard';
+import { parseBackupContents } from '@/lib/backupContents';
 import {
 	createOffer, encodeInvite, openOffer, unsealPayload, signCommand, verifyCommand,
 	encodeBytes, decodeBytes, DeviceLinkError,
@@ -156,8 +157,13 @@ const finish = async () => {
 	importing = true;
 	stage.value = 'importing';
 	try {
-		const backup = JSON.parse(await unsealPayload(session.value.key, sealed));
-		if (!backup?.identity?.user_hash || !backup?.keys) throw new DeviceLinkError('The account data is incomplete.');
+		const text = await unsealPayload(session.value.key, sealed);
+		let backup;
+		try {
+			backup = parseBackupContents(JSON.parse(text));
+		} catch {
+			throw new DeviceLinkError('The account data is incomplete.');
+		}
 
 		// The same user_hash is the same signing key: there is nothing a second
 		// copy could add, and importing one would only list the account twice.
