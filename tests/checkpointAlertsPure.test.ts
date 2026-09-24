@@ -2,18 +2,18 @@
 // the checkpoint fixed, and does the pointer survive a round trip.
 import { describe, it, expect, beforeEach } from 'vitest';
 import { _setStoreForTests } from '@/lib/data/localStore';
-import { loadPointer, savePointer, rawViewState, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
+import { loadPointer, savePointer, rawViewState, viewMoved, pointerDialogs, rememberPointerDialog, type AlertRow } from '@/lib/data/checkpointAlerts';
 import { buildViewTree, CHECKPOINT_SEMANTICS } from '@/lib/pq/checkpoint';
 
 const M1 = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
 const M2 = 'dmsg_0192aabb-0000-7000-8000-000000000002';
 const sh = (n: number) => 'dms_' + String(n).repeat(128);
 
-const rows = [
+const rows: AlertRow[] = [
 	{ message_id: M1, sign_hash: sh(1), deleted_flag: false },
 	{ message_id: M2, sign_hash: sh(2), deleted_flag: false },
 ];
-const rootOf = (r: typeof rows) => buildViewTree(rawViewState(r)).root;
+const rootOf = (r: AlertRow[]) => buildViewTree(rawViewState(r)).root;
 
 describe('alert decision', () => {
 	it('an unchanged dialog does not alert', () => {
@@ -96,7 +96,7 @@ describe('pointer storage', () => {
 	// overwrite the first (the sweep and a fresh signing interleave through
 	// await points on the same index array).
 	it('concurrent index registrations both survive', async () => {
-		const slow = new Map<string, unknown>();
+		const slow = new Map<string, string>();
 		_setStoreForTests({
 			async get(k) { await new Promise((r) => setTimeout(r, 1)); return slow.get(k) ?? null; },
 			async set(k, v) { await new Promise((r) => setTimeout(r, 1)); slow.set(k, v); },
@@ -142,7 +142,7 @@ describe('pointer storage', () => {
 	// round 2's own fix taught the reader the difference; the writer has to
 	// keep it.
 	it('a failed index read never clobbers the stored index', async () => {
-		const slow = new Map<string, unknown>();
+		const slow = new Map<string, string>();
 		let failNextGet = false;
 		_setStoreForTests({
 			async get(k) {

@@ -20,11 +20,16 @@ import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
-import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
+import { startLeaderElection, stopLeaderElection, enqueue, _setStorageForTests } from '@/lib/data/outbox';
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
+import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import { _setStoreForTests } from '@/lib/data/localStore';
 import { loadPointer } from '@/lib/data/checkpointAlerts';
 import { deriveFrontierRoot, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@/lib/pq/checkpoint';
+import { decodeContent } from '@/lib/pq/content';
+import { recoverIntents } from '@/lib/data/intentRecovery';
+import { materializeMessageIntent } from '@/lib/data/messageIntent';
+import { intentsOf, getIntent } from '@/lib/data/intents';
 
 const makeCollection = (rows = {}) => ({
 	rows: new Map(Object.entries(rows)),
@@ -36,7 +41,7 @@ const makeCollection = (rows = {}) => ({
 let collections;
 let sendImpl;
 
-const HOLDER = vi.hoisted(() => ({ user: null, vault: {} }));
+const HOLDER = vi.hoisted(() => ({ user: null, vault: {}, vaultLocked: false }));
 
 vi.mock('@/store/userPQ.store', async () => {
 	const { reactive } = await import('vue');
@@ -71,6 +76,7 @@ vi.mock('@/lib/data/intents', () => {
 	const store = new Map();
 	let seq = 0;
 	return {
+		onIntentChange: () => () => {},
 		enqueueIntent: async (intent, userHash, relation) => {
 			const id = `test-intent-${seq++}`;
 			store.set(id, { id, userHash, relation, intent });
@@ -84,10 +90,18 @@ vi.mock('@/lib/data/intents', () => {
 		},
 		resolveIntent: async () => true,
 		getIntent: async (id) => store.get(id) ?? null,
+		intentsOf: async (userHash) => ({ entries: [...store.values()].filter((e) => e.userHash === userHash), issues: [] }),
 	};
 });
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
-	EncryptionManagerPQ: { getInstance: () => ({ exportVaultKeys: async () => HOLDER.vault }) },
+	EncryptionManagerPQ: {
+		getInstance: () => ({
+			exportVaultKeys: async () => {
+				if (HOLDER.vaultLocked) throw new Error('vault is locked');
+				return HOLDER.vault;
+			},
+		}),
+	},
 }));
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
@@ -174,6 +188,7 @@ describe('checkpoint through the store', () => {
 	beforeEach(async () => {
 		setActivePinia(createPinia());
 		resetCardRegistry();
+		HOLDER.vaultLocked = false;
 		const mem = new Map();
 		_setStoreForTests({
 			async get(k) { return mem.get(k) ?? null; },
@@ -189,7 +204,16 @@ describe('checkpoint through the store', () => {
 		HOLDER.vault = author.vault;
 		stopLeaderElection();
 		startLeaderElection(author.userHash, () => {});
+		_setProjectionStorageForTests((() => { const m = new Map(); return { get: async (k) => m.get(k) ?? null, set: async (k, v) => { m.set(k, v); }, delete: async (k) => { m.delete(k); }, keys: async () => [...m.keys()], clear: async () => { m.clear(); } }; })());
 		_setOwnObservedTailsStorageForTests({
+			_map: new Map(),
+			async get(k) { return this._map.get(k) ?? null; },
+			async set(k, v) { this._map.set(k, v); },
+			async delete(k) { this._map.delete(k); },
+			async keys() { return [...this._map.keys()]; },
+			async clear() { this._map.clear(); },
+		});
+		_setStorageForTests({
 			_map: new Map(),
 			async get(k) { return this._map.get(k) ?? null; },
 			async set(k, v) { this._map.set(k, v); },
@@ -542,5 +566,146 @@ describe('checkpoint through the store', () => {
 		HOLDER.user.currentUserHash = makeIdentity(21).userHash;
 		await new Promise((r) => setTimeout(r, 0));
 		expect(store.checkpointAlerts.size).toBe(0);
+	});
+
+	it('checkpoint captured scope: frozen at creation, covers an own signed-but-not-accepted message, and never waits on its SERVER_ACCEPTED (main-tanstack-proposal-v3.md §323,441,712)', async () => {
+		const r1 = await makeRow(M1, {});
+		seed(r1);
+		await store.admitMessageRow(r1);
+
+		const OWN_PENDING_ID = 'dmsg_0192aaaa-0000-7000-8000-0000000000aa';
+		const rowOf = (m) => m.modified ?? m.changes;
+		const sent = [];
+		const unsettled = [];
+
+		sendImpl = async (mutations) => {
+			await enqueue(mutations, author.userHash);
+			sent.push(...mutations);
+			return new Promise((resolve) => unsettled.push({ id: rowOf(mutations[0])?.message_id, resolve }));
+		};
+
+		const waitFor = async (predicate, label) => {
+			for (let i = 0; i < 200; i++) {
+				if (predicate()) return;
+				await Promise.resolve();
+				await new Promise((r) => setTimeout(r, 0));
+			}
+			throw new Error(`timed out waiting for: ${label}`);
+		};
+
+		try {
+			store.sendMessage(peer, 'own pending', () => {}, OWN_PENDING_ID);
+			await waitFor(
+				() => sent.some((m) => rowOf(m)?.message_id === OWN_PENDING_ID),
+				'own pending message to be signed and outbox-durable'
+			);
+			const ownPendingSignHash = rowOf(sent.find((m) => rowOf(m)?.message_id === OWN_PENDING_ID)).sign_hash;
+
+			let result;
+			const checkpointPromise = store.createDialogCheckpoint(peer).then((r) => { result = r; });
+			await waitFor(
+				() => sent.some((m) => rowOf(m)?.message_id && rowOf(m).message_id !== OWN_PENDING_ID),
+				'checkpoint carrier to be signed and outbox-durable'
+			);
+
+			seed(await makeRow(M2, { [M1]: r1.sign_hash }));
+
+			unsettled.find((u) => u.id !== OWN_PENDING_ID).resolve({ txids: [] });
+			await checkpointPromise;
+
+			const { part, messageId } = result;
+			expect(part.frontier).toEqual({ [M1]: r1.sign_hash });
+
+			const carrierRow = rowOf(sent.find((m) => rowOf(m)?.message_id === messageId));
+			const refs = JSON.parse(await DialogCrypto.decryptContent(senderKey, carrierRow.refs_map_b64));
+			expect(refs).toEqual({ [OWN_PENDING_ID]: ownPendingSignHash });
+		} finally {
+			unsettled.forEach((u) => u.resolve({ txids: [] }));
+			await new Promise((r) => setTimeout(r, 0));
+		}
+	});
+
+	it('checkpoint captured scope survives AWAITING_UNLOCK -> real intent recovery: a tail admitted during the wait is not retroactively added, and recovery reuses the same intent (main-tanstack-proposal-v3.md §427,439,708,712)', async () => {
+		const r1 = await makeRow(M1, {});
+		seed(r1);
+		await store.admitMessageRow(r1);
+
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const sent = [];
+		sendImpl = async (mutations) => {
+			mutations.forEach(applyMutation);
+			sent.push(...mutations);
+			return { txids: [] };
+		};
+		const rowOf = (m) => m.modified ?? m.changes;
+
+		const waitFor = async (predicate, label) => {
+			for (let i = 0; i < 200; i++) {
+				if (await predicate()) return;
+				await new Promise((r) => setTimeout(r, 0));
+			}
+			throw new Error(`timed out waiting for: ${label}`);
+		};
+
+		HOLDER.vaultLocked = true;
+		try {
+			void store.createDialogCheckpoint(peer);
+
+			const isThisCheckpoint = (e) => e.relation === 'dialog_messages' && e.intent?.kind === 'checkpoint';
+			await waitFor(async () => {
+				const { entries } = await intentsOf(author.userHash);
+				return entries.some(isThisCheckpoint);
+			}, 'checkpoint intent to be durably captured');
+
+			const { entries: capturedEntries } = await intentsOf(author.userHash);
+			const capturedCheckpointEntries = capturedEntries.filter(isThisCheckpoint);
+			expect(capturedCheckpointEntries).toHaveLength(1);
+			const checkpointEntry = capturedCheckpointEntries[0];
+			const intentId = checkpointEntry.id;
+			const capturedMessageId = checkpointEntry.intent.messageId;
+			const capturedObservedTails = checkpointEntry.intent.observedTails;
+			const capturedFrontier = checkpointEntry.intent.parts[0].frontier;
+			expect(capturedFrontier).toEqual({ [M1]: r1.sign_hash });
+
+			await waitFor(
+				() => warnSpy.mock.calls.some((c) => String(c[0]).includes('dispatchMessageIntent awaiting unlock')),
+				'dispatch to report awaiting_unlock'
+			);
+			expect(sent).toHaveLength(0);
+
+			const r2 = await makeRow(M2, { [M1]: r1.sign_hash });
+			seed(r2);
+			await store.admitMessageRow(r2);
+
+			setActivePinia(createPinia());
+			store = useDialogsStore();
+
+			HOLDER.vaultLocked = false;
+			await recoverIntents(author.userHash, author.sign.secretKey, {
+				materializeMessage: materializeMessageIntent,
+			});
+
+			const idsAtCapture = new Set(capturedEntries.map((e) => e.id));
+			const { entries: afterEntries } = await intentsOf(author.userHash);
+			expect(afterEntries.filter((e) => !idsAtCapture.has(e.id))).toHaveLength(0);
+			expect(afterEntries.some((e) => e.id === intentId)).toBe(true);
+			const recovered = await getIntent(intentId);
+			expect(recovered.intent.signedMutation).toBeTruthy();
+
+			const carrierMutation = sent.find((m) => rowOf(m)?.message_id === capturedMessageId);
+			expect(carrierMutation).toBeTruthy();
+			const carrierRow = rowOf(carrierMutation);
+
+			const refs = JSON.parse(await DialogCrypto.decryptContent(senderKey, carrierRow.refs_map_b64));
+			expect(refs).toEqual(capturedObservedTails);
+			expect(refs).not.toHaveProperty(M2);
+
+			const [signedPart] = decodeContent(await DialogCrypto.decryptContent(senderKey, carrierRow.content_b64));
+			expect(signedPart.frontier).toEqual(capturedFrontier);
+			expect(signedPart.frontier).not.toHaveProperty(M2);
+		} finally {
+			HOLDER.vaultLocked = false;
+			warnSpy.mockRestore();
+		}
 	});
 });

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
 	enqueue, resolveEntry, recordFailure, discardEntry,
 	readyEntries, blockedEntries, blockedDependentIssues, drainOutbox,
-	_setStorageForTests,
+	_setStorageForTests, _setLeaderForTests,
 } from '@/lib/data/outbox';
 import { IngestError } from '@/lib/data/ingest';
 
@@ -31,9 +31,11 @@ let backing: ReturnType<typeof makeStorage>;
 beforeEach(() => {
 	backing = makeStorage();
 	_setStorageForTests(backing);
+	_setLeaderForTests(true);
 });
 
 afterEach(() => {
+	_setLeaderForTests(null);
 	vi.useRealTimers();
 });
 

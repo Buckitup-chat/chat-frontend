@@ -43,6 +43,7 @@ vi.mock('@/lib/data/intents', () => {
 	const store = new Map();
 	let seq = 0;
 	return {
+		onIntentChange: () => () => {},
 		enqueueIntent: async (intent, userHash, relation) => {
 			const id = `test-intent-${seq++}`;
 			store.set(id, { id, userHash, relation, intent });
@@ -56,6 +57,7 @@ vi.mock('@/lib/data/intents', () => {
 		},
 		resolveIntent: async () => true,
 		getIntent: async (id) => store.get(id) ?? null,
+		intentsOf: async (userHash) => ({ entries: [...store.values()].filter((e) => e.userHash === userHash), issues: [] }),
 	};
 });
 vi.mock('@/libs/EncryptionManagerPQ', () => ({

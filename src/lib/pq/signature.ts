@@ -125,8 +125,10 @@ export const encodeField = (key: string, value: SignableValue): string => {
 	return String(value);
 };
 
-/** Fields the signature never covers: the signature itself and what derives from it. */
-const NOT_SIGNED = new Set(['sign_b64', 'sign_hash']);
+/** Fields the signature never covers: the signature itself and what derives
+ * from it. Exported so other canonicalizers (signaturePayloadV2.ts) drop
+ * exactly this set instead of maintaining their own copy that could drift. */
+export const NOT_SIGNED = new Set(['sign_b64', 'sign_hash']);
 
 /**
  * Builds the canonical payload string. Pass the row's signable fields; any

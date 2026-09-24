@@ -61,7 +61,7 @@ export class DialogCrypto {
      * Encap and wrap the sender_msg_key for the peer
      * @param {Uint8Array} senderMsgKey 
      * @param {Uint8Array} peerCryptPkey 
-     * @returns {Promise<{ peerKemWrapKey: Uint8Array, peerWrappedMsgKey: Uint8Array }>}
+     * @returns {Promise<{ peerKemWrapKeyB64: string, peerWrappedMsgKeyB64: string }>}
      */
     static async wrapSenderMsgKey(senderMsgKey, peerCryptPkey) {
         // ML-KEM-1024 Encap
