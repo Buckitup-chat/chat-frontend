@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router';
+import { SANDBOX_SURFACES } from '@/config/sandbox';
 import { userPQStore } from '@/store/userPQ.store';
 
 const routes = [
@@ -82,12 +83,13 @@ const routes = [
 				component: () => import('../views/backup/Page_Backup_Dashboard.vue'),
 				meta: { auth: true, name: 'Backup Center', sub: true },
 			},
-			{
+			// Scaffolding, not a feature — see config/sandbox.
+			...(SANDBOX_SURFACES ? [{
 				path: 'teststand',
 				name: 'account_backup_teststand',
 				component: () => import('../views/backup/Page_Backup_ShamirTestbed.vue'),
 				meta: { auth: true, name: 'Backup Teststand', sub: true },
-			},
+			}] : []),
 			{
 				path: 'admin',
 				name: 'account_admin',

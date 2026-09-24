@@ -56,7 +56,7 @@
 						</template>
 					</div>
 
-					<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center w-100" @click="backup()">Download</button>
+					<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center w-100" :disabled="processing" @click="backup()">Download</button>
 				</template>
 			</div>
 		</div>
@@ -78,109 +78,32 @@
 </style>
 
 <script setup>
-import { userPQStore } from '@/store/userPQ.store';
+import errorMessage from '@/utils/errorMessage';
+import { useLocalBackupExport } from '@/composables/useLocalBackupExport';
+import { inject, ref } from 'vue';
 
-
-import { inject, ref, watch, computed } from 'vue';
-
-const $enigma = inject('$enigma');
-const $userPQ = userPQStore();
 const $swal = inject('$swal');
 
-const protect = ref(true);
-const showPassword = ref(true);
-const password = ref();
-const dirty = ref();
+const { protect, showPassword, password, dirty, processing, passwordErrors, exportToFile } =
+	useLocalBackupExport();
 const exportLocally = ref();
 
 const { showLocal } = defineProps({ showLocal: { type: Boolean } });
 
 const emit = defineEmits(['backup']);
 
-watch(
-	() => protect.value,
-	(val) => {
-		if (!val) {
-			password.value = null;
-			showPassword.value = true;
-			dirty.value = false;
-		}
-	},
-);
-
-watch(
-	() => password.value,
-	(val) => {
-		if (val) {
-			password.value = password.value.replaceAll(' ', '');
-			if (val.length > 3) dirty.value = true;
-		}
-	},
-);
-
 const backup = async () => {
-	dirty.value = true;
-	if (passwordErrors.value.length) return;
-
-	const backup = await $userPQ.exportBackup();
-	if (!backup) {
+	try {
+		if (await exportToFile()) emit('backup');
+	} catch (error) {
+		console.error(error);
 		$swal.fire({
 			icon: 'error',
 			title: 'Backup error',
-			text: 'Unable to export backup data',
-			timer: 5000,
+			text: 'Unable to write the backup file.',
+			footer: errorMessage(error),
+			timer: 8000,
 		});
-		return;
 	}
-
-	const jsonString = JSON.stringify(backup, null, 2);
-
-	let backupString;
-	if (password.value) {
-		const base64PlainData = btoa(jsonString);
-		const base64Password = btoa(password.value);
-		backupString = $enigma.encryptData(base64PlainData, base64Password);
-	} else {
-		backupString = jsonString;
-	}
-
-	const blob = new Blob([backupString], { type: 'text/plain' });
-	const url = URL.createObjectURL(blob);
-	const a = document.createElement('a');
-	a.href = url;
-	a.download = generateBackupName($userPQ.currentUser?.name || 'account');
-	document.body.appendChild(a);
-	a.click();
-	document.body.removeChild(a);
-	URL.revokeObjectURL(url);
-
-	emit('backup');
-
-	showPassword.value = true;
-	password.value = null;
 };
-
-function generateBackupName(rawName) {
-	const now = new Date();
-	const yyyy = now.getFullYear();
-	const mm = String(now.getMonth() + 1).padStart(2, '0');
-	const dd = String(now.getDate()).padStart(2, '0');
-	const datePart = `${yyyy}_${mm}_${dd}`;
-	// Remove all characters except letters, digits, underscores, and hyphens, spaces
-	const safeName = rawName.replace(/[^a-zA-Z0-9_-]/g, '');
-	return `backup_${datePart}_${safeName}${password.value ? '_encrypted' : '_raw'}.bukitup`;
-}
-
-const passwordErrors = computed(() => {
-	const errors = [];
-	if (!protect.value) return errors;
-
-	if (password.value.length < 10) errors.push('Must be at least 10 characters long.');
-	if (!/[A-Z]/.test(password.value)) errors.push('Must contain an uppercase letter (A-Z).');
-	if (!/[a-z]/.test(password.value)) errors.push('Must contain a lowercase letter (a-z).');
-	if (!/\d/.test(password.value)) errors.push('Must contain a digit (0-9).');
-	if (!/[!@#$%^&*(),.?":{}|<>]/.test(password.value)) errors.push('Must contain a special character (e.g. !@#$%^&*).');
-
-	return errors;
-});
 </script>

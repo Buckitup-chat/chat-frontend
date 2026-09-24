@@ -156,7 +156,7 @@ import FullContentBlock from '@/components/FullContentBlock.vue';
 import LocalMode from './_Testbed_Local.vue';
 
 import { splitPayload, recoverPayload, generateNodeShares, recoverNodeHalf, generateHelperShares, decryptHelperShare, recoverHelperHalf, generateStealthPrivateKey, generateOwnerAccount } from '@/lib/testbed/crypto';
-import { addGuardian as addGuard, removeGuardian as removeGuard, clearGuardians, loadGuardians } from '@/lib/testbed/guardians';
+import { addGuardian as addGuard, removeGuardian as removeGuard, clearGuardians, loadGuardians, saveGuardians } from '@/lib/testbed/guardians';
 import { TESTBED } from '@/lib/testbed/config';
 import { registerGuardianOnChain, createNetworkBackup, networkRunRecovery, loadBackupData, listBackupData, readBalance } from '@/lib/testbed/network';
 
@@ -331,12 +331,11 @@ async function registerGuardian(g) {
 		log(`Registering ${g.label} (${g.eoaAddress})…`);
 		await registerGuardianOnChain(g, log);
 		g.registered = true;
-		// Update localStorage
 		const list = loadGuardians();
 		const idx = list.findIndex(x => x.id === g.id);
 		if (idx >= 0) {
 			list[idx].registered = true;
-			localStorage.setItem('testbed.guardians', JSON.stringify(list));
+			saveGuardians(list);
 		}
 		log(`Guardian ${g.label} registered ✅`, 'success');
 	} catch (e) {

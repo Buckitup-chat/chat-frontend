@@ -366,7 +366,7 @@ const signout = async () => {
 	// TODO: PQ Account Selector - commented out old Web3 code
 	// await $user.logout();
 
-	await $userPQ.logout();
+	await $userPQ.endSession();
 	reset();
 	if ($route.name !== 'login') {
 		$router.push({ name: 'login' });

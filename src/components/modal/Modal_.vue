@@ -41,6 +41,7 @@
 
 <script setup>
 import { Modal } from 'bootstrap';
+import { modalRegistry } from './registry';
 import { ref, shallowRef, onMounted, defineAsyncComponent, inject, watch, computed } from 'vue';
 
 const $mitt = inject('$mitt');
@@ -51,139 +52,6 @@ const modalId = ref(null);
 const modalElement = ref(null);
 const modalSizes = ['modal-sm', 'modal-md', 'modal-lg', 'modal-xl'];
 let resolvePromise;
-
-const modalRegistry = {
-	add_contact: {
-		header: true,
-		modalStatic: true,
-		component: 'Modal_AddContact',
-		modalClass: 'modal-sm',
-		title: 'Add contact',
-		icon: '_icon_profile',
-	},
-	add_contact_handshake: {
-		header: false,
-		component: 'Modal_QrHandshake',
-		modalClass: 'modal-md',
-	},
-	save_contact: {
-		header: false,
-		component: 'Modal_SaveContact',
-		modalClass: 'modal-md',
-	},
-
-	account_create: {
-		header: true,
-		component: 'Modal_Account_Create',
-		modalClass: 'modal-sm',
-		title: 'Create account',
-		icon: '_icon_profile',
-	},
-
-	account_backup: {
-		header: true,
-		component: 'Modal_Account_Backup',
-		modalClass: 'modal-sm',
-		title: 'Account Backup',
-		icon: '_icon_backups',
-	},
-
-	account_dxos_invite: {
-		header: true,
-		component: 'Modal_Account_Invite',
-		modalClass: 'modal-sm',
-		title: 'Invite other device',
-		icon: '_icon_reload',
-	},
-
-	account_connect: {
-		header: true,
-		component: 'Modal_Account_Connect',
-		modalClass: 'modal-sm',
-		title: 'Connect to other device',
-		icon: '_icon_reload',
-	},
-
-	account_activate: {
-		header: false,
-		component: 'Modal_Account_Activate',
-		modalClass: 'modal-sm',
-		title: 'Account Activation',
-		icon: '_icon_profile',
-		bodyClass: 'p-0',
-	},
-
-	account_restore_shares: {
-		header: true,
-		component: 'Modal_Account_Restore_Shares',
-		modalClass: 'modal-md',
-		title: 'Restore account',
-		icon: '_icon_shares',
-	},
-
-	account_backup_local: {
-		header: true,
-		component: 'Modal_Account_Backup_Local',
-		modalClass: 'modal-sm',
-		title: 'Local Backup',
-		icon: '_icon_backups',
-		modalStatic: true,
-	},
-
-	account_backup_shamir_create: {
-		header: true,
-		component: 'Modal_Backup_Shamir_Create',
-		modalClass: 'modal-md',
-		title: 'Shamir Shares Backup',
-		icon: '_icon_shares',
-		modalStatic: true,
-	},
-
-	account_backup_shamir_restore: {
-		header: true,
-		component: 'Modal_Backup_Shamir_Restore',
-		modalClass: 'modal-md',
-		title: 'Restore from Shares',
-		icon: '_icon_shares',
-		modalStatic: true,
-	},
-
-	account_restore_local: {
-		header: true,
-		modalStatic: true,
-		component: 'Modal_Account_Restore_Local',
-		modalClass: 'modal-sm',
-		title: 'Restore account',
-		icon: '_icon_backups',
-	},
-
-	signin: {
-		header: false,
-		component: 'Modal_SignIn',
-		modalClass: 'modal-md',
-	},
-	logout: {
-		header: true,
-		component: 'Modal_Logout',
-		modalClass: 'modal-sm',
-		title: 'Accounts',
-		icon: '_icon_logout',
-	},
-
-	auth: {
-		header: false,
-		component: 'Modal_Auth',
-		modalClass: 'modal-md',
-	},
-
-	contacts: {
-		header: true,
-		component: 'Modal_Contacts',
-		modalClass: 'modal-md',
-		title: 'Verified contacts',
-		icon: '_icon_contacts',
-	},
-};
 
 onMounted(() => {
 	$mitt.on('modal::open', open);

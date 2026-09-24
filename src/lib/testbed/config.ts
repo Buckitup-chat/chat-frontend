@@ -4,7 +4,6 @@ export const TESTBED = {
 	NUM_HELPERS: 3,
 	HELPER_THRESHOLD: 2,
 	DEMO_PIN: 'testbed-42',
-	STORE_KEY: 'testbed.guardians',
 };
 
 export const NETWORK = {

@@ -59,6 +59,7 @@
 
 <script setup>
 import { userPQStore } from '@/store/userPQ.store';
+import { decryptBackupFile, isEncryptedBackupFile } from '@/lib/backupCrypto';
 
 
 import { ref, inject } from 'vue';
@@ -67,7 +68,6 @@ import errorMessage from '@/utils/errorMessage';
 const $swal = inject('$swal');
 const $userPQ = userPQStore();
 const $mitt = inject('$mitt');
-const $enigma = inject('$enigma');
 const $router = inject('$router');
 const $swalModal = inject('$swalModal');
 
@@ -93,18 +93,39 @@ const handleRestore = async (event) => {
 		fileString.value = e.target.result;
 		if (!fileString.value) return;
 
+		// An encrypted backup is JSON as well — the envelope carries its KDF
+		// parameters in the clear — so "does it parse" cannot tell the two
+		// apart. Ask the format itself.
+		if (isEncryptedBackupFile(fileString.value)) {
+			requestDecrypt.value = true;
+			return;
+		}
+
 		let data;
 		try {
 			data = JSON.parse(fileString.value);
-		} catch (_) {
-			// not JSON — likely encrypted
+			// JSON.parse accepts "null", "0" and "\"text\"" — all of them parse and
+			// none of them is a vault. Without this, applyBackup reads .identity
+			// off null and the screen reports a restore error for a file it should
+			// have refused, with the file input left unmounted.
+			if (!data || typeof data !== 'object') throw new Error('not a vault export');
+		} catch {
+			// Neither a plain export nor a backup envelope. Not a password
+			// problem either: asking for one here would offer a prompt that
+			// cannot succeed.
+			$swal.fire({
+				icon: 'error',
+				title: 'Not a backup file',
+				text: 'Choose a .bukitup backup exported from this app.',
+				timer: 8000,
+			});
+			// Remount the input, or picking the same file again fires no change
+			// event at all and the screen simply stops responding.
+			fileInputKey.value++;
+			return;
 		}
 
-		if (!data) {
-			requestDecrypt.value = true;
-		} else {
-			await applyBackup(data);
-		}
+		await applyBackup(data);
 	};
 
 	reader.onerror = () => {
@@ -122,10 +143,9 @@ const handleRestore = async (event) => {
 const decrypt = async () => {
 	try {
 		processing.value = true;
-		await new Promise(r => setTimeout(r, 100));
-		const base64Password = btoa(password.value);
-		const decryptedBase64 = $enigma.decryptData(fileString.value, base64Password);
-		const jsonString = decodeURIComponent(escape(atob(decryptedBase64)));
+		// No hand-rolled yield before the derivation: PBKDF2 runs in WebCrypto,
+		// off the main thread, so the spinner paints on its own.
+		const jsonString = await decryptBackupFile(fileString.value, password.value);
 		const data = JSON.parse(jsonString);
 		await applyBackup(data);
 	} catch (error) {

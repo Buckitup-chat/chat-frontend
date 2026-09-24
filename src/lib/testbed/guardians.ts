@@ -1,20 +1,14 @@
 import type { GuardianDevice } from './types';
 import { TESTBED } from './config';
 import { createGuardianKeypair, generateStealthAddress } from './crypto';
-
-function storeKey(): string {
-	return TESTBED.STORE_KEY;
-}
+import { GUARDIANS_KEY, readStored, writeStored, removeStored } from './storage';
 
 export function loadGuardians(): GuardianDevice[] {
-	try {
-		const raw = localStorage.getItem(storeKey());
-		return raw ? JSON.parse(raw) : [];
-	} catch { return []; }
+	return readStored<GuardianDevice[]>(GUARDIANS_KEY, []);
 }
 
 export function saveGuardians(list: GuardianDevice[]): void {
-	localStorage.setItem(storeKey(), JSON.stringify(list));
+	writeStored(GUARDIANS_KEY, list);
 }
 
 export async function addGuardian(label: string): Promise<GuardianDevice> {
@@ -41,5 +35,5 @@ export function removeGuardian(id: string): void {
 }
 
 export function clearGuardians(): void {
-	localStorage.removeItem(storeKey());
+	removeStored(GUARDIANS_KEY);
 }

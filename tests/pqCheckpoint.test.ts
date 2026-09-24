@@ -1,4 +1,4 @@
-// Checkpoint commitments (ТЗ "Signed DAG Checkpoint + View Root"): the
+// Checkpoint commitments (spec: "Signed DAG Checkpoint + View Root"): the
 // frontier fingerprint, the keyed Merkle trie behind view_root, its diff and
 // proofs, and the wire envelope. Determinism across delivery order and
 // "a late insert touches nothing but itself" are the security invariants

@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia';
+import { wipeTestbedStorage } from '@/lib/testbed/storage';
 import { ref, shallowRef, computed, watch, onScopeDispose } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
@@ -163,6 +164,8 @@ export const userPQStore = defineStore('userPQ', () => {
     return identity;
   };
 
+  // Tearing down the session object, which is also the first half of signing
+  // in: switching accounts and importing a backup both go through here.
   const logout = async () => {
     if (em.value) {
       await em.value.logout();
@@ -173,6 +176,15 @@ export const userPQStore = defineStore('userPQ', () => {
     console.log('[userStore] User logged out');
   };
 
+  // Ending the session for good, which logout() is not: anything a device
+  // should stop holding once its owner walks away goes here, and callers that
+  // mean "the session is over" call this instead of remembering the list. The
+  // teststand's plaintext guardian keys are the first entry.
+  const endSession = async () => {
+    await logout();
+    wipeTestbedStorage();
+  };
+
   const deleteAccount = async (userHash) => {
     if (em.value) {
       await em.value.deleteUserVault(userHash);
@@ -180,6 +192,11 @@ export const userPQStore = defineStore('userPQ', () => {
     
     if (currentUser.value && currentUser.value.user_hash === userHash) {
       currentUser.value = null;
+      // Only when the account being deleted is the one signed in: this ends
+      // that session for good. Deleting some other account off the device is
+      // not the end of anything, and the material wiped here belongs to
+      // whoever is still signed in.
+      wipeTestbedStorage();
     }
 
     await refreshMyLocalUsers();
@@ -361,6 +378,7 @@ export const userPQStore = defineStore('userPQ', () => {
     registerNewUser,
     login,
     logout,
+    endSession,
     deleteAccount,
     updateCurrentUserName,
     updateCurrentUserProfile,

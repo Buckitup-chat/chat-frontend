@@ -62,7 +62,7 @@
 			<button class="btn btn-outline-light w-100" @click="setMode('restore')">Import from local backup</button>
 		</div>
 
-		<div class="px-3 w-100 mb-3">
+		<div v-if="sharesRestoreAvailable" class="px-3 w-100 mb-3">
 			<button class="btn btn-outline-light w-100" @click="setMode('shares')">Restore from shares</button>
 		</div>
 
@@ -222,6 +222,11 @@
 
 <script setup>
 import { userPQStore } from '@/store/userPQ.store';
+import { isModalAvailable } from '@/components/modal/registry';
+
+// The button is hidden when the modal it opens is not in this build — asking
+// the registry rather than the flag keeps one owner of what is reachable.
+const sharesRestoreAvailable = isModalAvailable('account_restore_shares');
 
 import { userStore } from '@/store/user.store';
 
@@ -270,6 +275,9 @@ const updateData = async () => {
 
 const wipe = async () => {
 	await $user.clearIndexedDB();
+	// clearIndexedDB does what its name says and no more, but this button says
+	// "all" — and it is the exit a person takes before handing the device on.
+	await $userPQ.endSession();
 	location.reload();
 };
 

@@ -132,29 +132,6 @@ export const publicKeyToAddress = (publickKey) => {
 };
 
 /**
- * Encrypts data using Blowfish in CFB mode.
- * @param {string} base64PlainData - Plain data in base64 format.
- * @param {string} base64Password - Password in base64 format.
- * @returns {string} - Encrypted data in base64 format.
- */
-export const encryptData = (base64PlainData, base64Password) => {
-	const { pass, iv } = deriveKeyAndIV(base64Password);
-	const ciphered = blowfishCFB(Buffer.from(base64PlainData, 'base64'), pass, iv, false);
-	return ciphered.toString('base64');
-};
-/**
- * Decrypts data using Blowfish in CFB mode.
- * @param {string} base64CipheredData - Encrypted data in base64 format.
- * @param {string} base64Password - Password in base64 format.
- * @returns {string} - Decrypted data in base64 format.
- */
-export const decryptData = (base64CipheredData, base64Password) => {
-	const { pass, iv } = deriveKeyAndIV(base64Password);
-	const deciphered = blowfishCFB(Buffer.from(base64CipheredData, 'base64'), pass, iv, true);
-	return deciphered.toString('base64');
-};
-
-/**
  * Generates a keypair for ECDH.
  * @returns {Object} - Object containing the public and private keys in base64 format.
  */
@@ -177,29 +154,6 @@ export const generateSecurePassword = (len) => {
 		.join('');
 };
 
-/**
- * Computes a shared secret using ECDH.
- * @param {string} base64PrivateKey - Private key in base64 format.
- * @param {string} base64PublicKey - Public key in base64 format.
- * @returns {string} - Shared secret in base64 format.
- */
-export const computeSharedSecret = (base64PrivateKey, base64PublicKey) => {
-	const privateKeyArray = base64ToArray(base64PrivateKey);
-	const publicKeyArray = base64ToArray(base64PublicKey);
-	const sharedSecret = secp.getSharedSecret(privateKeyArray, publicKeyArray, true);
-	return arrayToBase64(sharedSecret);
-};
-/**
- * Encrypts data using a shared secret.
- * @param {string} base64PlainData - Plain data in base64 format.
- * @param {string} base64PrivateKey - Private key in base64 format.
- * @param {string} base64PublicKey - Public key in base64 format.
- * @returns {string} - Encrypted data in base64 format.
- */
-export const encryptWithSharedSecret = (base64PlainData, base64PrivateKey, base64PublicKey) => {
-	const sharedSecret = computeSharedSecret(base64PrivateKey, base64PublicKey);
-	return encryptData(base64PlainData, sharedSecret);
-};
 /**
  * Creates a shortcode from a full key.
  * @param {string} base64FullKey - Full key in base64 format.
@@ -256,7 +210,7 @@ export const splitKeypair = (combinedKeyBase64) => {
  * @param {string} base64Password - Password in base64 format.
  * @returns {Object} - Object containing the key and initialization vector.
  */
-export const deriveKeyAndIV = (base64Password) => {
+const deriveKeyAndIV = (base64Password) => {
 	const passBuffer = Buffer.from(base64Password, 'base64');
 	const pass = passBuffer.slice(8, 24); // 16 bytes for the key
 	const key1 = passBuffer.slice(0, 8); // First 8 bytes
@@ -275,7 +229,7 @@ export const deriveKeyAndIV = (base64Password) => {
  * @param {boolean} decrypt - Flag indicating decryption.
  * @returns {Buffer} - Processed data.
  */
-export const blowfishCFB = (data, key, iv, decrypt = false) => {
+const blowfishCFB = (data, key, iv, decrypt = false) => {
 	const context = blf.key(key);
 	return blf.cfb(context, iv, data, decrypt);
 };

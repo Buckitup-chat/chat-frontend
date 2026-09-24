@@ -10,6 +10,8 @@ import {
 	signAddSecret, signRegisterKeys, signInitiateRecovery, signApproveRecovery,
 	type ShareInput,
 } from './eip712';
+import { BACKUPS_KEY, readStored, writeStored } from './storage';
+import { loadGuardians } from './guardians';
 import { relayer } from './relayer';
 import { depositNodeShare, fetchNodeShare } from './nodes';
 import {
@@ -57,19 +59,20 @@ export interface NetworkBackupData {
 	payload: string;
 }
 
+type BackupsById = Record<string, NetworkBackupData>;
+
 export function saveBackupData(data: NetworkBackupData): void {
-	const all = JSON.parse(localStorage.getItem('testbed.backups') ?? '{}');
+	const all = readStored<BackupsById>(BACKUPS_KEY, {});
 	all[data.id.toLowerCase()] = data;
-	localStorage.setItem('testbed.backups', JSON.stringify(all));
+	writeStored(BACKUPS_KEY, all);
 }
 
 export function loadBackupData(id: string): NetworkBackupData | null {
-	const all = JSON.parse(localStorage.getItem('testbed.backups') ?? '{}');
-	return all[id.toLowerCase()] ?? null;
+	return readStored<BackupsById>(BACKUPS_KEY, {})[id.toLowerCase()] ?? null;
 }
 
 export function listBackupData(): NetworkBackupData[] {
-	return Object.values(JSON.parse(localStorage.getItem('testbed.backups') ?? '{}'));
+	return Object.values(readStored<BackupsById>(BACKUPS_KEY, {}));
 }
 
 export interface GuardianRegInfo {
@@ -408,10 +411,7 @@ export async function networkRunRecovery(backupId: `0x${string}`, log: LogFn): P
 
 function findGuardianDevice(eoa: string): { spendingPrivateKey: string; stealthAddress: string; eoaPrivateKey: string; ephemeralPubKey: string } | null {
 	try {
-		const raw = localStorage.getItem('testbed.guardians');
-		if (!raw) return null;
-		const list = JSON.parse(raw);
-		const found = list.find((g: any) => g.eoaAddress.toLowerCase() === eoa.toLowerCase());
+		const found = loadGuardians().find((g) => g.eoaAddress.toLowerCase() === eoa.toLowerCase());
 		if (!found) return null;
 		return {
 			spendingPrivateKey: found.spendingPrivateKey,

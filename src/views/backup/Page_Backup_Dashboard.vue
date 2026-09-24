@@ -10,53 +10,6 @@
 					Choose a backup or recovery method for your account.
 				</div>
 
-				<!-- Local File -->
-				<div class="card mb-3 shadow-sm border-0">
-					<div class="card-body">
-						<div class="d-flex align-items-center mb-2">
-							<i class="_icon_backups bg-dark fs-3 me-3" style="width: 2rem; height: 2rem;"></i>
-							<h5 class="card-title mb-0 fw-bold">Local File</h5>
-						</div>
-						<p class="card-text text-secondary mb-3">
-							Save an encrypted backup file to your device.
-						</p>
-						<div class="d-flex gap-2">
-							<button class="btn btn-outline-dark flex-fill" @click="openModal('account_backup_local')">
-								+ Create Backup
-							</button>
-							<button class="btn btn-dark flex-fill" @click="openModal('account_restore_local')">
-								<i class="bi bi-arrow-clockwise"></i> Restore
-							</button>
-						</div>
-					</div>
-				</div>
-
-				<!-- Shamir Shares -->
-				<div class="card mb-3 shadow-sm border-0">
-					<div class="card-body">
-						<div class="d-flex align-items-center mb-2">
-							<i class="_icon_shares bg-dark fs-3 me-3" style="width: 2rem; height: 2rem;"></i>
-							<h5 class="card-title mb-0 fw-bold">Distributed Shares (Shamir)</h5>
-						</div>
-						<p class="card-text text-secondary mb-3">
-							Split your key among trusted contacts or devices.
-						</p>
-						<div class="d-flex gap-2">
-							<button class="btn btn-outline-dark flex-fill" @click="openModal('account_backup_shamir_create')">
-								+ Create Backup
-							</button>
-							<button class="btn btn-dark flex-fill" @click="openModal('account_backup_shamir_restore')">
-								<i class="bi bi-arrow-clockwise"></i> Restore
-							</button>
-						</div>
-						<div class="mt-3 text-center">
-							<router-link :to="{ name: 'account_backup_teststand' }" class="btn btn-sm btn-outline-info w-100">
-								🧪 Open Architecture Teststand (Vernam + Shamir)
-							</router-link>
-						</div>
-					</div>
-				</div>
-
 				<!-- Blockchain -->
 				<div class="card mb-3 shadow-sm border-0" style="opacity: 0.7;">
 					<div class="card-body">
@@ -75,6 +28,58 @@
 							<button class="btn btn-dark flex-fill" disabled>
 								<i class="bi bi-arrow-clockwise"></i> Restore
 							</button>
+						</div>
+					</div>
+				</div>
+
+				<!-- Local File -->
+				<div class="card mb-3 shadow-sm border-0">
+					<div class="card-body">
+						<div class="d-flex align-items-center mb-2">
+							<i class="_icon_backups bg-dark fs-3 me-3" style="width: 2rem; height: 2rem;"></i>
+							<h5 class="card-title mb-0 fw-bold">Local File</h5>
+						</div>
+						<p class="card-text text-secondary mb-3">
+							Save an encrypted backup file to your device. Keeping it safe —
+							and remembering the password — is entirely on you: nobody can
+							recover this file for you.
+						</p>
+						<div class="d-flex gap-2">
+							<button class="btn btn-outline-dark flex-fill" @click="openModal('account_backup_local')">
+								+ Create Backup
+							</button>
+							<button class="btn btn-dark flex-fill" @click="openModal('account_restore_local')">
+								<i class="bi bi-arrow-clockwise"></i> Restore
+							</button>
+						</div>
+					</div>
+				</div>
+
+				<!-- Splitting a key by hand is the sandbox the community scheme is
+				     being built from, not a way to back up an account: the shares are
+				     raw fragments moved around by copy-paste. The card asks whether
+				     its destinations exist rather than re-reading the build flag. -->
+				<div v-if="sharesAvailable" class="card mb-3 shadow-sm border-0">
+					<div class="card-body">
+						<div class="d-flex align-items-center mb-2">
+							<i class="_icon_shares bg-dark fs-3 me-3" style="width: 2rem; height: 2rem;"></i>
+							<h5 class="card-title mb-0 fw-bold">Distributed Shares (Shamir)</h5>
+						</div>
+						<p class="card-text text-secondary mb-3">
+							Split your key among trusted contacts or devices.
+						</p>
+						<div class="d-flex gap-2">
+							<button class="btn btn-outline-dark flex-fill" @click="openModal('account_backup_shamir_create')">
+								+ Create Backup
+							</button>
+							<button class="btn btn-dark flex-fill" @click="openModal('account_backup_shamir_restore')">
+								<i class="bi bi-arrow-clockwise"></i> Restore
+							</button>
+						</div>
+						<div v-if="teststandAvailable" class="mt-3 text-center">
+							<router-link :to="{ name: 'account_backup_teststand' }" class="btn btn-sm btn-outline-info w-100">
+								🧪 Open Architecture Teststand (Vernam + Shamir)
+							</router-link>
 						</div>
 					</div>
 				</div>
@@ -107,6 +112,12 @@ import FullContentBlock from '@/components/FullContentBlock.vue';
 
 const $userPQ = userPQStore();
 const $modal = inject('$modal');
+
+import { isModalAvailable } from '@/components/modal/registry';
+import { useRouter } from 'vue-router';
+
+const sharesAvailable = isModalAvailable('account_backup_shamir_create');
+const teststandAvailable = useRouter().hasRoute('account_backup_teststand');
 
 const openModal = (modalId) => {
 	$modal.value.open({ id: modalId });

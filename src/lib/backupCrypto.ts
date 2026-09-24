@@ -31,6 +31,10 @@ const toB64 = (b: Uint8Array) => Buffer.from(b).toString('base64');
 const fromB64 = (s: string) => new Uint8Array(Buffer.from(s, 'base64'));
 
 export const PBKDF2_ITERATIONS = 600_000;
+/** A ceiling on the file-supplied work factor: two billion iterations is a
+ * quarter of an hour of PBKDF2 per attempt, and the modal it blocks is static —
+ * a password attempt stops being a wait and becomes a hang. */
+export const MAX_PBKDF2_ITERATIONS = 10_000_000;
 const FILE_VERSION = 2;
 const SHARE_VERSION = 1;
 const SHARE_PREFIX = 'bks';
@@ -85,16 +89,38 @@ export const encryptBackupFile = async (json: string, password: string): Promise
 	return JSON.stringify(file);
 };
 
-export const decryptBackupFile = async (fileText: string, password: string): Promise<string> => {
-	let file: EncryptedBackupFile;
+// One place decides what an encrypted backup is, because both callers need the
+// same answer: a plain export and an envelope are both JSON, so parseability
+// cannot tell them apart. A sniffer one field wider than the decryptor sends a
+// file to a password prompt that cannot succeed.
+const readBackupFile = (fileText: string): EncryptedBackupFile | null => {
+	let parsed: unknown;
 	try {
-		file = JSON.parse(fileText);
+		parsed = JSON.parse(fileText);
 	} catch {
-		throw new BackupFormatError('not a backup file');
+		return null;
 	}
-	if (file?.v !== FILE_VERSION || file.kdf !== 'PBKDF2-SHA-256') {
-		// Older files carried keys under a sliced-password cipher; treating
-		// them as readable would bless that scheme. Re-export instead.
+	const file = parsed as Partial<EncryptedBackupFile> | null;
+	if (!file || typeof file !== 'object') return null;
+	if (file.v !== FILE_VERSION || file.kdf !== 'PBKDF2-SHA-256') return null;
+	// Non-empty, not merely a string: an envelope with an empty salt or
+	// ciphertext passes every type check and then fails to decrypt, which the
+	// restore screen can only report as a wrong password.
+	if (!(['salt', 'iv', 'ct'] as const).every((k) => typeof file[k] === 'string' && file[k])) return null;
+	// The work factor comes out of the file, so an attacker picks it. Too low is
+	// clamped up by the decryptor; too high is refused here.
+	if (Number(file.iter) > MAX_PBKDF2_ITERATIONS) return null;
+	return file as EncryptedBackupFile;
+};
+
+/** Whether this text is an encrypted backup rather than a plain vault export. */
+export const isEncryptedBackupFile = (fileText: string): boolean => readBackupFile(fileText) !== null;
+
+export const decryptBackupFile = async (fileText: string, password: string): Promise<string> => {
+	const file = readBackupFile(fileText);
+	if (!file) {
+		// Either not a backup at all, or one written by the sliced-password
+		// cipher this format replaced. Reading those would bless that scheme.
 		throw new BackupFormatError('unsupported backup format — create a new backup from a logged-in device');
 	}
 	// The stored iteration count is honoured (forward compatibility with a
