@@ -83,13 +83,13 @@ current implementation that is a smart contract (Sepolia):
 | Component | Where | State |
 |---|---|---|
 | Architecture RFC | `docs/restoration.livemd` | adopted as the basis of this work |
-| Contracts (SecretRecovery + KeyRegistry) | Sepolia `0xe6342a319AA534d15D0aFA5cd947a6aF0Bc423c3` / `0x04FA3aa8A23501A70768E220A5Df684D6249EDe7` | 62/62 tests; live since July |
-| SDK (split/ECIES/stealth/EIP-712) | `backitup-secret-recovery-sdk` | 15/15 tests |
-| Relayer | Railway, live — `https://secret-recovery-production.up.railway.app` | no tests |
-| Nodes ×3 | Railway, live — `node-a-production-b16b`, `node-b-production-991a`, `generous-essence-production` (`.up.railway.app`), threshold 2 | no tests |
-| E2E of the whole chain | `/workspace/harness` | 10/10 scenarios, 7 full recoveries (July) |
+| Contracts v2 (SecretRecovery + KeyRegistry) | `backitup-smart-contracts`, branch `security/contracts-v2` | not deployed — Sepolia still runs v1 at `0xe6342a319AA534d15D0aFA5cd947a6aF0Bc423c3` / `0x04FA3aa8A23501A70768E220A5Df684D6249EDe7` |
+| SDK (split/ECIES/stealth/EIP-712) | `backitup-secret-recovery-sdk` | carries the v2 typed data, nonce keys and `RoundState`, pinned to the contracts by test; its `harness/` and the demo sign from them |
+| Relayer + indexer | Railway, live — `https://secret-recovery-production.up.railway.app` (v1) | the code reads the v2 ABI and waits for its deployment |
+| Nodes ×3 | Railway, live — `node-a-production-b16b`, `node-b-production-991a`, `generous-essence-production` (`.up.railway.app`), threshold 2 (v1) | the code reads the v2 contract and waits for its deployment |
+| E2E of the whole chain | `backitup-secret-recovery-sdk/harness` | v1: 10/10 scenarios, 7 full recoveries (July); not yet run against v2, which is not deployed |
 | Client: sealed vault in `user_storage` under a wrap key, found by the key alone; Local File; the key split by hand (dev builds) | `src/lib/recovery`, `src/lib/pq/vaultEnvelope.ts`, `src/views/backup` | Phase 1 of the plan; the split is scaffolding for Phase 2 |
-| Threat model + hardening RFC SI-1…SI-6 | `backitup-smart-contracts/docs/security` | written, not implemented |
+| Threat model + hardening RFC SI-1…SI-6 | `backitup-smart-contracts/docs/security` | K-H1, SI-2, SI-4 implemented on `security/contracts-v2`; SI-1, SI-3, SI-5, SI-6 proposed |
 | Audit of every module | `docs/backup-recovery-audit-2026-09.md` | done: 3 critical, 11 high; crypto cores clean |
 
 ## 6. Decisions
