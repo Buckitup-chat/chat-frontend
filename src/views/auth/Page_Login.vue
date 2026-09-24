@@ -241,7 +241,6 @@ const $mitt = inject('$mitt');
 const $user = userStore();
 const $userPQ = userPQStore();
 // const $swal = inject('$swal');
-const $route = inject('$route');
 // const $loader = useLoader();
 // const $isProd = inject('$isProd');
 // const $router = inject('$router');
@@ -255,10 +254,7 @@ onMounted(async () => {
 
 	await updateData();
 
-	if ($route.query.sessionId) {
-		mode.value = 'connect';
-		$mitt.emit('modal::open', { id: 'account_connect' });
-	} else if ($userPQ.myLocalUsers?.length) {
+	if ($userPQ.myLocalUsers?.length) {
 		mode.value = 'existing';
 	}
 
@@ -286,7 +282,7 @@ function setMode(m) {
 	if (m === 'create') $mitt.emit('modal::open', { id: 'account_create' });
 	if (m === 'restore') $mitt.emit('modal::open', { id: 'account_restore_local' });
 	if (m === 'shares') $mitt.emit('modal::open', { id: 'account_restore_shares' });
-	if (m === 'connect') $mitt.emit('modal::open', { id: 'account_connect' });
+	if (m === 'connect') $mitt.emit('modal::open', { id: 'account_link_device' });
 }
 
 const connectVaultLocalApp = async () => {

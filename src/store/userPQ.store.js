@@ -131,7 +131,16 @@ export const userPQStore = defineStore('userPQ', () => {
   const login = async (userHash) => {
     await initialize();
 
-    let identity = await em.value.login(userHash);
+    const identity = await em.value.login(userHash);
+    afterSignIn(identity);
+    return identity;
+  };
+
+  // Everything a signed-in session needs beyond the manager's own login:
+  // the store's currentUser (which the router guard reads), the profile
+  // merge and the contacts map. Shared by login and importBackup, so an
+  // imported account is not a second-class session until the next sign-in.
+  const afterSignIn = (identity) => {
     currentUser.value = identity;
 
     // Load profile + contacts in background (PGlite may not be ready yet)
@@ -160,8 +169,6 @@ export const userPQStore = defineStore('userPQ', () => {
     }).catch(() => {});
 
     refreshAllData();
-
-    return identity;
   };
 
   // Tearing down the session object, which is also the first half of signing
@@ -333,6 +340,12 @@ export const userPQStore = defineStore('userPQ', () => {
   const exportBackup = async () => {
     if (!em.value) return null;
     const keys = await em.value.exportVaultKeys();
+    if (!keys.contact_skey) {
+      // A vault restored before contact_skey was carried has none, and an
+      // import refuses a backup without it - so refuse here, before it is
+      // sealed, downloaded or sent.
+      throw new Error('This account has no contact key in its vault and cannot be backed up or linked.');
+    }
     return {
       version: 1,
       identity: currentUser.value,
@@ -350,7 +363,10 @@ export const userPQStore = defineStore('userPQ', () => {
     const { identity, keys } = backupData;
     if (!identity?.name) identity.name = 'Imported Account';
     await em.value.importVaultKeys(keys, identity);
-    await refreshAllData();
+    // importVaultKeys signs in at the manager level only; the store's side of
+    // a session is the same as after login, or the import lands on the login
+    // page with no contacts.
+    afterSignIn(identity);
   };
 
   watch(isAuthenticated, (authenticated) => {

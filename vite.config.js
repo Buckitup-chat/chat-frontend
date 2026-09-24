@@ -102,7 +102,6 @@ export default defineConfig(({ command }) => {
 				: `${apiBase}/electric/v1`
 			),
 			API_URL: JSON.stringify(apiBase),
-			CONNECTOR_URL: JSON.stringify(isLocalhost ? 'ws://localhost:3953' : 'wss://buckitupss.appdev.pp.ua/connector'),
 			IS_PRODUCTION: isProduction,
 			IS_PRODUCTION_API: isProduction,
 			API_SURL: JSON.stringify(isLocalhost ? `http://${DOMAIN}` : apiBase),

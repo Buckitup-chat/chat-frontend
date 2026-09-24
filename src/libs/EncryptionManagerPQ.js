@@ -488,10 +488,14 @@ export class EncryptionManagerPQ extends EventTarget {
   async exportVaultKeys() {
     if (!this.#currentVault) throw new Error('Vault not loaded');
 
+    // contact_skey is the secp256k1 key behind signContactChallenge — the
+    // optical handshake. Without it an imported account cannot add a contact
+    // in person, so a backup is refused without it, on both sides.
     return {
       sign_skey: arrayToBase64(this.#signSkey),
       crypt_skey: arrayToBase64(this.#cryptSkey),
       evm_skey: this.#evmSkey,
+      contact_skey: this.#contactSkey,
       sign_pkey: this.#localUserCards.find(u => u.user_hash === this.#currentUserHash).sign_pkey,
       crypt_pkey: this.#localUserCards.find(u => u.user_hash === this.#currentUserHash).crypt_pkey
     };
@@ -500,6 +504,13 @@ export class EncryptionManagerPQ extends EventTarget {
   async importVaultKeys(keys, identity) {
     if (!keys.evm_skey) {
       throw new Error('EVM key missing from backup. Cannot safely restore account.');
+    }
+    // Minting a replacement would re-certify the card with a key no other
+    // device of this account holds, and break every handshake those devices
+    // start. No backward compatibility is owed (CLAUDE.md): a backup written
+    // before the key was exported is test data.
+    if (!keys.contact_skey) {
+      throw new Error('Contact key missing from backup. Cannot safely restore account.');
     }
 
     const userVault = await connect({
@@ -514,13 +525,21 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`sign_skey`, signSkey);
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, keys.evm_skey);
+    await userVault.set(`contact_skey`, keys.contact_skey);
 
     identity.vaultId = userVault.id;
     this.#localUserCards.push(identity);
     await this.#saveLocalUserCards();
 
     // Same dependency as registration: the card may not exist on this Pi yet.
-    await this.#pushOwnCard(identity, { signSkey });
+    // Not fatal: the vault and the local card are complete, and a card write
+    // lost here is republished on the next login. Failing the import instead
+    // would leave an account that is here but cannot be imported again.
+    try {
+      await this.#pushOwnCard(identity, { signSkey });
+    } catch (e) {
+      console.warn('[EncryptionManagerPQ] card publication deferred to next login:', e?.message ?? e);
+    }
 
     await this.login(identity.user_hash);
   }

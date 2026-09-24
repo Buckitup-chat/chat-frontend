@@ -64,6 +64,8 @@ The one backup option a released build offers is the encrypted local file export
 
 The manual Shamir split exists in the tree but is a development surface only: it is gated behind `SANDBOX_SURFACES` (`src/config/sandbox.ts`), which is the dev server and nothing else, because a screen that hands out raw key fragments must not read as an offered way to back up an account in a public deployment.
 
+Signing in on a second device goes through [docs/device-link.md](docs/device-link.md): the backup travels between the two devices under an ML-KEM session, started by the account holder from their own account page and checked by a code they compare on both screens.
+
 The node-based flow that replaces it — Compartmented Multi-Secret Sharing across helper contacts and independent nodes, with a smart-contract condition layer — is under development. See [docs/backup-recovery-overview.md](docs/backup-recovery-overview.md), [docs/backup-recovery-plan.md](docs/backup-recovery-plan.md) and the [RFC](https://github.com/Community-secret-sharing/backitup-smart-contracts/blob/main/RFC_COMPARTMENTED_RECOVERY_WITH_CONTRACT.md).
 
 ## Deployment

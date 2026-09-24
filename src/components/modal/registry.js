@@ -76,19 +76,20 @@ export const modalRegistry = {
 		icon: '_icon_backups',
 	},
 
-	account_dxos_invite: {
+	// Device link: the existing device approves, the new device receives.
+	account_link_approve: {
 		header: true,
-		component: 'Modal_Account_Invite',
+		component: 'Modal_Link_Approve',
 		modalClass: 'modal-sm',
-		title: 'Invite other device',
+		title: 'Add a device',
 		icon: '_icon_reload',
 	},
 
-	account_connect: {
+	account_link_device: {
 		header: true,
-		component: 'Modal_Account_Connect',
+		component: 'Modal_Link_Device',
 		modalClass: 'modal-sm',
-		title: 'Connect to other device',
+		title: 'Link this device',
 		icon: '_icon_reload',
 	},
 
