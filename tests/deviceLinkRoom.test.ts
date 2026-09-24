@@ -164,8 +164,12 @@ describe('joinRoom', () => {
 		try {
 			const channel = new FakeChannel();
 			const pending = joinRoom('ws://x', 'r1', { makeSocket: () => new FakeSocket(channel, 'hang') as unknown as WebSocket });
+			// Expectation first, clock second: the rejection fires inside the
+			// advance, and a promise nobody is listening to yet is reported as
+			// an unhandled error even when the test then goes on to pass.
+			const outcome = expect(pending).rejects.toThrow(/timed out/);
 			await vi.advanceTimersByTimeAsync(16_000);
-			await expect(pending).rejects.toThrow(/timed out/);
+			await outcome;
 			expect(socketsOf(channel)[0].closed).toBe(true);
 		} finally {
 			vi.useRealTimers();
