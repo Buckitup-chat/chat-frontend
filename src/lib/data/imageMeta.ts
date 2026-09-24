@@ -24,6 +24,9 @@ export const isImageMime = (mime: string): boolean =>
 
 export const isVideoMime = (mime: string): boolean => /^video\//i.test(mime || '');
 
+export const videoDurationSeconds = (duration: number): number =>
+	Number.isFinite(duration) && duration > 0 ? Math.max(1, Math.round(duration)) : 0;
+
 /** Smallest whole-number ratio, so "1920x1080" travels as 16:9. */
 const reduceRatio = (w: number, h: number): [number, number] => {
 	const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a);
@@ -113,8 +116,7 @@ export const buildVideoPreview = (blob: Blob): Promise<VideoPreview | null> =>
 					widthAspect,
 					heightAspect,
 					thumbHashB64: toBase64(new Uint8Array(rgbaToThumbHash(canvas.width, canvas.height, data))),
-					// NaN/Infinity for streams without a declared length → unknown
-					durationSeconds: Number.isFinite(video.duration) ? Math.max(0, Math.round(video.duration)) : 0,
+					durationSeconds: videoDurationSeconds(video.duration),
 				});
 			} catch {
 				finish(null);
