@@ -46,6 +46,22 @@ const requireWrapKey = (s: Uint8Array): Uint8Array => {
 };
 
 /**
+ * S as two halves, S = nodeHalf XOR friendsHalf: the nodes hold one, the
+ * guardians the other, and either alone is uniformly random — a guardian set
+ * past its threshold still learns nothing without the node plane. The node
+ * half is fresh randomness; the friends' half is what that leaves.
+ */
+export const splitIntoHalves = (s: Uint8Array): { nodeHalf: Uint8Array; friendsHalf: Uint8Array } => {
+	requireWrapKey(s);
+	const nodeHalf = randomBytes(32);
+	return { nodeHalf, friendsHalf: s.map((b, i) => b ^ nodeHalf[i]) };
+};
+
+/** S from its two halves. */
+export const joinHalves = (nodeHalf: Uint8Array, friendsHalf: Uint8Array): Uint8Array =>
+	requireWrapKey(requireWrapKey(nodeHalf).map((b, i) => b ^ requireWrapKey(friendsHalf)[i]));
+
+/**
  * The user_storage uuid the sealed vault lives at. Derived, not stored: a
  * recovering client has nothing but S.
  */

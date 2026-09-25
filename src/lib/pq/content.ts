@@ -96,6 +96,31 @@ export interface CheckpointPart {
 	createdAt: number;
 }
 
+/**
+ * One guardian's Shamir share of the friends' half of an owner's community
+ * backup (07 §"recovery_share"; lifecycle in the chat repo's
+ * docs/pq/reqs/pq_recovery_shares.proposed.md). The codec holds the envelope
+ * to its shape; whether the share belongs to the split whose root is on chain
+ * is lib/recovery/shareSplit's checkShare.
+ */
+export interface RecoverySharePart {
+	kind: 'recovery_share';
+	/** `<namespace>/<id>`, e.g. `eip155:<chainId>:<contract>/<secret id>`. */
+	secretRef: string;
+	version: number;
+	/** Shamir shares needed; not the contract's approval quorum. */
+	threshold: number;
+	total: number;
+	/** The share itself, unpadded base64. */
+	shareB64: string;
+	createdAt: number;
+	splitId: string;
+	/** 1-based. */
+	shareIndex: number;
+	/** Every leaf of the split in index order, unpadded base64; empty when the sender sent none, which no check passes. */
+	splitProof: string[];
+}
+
 /** A typed value this build does not render yet (e.g. "image" before the
  * file transport lands). Preserved verbatim so re-encoding loses nothing. */
 export interface UnknownPart {
@@ -104,7 +129,15 @@ export interface UnknownPart {
 	value: unknown;
 }
 
-export type ContentPart = TextPart | QuotePart | FilePart | ImagePart | VideoPart | CheckpointPart | UnknownPart;
+export type ContentPart =
+	| TextPart
+	| QuotePart
+	| FilePart
+	| ImagePart
+	| VideoPart
+	| CheckpointPart
+	| RecoverySharePart
+	| UnknownPart;
 
 export class ContentDecodeError extends Error {}
 
@@ -142,6 +175,13 @@ const encodePart = (part: ContentPart): unknown => {
 				checkpoint: [
 					part.version, part.reducerVersion, part.treeVersion,
 					part.frontierRoot, part.viewRoot, part.frontier, part.createdAt,
+				],
+			};
+		case 'recovery_share':
+			return {
+				recovery_share: [
+					part.secretRef, part.version, part.threshold, part.total, part.shareB64,
+					part.createdAt, part.splitId, part.shareIndex, part.splitProof,
 				],
 			};
 		case 'unknown':
@@ -271,11 +311,42 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					encSecretB64: f[5],
 				}];
 			}
+			if (type === 'recovery_share') return [decodeRecoveryShare(obj.recovery_share)];
 			return [{ kind: 'unknown', type, value: obj[type] }];
 		}
 	}
 
 	throw new ContentDecodeError(`unrecognized content shape: ${JSON.stringify(value)?.slice(0, 80)}`);
+};
+
+const isInt = (v: unknown): v is number => Number.isInteger(v);
+
+/**
+ * Positions 0–7 are required and typed; `split_proof` at 8 may be missing — a
+ * share without it is kept and fails its check, rather than taking the whole
+ * message down as undecodable. A longer array is accepted and its tail ignored.
+ */
+const decodeRecoveryShare = (r: unknown): RecoverySharePart => {
+	if (
+		!Array.isArray(r) || r.length < 8 ||
+		typeof r[0] !== 'string' || !isInt(r[1]) || !isInt(r[2]) || !isInt(r[3]) ||
+		typeof r[4] !== 'string' || typeof r[5] !== 'number' || typeof r[6] !== 'string' || !isInt(r[7]) ||
+		(r.length > 8 && !(Array.isArray(r[8]) && r[8].every((leaf: unknown) => typeof leaf === 'string')))
+	) {
+		throw new ContentDecodeError('malformed recovery_share envelope');
+	}
+	return {
+		kind: 'recovery_share',
+		secretRef: r[0],
+		version: r[1],
+		threshold: r[2],
+		total: r[3],
+		shareB64: r[4],
+		createdAt: r[5],
+		splitId: r[6],
+		shareIndex: r[7],
+		splitProof: r.length > 8 ? (r[8] as string[]) : [],
+	};
 };
 
 /** Parses wire JSON (canonical or legacy) into parts. Throws ContentDecodeError. */
@@ -302,7 +373,7 @@ export const contentToText = (parts: ContentPart[]): string =>
 			// Attachments render as their own element in the bubble; naming them
 			// here too would print the filename twice under the picture.
 			if (p.kind === 'file' || p.kind === 'image' || p.kind === 'video') return '';
-			if (p.kind === 'checkpoint') return ''; // renders as its own marker
+			if (p.kind === 'checkpoint' || p.kind === 'recovery_share') return ''; // renders as its own marker
 			return `[${p.type}]`;
 		})
 		.filter(Boolean)
@@ -318,5 +389,6 @@ export const previewText = (parts: ContentPart[]): string => {
 		return `${icon} ${media.name}`;
 	}
 	if (parts.some((p) => p.kind === 'checkpoint')) return '🔏 checkpoint';
+	if (parts.some((p) => p.kind === 'recovery_share')) return '🔐 recovery share';
 	return '';
 };

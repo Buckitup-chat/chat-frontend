@@ -179,3 +179,48 @@ describe('video envelope (§1.4)', () => {
 		expect(wire).toContain(`,0,"${video.fileId}","c2VjcmV0"]`);
 	});
 });
+
+describe('T-CONTENT-RECOVERY-SHARE: a guardian share envelope', () => {
+	const part = {
+		kind: 'recovery_share' as const,
+		secretRef: 'eip155:11155111:0xe634/0x9f3c',
+		version: 1,
+		threshold: 2,
+		total: 3,
+		shareB64: 'CAFxyz',
+		createdAt: 1_715_000_000,
+		splitId: '4f1c'.repeat(8),
+		shareIndex: 2,
+		splitProof: ['leafA', 'leafB', 'leafC'],
+	};
+
+	it('round-trips at the registry positions', () => {
+		const json = encodeContent([part]);
+		expect(JSON.parse(json)).toEqual({
+			recovery_share: [part.secretRef, 1, 2, 3, 'CAFxyz', 1_715_000_000, part.splitId, 2, ['leafA', 'leafB', 'leafC']],
+		});
+		expect(decodeContent(json)).toEqual([part]);
+	});
+
+	it('accepts a longer array and ignores its tail; takes a missing proof as an empty one, which no check passes', () => {
+		const wire = [part.secretRef, 1, 2, 3, 'CAFxyz', 1_715_000_000, part.splitId, 2, ['leafA'], 'a future field'];
+		expect(decodeContent(JSON.stringify({ recovery_share: wire }))[0]).toMatchObject({ splitProof: ['leafA'] });
+		expect(decodeContent(JSON.stringify({ recovery_share: wire.slice(0, 8) }))[0]).toMatchObject({ splitProof: [] });
+	});
+
+	it('refuses a malformed envelope rather than guessing its fields', () => {
+		const bad = [
+			[part.secretRef, '1', 2, 3, 'CAFxyz', 1, part.splitId, 2],
+			[part.secretRef, 1, 2.5, 3, 'CAFxyz', 1, part.splitId, 2],
+			[part.secretRef, 1, 2, 3, 'CAFxyz', 1, part.splitId],
+			[part.secretRef, 1, 2, 3, 'CAFxyz', 1, part.splitId, 2, 'not a list'],
+			[part.secretRef, 1, 2, 3, 'CAFxyz', 1, part.splitId, 2, [1, 2]],
+		];
+		for (const wire of bad) expect(() => decodeContent(JSON.stringify({ recovery_share: wire }))).toThrow(ContentDecodeError);
+	});
+
+	it('adds no body text and previews as a recovery share', () => {
+		expect(contentToText([part])).toBe('');
+		expect(previewText([part])).toBe('🔐 recovery share');
+	});
+});
