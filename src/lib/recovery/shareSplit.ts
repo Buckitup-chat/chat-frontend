@@ -6,10 +6,9 @@
 // A share is checked, not trusted: Shamir combines any bytes into some half,
 // so a share that is damaged, from another split, or made up by its holder is
 // caught here, by its leaf and the split's root, before it is combined.
-import sss from 'shamirs-secret-sharing';
-import { Buffer } from 'buffer';
 import { sha3_512 } from '@noble/hashes/sha3';
-import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
+import { bytesToHex, concatBytes, hexToBytes, randomBytes } from '@noble/hashes/utils';
+import { shamirCombine, shamirSplit } from '@/lib/shamir';
 
 const LEAF_TAG = new TextEncoder().encode('buckitup/recovery-share/leaf/v1\n');
 const ROOT_TAG = new TextEncoder().encode('buckitup/recovery-share/root/v1\n');
@@ -35,16 +34,6 @@ export interface Split {
 	root: Uint8Array;
 }
 
-const concat = (...parts: Uint8Array[]): Uint8Array => {
-	const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-	let at = 0;
-	for (const p of parts) {
-		out.set(p, at);
-		at += p.length;
-	}
-	return out;
-};
-
 const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
 	a.length === b.length && a.every((v, i) => v === b[i]);
 
@@ -55,22 +44,16 @@ const shape = (threshold: number, total: number): void => {
 };
 
 export const leafOf = (splitId: string, index: number, share: Uint8Array): Uint8Array =>
-	sha3_512(concat(LEAF_TAG, hexToBytes(splitId), Uint8Array.of(index), share));
+	sha3_512(concatBytes(LEAF_TAG, hexToBytes(splitId), Uint8Array.of(index), share));
 
 export const rootOf = (threshold: number, total: number, leaves: Uint8Array[]): Uint8Array =>
-	sha3_512(concat(ROOT_TAG, Uint8Array.of(threshold), Uint8Array.of(total), ...leaves));
+	sha3_512(concatBytes(ROOT_TAG, Uint8Array.of(threshold), Uint8Array.of(total), ...leaves));
 
 /** Splits the friends' half into `total` shares, any `threshold` of which give it back. */
 export const splitFriendsHalf = (half: Uint8Array, total: number, threshold: number): Split => {
 	shape(threshold, total);
 	if (half.length !== HALF_BYTES) throw new ShareCheckError('the friends\' half is 32 bytes');
-	const secret = Buffer.from(half);
-	let shares: Uint8Array[];
-	try {
-		shares = (sss.split(secret, { shares: total, threshold }) as Buffer[]).map((b) => new Uint8Array(b));
-	} finally {
-		secret.fill(0);
-	}
+	const shares = shamirSplit(half, total, threshold);
 	const splitId = bytesToHex(randomBytes(16));
 	const leaves = shares.map((share, i) => leafOf(splitId, i + 1, share));
 	return { splitId, threshold, total, shares, leaves, root: rootOf(threshold, total, leaves) };
@@ -115,15 +98,13 @@ export const checkShare = (s: ShareToCheck, root: Uint8Array): void => {
 export const combineFriendsHalf = (shares: { index: number; share: Uint8Array }[], threshold: number): Uint8Array => {
 	const distinct = new Map(shares.map((s) => [s.index, s.share]));
 	if (distinct.size < threshold) throw new ShareCheckError(`need ${threshold} different shares, got ${distinct.size}`);
-	const combined = sss.combine([...distinct.values()].slice(0, threshold).map((s) => Buffer.from(s))) as Buffer;
-	const half = new Uint8Array(combined);
-	combined.fill(0);
+	const half = shamirCombine([...distinct.values()]);
 	if (half.length !== HALF_BYTES) throw new ShareCheckError('the shares do not combine into a 32-byte half');
 	return half;
 };
 
 /** What the first guardian slot of a version carries on chain for shares that travel in the dialog. */
-export const deliveryRecord = (root: Uint8Array): Uint8Array => concat(Uint8Array.of(DIALOG_CHANNEL), root);
+export const deliveryRecord = (root: Uint8Array): Uint8Array => concatBytes(Uint8Array.of(DIALOG_CHANNEL), root);
 
 /** Every other guardian slot of the version: the channel tag alone. */
 export const deliveryTag = (): Uint8Array => Uint8Array.of(DIALOG_CHANNEL);

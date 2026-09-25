@@ -276,40 +276,48 @@ export const userPQStore = defineStore('userPQ', () => {
     return true;
   };
 
-  // What a contact keeps in the contacts slot. One definition for every write:
-  // the delete path had its own and dropped contact_pkey from every contact it
-  // kept. `confirmed` marks a contact added — or scanned again — through the QR
-  // handshake, in person: the only kind a recovery share may be issued to.
-  const storedContacts = () =>
-    Object.values(contactsMap.value).map((c) => ({
-      user_hash: c.user_hash,
-      name: c.name,
-      notes: c.notes,
-      hidden: c.hidden,
-      contact_pkey: c.contact_pkey,
-      confirmed: !!c.confirmed,
-    }));
+  // What a contact keeps in the contacts slot. `confirmed` marks a contact
+  // added — or scanned again — through the QR handshake, in person: the only
+  // kind a recovery share may be issued to. It only ever goes from false to
+  // true here; nothing but a delete takes it back.
+  const toStored = (c) => ({
+    user_hash: c.user_hash,
+    name: c.name,
+    notes: c.notes,
+    hidden: c.hidden,
+    contact_pkey: c.contact_pkey,
+    confirmed: !!c.confirmed,
+  });
+
+  // Every write edits the list as the server holds it, not this tab's copy:
+  // another tab may have confirmed a contact since this one loaded, and a copy
+  // that never loaded would write a list of one over everyone else.
+  const writeContacts = async (edit) => {
+    const next = await em.value.updateSlotJson('contacts', (current) => {
+      const byHash = new Map((current ?? []).map((c) => [c.user_hash, c]));
+      edit(byHash);
+      return [...byHash.values()].map(toStored);
+    });
+    contactsMap.value = Object.fromEntries(next.map((c) => [c.user_hash, c]));
+  };
 
   const saveContact = async (userHash, contactData) => {
     if (!em.value || !currentUserHash.value) return false;
-
-    contactsMap.value[userHash] = {
-      ...contactsMap.value[userHash],
-      ...contactData,
-      user_hash: userHash
-    };
-
-    await em.value.updateContacts(storedContacts());
+    await writeContacts((byHash) => {
+      const prev = byHash.get(userHash);
+      byHash.set(userHash, {
+        ...prev,
+        ...contactData,
+        user_hash: userHash,
+        confirmed: !!(prev?.confirmed || contactData.confirmed),
+      });
+    });
     return true;
   };
 
   const deleteContact = async (userHash) => {
     if (!em.value || !currentUserHash.value) return false;
-    
-    if (contactsMap.value[userHash]) {
-      delete contactsMap.value[userHash];
-      await em.value.updateContacts(storedContacts());
-    }
+    await writeContacts((byHash) => byHash.delete(userHash));
     return true;
   };
 

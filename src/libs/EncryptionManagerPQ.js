@@ -252,6 +252,7 @@ export class EncryptionManagerPQ extends EventTarget {
     // an account switch — would otherwise resolve this account's slot names
     // against the previous account's addresses.
     this.#slotResolver = null;
+    this.#queues.clear();
     resetUserStorageCollection();
 
     await this.#loadLocalUserCards();
@@ -348,6 +349,7 @@ export class EncryptionManagerPQ extends EventTarget {
     // Slot addresses and the storage shape belong to the account that just
     // left; carrying either into the next login would point at its rows.
     this.#slotResolver = null;
+    this.#queues.clear();
     resetUserStorageCollection();
 
     console.log('Logged out — secret key wiped');
@@ -581,20 +583,26 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   /**
-   * Decrypted root record, or null when this account has none yet. A row that
-   * is there but does not decrypt is null for a reader and an error for a
-   * writer: a patch built on that null would sign a root with no slot map.
+   * The decrypted JSON at `uuid`, or null when there is none. A row that is
+   * there but does not decrypt is null for a reader and an error for a
+   * writer: a write built on that null would replace what it could not read —
+   * a root with no slot map, a list with nothing in it.
    */
-  async #readRoot({ strict = false } = {}) {
-    const row = await getStorageRow(this.#currentUserHash, this.#rootSlotUuid());
+  async #readJsonAt(uuid, label, { strict = false } = {}) {
+    const row = await getStorageRow(this.#currentUserHash, uuid);
     if (!row || !row.value_b64) return null;
     try {
       return await this.#decryptJson(row.value_b64);
     } catch (e) {
-      if (strict) throw new Error('The account record on the server cannot be read; nothing was written', { cause: e });
-      console.error('Failed to decrypt the user_storage root record:', e);
+      if (strict) throw new Error(`${label} on the server cannot be read; nothing was written`, { cause: e });
+      console.error(`Failed to decrypt ${label}:`, e);
       return null;
     }
+  }
+
+  /** Decrypted root record, or null when this account has none yet. */
+  #readRoot(opts) {
+    return this.#readJsonAt(this.#rootSlotUuid(), 'The account record', opts);
   }
 
   async #writeRoot(record) {
@@ -602,18 +610,26 @@ export class EncryptionManagerPQ extends EventTarget {
     await this.#writeSlotRow(this.#rootSlotUuid(), valueB64, hashB64);
   }
 
-  // Root read-modify-writes are serialized here: the per-slot queue under
-  // upsertStorageRow orders the writes only, and two callers that both read
-  // the root before either wrote it would each drop the other's field.
-  #rootQueue = Promise.resolve();
+  // Read-modify-writes of one record — the root, or a named slot — are
+  // serialized here: the per-slot queue under upsertStorageRow orders the
+  // writes only, and two callers that both read before either wrote would each
+  // drop the other's change. A settled entry is dropped, so the queue keeps no
+  // record's plaintext alive; an account switch clears it.
+  #queues = new Map();
+
+  #serialized(key, fn) {
+    const run = (this.#queues.get(key) ?? Promise.resolve()).then(fn);
+    const settled = run.then(() => undefined, () => undefined);
+    this.#queues.set(key, settled);
+    settled.then(() => { if (this.#queues.get(key) === settled) this.#queues.delete(key); });
+    return run;
+  }
 
   #patchRoot(mutate) {
-    const run = this.#rootQueue.then(async () => {
+    return this.#serialized('\0root', async () => {
       const root = (await this.#readRoot({ strict: true })) || {};
       await this.#writeRoot(await mutate(root));
     });
-    this.#rootQueue = run.catch(() => undefined);
-    return run;
   }
 
   async #writeSlotRow(uuid, valueB64, hashB64) {
@@ -809,60 +825,15 @@ export class EncryptionManagerPQ extends EventTarget {
     return root;
   }
 
-  // Contacts Encryption
+  // Contacts: a named JSON slot like any other.
 
   async updateContacts(contactsArray) {
-    if (!this.#currentUserHash) throw new Error('No user is currently logged in');
-    if (!this.#cryptSkey) throw new Error('Crypt key not loaded');
-
-    const contactsJson = JSON.stringify(contactsArray);
-    const contactsData = new TextEncoder().encode(contactsJson);
-
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-
-    const encryptedData = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      await this.#deriveKeyFromCryptSkey(),
-      contactsData
-    );
-
-    const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
-    const combined = arrayToBase64(ivData);
-
-    await this.#writeSlot('contacts', combined, bytesToHex(sha256(new Uint8Array(encryptedData))));
-
+    await this.updateSlotJson('contacts', () => contactsArray);
     return true;
   }
 
   async loadContacts() {
-    if (!this.#currentUserHash) throw new Error('No user is currently logged in');
-    if (!this.#cryptSkey) return [];
-
-    // No slot yet means this account has never saved contacts. Reading must
-    // not create one: doing so on a transient failure to load the map would
-    // start a second, empty contacts row alongside the real one.
-    const contactsUuid = await this.#slotUuid('contacts');
-    if (!contactsUuid) return [];
-
-    const storage = await getStorageRow(this.#currentUserHash, contactsUuid);
-    if (!storage || !storage.value_b64) return [];
-
-    const combined = decodeHexOrBase64(storage.value_b64);
-
-    const iv = combined.slice(0, 12);
-    const encryptedData = combined.slice(12);
-
-    try {
-      const decryptedData = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv },
-        await this.#deriveKeyFromCryptSkey(),
-        encryptedData
-      );
-      return JSON.parse(new TextDecoder().decode(decryptedData));
-    } catch (e) {
-      console.error('Failed to decrypt contacts:', e);
-      return [];
-    }
+    return (await this.loadSlotJson('contacts')) ?? [];
   }
 
   // Named JSON slots
@@ -876,46 +847,24 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
     if (!this.#cryptSkey) return null;
     const uuid = await this.#slotUuid(name);
-    if (!uuid) return null;
-    const row = await getStorageRow(this.#currentUserHash, uuid);
-    if (!row || !row.value_b64) return null;
-    try {
-      return await this.#decryptJson(row.value_b64);
-    } catch (e) {
-      console.error(`Failed to decrypt the ${name} slot:`, e);
-      return null;
-    }
+    return uuid ? this.#readJsonAt(uuid, `the ${name} slot`) : null;
   }
 
-  // Read-modify-writes of one named slot are serialized, as the root's are:
-  // two updates that both read before either wrote would each drop the other's change.
-  #slotQueues = new Map();
-
   /**
-   * Replaces a named slot's JSON value with `mutate(current)`, where current
-   * is null for a slot never written. A value that is there and does not
-   * decrypt fails the update instead of being overwritten from null.
+   * Replaces a named slot's JSON value with `mutate(current)` and resolves to
+   * it; current is null for a slot never written. A value that is there and
+   * does not decrypt fails the update instead of being overwritten from null.
    */
   updateSlotJson(name, mutate) {
-    const run = (this.#slotQueues.get(name) ?? Promise.resolve()).then(async () => {
+    return this.#serialized(name, async () => {
       if (!this.#currentUserHash || !this.#cryptSkey) throw new Error('No user is currently logged in');
       const uuid = await this.#slotUuid(name);
-      const row = uuid ? await getStorageRow(this.#currentUserHash, uuid) : null;
-      let current = null;
-      if (row && row.value_b64) {
-        try {
-          current = await this.#decryptJson(row.value_b64);
-        } catch (e) {
-          throw new Error(`The ${name} slot on the server cannot be read; nothing was written`, { cause: e });
-        }
-      }
+      const current = uuid ? await this.#readJsonAt(uuid, `The ${name} slot`, { strict: true }) : null;
       const next = await mutate(current);
       const { valueB64, hashB64 } = await this.#encryptJson(next);
       await this.#writeSlot(name, valueB64, hashB64);
       return next;
     });
-    this.#slotQueues.set(name, run.catch(() => undefined));
-    return run;
   }
 
   // Avatar Encryption

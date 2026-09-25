@@ -58,8 +58,11 @@ export const splitIntoHalves = (s: Uint8Array): { nodeHalf: Uint8Array; friendsH
 };
 
 /** S from its two halves. */
-export const joinHalves = (nodeHalf: Uint8Array, friendsHalf: Uint8Array): Uint8Array =>
-	requireWrapKey(requireWrapKey(nodeHalf).map((b, i) => b ^ requireWrapKey(friendsHalf)[i]));
+export const joinHalves = (nodeHalf: Uint8Array, friendsHalf: Uint8Array): Uint8Array => {
+	requireWrapKey(nodeHalf);
+	requireWrapKey(friendsHalf);
+	return nodeHalf.map((b, i) => b ^ friendsHalf[i]);
+};
 
 /**
  * The user_storage uuid the sealed vault lives at. Derived, not stored: a
