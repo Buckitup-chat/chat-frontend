@@ -3,14 +3,16 @@
 // share that is damaged, foreign, shifted between fields or repeated is named
 // rather than combined into a wrong half.
 import { describe, it, expect } from 'vitest';
-import { randomBytes } from '@noble/hashes/utils';
+import { bytesToHex, randomBytes } from '@noble/hashes/utils';
 import {
 	ShareCheckError,
 	checkShare,
 	combineFriendsHalf,
 	deliveryRecord,
 	deliveryTag,
+	leafOf,
 	rootFromSlots,
+	rootOf,
 	splitFriendsHalf,
 	type ShareToCheck,
 } from '@/lib/recovery/shareSplit';
@@ -99,5 +101,27 @@ describe('the root on chain', () => {
 		const ciphertext = randomBytes(97);
 		ciphertext[0] = 0x01;
 		expect(rootFromSlots([ciphertext, deliveryTag()])).toBeNull();
+	});
+});
+
+describe('the derivations, pinned', () => {
+	// Computed outside this module from the spec's definitions (pq_recovery_shares
+	// §Re-issuing): shares issued by one build are checked by another, years
+	// later, so a changed tag, field order or encoding must fail here first.
+	const splitId = '00112233445566778899aabbccddeeff';
+	const share = (i: number) => Uint8Array.of(8, i, ...new Uint8Array(4).fill(0x10 + i));
+
+	it('hashes a leaf and a root to the same bytes as the spec', () => {
+		const leaves = [1, 2, 3].map((i) => leafOf(splitId, i, share(i)));
+		expect(bytesToHex(leaves[0])).toBe(
+			'b8ca3a786c3cee10d8f33961fe43ec6cf94932ec2a91e1f372b87a636149f8a2dcde8570024b243bd0d455dcc39f486296a004fc61e1e5e7bd61d5abb16cf26e',
+		);
+		expect(bytesToHex(rootOf(2, 3, leaves))).toBe(
+			'56671b6bbf71e81c9c19907a5312d7e7b95e3bb226636bf892bc0a264e038fb8acbc7d8c359444918feb2d5312651781334a113390856c75b09be72a1a43ce2e',
+		);
+	});
+
+	it('will not put a root of another length on chain', () => {
+		expect(() => deliveryRecord(new Uint8Array(32))).toThrow(/64 bytes/);
 	});
 });

@@ -136,6 +136,7 @@ import { useMenu } from '@/composables/useMenu';
 import { ref, inject, onMounted, computed } from 'vue';
 import Account_Item from '@/components/Account_Item.vue';
 import QRScannerEngine from '@/components/engines/QRScannerEngine.vue';
+import { cardVouchesForContactKey } from '@/lib/pq/verifyCard';
 
 const $userPQ = userPQStore();
 const $mitt = inject('$mitt');
@@ -181,10 +182,19 @@ const onCountdown = (count) => {
 	}
 };
 
-// A contact that came through the handshake was met in person; one typed in by id was not.
+// The handshake proves the person in front of you holds `contact_pkey`; their
+// certified card is what ties that key to the user_hash their QR named. Both
+// together confirm the contact; one typed in by id, or a key the card does not
+// carry, does not.
 const onHandshakeCompleted = (peerData) => {
-	contact.value = { ...peerData, confirmed: true };
+	const card = $userPQ.allNetworkUsers.find((u) => u.user_hash === peerData.user_hash);
+	contact.value = { ...peerData, viaHandshake: true, confirmed: cardVouchesForContactKey(card, peerData.contact_pkey) };
 };
+
+const notConfirmedFooter = () =>
+	contact.value.viaHandshake && !contact.value.confirmed
+		? 'Not confirmed: the key they showed is not the one on their card'
+		: undefined;
 
 async function toggleScanner() {
 	manual.value = false;
@@ -218,16 +228,18 @@ const addContact = async () => {
 
 		if (isInContacts.value) {
 			const existingContact = $userPQ.contactsMap[contact.value.user_hash];
-			// Scanned in person now, after being added by id before: that is what confirms it.
+			// Scanned in person now, after being added by id before: that is what
+			// confirms it, with the key the handshake proved.
 			const confirmsIt = contact.value.confirmed && !existingContact.confirmed;
-			if (confirmsIt) await $userPQ.saveContact(contact.value.user_hash, { confirmed: true });
+			if (confirmsIt) await $userPQ.confirmContact(contact.value.user_hash, contact.value.contact_pkey);
 			$swal.fire({
 				icon: 'success',
 				title: confirmsIt ? 'Contact confirmed' : 'Contact already in your list',
+				footer: notConfirmedFooter(),
 				timer: 15000,
 			});
 			manual.value = false;
-			$router.push({ name: 'contact', params: { address: existingContact.address } });
+			$router.push({ name: 'contact', params: { address: contact.value.user_hash } });
 			closeModal();
 			return;
 		}
@@ -236,18 +248,17 @@ const addContact = async () => {
 			console.warn("Saving contact without contact_pkey. Encryption might not work.");
 		}
 
-		await $userPQ.saveContact(contact.value.user_hash, {
-			name: contact.value.name,
-			notes: '',
-			hidden: false,
-			contact_pkey: contact.value.contact_pkey,
-			confirmed: !!contact.value.confirmed,
-		});
+		const fields = { name: contact.value.name, notes: '', hidden: false };
+		if (contact.value.confirmed) {
+			await $userPQ.confirmContact(contact.value.user_hash, contact.value.contact_pkey, fields);
+		} else {
+			await $userPQ.saveContact(contact.value.user_hash, { ...fields, contact_pkey: contact.value.contact_pkey });
+		}
 
 		$swal.fire({
 			icon: 'success',
-			title: 'Contact added',
-			footer: 'Now you can name it and make notes',
+			title: contact.value.confirmed ? 'Contact added and confirmed' : 'Contact added',
+			footer: notConfirmedFooter() ?? 'Now you can name it and make notes',
 			timer: 15000,
 		});
 		

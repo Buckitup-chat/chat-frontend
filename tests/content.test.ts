@@ -192,6 +192,7 @@ describe('T-CONTENT-RECOVERY-SHARE: a guardian share envelope', () => {
 		splitId: '4f1c'.repeat(8),
 		shareIndex: 2,
 		splitProof: ['leafA', 'leafB', 'leafC'],
+		rest: [],
 	};
 
 	it('round-trips at the registry positions', () => {
@@ -204,7 +205,9 @@ describe('T-CONTENT-RECOVERY-SHARE: a guardian share envelope', () => {
 
 	it('accepts a longer array and ignores its tail; takes a missing proof as an empty one, which no check passes', () => {
 		const wire = [part.secretRef, 1, 2, 3, 'CAFxyz', 1_715_000_000, part.splitId, 2, ['leafA'], 'a future field'];
-		expect(decodeContent(JSON.stringify({ recovery_share: wire }))[0]).toMatchObject({ splitProof: ['leafA'] });
+		const decoded = decodeContent(JSON.stringify({ recovery_share: wire }));
+		expect(decoded[0]).toMatchObject({ splitProof: ['leafA'], rest: ['a future field'] });
+		expect(JSON.parse(encodeContent(decoded)).recovery_share).toEqual(wire);
 		expect(decodeContent(JSON.stringify({ recovery_share: wire.slice(0, 8) }))[0]).toMatchObject({ splitProof: [] });
 	});
 
@@ -219,8 +222,15 @@ describe('T-CONTENT-RECOVERY-SHARE: a guardian share envelope', () => {
 		for (const wire of bad) expect(() => decodeContent(JSON.stringify({ recovery_share: wire }))).toThrow(ContentDecodeError);
 	});
 
-	it('adds no body text and previews as a recovery share', () => {
-		expect(contentToText([part])).toBe('');
+	it('shows as a recovery share, never as an empty bubble', () => {
+		expect(contentToText([part])).toBe('🔐 recovery share');
 		expect(previewText([part])).toBe('🔐 recovery share');
+	});
+
+	it('is named in a quote, never copied: a reply must not carry the share', () => {
+		const reply = encodeContent([{ kind: 'quote', authorHash: 'u_a', messageId: 'm', signHash: 's', snapshot: [part] }, { kind: 'text', text: 'thanks' }]);
+		expect(reply).not.toContain('CAFxyz');
+		expect(reply).not.toContain('leafA');
+		expect(reply).toContain('🔐 recovery share');
 	});
 });

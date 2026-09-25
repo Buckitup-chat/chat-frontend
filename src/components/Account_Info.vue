@@ -150,6 +150,10 @@ onMounted(async () => {
 		if (newVal.notes && newVal.notes.length > maxNotesLength) {
 			newVal.notes = newVal.notes.slice(0, maxNotesLength);
 		}
+		// Only an edit is an update. The copy is also reset from the prop, and
+		// echoing that back saved what was just saved, which changed the prop
+		// again: an endless loop of signed writes while the page is open.
+		if (JSON.stringify(newVal) === JSON.stringify(accountIn)) return;
 		emit('update', newVal);
 	}, { deep: true });
 });

@@ -249,3 +249,50 @@ describe('named JSON slots', () => {
 		expect(rows.get(slotRow)).toBe('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
 	});
 });
+
+describe('a named slot written from more than one place', () => {
+	beforeEach(() => {
+		rows = new Map();
+		vaults = new Map();
+		rawStore = new Map();
+		refuseTombstones = false;
+		onRowWritten = undefined;
+	});
+
+	it('builds an update from the row it lands on, not from a slot map read before the slot existed', async () => {
+		// The manager is one per page, so another client is simulated through the
+		// server's rows: this session caches a slot map with no contacts slot,
+		// and meanwhile the server gains one another client created. The save
+		// must add to that list, not write a list made from nothing over it.
+		const em = await login();
+		const account = em.currentUserHash;
+		await em.updateSlotJson('holdings', () => ({}));
+		const beforeContacts = new Map(rows);
+		await em.updateSlotJson('contacts', () => [{ user_hash: 'A' }, { user_hash: 'B' }]);
+		const withContacts = new Map(rows);
+
+		rows = beforeContacts;
+		await em.login(account); // a fresh session: its map has holdings, no contacts
+		await em.updateSlotJson('holdings', () => ({}));
+		rows = withContacts; // …while another client created the contacts slot
+
+		await em.updateSlotJson('contacts', (cur) => [...(cur ?? []), { user_hash: 'C' }]);
+		expect((await em.loadContacts()).map((c) => c.user_hash)).toEqual(['A', 'B', 'C']);
+	});
+
+	it('refuses a queued update once the account has switched, instead of writing into the next account', async () => {
+		const em = await login();
+		let switched = false;
+		onRowWritten = async () => {
+			if (switched) return;
+			switched = true;
+			await em.createUserVault({ name: 'Someone else' });
+		};
+		const first = em.updateSlotJson('contacts', () => [{ user_hash: 'mine' }]);
+		const second = em.updateSlotJson('contacts', (cur) => [...(cur ?? []), { user_hash: 'also mine' }]);
+		await first;
+		await expect(second).rejects.toThrow(/account changed before this write ran/);
+		onRowWritten = undefined;
+		expect(await em.loadContacts()).toEqual([]);
+	});
+});

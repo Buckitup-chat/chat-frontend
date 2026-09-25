@@ -119,6 +119,8 @@ export interface RecoverySharePart {
 	shareIndex: number;
 	/** Every leaf of the split in index order, unpadded base64; empty when the sender sent none, which no check passes. */
 	splitProof: string[];
+	/** Positions past split_proof, from a newer build: kept, so re-encoding loses nothing. */
+	rest?: unknown[];
 }
 
 /** A typed value this build does not render yet (e.g. "image" before the
@@ -152,7 +154,7 @@ const encodePart = (part: ContentPart): unknown => {
 		case 'text':
 			return part.text;
 		case 'quote':
-			return { quote: [part.authorHash, part.messageId, part.signHash, encodeValue(part.snapshot)] };
+			return { quote: [part.authorHash, part.messageId, part.signHash, encodeValue(part.snapshot.map(quotable))] };
 		case 'file':
 			return { file: [part.name, part.size, part.mimeType, part.createdAt, part.fileId, part.encSecretB64] };
 		case 'image':
@@ -181,13 +183,24 @@ const encodePart = (part: ContentPart): unknown => {
 			return {
 				recovery_share: [
 					part.secretRef, part.version, part.threshold, part.total, part.shareB64,
-					part.createdAt, part.splitId, part.shareIndex, part.splitProof,
+					part.createdAt, part.splitId, part.shareIndex, part.splitProof, ...(part.rest ?? []),
 				],
 			};
 		case 'unknown':
 			return { [part.type]: part.value };
 	}
 };
+
+/**
+ * What a quote may carry of a part. A recovery share is named, never copied:
+ * a reply to the message would otherwise put the share's bytes in a second
+ * message, which the share's owner never sent and dropping the share never
+ * reaches.
+ */
+const quotable = (part: ContentPart): ContentPart =>
+	part.kind === 'recovery_share' ? { kind: 'text', text: RECOVERY_SHARE_LABEL } : part;
+
+const RECOVERY_SHARE_LABEL = '🔐 recovery share';
 
 const encodeValue = (parts: ContentPart[]): unknown => {
 	if (parts.length === 1) return encodePart(parts[0]);
@@ -346,6 +359,7 @@ const decodeRecoveryShare = (r: unknown): RecoverySharePart => {
 		splitId: r[6],
 		shareIndex: r[7],
 		splitProof: r.length > 8 ? (r[8] as string[]) : [],
+		rest: r.slice(9),
 	};
 };
 
@@ -373,7 +387,8 @@ export const contentToText = (parts: ContentPart[]): string =>
 			// Attachments render as their own element in the bubble; naming them
 			// here too would print the filename twice under the picture.
 			if (p.kind === 'file' || p.kind === 'image' || p.kind === 'video') return '';
-			if (p.kind === 'checkpoint' || p.kind === 'recovery_share') return ''; // renders as its own marker
+			if (p.kind === 'checkpoint') return ''; // renders as its own marker
+			if (p.kind === 'recovery_share') return RECOVERY_SHARE_LABEL;
 			return `[${p.type}]`;
 		})
 		.filter(Boolean)
@@ -389,6 +404,5 @@ export const previewText = (parts: ContentPart[]): string => {
 		return `${icon} ${media.name}`;
 	}
 	if (parts.some((p) => p.kind === 'checkpoint')) return '🔏 checkpoint';
-	if (parts.some((p) => p.kind === 'recovery_share')) return '🔐 recovery share';
 	return '';
 };

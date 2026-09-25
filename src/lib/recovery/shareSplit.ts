@@ -104,7 +104,11 @@ export const combineFriendsHalf = (shares: { index: number; share: Uint8Array }[
 };
 
 /** What the first guardian slot of a version carries on chain for shares that travel in the dialog. */
-export const deliveryRecord = (root: Uint8Array): Uint8Array => concatBytes(Uint8Array.of(DIALOG_CHANNEL), root);
+export const deliveryRecord = (root: Uint8Array): Uint8Array => {
+	// Anything but 64 bytes would go on chain as a record rootFromSlots never finds, for good.
+	if (root.length !== LEAF_BYTES) throw new ShareCheckError('the split root is 64 bytes');
+	return concatBytes(Uint8Array.of(DIALOG_CHANNEL), root);
+};
 
 /** Every other guardian slot of the version: the channel tag alone. */
 export const deliveryTag = (): Uint8Array => Uint8Array.of(DIALOG_CHANNEL);

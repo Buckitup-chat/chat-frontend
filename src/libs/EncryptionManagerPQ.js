@@ -614,11 +614,19 @@ export class EncryptionManagerPQ extends EventTarget {
   // serialized here: the per-slot queue under upsertStorageRow orders the
   // writes only, and two callers that both read before either wrote would each
   // drop the other's change. A settled entry is dropped, so the queue keeps no
-  // record's plaintext alive; an account switch clears it.
+  // record's plaintext alive. A task runs only for the account it was queued
+  // by: every key it would use is read when it runs, so one left over from an
+  // account switch would otherwise write into the next account's records.
   #queues = new Map();
 
   #serialized(key, fn) {
-    const run = (this.#queues.get(key) ?? Promise.resolve()).then(fn);
+    const owner = this.#currentUserHash;
+    const run = (this.#queues.get(key) ?? Promise.resolve()).then(() => {
+      if (!owner || this.#currentUserHash !== owner) {
+        throw new Error('The account changed before this write ran; nothing was written');
+      }
+      return fn();
+    });
     const settled = run.then(() => undefined, () => undefined);
     this.#queues.set(key, settled);
     settled.then(() => { if (this.#queues.get(key) === settled) this.#queues.delete(key); });
@@ -682,18 +690,6 @@ export class EncryptionManagerPQ extends EventTarget {
     return this.#slots().getSlotUuid(name);
   }
 
-  /**
-   * Writes a named slot, creating it on first use. The slot row lands before
-   * the map entry that names it, so a failure between the two leaves an
-   * unreferenced row rather than a map pointing at nothing.
-   */
-  async #writeSlot(name, valueB64, hashB64) {
-    const { orphaned } = await this.#slots().ensureSlotUuid(name, {
-      mint: randomSlotUuid,
-      writeRow: (uuid) => this.#writeSlotRow(uuid, valueB64, hashB64),
-    });
-    if (orphaned) await this.#tombstoneSlotRow(orphaned);
-  }
 
   /**
    * Seals the account under a wrap key and publishes it where only that key
@@ -857,12 +853,22 @@ export class EncryptionManagerPQ extends EventTarget {
    */
   updateSlotJson(name, mutate) {
     return this.#serialized(name, async () => {
-      if (!this.#currentUserHash || !this.#cryptSkey) throw new Error('No user is currently logged in');
-      const uuid = await this.#slotUuid(name);
-      const current = uuid ? await this.#readJsonAt(uuid, `The ${name} slot`, { strict: true }) : null;
-      const next = await mutate(current);
-      const { valueB64, hashB64 } = await this.#encryptJson(next);
-      await this.#writeSlot(name, valueB64, hashB64);
+      if (!this.#cryptSkey) throw new Error('No user is currently logged in');
+      // The value is built from the row it is written to, at the address the
+      // map actually names by then: this session's cached map can be missing
+      // a slot another client created, and a race lost while creating one
+      // moves the write to the winner's row. Built from the cache, either
+      // would write a value made from nothing over one that exists.
+      let next;
+      const { orphaned } = await this.#slots().ensureSlotUuid(name, {
+        mint: randomSlotUuid,
+        writeRow: async (uuid) => {
+          next = await mutate(await this.#readJsonAt(uuid, `The ${name} slot`, { strict: true }));
+          const { valueB64, hashB64 } = await this.#encryptJson(next);
+          await this.#writeSlotRow(uuid, valueB64, hashB64);
+        },
+      });
+      if (orphaned) await this.#tombstoneSlotRow(orphaned);
       return next;
     });
   }

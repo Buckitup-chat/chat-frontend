@@ -180,6 +180,8 @@ export const userPQStore = defineStore('userPQ', () => {
     }
 
     currentUser.value = null;
+    // The next account loads its own; until then this one's must not show.
+    contactsMap.value = {};
 
     console.log('[userStore] User logged out');
   };
@@ -277,9 +279,10 @@ export const userPQStore = defineStore('userPQ', () => {
   };
 
   // What a contact keeps in the contacts slot. `confirmed` marks a contact
-  // added — or scanned again — through the QR handshake, in person: the only
-  // kind a recovery share may be issued to. It only ever goes from false to
-  // true here; nothing but a delete takes it back.
+  // whose key was checked in person, through the QR handshake: the only kind a
+  // recovery share may be issued to. It is set by confirmContact alone —
+  // saveContact is handed whole view objects that mix in network card fields,
+  // and keeps whatever the stored contact already says.
   const toStored = (c) => ({
     user_hash: c.user_hash,
     name: c.name,
@@ -291,26 +294,46 @@ export const userPQStore = defineStore('userPQ', () => {
 
   // Every write edits the list as the server holds it, not this tab's copy:
   // another tab may have confirmed a contact since this one loaded, and a copy
-  // that never loaded would write a list of one over everyone else.
+  // that never loaded would write a list of one over everyone else. The edit
+  // shows at once, and the server's answer replaces it — unless a later edit
+  // has shown since (its own answer will), or the account changed while the
+  // write was out, in which case it belongs to nobody here.
+  let contactsEdits = 0;
   const writeContacts = async (edit) => {
+    const account = currentUserHash.value;
+    const generation = ++contactsEdits;
+    const local = new Map(Object.entries(contactsMap.value));
+    edit(local);
+    contactsMap.value = Object.fromEntries(local);
     const next = await em.value.updateSlotJson('contacts', (current) => {
       const byHash = new Map((current ?? []).map((c) => [c.user_hash, c]));
       edit(byHash);
       return [...byHash.values()].map(toStored);
     });
-    contactsMap.value = Object.fromEntries(next.map((c) => [c.user_hash, c]));
+    if (currentUserHash.value === account && generation === contactsEdits) {
+      contactsMap.value = Object.fromEntries(next.map((c) => [c.user_hash, c]));
+    }
   };
 
   const saveContact = async (userHash, contactData) => {
     if (!em.value || !currentUserHash.value) return false;
     await writeContacts((byHash) => {
       const prev = byHash.get(userHash);
-      byHash.set(userHash, {
-        ...prev,
-        ...contactData,
-        user_hash: userHash,
-        confirmed: !!(prev?.confirmed || contactData.confirmed),
-      });
+      byHash.set(userHash, { ...prev, ...contactData, user_hash: userHash, confirmed: !!prev?.confirmed });
+    });
+    return true;
+  };
+
+  /**
+   * Marks a contact as met in person, with the key the handshake proved —
+   * adding it if it is not a contact yet. The caller has checked that key
+   * against the contact's certified card (lib/pq/verifyCard).
+   */
+  const confirmContact = async (userHash, contactPkey, fields = {}) => {
+    if (!em.value || !currentUserHash.value) return false;
+    await writeContacts((byHash) => {
+      const prev = byHash.get(userHash);
+      byHash.set(userHash, { ...prev, ...fields, user_hash: userHash, contact_pkey: contactPkey, confirmed: true });
     });
     return true;
   };
@@ -430,6 +453,7 @@ export const userPQStore = defineStore('userPQ', () => {
     contacts,
     contactsMap,
     saveContact,
+    confirmContact,
     deleteContact,
 
     initialize,

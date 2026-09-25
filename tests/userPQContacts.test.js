@@ -59,8 +59,17 @@ describe('the contacts slot', () => {
 		fake.fakeLogin('u_' + '1'.repeat(128));
 	});
 
+	it('confirms a contact only through confirmContact; saveContact ignores a confirmed field', async () => {
+		await store.confirmContact(A, 'pkA', { name: 'Ann' });
+		// A view object mixing in network card fields must not confirm anyone.
+		await store.saveContact(B, { name: 'Bob', contact_pkey: 'pkB', confirmed: true });
+		const last = fake.stored;
+		expect(last.find((c) => c.user_hash === A)).toMatchObject({ confirmed: true, contact_pkey: 'pkA' });
+		expect(last.find((c) => c.user_hash === B)).toMatchObject({ confirmed: false, contact_pkey: 'pkB' });
+	});
+
 	it('keeps a contact confirmed in person as confirmed, and one added by id as not', async () => {
-		await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA', confirmed: true });
+		await store.confirmContact(A, 'pkA', { name: 'Ann' });
 		await store.saveContact(B, { name: 'Bob', contact_pkey: 'pkB' });
 		const last = fake.stored;
 		expect(last.find((c) => c.user_hash === A)).toMatchObject({ confirmed: true, contact_pkey: 'pkA' });
@@ -68,7 +77,7 @@ describe('the contacts slot', () => {
 	});
 
 	it('keeps every other contact whole when one is deleted', async () => {
-		await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA', confirmed: true });
+		await store.confirmContact(A, 'pkA', { name: 'Ann' });
 		await store.saveContact(B, { name: 'Bob', contact_pkey: 'pkB' });
 		await store.deleteContact(B);
 		expect(fake.stored).toEqual([
@@ -93,16 +102,36 @@ describe('the contacts slot', () => {
 	});
 
 	it('does not unconfirm a contact when it is saved again without the flag', async () => {
-		await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA', confirmed: true });
+		await store.confirmContact(A, 'pkA', { name: 'Ann' });
 		await store.saveContact(A, { hidden: true });
 		expect(fake.stored.find((c) => c.user_hash === A)).toMatchObject({ confirmed: true, hidden: true });
 	});
 
-	it('confirms a contact added by id once it is scanned in person', async () => {
-		await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA' });
-		await store.saveContact(A, { confirmed: true });
+	it('confirms a contact added by id once it is scanned in person, with the key the handshake proved', async () => {
+		await store.saveContact(A, { name: 'Ann', contact_pkey: 'pk-from-the-network' });
+		await store.confirmContact(A, 'pk-proved-in-person');
 		expect(fake.stored).toEqual([
-			{ user_hash: A, name: 'Ann', notes: undefined, hidden: undefined, contact_pkey: 'pkA', confirmed: true },
+			{ user_hash: A, name: 'Ann', notes: undefined, hidden: undefined, contact_pkey: 'pk-proved-in-person', confirmed: true },
 		]);
+	});
+
+	it('shows an edit at once, and does not let an older write\'s answer undo a newer edit', async () => {
+		let release;
+		const slow = new Promise((r) => { release = r; });
+		const realUpdate = fake.updateSlotJson.bind(fake);
+		let calls = 0;
+		fake.updateSlotJson = async (name, mutate) => (++calls === 1 ? slow.then(() => realUpdate(name, mutate)) : realUpdate(name, mutate));
+		const first = store.saveContact(A, { name: 'An' });
+		expect(store.contactsMap[A].name).toBe('An');
+		await store.saveContact(A, { name: 'Ann' });
+		release();
+		await first;
+		expect(store.contactsMap[A].name).toBe('Ann');
+	});
+
+	it('clears the contacts on logout, so the next account does not see them', async () => {
+		await store.saveContact(A, { name: 'Ann' });
+		await store.logout();
+		expect(store.contactsMap).toEqual({});
 	});
 });
