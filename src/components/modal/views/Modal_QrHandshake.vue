@@ -181,8 +181,9 @@ const onCountdown = (count) => {
 	}
 };
 
+// A contact that came through the handshake was met in person; one typed in by id was not.
 const onHandshakeCompleted = (peerData) => {
-	contact.value = peerData;
+	contact.value = { ...peerData, confirmed: true };
 };
 
 async function toggleScanner() {
@@ -216,12 +217,15 @@ const addContact = async () => {
 		}
 
 		if (isInContacts.value) {
+			const existingContact = $userPQ.contactsMap[contact.value.user_hash];
+			// Scanned in person now, after being added by id before: that is what confirms it.
+			const confirmsIt = contact.value.confirmed && !existingContact.confirmed;
+			if (confirmsIt) await $userPQ.saveContact(contact.value.user_hash, { confirmed: true });
 			$swal.fire({
 				icon: 'success',
-				title: 'Contact already in your list',
+				title: confirmsIt ? 'Contact confirmed' : 'Contact already in your list',
 				timer: 15000,
 			});
-			const existingContact = $userPQ.contactsMap[contact.value.user_hash];
 			manual.value = false;
 			$router.push({ name: 'contact', params: { address: existingContact.address } });
 			closeModal();
@@ -236,7 +240,8 @@ const addContact = async () => {
 			name: contact.value.name,
 			notes: '',
 			hidden: false,
-			contact_pkey: contact.value.contact_pkey
+			contact_pkey: contact.value.contact_pkey,
+			confirmed: !!contact.value.confirmed,
 		});
 
 		$swal.fire({

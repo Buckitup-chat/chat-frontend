@@ -276,25 +276,30 @@ export const userPQStore = defineStore('userPQ', () => {
     return true;
   };
 
+  // What a contact keeps in the contacts slot. One definition for every write:
+  // the delete path had its own and dropped contact_pkey from every contact it
+  // kept. `confirmed` marks a contact added — or scanned again — through the QR
+  // handshake, in person: the only kind a recovery share may be issued to.
+  const storedContacts = () =>
+    Object.values(contactsMap.value).map((c) => ({
+      user_hash: c.user_hash,
+      name: c.name,
+      notes: c.notes,
+      hidden: c.hidden,
+      contact_pkey: c.contact_pkey,
+      confirmed: !!c.confirmed,
+    }));
+
   const saveContact = async (userHash, contactData) => {
     if (!em.value || !currentUserHash.value) return false;
-    
-    // Maintain backward compatibility fields if they are missing
+
     contactsMap.value[userHash] = {
       ...contactsMap.value[userHash],
       ...contactData,
       user_hash: userHash
     };
 
-    const contactsArray = Object.values(contactsMap.value).map(c => ({
-      user_hash: c.user_hash,
-      name: c.name,
-      notes: c.notes,
-      hidden: c.hidden,
-      contact_pkey: c.contact_pkey
-    }));
-
-    await em.value.updateContacts(contactsArray);
+    await em.value.updateContacts(storedContacts());
     return true;
   };
 
@@ -303,15 +308,7 @@ export const userPQStore = defineStore('userPQ', () => {
     
     if (contactsMap.value[userHash]) {
       delete contactsMap.value[userHash];
-      
-      const contactsArray = Object.values(contactsMap.value).map(c => ({
-        user_hash: c.user_hash,
-        name: c.name,
-        notes: c.notes,
-        hidden: c.hidden
-      }));
-      
-      await em.value.updateContacts(contactsArray);
+      await em.value.updateContacts(storedContacts());
     }
     return true;
   };
