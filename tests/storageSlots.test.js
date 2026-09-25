@@ -213,3 +213,39 @@ describe('the recovery vault', () => {
 		await expect(em.publishRecoveryVault(key(), '{}')).rejects.toThrow(/account changed/);
 	});
 });
+
+describe('named JSON slots', () => {
+	beforeEach(() => {
+		rows = new Map();
+		vaults = new Map();
+		rawStore = new Map();
+		refuseTombstones = false;
+		onRowWritten = undefined;
+	});
+
+	it('reads null for a slot never written, and the value after an update', async () => {
+		const em = await login();
+		expect(await em.loadSlotJson('recovery-split')).toBeNull();
+		await em.updateSlotJson('recovery-split', () => ({ total: 5 }));
+		expect(await em.loadSlotJson('recovery-split')).toEqual({ total: 5 });
+	});
+
+	it('serializes updates of one slot, so neither drops the other\'s change', async () => {
+		const em = await login();
+		await Promise.all([
+			em.updateSlotJson('holdings', (cur) => ({ ...cur, a: 1 })),
+			em.updateSlotJson('holdings', (cur) => ({ ...cur, b: 2 })),
+		]);
+		expect(await em.loadSlotJson('holdings')).toEqual({ a: 1, b: 2 });
+	});
+
+	it('refuses to update a slot it cannot read rather than overwrite it', async () => {
+		const em = await login();
+		const before = new Set(rows.keys());
+		await em.updateSlotJson('holdings', () => ({ a: 1 }));
+		const slotRow = [...rows.keys()].find((u) => !before.has(u));
+		rows.set(slotRow, 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+		await expect(em.updateSlotJson('holdings', (cur) => ({ ...cur, b: 2 }))).rejects.toThrow(/cannot be read; nothing was written/);
+		expect(rows.get(slotRow)).toBe('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+	});
+});

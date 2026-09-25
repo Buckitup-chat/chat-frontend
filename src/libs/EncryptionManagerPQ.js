@@ -865,6 +865,59 @@ export class EncryptionManagerPQ extends EventTarget {
     }
   }
 
+  // Named JSON slots
+
+  /**
+   * A named slot's JSON value, or null when the slot was never written or
+   * does not decrypt. For readers only: a writer goes through updateSlotJson,
+   * which refuses rather than build on a value it could not read.
+   */
+  async loadSlotJson(name) {
+    if (!this.#currentUserHash) throw new Error('No user is currently logged in');
+    if (!this.#cryptSkey) return null;
+    const uuid = await this.#slotUuid(name);
+    if (!uuid) return null;
+    const row = await getStorageRow(this.#currentUserHash, uuid);
+    if (!row || !row.value_b64) return null;
+    try {
+      return await this.#decryptJson(row.value_b64);
+    } catch (e) {
+      console.error(`Failed to decrypt the ${name} slot:`, e);
+      return null;
+    }
+  }
+
+  // Read-modify-writes of one named slot are serialized, as the root's are:
+  // two updates that both read before either wrote would each drop the other's change.
+  #slotQueues = new Map();
+
+  /**
+   * Replaces a named slot's JSON value with `mutate(current)`, where current
+   * is null for a slot never written. A value that is there and does not
+   * decrypt fails the update instead of being overwritten from null.
+   */
+  updateSlotJson(name, mutate) {
+    const run = (this.#slotQueues.get(name) ?? Promise.resolve()).then(async () => {
+      if (!this.#currentUserHash || !this.#cryptSkey) throw new Error('No user is currently logged in');
+      const uuid = await this.#slotUuid(name);
+      const row = uuid ? await getStorageRow(this.#currentUserHash, uuid) : null;
+      let current = null;
+      if (row && row.value_b64) {
+        try {
+          current = await this.#decryptJson(row.value_b64);
+        } catch (e) {
+          throw new Error(`The ${name} slot on the server cannot be read; nothing was written`, { cause: e });
+        }
+      }
+      const next = await mutate(current);
+      const { valueB64, hashB64 } = await this.#encryptJson(next);
+      await this.#writeSlot(name, valueB64, hashB64);
+      return next;
+    });
+    this.#slotQueues.set(name, run.catch(() => undefined));
+    return run;
+  }
+
   // Avatar Encryption
 
   async encryptAndStoreAvatar(imageBlob) {
