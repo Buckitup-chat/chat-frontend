@@ -26,7 +26,7 @@ import { DialogCrypto } from '@/libs/DialogCrypto';
 
 const VECTORS_PATH = path.join(__dirname, 'vectors', 'pq-conformance.json');
 
-// Deterministic byte patterns — recognizable, никакой криптографии не нужно:
+// Deterministic byte patterns — recognizable, and no real crypto needed:
 // the payload contract is about ENCODING bytes, not about their meaning.
 const bytes = (len: number, seed: number) =>
 	Uint8Array.from({ length: len }, (_, i) => (i * 7 + seed) % 251);

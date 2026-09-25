@@ -58,18 +58,15 @@
 <style lang="scss" scoped></style>
 
 <script setup>
-import { userPQStore } from '@/store/userPQ.store';
-
+import { decryptBackupFile, isEncryptedBackupFile } from '@/lib/backupCrypto';
+import { parseBackupContents } from '@/lib/backupContents';
+import { useRestoreAccount } from '@/composables/useRestoreAccount';
 
 import { ref, inject } from 'vue';
 import errorMessage from '@/utils/errorMessage';
 
 const $swal = inject('$swal');
-const $userPQ = userPQStore();
-const $mitt = inject('$mitt');
-const $enigma = inject('$enigma');
-const $router = inject('$router');
-const $swalModal = inject('$swalModal');
+const { restore } = useRestoreAccount();
 
 const fileString = ref();
 const requestDecrypt = ref();
@@ -93,18 +90,39 @@ const handleRestore = async (event) => {
 		fileString.value = e.target.result;
 		if (!fileString.value) return;
 
+		// An encrypted backup is JSON as well — the envelope carries its KDF
+		// parameters in the clear — so "does it parse" cannot tell the two
+		// apart. Ask the format itself.
+		if (isEncryptedBackupFile(fileString.value)) {
+			requestDecrypt.value = true;
+			return;
+		}
+
 		let data;
 		try {
 			data = JSON.parse(fileString.value);
-		} catch (_) {
-			// not JSON — likely encrypted
+			// JSON.parse accepts "null", "0" and "\"text\"" — all of them parse and
+			// none of them is a vault. Without this, applyBackup reads .identity
+			// off null and the screen reports a restore error for a file it should
+			// have refused, with the file input left unmounted.
+			if (!data || typeof data !== 'object') throw new Error('not a vault export');
+		} catch {
+			// Neither a plain export nor a backup envelope. Not a password
+			// problem either: asking for one here would offer a prompt that
+			// cannot succeed.
+			$swal.fire({
+				icon: 'error',
+				title: 'Not a backup file',
+				text: 'Choose a .bukitup backup exported from this app.',
+				timer: 8000,
+			});
+			// Remount the input, or picking the same file again fires no change
+			// event at all and the screen simply stops responding.
+			fileInputKey.value++;
+			return;
 		}
 
-		if (!data) {
-			requestDecrypt.value = true;
-		} else {
-			await applyBackup(data);
-		}
+		await applyBackup(data);
 	};
 
 	reader.onerror = () => {
@@ -122,10 +140,9 @@ const handleRestore = async (event) => {
 const decrypt = async () => {
 	try {
 		processing.value = true;
-		await new Promise(r => setTimeout(r, 100));
-		const base64Password = btoa(password.value);
-		const decryptedBase64 = $enigma.decryptData(fileString.value, base64Password);
-		const jsonString = decodeURIComponent(escape(atob(decryptedBase64)));
+		// No hand-rolled yield before the derivation: PBKDF2 runs in WebCrypto,
+		// off the main thread, so the spinner paints on its own.
+		const jsonString = await decryptBackupFile(fileString.value, password.value);
 		const data = JSON.parse(jsonString);
 		await applyBackup(data);
 	} catch (error) {
@@ -144,36 +161,10 @@ const decrypt = async () => {
 
 const applyBackup = async (data) => {
 	try {
-		if (!data.identity || !data.keys || !data.identity.user_hash) {
-			$swal.fire({
-				icon: 'error',
-				title: 'Invalid backup format',
-				text: 'This backup file is not compatible with the current version.',
-				timer: 10000,
-			});
+		if (!(await restore(parseBackupContents(data)))) {
+			fileInput.value = null;
 			fileInputKey.value++;
-			return;
 		}
-
-		const existing = $userPQ.myLocalUsers?.find(u => u.user_hash === data.identity.user_hash);
-		if (existing) {
-			const confirmed = await $swalModal.value.open({
-				id: 'confirm',
-				title: 'Account restore',
-				content: `Account <strong>${data.identity.name}</strong> already exists. Replace it?`,
-			});
-			if (!confirmed) {
-				fileInput.value = null;
-				fileInputKey.value++;
-				return;
-			}
-		}
-
-		await $userPQ.importBackup({ identity: data.identity, keys: data.keys });
-
-		$mitt.emit('account::created');
-		$mitt.emit('modal::close');
-		$router.replace({ name: 'account_info' });
 	} catch (error) {
 		console.error('applyBackup error:', error);
 		$swal.fire({
@@ -182,6 +173,7 @@ const applyBackup = async (data) => {
 			text: errorMessage(error),
 			timer: 15000,
 		});
+		fileInputKey.value++;
 	}
 };
 </script>

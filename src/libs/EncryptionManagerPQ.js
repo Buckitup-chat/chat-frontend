@@ -16,9 +16,10 @@ import { recoverIntents } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { freshestOf, getAccepted, recordAccepted } from '@/lib/data/acceptedSnapshot';
 import { getUserCardsCollection } from '@/lib/data/collections';
-import { getStorageRow, upsertStorageRow, upsertStorageJsonPatch } from '@/lib/data/userStorage';
+import { getStorageRow, putStorageRow, putStorageJsonPatch } from '@/lib/data/userStorage';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
+import { publishVault } from '@/lib/recovery/vault';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
@@ -584,10 +585,14 @@ export class EncryptionManagerPQ extends EventTarget {
   async exportVaultKeys() {
     if (!this.#currentVault) throw new Error('Vault not loaded');
 
+    // contact_skey is the secp256k1 key behind signContactChallenge — the
+    // optical handshake. Without it an imported account cannot add a contact
+    // in person, so a backup is refused without it, on both sides.
     return {
       sign_skey: arrayToBase64(this.#signSkey),
       crypt_skey: arrayToBase64(this.#cryptSkey),
       evm_skey: this.#evmSkey,
+      contact_skey: this.#contactSkey,
       sign_pkey: this.#localUserCards.find(u => u.user_hash === this.#currentUserHash).sign_pkey,
       crypt_pkey: this.#localUserCards.find(u => u.user_hash === this.#currentUserHash).crypt_pkey
     };
@@ -596,6 +601,13 @@ export class EncryptionManagerPQ extends EventTarget {
   async importVaultKeys(keys, identity) {
     if (!keys.evm_skey) {
       throw new Error('EVM key missing from backup. Cannot safely restore account.');
+    }
+    // Minting a replacement would re-certify the card with a key no other
+    // device of this account holds, and break every handshake those devices
+    // start. No backward compatibility is owed (CLAUDE.md): a backup written
+    // before the key was exported is test data.
+    if (!keys.contact_skey) {
+      throw new Error('Contact key missing from backup. Cannot safely restore account.');
     }
 
     const userVault = await connect({
@@ -610,13 +622,21 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`sign_skey`, signSkey);
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, keys.evm_skey);
+    await userVault.set(`contact_skey`, keys.contact_skey);
 
     identity.vaultId = userVault.id;
     this.#localUserCards.push(identity);
     await this.#saveLocalUserCards();
 
     // Same dependency as registration: the card may not exist on this Pi yet.
-    await this.#pushOwnCard(identity, { signSkey });
+    // Not fatal: the vault and the local card are complete, and a card write
+    // lost here is republished on the next login. Failing the import instead
+    // would leave an account that is here but cannot be imported again.
+    try {
+      await this.#pushOwnCard(identity, { signSkey });
+    } catch (e) {
+      console.warn('[EncryptionManagerPQ] card publication deferred to next login:', e?.message ?? e);
+    }
 
     await this.login(identity.user_hash);
   }
@@ -656,57 +676,62 @@ export class EncryptionManagerPQ extends EventTarget {
     return JSON.parse(new TextDecoder().decode(decrypted));
   }
 
-  /** Decrypted root record, or null when this account has none yet. */
-  async #readRoot() {
+  /**
+   * Decrypted root record, or null when this account has none yet. A row that
+   * is there but does not decrypt is null for a reader and an error for a
+   * writer: a patch built on that null would sign a root with no slot map.
+   */
+  async #readRoot({ strict = false } = {}) {
     const row = await getStorageRow(this.#currentUserHash, this.#rootSlotUuid());
     if (!row || !row.value_b64) return null;
     try {
       return await this.#decryptJson(row.value_b64);
     } catch (e) {
+      if (strict) throw new Error('The account record on the server cannot be read; nothing was written', { cause: e });
       console.error('Failed to decrypt the user_storage root record:', e);
       return null;
     }
   }
 
+  // Root writes are JSON-patch intents (storageIntent.ts): the patch is merged
+  // onto the base the signer actually uses, so a field another device wrote
+  // in between survives without a read-modify-write here. Resolves only once
+  // the server has the revision; a locally kept intent is not a save.
   async #writeRootPatch(patch) {
-    const write = await upsertStorageJsonPatch({
+    await putStorageJsonPatch({
       userHash: this.#currentUserHash,
       uuid: this.#rootSlotUuid(),
       jsonPatch: patch,
       signSkey: this.#signSkey,
     });
-    const sync = await write.sync;
-    if (sync.status !== 'synced') {
-      throw new Error('Storage saved locally but failed to sync to the server');
-    }
   }
 
   async #writeSlotRow(uuid, valueB64, hashB64) {
-    const write = await upsertStorageRow({
+    await putStorageRow({
       userHash: this.#currentUserHash,
       uuid,
       valueB64,
       hashB64,
       signSkey: this.#signSkey,
     });
-    const sync = await write.sync;
-    if (sync.status !== 'synced') {
-      throw new Error('Saved locally but failed to sync to the server');
-    }
   }
 
-  /** Signed tombstone for a slot row another client's map won over. */
+  /** Signed tombstone; deletion is a revision like any other and fails like one. */
+  async #tombstoneRow(uuid) {
+    await putStorageRow({
+      userHash: this.#currentUserHash,
+      uuid,
+      valueB64: '',
+      hashB64: null,
+      signSkey: this.#signSkey,
+      deletedFlag: true,
+    });
+  }
+
+  /** Tombstone for a slot row another client's map won over. */
   async #tombstoneSlotRow(uuid) {
     try {
-      const write = await upsertStorageRow({
-        userHash: this.#currentUserHash,
-        uuid,
-        valueB64: '',
-        hashB64: null,
-        signSkey: this.#signSkey,
-        deletedFlag: true,
-      });
-      await write.sync;
+      await this.#tombstoneRow(uuid);
     } catch (e) {
       // The row is already unreferenced; failing to mark it is not worth
       // failing the user's save over.
@@ -752,6 +777,63 @@ export class EncryptionManagerPQ extends EventTarget {
     }
   }
 
+  /**
+   * Seals the account under a wrap key and publishes it where only that key
+   * can find it (lib/recovery/vault). The root record names the current vault
+   * and every earlier one not yet retired: the keys inside never change, so a
+   * vault left live would keep an old set of shares able to open the account,
+   * and a tombstone that fails is kept on the list for the next attempt
+   * rather than forgotten.
+   *
+   * Vault first, root second, tombstones last. A crash before the root write
+   * leaves the new vault live and unreferenced, which is safe only because
+   * its key is never shown before this returns (userPQ.store
+   * createRecoveryBackup); a failure after the root write leaves the previous
+   * backup usable, since nothing is retired until the new one is on record.
+   */
+  async publishRecoveryVault(wrapKey, json) {
+    const userHash = this.#currentUserHash;
+    if (!userHash || !this.#signSkey || !this.#cryptSkey) {
+      throw new Error('No user is currently logged in');
+    }
+    // Each root patch is signed with whatever account is current when it is
+    // written; one switched in between would get this account's vault list.
+    const sameAccount = () => {
+      if (this.#currentUserHash !== userHash) throw new Error('The account changed while the backup was being written');
+    };
+    // A root that is there but does not decrypt would fail the patch only
+    // after the vault is already live; refuse before publishing anything.
+    await this.#readRoot({ strict: true });
+    const uuid = await publishVault({ userHash, signSkey: this.#signSkey, wrapKey, json });
+    sameAccount();
+    // Only the address: mergeJsonPatch moves the vault it replaces onto
+    // staleVaults against the base the patch actually lands on.
+    await this.#writeRootPatch({ vaultUuid: uuid });
+    await this.#retireStaleVaults(sameAccount);
+  }
+
+  /** Tombstones every vault the root lists as retired-pending; the ones that
+   * fail stay listed for the next attempt, and the failure is reported. */
+  async #retireStaleVaults(check) {
+    check();
+    const root = (await this.#readRoot({ strict: true })) || {};
+    const retired = [];
+    let failure = null;
+    for (const uuid of root.staleVaults ?? []) {
+      try {
+        await this.#tombstoneRow(uuid);
+        retired.push(uuid);
+      } catch (e) {
+        failure = e;
+      }
+    }
+    if (retired.length) {
+      check();
+      await this.#writeRootPatch({ retiredVaults: retired });
+    }
+    if (failure) throw new Error('An earlier backup could not be retired; create the backup again to retry.', { cause: failure });
+  }
+
   // Update User Storage
 
   async updateUserStorage({ name, notes, avatarUuid, avatarDataUrl }) {
@@ -767,8 +849,9 @@ export class EncryptionManagerPQ extends EventTarget {
     // save) must be omitted from the patch, not written as undefined — a
     // full-record spread would have serialized it away and silently erased
     // the existing value. Merging (storageIntent.ts's mergeJsonPatch) also
-    // means the slot map and any other field written by another device
-    // concurrently is preserved rather than needing a fresh read here.
+    // means the slot map, the vault's address and any other field written by
+    // another device concurrently is preserved rather than needing a fresh
+    // read here.
     const patch = {};
     if (name !== undefined) patch.name = name;
     if (notes !== undefined) patch.notes = notes;
@@ -924,17 +1007,7 @@ export class EncryptionManagerPQ extends EventTarget {
     // avatar must be accepted by the server FIRST — otherwise a profile can
     // sync successfully while pointing at an avatar row that never landed,
     // and another device renders a broken reference.
-    const avatarWrite = await upsertStorageRow({
-      userHash: this.#currentUserHash,
-      uuid,
-      valueB64: combined,
-      hashB64: bytesToHex(sha256(new Uint8Array(encryptedData))),
-      signSkey: this.#signSkey,
-    });
-    const avatarSync = await avatarWrite.sync;
-    if (avatarSync.status !== 'synced') {
-      throw new Error('Avatar saved locally but failed to sync to the server');
-    }
+    await this.#writeSlotRow(uuid, combined, bytesToHex(sha256(new Uint8Array(encryptedData))));
 
     return uuid;
   }

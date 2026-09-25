@@ -67,11 +67,11 @@ vi.mock('@/lib/data/ingest', () => ({
 
 vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async () => null,
-	upsertStorageRow: async () => {
+	putStorageRow: async () => {
 		order.push('user_storage');
-		return { sync: Promise.resolve({ status: 'synced' }) };
+		return {};
 	},
-	upsertStorageJsonPatch: async () => {
+	putStorageJsonPatch: async () => {
 		order.push('user_storage');
 		return { sync: Promise.resolve({ status: 'synced' }) };
 	},

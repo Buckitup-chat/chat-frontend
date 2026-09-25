@@ -1,6 +1,6 @@
 // Word-level diff for the edit history (board screen 06).
 //
-// The board highlights what changed INSIDE the text — "в 19:30, не в 19:00"
+// The board highlights what changed INSIDE the text — "at 19:30, not 19:00"
 // with the changed words marked — instead of a separate compare mode. An LCS
 // over words is enough at message size; anything smarter buys nothing a chat
 // message can show.

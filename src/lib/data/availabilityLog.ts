@@ -1,4 +1,4 @@
-// Local backfill journal per file (screen 05, "Ход добора").
+// Local backfill journal per file (screen 05, "backfill progress").
 //
 // The protocol does not record when chunks reached this node — chunk rows
 // carry the uploader's signing time, not arrival time — so the only honest

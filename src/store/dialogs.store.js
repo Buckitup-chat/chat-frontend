@@ -968,7 +968,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     /**
      * Uploads a file and sends the message referencing it. Progress is in
-     * chunks (§2.1 — "chunks, not percentage guesses"). Returns the fileId.
+     * chunks (§2.1 — chunks, not guessed percentages). Returns the fileId.
      */
     /**
      * Uploads one attachment and returns its content part.

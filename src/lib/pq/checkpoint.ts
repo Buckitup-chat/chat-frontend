@@ -1,5 +1,5 @@
 // Signed DAG checkpoint: commitments over a dialog's causal history and its
-// materialized view (ТЗ "Signed DAG Checkpoint + View Root").
+// materialized view (spec: "Signed DAG Checkpoint + View Root").
 //
 // Two independent fingerprints travel inside an ordinary encrypted message
 // (content type "checkpoint", registry 07):

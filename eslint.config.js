@@ -23,7 +23,6 @@ export default [
 				API_SURL: 'readonly',
 				API_SPATH: 'readonly',
 				ELECTRIC_API_URL: 'readonly',
-				CONNECTOR_URL: 'readonly',
 				IS_PRODUCTION: 'readonly',
 				IS_PRODUCTION_API: 'readonly',
 				TM_BOT: 'readonly',

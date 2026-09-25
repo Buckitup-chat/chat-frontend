@@ -35,12 +35,12 @@ vi.mock('@/lib/data/ingest', () => ({
 vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async (_userHash, uuid) =>
 		rows.has(uuid) ? { uuid, value_b64: rows.get(uuid).valueB64, deleted_flag: rows.get(uuid).deletedFlag ?? false } : null,
-	upsertStorageRow: async ({ uuid, valueB64, deletedFlag }) => {
+	putStorageRow: async ({ uuid, valueB64, deletedFlag }) => {
 		rows.set(uuid, { valueB64, deletedFlag: !!deletedFlag });
 		upsertCalls.push({ uuid, valueB64, deletedFlag: !!deletedFlag });
 		return { sync: Promise.resolve({ status: 'synced' }) };
 	},
-	upsertStorageJsonPatch: async ({ uuid, jsonPatch, deletedFlag }) => {
+	putStorageJsonPatch: async ({ uuid, jsonPatch, deletedFlag }) => {
 		const valueB64 = JSON.stringify(jsonPatch);
 		rows.set(uuid, { valueB64, deletedFlag: !!deletedFlag });
 		upsertCalls.push({ uuid, valueB64, deletedFlag: !!deletedFlag });

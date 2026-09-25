@@ -198,8 +198,10 @@ const scheduleDecrypt = (newRows) => {
                 const verdict = await $dialogs.admitMessageRow(row);
                 // §4.3 ✓✓: arrival is a fact, so the delivered receipt goes
                 // out automatically once the row verifies — unlike "read",
-                // which stays a deliberate act.
-                if (verdict.status === 'verified' && !row.deleted_flag && row.sender_hash !== $userPQ.currentUserHash && row.sign_hash) {
+                // which stays a deliberate act. A tombstone is a revision
+                // like any other and gets its own receipt: the sender learns
+                // the deletion reached the peer, not just the server.
+                if (verdict.status === 'verified' && row.sender_hash !== $userPQ.currentUserHash && row.sign_hash) {
                     $dialogs.sendDeliveredReceipt(peerHash.value, {
                         messageId: row.message_id, messageSignHash: row.sign_hash,
                     });
@@ -278,6 +280,15 @@ const scheduleDecrypt = (newRows) => {
                 entry._verify = 'verified';
                 entry._dagVerified = true;
                 if (entry._raw.deleted_flag) entry._deleted = true;
+                // The receipt goes out here or never: this row verified
+                // inside the gate rather than at its own admission, and
+                // once it is marked verified the pending filter above
+                // excludes it from every later pass.
+                if (entry._raw.sender_hash !== $userPQ.currentUserHash) {
+                    $dialogs.sendDeliveredReceipt(peerHash.value, {
+                        messageId: entry._raw.message_id, messageSignHash: entry._raw.sign_hash,
+                    });
+                }
             }
         }
 
@@ -762,7 +773,7 @@ const checkAvailability = async (fileId) => {
     try {
         const a = await $dialogs.getFileAvailability(fileId);
         availabilityByFileId.value = { ...availabilityByFileId.value, [fileId]: a };
-        // Screen 05 "Ход добора": what this client has observed, when.
+        // Screen 05, backfill progress: what this client has observed, when.
         if (!a.unknown) recordAvailability(fileId, a.present, a.total);
     } catch (e) {
         console.warn('Availability check failed for', fileId, e);
@@ -829,7 +840,7 @@ const handlePlayVideo = async (part) => {
                     [id]: { ...cur, status: cur.url ? cur.status : 'opening', done: p.done, total: p.total },
                 };
             },
-            // §1.4 "играть можно с первого куска": the prefix becomes a
+            // §1.4, playback starts from the first chunk: the prefix becomes a
             // playable src immediately; the full file replaces it when done.
             onPartial: (url) => {
                 videosByFileId.value = {

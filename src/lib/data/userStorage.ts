@@ -35,6 +35,8 @@ import { pinActiveSession, assertSessionUnchanged } from './sessionGuard';
 import { SessionFencedError } from './outbox';
 import { nextOwnerTimestamp } from './time';
 import type { UserStorageRow } from './types';
+import { readShapeOnce } from './shapeRead';
+import { wireBool } from '@/lib/pq/schema';
 
 // Slot addresses are not constants here: reads are public, so a fixed uuid
 // per slot would be the same address on every account. See lib/pq/slotId for
@@ -275,6 +277,32 @@ export function upsertStorageJsonPatch(opts: UpsertJsonPatchOptions): Promise<Up
 	return upsertStorageEditLive({ userHash, uuid, deletedFlag, jsonPatch }, null, signSkey);
 }
 
+/**
+ * A write that counts only once the server has it. "Saved on this device" is
+ * not something to tell a person who just pressed Save, nor a vault the
+ * shares would find, so every caller with a person or a key behind it uses
+ * this; upsertStorageRow is for the ones that can live with a local-only row.
+ */
+export async function putStorageRow(opts: UpsertOptions): Promise<UserStorageRow> {
+	return settledOnServer(await upsertStorageRow(opts));
+}
+
+/** putStorageRow for a JSON-patch intent (the root record). */
+export async function putStorageJsonPatch(opts: UpsertJsonPatchOptions): Promise<UserStorageRow> {
+	return settledOnServer(await upsertStorageJsonPatch(opts));
+}
+
+// 'awaiting-recovery' is a durable local intent, not a server verdict: it
+// throws here just like 'failed', or a caller would report as saved (or show
+// shares for) a row the server does not have yet.
+async function settledOnServer(write: UpsertResult): Promise<UserStorageRow> {
+	const sync = await write.sync;
+	if (sync.status !== 'synced') {
+		throw new Error('Saved on this device, but the server did not take it', { cause: sync.error ?? sync.status });
+	}
+	return write.row;
+}
+
 /** Sync status of the locally stored revision, for UI indicators. */
 export async function getStorageSyncStatus(userHash: string, uuid: string): Promise<StorageSyncStatus | null> {
 	const local = await getLocalEntry(userHash, uuid);
@@ -282,3 +310,47 @@ export async function getStorageSyncStatus(userHash: string, uuid: string): Prom
 }
 
 export { entityKeyFor as storageEntityKeyFor };
+
+// ---------- account-free reads ----------
+//
+// Everything above needs an account: the collection is built per user_hash and
+// the KV is keyed by it. Recovery has neither, so it reads the raw shape.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Reads the live user_storage rows at one uuid, without an account.
+ *
+ * Every other reader here goes through the account's collection, because
+ * every other caller has an account. Recovery does not: the signing key is
+ * gone, so `user_hash` cannot be computed and the collection cannot be built.
+ * Reads are public (pq_user_storage §FR-3), and a uuid derived from the
+ * recovered secret is enough to name the rows.
+ *
+ * Plural on purpose. The row key is (user_hash, uuid) and only half of it is
+ * known here, so anyone who learns the locator — every guardian does, it
+ * travels with their share — can write their own row at the same address.
+ * Returning the first match would let one such row shadow the real vault and
+ * report the backup as missing. The caller tries each candidate; AES-GCM is
+ * what identifies the owner's row, and nothing else can.
+ *
+ * An empty array means nothing is stored there — a legitimate answer meaning
+ * this secret has no backup on this server.
+ */
+export async function getPublicStorageRowsByUuid(
+	uuid: string, signal?: AbortSignal,
+): Promise<UserStorageRow[]> {
+	// Validation, not sanitization, as with every other identifier this layer
+	// puts in a where clause: encodeURIComponent protects the URL, not the SQL
+	// behind it, and this uuid can arrive from a guardian's message.
+	if (!UUID_RE.test(uuid)) throw new Error(`Invalid user_storage uuid: ${JSON.stringify(uuid)}`);
+
+	// readShapeOnce, not the collection: it forces a fresh snapshot, which
+	// matters here because recovery reads a row it may have written seconds ago
+	// on another device. wireBool, not a local truthiness test: no Electric
+	// parser runs on a raw shape read, so a tombstone arrives as true, 't', 1
+	// or '1' depending on the hop, and misreading one hands back a vault its
+	// owner deliberately revoked.
+	const rows = await readShapeOnce<UserStorageRow>('user_storage', `uuid='${uuid}'`, signal);
+	return rows.filter((v) => !wireBool(v.deleted_flag));
+}

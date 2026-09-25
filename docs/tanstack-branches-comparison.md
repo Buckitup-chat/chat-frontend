@@ -1,222 +1,226 @@
-# Сравнение веток миграции на TanStack DB
+# Comparing the TanStack DB migration branches
 
-Две ветки решают одну задачу — уход с PGlite на Electric-шейпы + TanStack DB —
-разными архитектурами. Документ сопоставляет решения по одному, с
-достоинствами и недостатками каждого, для совместного обсуждения перед выбором
-целевой архитектуры.
+Two branches solve the same task — moving off PGlite onto Electric shapes +
+TanStack DB — with different architectures. This document sets the decisions side
+by side, with the merits and drawbacks of each, for a joint discussion before the
+target architecture is chosen.
 
-Сравниваются: **`docs/tanstack-migration`** (интеграционная ветка —
-`tanstack-migration`) и **`feat/user-domain-tanstack-db-migration`**.
-Состояние зафиксировано по коммитам `309731b` и `018515e` соответственно;
-цифры и наблюдения относятся к этим коммитам.
-
----
-
-## 1. Охват миграции
-
-**`docs/tanstack-migration`** — миграция целиком: все семь таблиц (карточки,
-storage, ключи диалогов, сообщения, версии, реакции, receipts), PGlite и его
-схемы удалены, добавлены персистентность коллекций, durable outbox, поддержка
-нескольких вкладок.
-
-**`feat/user-domain-…`** — вертикальный срез: домен user (`user_cards` +
-`user_storage`). Диалоги работают на PGlite; два движка сосуществуют.
-
-| | Достоинства | Недостатки |
-|---|---|---|
-| `docs/…` | Целевое состояние достигнуто; PGlite-класс проблем закрыт; сквозные свойства (outbox, вкладки) проверяются на всей системе | Большой объём изменений в одном комплекте — ревьюить и откатывать труднее |
-| `feat/…` | Меньший радиус поражения на шаг; домен можно довести до качества изолированно | Самая сложная часть (append-only диалоги, версии, refs) ещё впереди; период двух движков — двойная стоимость поддержки |
-
-## 2. Путь записи
-
-Обе ветки работают без сети: запись сначала попадает в персистентную очередь
-на диске и только потом отправляется, поэтому отсутствие сети её не теряет.
-Различается устройство очереди и то, что видит вызывающий код.
-
-**`docs/…`**: одна логическая запись = одна подписанная мутация. Она кладётся
-в durable outbox (IndexedDB) **до** первой попытки отправки, затем идёт в
-`/ingest_each` через `sendMutationsAndAwaitShape`. Нет сети — попытка падает,
-запись остаётся в очереди; дренаж по логину и по событию `online` переигрывает
-её в порядке добавления. Реплей дословный: мутация несёт собственную
-ML-DSA-подпись над содержимым строки и не протухает — живой ключ нужен только
-для подписи auth-челленджа самого запроса, поэтому дренаж возможен лишь под
-разблокированным аккаунтом. Ошибки классифицируются транспортом (transient /
-permanent) и возвращаются вызвавшему коду. Покрыто `tests/offlineWrite.test.ts`.
-
-**`feat/…`**: запись кладётся в персистентную очередь (`userQueue.ts`) со
-статусами `pending → awaiting_remote → удалена / quarantined`; отправку ведёт
-планировщик с debounce и backoff, он же пропускает цикл при `navigator.onLine
-=== false`. Повторные правки одного ключа коалесцируются в один entry
-(merge patch).
-
-| | Достоинства | Недостатки |
-|---|---|---|
-| `docs/…` | Простой контроль потока: вызвавший код получает результат этой конкретной записи; порядок задаётся вызовами; очередь общая для всех семи таблиц | Логика «что делать при отказе» распределена по вызывающим местам; вызов без сети возвращает ошибку, хотя запись впоследствии доедет — в UI это выглядит как отказ |
-| `feat/…` | Все записи проходят один конвейер; коалесинг экономит трафик при серии правок; отправка не начинается, когда браузер знает, что сети нет | Коалесинг = семантика last-write-wins, верная для карточки, но не для append-only сообщений; результат конкретной записи вызвавшему коду не возвращается; очередь покрывает только домен user |
-
-## 3. Подтверждение доставки
-
-**`docs/…`**: сервер возвращает `txid`; `awaitTxId(txid)` — точное «строка
-дошла до коллекции». Конфликт уникальности разрешается проверкой идентичности
-подписи: либо «наша строка уже на сервере» (успех), либо явная перманентная
-ошибка.
-
-**`feat/…`**: после отправки фиксируется snapshot; подтверждение — совпадение
-полей snapshot и строки, пришедшей из шейпа (с канонизацией bytea/base64).
-Состояние `awaiting_remote` хранится в IndexedDB и переживает перезагрузку.
-
-| | Достоинства | Недостатки |
-|---|---|---|
-| `docs/…` | Подтверждение точное, не зависит от формата полей; конфликт всегда завершается определённым исходом | Барьер живёт в памяти: после перезагрузки подтверждение «доигрывается» реплеем outbox, а не сохранённым состоянием |
-| `feat/…` | Ожидание подтверждения durable — переживает перезагрузку без реплея | Сравнение по полям чувствительно к дрейфу сериализации (новая колонка, bigint/number, padding); несовпадение не имеет исхода — entry остаётся в `awaiting_remote` без ошибки и таймаута, оверлей продолжает заслонять серверную строку |
-
-## 4. Оптимистичное состояние
-
-**`docs/…`**: in-memory слой (`optimisticItems`, `pendingEdits`,
-`reactionIntents`) с пер-элементным статусом (`sending / synced / error`,
-маркер отклонённой правки). Живёт в памяти вкладки.
-
-**`feat/…`**: оверлей — TanStack-коллекции, проецируемые из персистентной
-очереди; после перезагрузки восстанавливается (`ensureRehydrated`). Чтение идёт
-через фасад с приоритетом `pending > electric > preview > cache`.
-
-| | Достоинства | Недостатки |
-|---|---|---|
-| `docs/…` | UI читает Electric-коллекции напрямую; статус каждого элемента виден пользователю | Оптимистичное состояние теряется при перезагрузке: неотправленное сообщение доедет (outbox), но до подтверждения его не видно — пользователь может отправить повторно |
-| `feat/…` | Значение переживает перезагрузку и остаётся видимым — для профиля это ровно ожидаемый UX | Каждый потребитель обязан ходить через merge-фасад четырёх коллекций; пер-элементного статуса нет — неотправленное неотличимо от сохранённого; «вечный pending» из §3 заслоняет сервер без индикации |
-
-## 5. Судьба отклонённой записи
-
-**`docs/…`**: transient — остаётся в outbox для реплея; permanent — запись
-удаляется из очереди, в UI показывается ошибка (если вкладка жива).
-
-**`feat/…`**: permanent → `quarantined` с `lastError`; entry сохраняется,
-следующая правка того же ключа возвращает его в `pending`; счётчики
-(`queueStatus`) реактивны и доступны UI.
-
-| | Достоинства | Недостатки |
-|---|---|---|
-| `docs/…` | Исход всегда определён; пользователь видит ошибку в момент отказа | Если отказ случился при реплее после перезагрузки — контент удаляется без следа для пользователя |
-| `feat/…` | Контент не теряется; реактивация естественна; наблюдаемость из коробки | Карантин молчалив: без UI поверх счётчиков пользователь не узнаёт об отказе; карантинное значение продолжает показываться как данные |
-
-## 6. Read-эндпоинты
-
-**`docs/…`**: все шейпы через `/electric/v1/shapes` — эндпоинт, санкционированный
-бэкенд-командой (2026-07-31). **`feat/…`**: шейпы через `/user_card` и
-`/user_storage` — проксирующие эндпоинты с собственной логикой оффсетов,
-объявленные устаревшими.
-
-Здесь различие не в качестве решения, а в синхронизации с планами бэкенда:
-код на устаревших эндпоинтах предстоит переводить при их удалении. Перевод
-механический (URL + параметры).
-
-## 7. Wire-формат
-
-**`docs/…`**: состав полей мутации сверен с Ecto-схемами
-(`chat/lib/chat/data/schemas/*.ex`); `hash_b64` не отправляется, `sign_hash`
-только у таблиц, где колонка существует. **`feat/…`**: отправляет `hash_b64`
-в `user_storage` (сервер игнорирует лишние поля при cast, вреда нет —
-но поле мёртвое); состав подписи корректен в обеих ветках.
-
-## 8. Монотонность `owner_timestamp`
-
-**`docs/…`**: `nextOwnerTimestamp = max(now, prev + 1)` + сериализация записей
-одной сущности; покрыто тестами на две правки в одну секунду.
-**`feat/…`**: `Math.floor(Date.now() / 1000)` — две правки карточки в одну
-секунду дают одинаковый таймстемп, сервер отклоняет вторую («not newer»), и
-она попадает в карантин. Исправление точечное (та же формула + очередь).
-
-## 9. Персистентность чтения (кэш между сессиями)
-
-**`docs/…`**: официальные пакеты (`@tanstack/db-sqlite-persistence-core` +
-браузерный адаптер, wa-sqlite поверх OPFS); Electric хранит курсор шейпа в
-метаданных и докачивает **дельту** после перезагрузки. Цена: ~1 МБ wasm,
-требование OPFS, исключения в `optimizeDeps`.
-
-**`feat/…`**: самописный кэш (`userCache.ts`) — строки дублируются в
-IndexedDB и поднимаются на старте. Курсора нет: шейп перекачивается целиком
-при каждой загрузке; кэш закрывает только «показать до ответа сети». Цена:
-нулевые зависимости, работает везде, где есть IndexedDB.
-
-| | Достоинства | Недостатки |
-|---|---|---|
-| `docs/…` | Дельта-докачка — трафик и время старта не растут с историей; поддержка апстрима | Тяжёлая зависимость; OPFS нужен в целевых браузерах (WebView на Pi — проверить) |
-| `feat/…` | Просто, переносимо, без wasm | Полная перекачка каждого шейпа на каждый старт; двойное хранение (кэш + коллекция) своими руками |
-
-## 10. Слоты `user_storage`
-
-**`docs/…`**: фиксированные UUID слотов (`STORAGE_SLOTS.profile/contacts`) +
-чтение legacy-имён. **`feat/…`**: `deriveStorageUuid` — детерминированный
-UUIDv8 из логического имени (sha256): более общее решение, любой будущий слот
-получает идентификатор без реестра.
-
-Общий недостаток обоих: идентификатор одинаков у всех аккаунтов и предсказуем,
-а чтение `user_storage` публичное («any user can read any storage»,
-`docs/pq/reqs/pq_user_storage.md` §2.2) — то есть по чужому `user_hash` можно
-узнать, что у пользователя есть профиль и когда он его правил. Значение
-зашифровано, назначение записи и хронология — нет. Деривация из имени вдобавок
-привязывает цепочку `parent_sign_hash` к строке, которую можно переименовать.
-
-Спека предполагает другое: uuid генерируется клиентом случайно, а соответствие
-«слот → uuid» клиент хранит локально (§8.2). Реестр на новом устройстве
-восстанавливается из самих данных — шейп отдаёт все строки своего `user_hash`,
-ключ расшифровки есть, тип записи лежит внутри значения. Решение общее для
-обеих веток (бэклог §5).
-
-## 11. Тесты
-
-**`docs/…`**: 114/114 зелёных; ключевые регрессионные тесты проверены на
-дискриминирующую силу (падают при откате фикса); фейковый транспорт соблюдает
-контракт барьера. Пройдены три раунда внешнего ревью.
-
-**`feat/…`**: 172 теста, высокая плотность (~1800 строк тестов на ~1300 кода),
-осмысленные сценарии (корреляция результатов по index, гонки гидрации,
-ownership). На коммите `018515e` красных 17 — сосредоточены в корреляции
-результатов ingest и чистке legacy-записей, то есть тесты описывают
-поведение, которое в коде ещё не завершено.
-
-## 12. Функциональные различия (факты без оценки)
-
-Есть в `docs/tanstack-migration`, нет в `feat/…`: явные read-receipts,
-несколько вкладок (гейт снят), durable outbox для всех таблиц, шифрование
-локальной очереди (изоляция аккаунтов в одном профиле браузера).
-
-Есть в `feat/…`, нет в `docs/…`: видимый после перезагрузки pending, карантин
-с реактивацией, реактивные счётчики очереди, preview-слой для карточек из
-QR-сканов.
+Compared: **`docs/tanstack-migration`** (integration branch —
+`tanstack-migration`) and **`feat/user-domain-tanstack-db-migration`**. The state
+is taken at commits `309731b` and `018515e` respectively; the numbers and
+observations apply to those commits.
 
 ---
 
-## Кандидаты на перенос между ветками
+## 1. Migration coverage
 
-Идеи из `feat/…`, ложащиеся в `docs/…` точечно: регидрируемый видимый pending
-(outbox уже хранит всё необходимое), карантин вместо удаления при permanent,
-реактивный счётчик очереди, preview-слой, короткое замыкание по
-`navigator.onLine` перед отправкой — сейчас вызов без сети проходит полный
-цикл ретраев и возвращает ошибку, хотя запись уже в очереди и доедет позже.
+**`docs/tanstack-migration`** — the whole migration: all seven tables (cards,
+storage, dialog keys, messages, versions, reactions, receipts), PGlite and its
+schemas removed, with collection persistence, a durable outbox and multi-tab
+support added.
 
-Идеи из `docs/…`, применимые в `feat/…` без смены архитектуры:
-`nextOwnerTimestamp`, переход на `/shapes`, подтверждение по `txid` вместо
-сравнения полей, исход для незавершаемого `awaiting_remote`.
+**`feat/user-domain-…`** — a vertical slice: the user domain (`user_cards` +
+`user_storage`). Dialogs run on PGlite; the two engines coexist.
 
-Способ адресации слотов `user_storage` переносить не из чего: замечание
-бэкенда касается обеих веток. Фиксированные UUID (`docs/…`) и деривация из
-имени слота (`feat/…`) дают идентификаторы, одинаковые у всех аккаунтов, а
-чтение `user_storage` публичное — назначение записи и хронология её правок
-открыты на сервере. Общее решение — случайный uuid на аккаунт с локальным
-реестром (см. бэклог §5).
+| | Merits | Drawbacks |
+|---|---|---|
+| `docs/…` | The target state is reached; the PGlite class of problems is closed; cross-cutting properties (outbox, tabs) are exercised across the whole system | A large body of change in one set — harder to review and to roll back |
+| `feat/…` | A smaller blast radius per step; the domain can be brought to quality in isolation | The hardest part (append-only dialogs, versions, refs) is still ahead; the two-engine period costs double to maintain |
 
-## Вопросы к совместному обсуждению
+## 2. The write path
 
-1. Семантика очереди для диалогов: как модель `feat/…` (map по ключу)
-   расширяется на append-only сообщения с версиями — или для диалогов
-   принимается прямой путь записи?
-2. Подтверждение: `txid` как общий механизм? Это снимает и вопрос дрейфа
-   сравнения полей, и «вечный `awaiting_remote`».
-3. Нужен ли пер-элементный статус синхронизации в UI пользовательского домена
-   (профиль/контакты), или достаточно агрегатных счётчиков?
-4. OPFS/wasm на целевых устройствах (WebView на Pi, Safari): если поддержка
-   подтверждается — дельта-докачка сильный аргумент; если нет — кэш в стиле
-   `feat/…` остаётся запасным вариантом.
-5. Судьба legacy-эндпоинтов: сроки удаления на бэкенде определяют срочность
-   перевода `feat/…` на `/shapes`.
+Both branches work without a network: a write lands in a persistent on-disk queue
+first and is sent afterwards, so losing the network does not lose it. What differs
+is how the queue works and what the calling code sees.
+
+**`docs/…`**: one logical write = one signed mutation. It goes into the durable
+outbox (IndexedDB) **before** the first send attempt, then to `/ingest_each`
+through `sendMutationsAndAwaitShape`. With no network the attempt fails and the
+record stays in the queue; draining on login and on the `online` event replays it
+in insertion order. The replay is literal: a mutation carries its own ML-DSA
+signature over the row's contents and does not go stale — a live key is needed
+only to sign the request's own auth challenge, which is why draining requires an
+unlocked account. Errors are classified by the transport (transient / permanent)
+and returned to the caller. Covered by `tests/offlineWrite.test.ts`.
+
+**`feat/…`**: a write goes into a persistent queue (`userQueue.ts`) with the
+statuses `pending → awaiting_remote → deleted / quarantined`; a scheduler with
+debounce and backoff does the sending and skips a cycle when
+`navigator.onLine === false`. Repeated edits of one key coalesce into a single
+entry (a merge patch).
+
+| | Merits | Drawbacks |
+|---|---|---|
+| `docs/…` | Simple flow control: the caller gets the result of that particular write; order follows the calls; one queue serves all seven tables | The "what to do on failure" logic is spread across call sites; a call without a network returns an error even though the write will arrive later — in the UI that reads as a rejection |
+| `feat/…` | Every write goes through one pipeline; coalescing saves traffic during a run of edits; sending does not start when the browser knows there is no network | Coalescing means last-write-wins semantics, right for a card but not for append-only messages; the caller does not get the result of a specific write; the queue covers only the user domain |
+
+## 3. Delivery confirmation
+
+**`docs/…`**: the server returns a `txid`, and `awaitTxId(txid)` is an exact "the
+row reached the collection". A uniqueness conflict is resolved by comparing
+signatures: either "our row is already on the server" (success) or an explicit
+permanent error.
+
+**`feat/…`**: a snapshot is recorded after sending; confirmation is a match
+between the snapshot's fields and the row arriving from the shape (with
+bytea/base64 canonicalisation). The `awaiting_remote` state lives in IndexedDB and
+survives a reload.
+
+| | Merits | Drawbacks |
+|---|---|---|
+| `docs/…` | Confirmation is exact and independent of field formats; a conflict always ends in a definite outcome | The barrier lives in memory: after a reload, confirmation is re-derived by replaying the outbox rather than from stored state |
+| `feat/…` | The wait for confirmation is durable — it survives a reload without a replay | Field-by-field comparison is sensitive to serialisation drift (a new column, bigint vs number, padding); a mismatch has no outcome — the entry stays in `awaiting_remote` with no error and no timeout, and the overlay keeps hiding the server row |
+
+## 4. Optimistic state
+
+**`docs/…`**: an in-memory layer (`optimisticItems`, `pendingEdits`,
+`reactionIntents`) with per-item status (`sending / synced / error`, plus a marker
+for a rejected edit). It lives in the tab's memory.
+
+**`feat/…`**: an overlay — TanStack collections projected from the persistent
+queue, restored after a reload (`ensureRehydrated`). Reads go through a facade
+with the priority `pending > electric > preview > cache`.
+
+| | Merits | Drawbacks |
+|---|---|---|
+| `docs/…` | The UI reads Electric collections directly; the status of every item is visible to the user | Optimistic state is lost on reload: an unsent message will arrive (the outbox), but it is invisible until confirmed — the user may send it again |
+| `feat/…` | The value survives a reload and stays visible — exactly the expected UX for a profile | Every consumer has to go through a merge facade over four collections; there is no per-item status, so unsent is indistinguishable from saved; the "eternal pending" of §3 hides the server with no indication |
+
+## 5. What happens to a rejected write
+
+**`docs/…`**: transient — it stays in the outbox for replay; permanent — the
+record is removed from the queue and an error is shown in the UI (if the tab is
+still alive).
+
+**`feat/…`**: permanent → `quarantined` with `lastError`; the entry is kept, and
+the next edit of the same key returns it to `pending`; the counters
+(`queueStatus`) are reactive and available to the UI.
+
+| | Merits | Drawbacks |
+|---|---|---|
+| `docs/…` | The outcome is always definite; the user sees the error at the moment of rejection | If the rejection happened during a replay after a reload, the content is deleted with no trace for the user |
+| `feat/…` | Content is not lost; reactivation is natural; observability comes for free | The quarantine is silent: without UI over the counters the user never learns about the rejection, and the quarantined value keeps being displayed as data |
+
+## 6. Read endpoints
+
+**`docs/…`**: all shapes through `/electric/v1/shapes` — the endpoint sanctioned
+by the backend team (2026-07-31). **`feat/…`**: shapes through `/user_card` and
+`/user_storage` — proxy endpoints with their own offset logic, declared
+deprecated.
+
+The difference here is not in the quality of the decision but in alignment with
+the backend's plans: code on deprecated endpoints will have to be moved when they
+are removed. The move is mechanical (URL plus parameters).
+
+## 7. The wire format
+
+**`docs/…`**: the field set of a mutation is checked against the Ecto schemas
+(`chat/lib/chat/data/schemas/*.ex`); `hash_b64` is not sent, and `sign_hash` goes
+only to tables where the column exists. **`feat/…`**: sends `hash_b64` in
+`user_storage` (the server ignores extra fields on cast, so no harm — but the
+field is dead); the signature composition is correct in both branches.
+
+## 8. `owner_timestamp` monotonicity
+
+**`docs/…`**: `nextOwnerTimestamp = max(now, prev + 1)` plus serialisation of
+writes to one entity; covered by tests for two edits within one second.
+**`feat/…`**: `Math.floor(Date.now() / 1000)` — two card edits in one second
+produce the same timestamp, the server rejects the second ("not newer") and it
+lands in quarantine. The fix is local (the same formula plus the queue).
+
+## 9. Read persistence (a cache between sessions)
+
+**`docs/…`**: the official packages (`@tanstack/db-sqlite-persistence-core` plus
+the browser adapter, wa-sqlite over OPFS); Electric keeps the shape cursor in
+metadata and fetches the **delta** after a reload. The price: ~1 MB of wasm, an
+OPFS requirement, and exclusions in `optimizeDeps`.
+
+**`feat/…`**: a hand-written cache (`userCache.ts`) — rows are duplicated into
+IndexedDB and loaded at startup. There is no cursor: the shape is re-fetched in
+full on every load, and the cache only covers "show something before the network
+answers". The price: zero dependencies, works anywhere IndexedDB exists.
+
+| | Merits | Drawbacks |
+|---|---|---|
+| `docs/…` | Delta fetching — traffic and startup time do not grow with history; upstream support | A heavy dependency; OPFS has to exist in the target browsers (the WebView on a Pi — to be checked) |
+| `feat/…` | Simple, portable, no wasm | A full re-fetch of every shape on every start; double storage (cache plus collection) maintained by hand |
+
+## 10. `user_storage` slots
+
+**`docs/…`**: fixed slot UUIDs (`STORAGE_SLOTS.profile/contacts`) plus reading
+legacy names. **`feat/…`**: `deriveStorageUuid` — a deterministic UUIDv8 from the
+logical name (sha256): a more general solution, where any future slot gets an
+identifier without a registry.
+
+A drawback shared by both: the identifier is the same for every account and
+predictable, while reading `user_storage` is public ("any user can read any
+storage", `docs/pq/reqs/pq_user_storage.md` §2.2) — so with someone's `user_hash`
+one can learn that the user has a profile and when they last edited it. The value
+is encrypted; the purpose of the record and its history are not. Deriving from
+the name additionally binds the `parent_sign_hash` chain to a string that can be
+renamed.
+
+The spec assumes something else: the uuid is generated randomly by the client and
+the "slot → uuid" mapping is kept locally (§8.2). On a new device the registry is
+rebuilt from the data itself — the shape returns every row of one's own
+`user_hash`, the decryption key is there, and the record's type sits inside the
+value. The solution is shared by both branches (backlog §5).
+
+## 11. Tests
+
+**`docs/…`**: 114/114 green; the key regression tests were checked for
+discriminating power (they fail when the fix is reverted); the fake transport
+honours the barrier's contract. Three rounds of external review passed.
+
+**`feat/…`**: 172 tests, high density (~1800 lines of tests over ~1300 lines of
+code), meaningful scenarios (correlating results by index, hydration races,
+ownership). At commit `018515e` 17 are red — concentrated in ingest result
+correlation and the cleanup of legacy records, i.e. the tests describe behaviour
+the code has not finished yet.
+
+## 12. Functional differences (facts, without judgement)
+
+Present in `docs/tanstack-migration`, absent in `feat/…`: explicit read receipts,
+multiple tabs (the gate is lifted), a durable outbox for all tables, encryption of
+the local queue (isolating accounts within one browser profile).
+
+Present in `feat/…`, absent in `docs/…`: pending state visible after a reload,
+quarantine with reactivation, reactive queue counters, a preview layer for cards
+from QR scans.
+
+---
+
+## Candidates to carry between the branches
+
+Ideas from `feat/…` that fit `docs/…` locally: rehydratable visible pending (the
+outbox already stores everything needed), quarantine instead of deletion on
+permanent, a reactive queue counter, the preview layer, and a short circuit on
+`navigator.onLine` before sending — today a call without a network runs the full
+retry cycle and returns an error even though the record is already queued and will
+arrive later.
+
+Ideas from `docs/…` applicable in `feat/…` without changing its architecture:
+`nextOwnerTimestamp`, moving to `/shapes`, confirmation by `txid` instead of field
+comparison, and an outcome for an `awaiting_remote` that never completes.
+
+There is nothing to carry over for `user_storage` slot addressing: the backend's
+remark applies to both branches. Fixed UUIDs (`docs/…`) and derivation from the
+slot name (`feat/…`) both produce identifiers identical across accounts, while
+reading `user_storage` is public — so the purpose of a record and the history of
+its edits are open on the server. The shared solution is a random uuid per account
+with a local registry (see backlog §5).
+
+## Questions for joint discussion
+
+1. Queue semantics for dialogs: how does the `feat/…` model (a map by key) extend
+   to append-only messages with versions — or do dialogs take the direct write
+   path?
+2. Confirmation: `txid` as the common mechanism? That removes both the
+   field-comparison drift and the "eternal `awaiting_remote`".
+3. Is per-item sync status needed in the UI of the user domain
+   (profile/contacts), or are aggregate counters enough?
+4. OPFS/wasm on the target devices (the WebView on a Pi, Safari): if support is
+   confirmed, delta fetching is a strong argument; if not, a `feat/…`-style cache
+   stays as the fallback.
+5. The fate of the legacy endpoints: the backend's removal timeline sets how
+   urgent it is to move `feat/…` onto `/shapes`.

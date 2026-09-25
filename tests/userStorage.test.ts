@@ -53,7 +53,7 @@ vi.mock('@/api/client', () => ({
 	},
 }));
 
-const { upsertStorageRow, getStorageRow } = await import('../src/lib/data/userStorage');
+const { upsertStorageRow, getStorageRow, putStorageRow } = await import('../src/lib/data/userStorage');
 const {
 	startLeaderElection, stopLeaderElection, stopDrainLoop, pendingEntries,
 	_setStorageForTests: _setOutboxStorageForTests, _setAtomicLeaseStoreForTests,
@@ -208,6 +208,31 @@ describe('upsertStorageRow: failure is reported to the caller', () => {
 		// the write is already decided by the time the caller gets the result
 		expect(settled).toBe(true);
 		expect((await res.sync).status).toBe('synced');
+	});
+});
+
+describe('putStorageRow: the write is the server verdict', () => {
+	it('throws when the server rejects, carrying the rejection', async () => {
+		(api.ingestWithAuthEach as ReturnType<typeof vi.fn>).mockImplementationOnce(async (mutations: unknown[]) => ({
+			status: 422,
+			json: async () => ({ results: mutations.map((_, index) => ({ index, status: 'error', error: 'validation_failed', details: {} })) }),
+		}));
+		await expect(putStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v', hashB64: null, signSkey }))
+			.rejects.toThrow(/server did not take it/);
+	});
+
+	// A durable local intent is not a save: a vault reported as published
+	// while only this device holds it would have its shares shown for nothing.
+	it('throws while the write only waits locally for recovery', async () => {
+		collection.preloadError = new Error('node unreachable');
+		await expect(putStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v', hashB64: null, signSkey }))
+			.rejects.toThrow(/server did not take it/);
+		expect(kv.get(`us|${USER}|${SLOT}`)).toMatchObject({ syncStatus: 'awaiting-recovery' });
+	});
+
+	it('resolves to the row once the server has it', async () => {
+		const row = await putStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v', hashB64: null, signSkey });
+		expect(row).toMatchObject({ user_hash: USER, uuid: SLOT, value_b64: 'v' });
 	});
 });
 

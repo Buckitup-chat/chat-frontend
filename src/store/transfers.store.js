@@ -11,8 +11,8 @@
 //
 // Pause is honest, not cosmetic: it aborts the running upload, and resume
 // re-enters with the same file_id + enc_secret, so the transport's resume
-// path re-sends only the chunks the device does not hold (§2.2 — "Пауза не
-// сбрасывает загрузку").
+// path re-sends only the chunks the device does not hold (§2.2 — a pause
+// does not discard the upload).
 //
 // A batch is the message being composed (screen 02): its files become parts
 // of ONE composed message, sent when the last live row lands. Cancelling a
@@ -194,7 +194,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 		});
 	};
 
-	// ---------- row actions (board: Старт / Пауза / Продолжить / ✕) ----------
+	// ---------- row actions (board: Start / Pause / Resume / ✕) ----------
 
 	const pause = (id) => {
 		const item = byId(id);

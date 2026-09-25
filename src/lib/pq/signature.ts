@@ -52,6 +52,10 @@ export const padBase64 = (b64: string): string => b64 + '='.repeat((4 - (b64.len
 export const fromBase64 = (b64: string): Uint8Array =>
 	Uint8Array.from(atob(padBase64(b64)), (c) => c.charCodeAt(0));
 
+/** URL-safe alphabet, no padding: for values that ride in a QR code or a query string. */
+export const toBase64Url = (bytes: Uint8Array): string =>
+	toBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
 const fromHex = (hex: string): Uint8Array => {
 	const out = new Uint8Array(hex.length / 2);
 	for (let i = 0; i < hex.length; i += 2) out[i / 2] = parseInt(hex.slice(i, i + 2), 16);

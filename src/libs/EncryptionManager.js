@@ -104,7 +104,7 @@ export class EncryptionManager extends EventTarget {
 						requireResidentKey: false
 					},
 
-					// Додатково (рекомендую)
+					// Optional, recommended
 					timeout: 60000,
 				},
 			});
@@ -163,14 +163,14 @@ export class EncryptionManager extends EventTarget {
 						// ...data.keyOptions,
 
 						authenticatorSelection: {
-							// Найкращий варіант для Linux (працює майже скрізь)
+							// The best option for Linux (works almost everywhere)
 							authenticatorAttachment: "cross-platform",
 							userVerification: "preferred",
 							residentKey: "preferred",
 							requireResidentKey: false
 						},
 
-						// Додатково (рекомендую)
+						// Optional, recommended
 						timeout: 60000,
 					},
 				});

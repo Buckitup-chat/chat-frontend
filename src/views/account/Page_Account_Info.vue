@@ -18,9 +18,8 @@
 				</div>
 
 				<div class="d-flex justify-content-center align-items-center mt-4 mb-3">
-					<!-- TODO: PQ - account_dxos_invite modal needs PQ implementation (Coming Soon) -->
-					<button type="button" class="btn btn-dark rounded-pill _action_btn"
-						@click="$mitt.emit('modal::open', { id: 'account_dxos_invite' })">
+					<button type="button" class="btn btn-dark rounded-pill _action_btn" title="Add a device"
+						@click="$mitt.emit('modal::open', { id: 'account_link_approve' })">
 						<i class="_icon_reload bg-white"></i>
 					</button>
 
@@ -102,6 +101,7 @@ const $mitt = inject('$mitt');
 const $em = inject('$encryptionManagerPQ');
 
 const accountInfoRef = ref(null);
+
 const draftAccount = ref(null);
 const draftAvatarBlob = ref(null);
 

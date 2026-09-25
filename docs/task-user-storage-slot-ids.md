@@ -1,13 +1,14 @@
-# Идентификаторы слотов `user_storage`
+# `user_storage` slot identifiers
 
-Задача на реализацию. Возникла из замечания бэкенд-разработчика; проверена по
-спеке (`chat/docs/pq/reqs/pq_user_storage.md`) и по нашему коду.
+An implementation task. It came out of a remark by the backend developer and is
+checked against the spec (`chat/docs/pq/reqs/pq_user_storage.md`) and against
+our own code.
 
-## Проблема
+## The problem
 
-`user_storage` — это generic key-value: ключ строки — пара `(user_hash, uuid)`,
-где `uuid` придумывает клиент, а смысл записи сервер не знает. Мы адресуем
-известные слоты фиксированными константами
+`user_storage` is a generic key-value store: a row's key is the pair
+`(user_hash, uuid)`, the client invents the `uuid`, and the server knows nothing
+about what a record means. We address the known slots with fixed constants
 ([userStorage.ts:27](../src/lib/data/userStorage.ts#L27)):
 
 ```ts
@@ -17,167 +18,171 @@ export const STORAGE_SLOTS = {
 };
 ```
 
-Два независимых дефекта.
+Two independent defects.
 
-**1. Идентификаторы одинаковы у всех аккаунтов и предсказуемы.** Чтение
-`user_storage` публичное — спека §2.2: *«Any user can read any storage (read
-public), only owner can write»*. Значит по чужому `user_hash` любой может
-запросить `(…0001)` и узнать: у этого пользователя есть профиль, вот его
-размер, вот когда он последний раз менялся. Содержимое зашифровано —
-**назначение записи и хронология правок открыты**. Это метаданные на сервере,
-то есть ровно тот уровень, где по решению CTO контроль и должен быть.
+**1. The identifiers are the same for every account and predictable.** Reads
+from `user_storage` are public — spec §2.2: *"Any user can read any storage
+(read public), only owner can write"*. So with someone's `user_hash` anyone can
+ask for `(…0001)` and learn: this user has a profile, here is its size, here is
+when it last changed. The contents are encrypted — **the purpose of the record
+and the history of its edits are not**. That is server-side metadata, which is
+exactly the level where the CTO decision puts access control.
 
-**2. Это магические константы без реестра.** Ни спека, ни код нигде не
-фиксируют, что `…0001` занят. Другая фича или другой клиент возьмёт тот же
-идентификатор и затрёт профиль.
+**2. They are magic constants with no registry.** Neither the spec nor the code
+records anywhere that `…0001` is taken. Another feature or another client will
+pick the same identifier and overwrite the profile.
 
-Деривация из имени слота (`sha256("profile")` — путь, выбранный в ветке
-`feat/user-domain-…`) не решает ни первое, ни второе: идентификатор по-прежнему
-одинаков у всех, плюс цепочка `parent_sign_hash` оказывается привязана к
-строке, которую можно переименовать.
+Deriving from the slot name (`sha256("profile")`, the route taken in the
+`feat/user-domain-…` branch) solves neither: the identifier is still identical
+for everyone, and the `parent_sign_hash` chain ends up bound to a string that
+can be renamed.
 
-## Правильный образец уже есть в нашем коде
+## The right pattern is already in our code
 
-Аватарки хранятся так, как предписывает спека, и это готовая модель для
-обобщения ([EncryptionManagerPQ.js:654](../src/libs/EncryptionManagerPQ.js#L654)):
+Avatars are stored the way the spec prescribes, and that is a ready model to
+generalise
+([EncryptionManagerPQ.js:654](../src/libs/EncryptionManagerPQ.js#L654)):
 
 ```js
-const uuid = crypto.randomUUID();   // случайный, свой у каждой аватарки
+const uuid = crypto.randomUUID();   // random, one per avatar
 ```
 
-а соответствие «какая аватарка моя» лежит **внутри** профиля — поле
-`avatarUuid` в расшифрованном значении. То есть профиль уже является реестром;
-не хватает только того же приёма для остальных слотов и непредсказуемого
-адреса у самого профиля.
+and the mapping "which avatar is mine" lives **inside** the profile — the
+`avatarUuid` field of the decrypted value. The profile is already a registry;
+what is missing is the same trick for the remaining slots and an unpredictable
+address for the profile itself.
 
-## Целевая схема
+## The target scheme
 
-**Корневая запись = профиль**, по адресу, выведенному из секрета аккаунта, а не
-из имени. Она хранит карту остальных слотов.
+**The root record is the profile**, at an address derived from the account
+secret rather than from a name. It holds the map of the other slots.
 
 ```
-uuid профиля = uuidv8( HKDF(crypt_skey, "buckitup/user-storage-root/v1", "slot") )
+profile uuid = uuidv8( HKDF(crypt_skey, "buckitup/user-storage-root/v1", "slot") )
 ```
 
-Свойства: непредсказуем без `crypt_skey`, детерминирован для владельца на любом
-устройстве, не требует ни реестра в vault, ни перебора строк. Ротация
-`crypt_skey` в этом протоколе означает смену личности, поэтому «уплывания»
-адреса не будет.
+Properties: unpredictable without `crypt_skey`, deterministic for the owner on
+any device, and needing neither a registry in the vault nor a scan of strings.
+Rotating `crypt_skey` in this protocol means changing identity, so the address
+will not drift.
 
-Значение корневой записи — сегодняшний профиль плюс карта слотов:
+The root record's value is today's profile, the slot map, the address of the
+current sealed vault and those of earlier vaults not yet tombstoned — kept so
+a backup retires its predecessors, and retries the ones it could not
+(`EncryptionManagerPQ.publishRecoveryVault`):
 
 ```json
 {
   "name": "…", "notes": "…", "avatarUuid": "…",
-  "slots": { "contacts": "0f8c…-…" }
+  "slots": { "contacts": "0f8c…-…" },
+  "vaultUuid": "3b1e…-…", "staleVaults": []
 }
 ```
 
-Все прочие слоты (`contacts`, будущие) получают **случайный** uuid при первом
-создании и находятся только через эту карту.
+Every other slot (`contacts`, and future ones) gets a **random** uuid when it is
+first created and is found only through this map.
 
-Байты uuid: взять первые 16 байт вывода HKDF, выставить версию 8
-(`b[6] = (b[6] & 0x0f) | 0x80`) и вариант RFC 4122 (`b[8] = (b[8] & 0x3f) | 0x80`),
-отформатировать канонически. Колонка на сервере — `Ecto.UUID`, произвольную
-строку она не примет.
+The uuid bytes: take the first 16 bytes of the HKDF output, set version 8
+(`b[6] = (b[6] & 0x0f) | 0x80`) and the RFC 4122 variant
+(`b[8] = (b[8] & 0x3f) | 0x80`), then format canonically. The server column is
+`Ecto.UUID` and will not accept an arbitrary string.
 
-## Изменения по файлам
+## Changes by file
 
 **`src/lib/data/userStorage.ts`**
 
-- Удалить `STORAGE_SLOTS` и `LEGACY_LABELS` (легаси-имена слотов больше не читаются).
-- Добавить `deriveRootSlotUuid(cryptSkey): string` — деривация выше.
-- Добавить резолвер слотов, разведённый по путям:
-  `getSlotUuid(name): string | null` — только чтение, `null` если слота нет;
-  `ensureSlotUuid(name): string` — путь записи, при отсутствии создаёт uuid и
-  карту. Резолвер кеширует карту на время сессии и сбрасывает кеш при выходе.
-- Ключ локального KV (`kvKey`) сегодня содержит uuid открытым текстом;
-  оставить как есть — `secureStore` уже хеширует имена ключей (`hashKeys: true`).
+- Remove `STORAGE_SLOTS` and `LEGACY_LABELS` (legacy slot names are no longer
+  read).
+- Add `deriveRootSlotUuid(cryptSkey): string` — the derivation above.
+- Add a slot resolver split by path: `getSlotUuid(name): string | null` for
+  reads, `null` when the slot does not exist; `ensureSlotUuid(name): string` for
+  the write path, creating the uuid and the map when absent. The resolver caches
+  the map for the session and drops the cache on logout.
+- The local KV key (`kvKey`) currently carries the uuid in the clear; leave it —
+  `secureStore` already hashes key names (`hashKeys: true`).
 
-**`src/libs/EncryptionManagerPQ.js`** — пять мест обращения к слотам
-(`:505`, `:559`, `:600`, `:619`, плюс аватарки `:673`, `:697`). Заменить
-`STORAGE_SLOTS.profile` на резолвер корневой записи, `STORAGE_SLOTS.contacts` —
-на `getSlotUuid('contacts')`. Аватарки не трогать: они уже правильные.
+**`src/libs/EncryptionManagerPQ.js`** — five places touch the slots (`:505`,
+`:559`, `:600`, `:619`, plus avatars at `:673`, `:697`). Replace
+`STORAGE_SLOTS.profile` with the root-record resolver and `STORAGE_SLOTS.contacts`
+with `getSlotUuid('contacts')`. Leave avatars alone: they are already correct.
 
-**`src/lib/data/collections.ts`** — попутно закрыть смежную дыру: шейп
-`user_storage` открывается **без фильтра** (`params: { table: 'user_storage' }`,
-[:107](../src/lib/data/collections.ts#L107)), то есть мы синхронизируем строки
-всех пользователей сети. Все наши обращения идут только к собственному
-`user_hash`, поэтому фильтр `where: user_hash = '<свой>'` безопасен и
-одновременно убирает лишний трафик. Коллекцию придётся строить лениво, после
-логина, — как диалоговые.
+**`src/lib/data/collections.ts`** — close the adjacent hole while here: the
+`user_storage` shape is opened **without a filter**
+(`params: { table: 'user_storage' }`,
+[:107](../src/lib/data/collections.ts#L107)), so we sync the rows of every user
+on the network. All our access goes to our own `user_hash`, so a
+`where: user_hash = '<ours>'` filter is safe and removes the excess traffic at
+the same time. The collection then has to be built lazily, after login, like the
+dialog ones.
 
-## Чтение не создаёт записей
+## Reading creates no records
 
-Резолвер слотов на пути чтения ничего не пишет. Корневой uuid вычисляется из
-`crypt_skey`, запись читается; если её нет — это валидное состояние «профиль
-ещё не сохранён», и наверх уходит пустой результат.
+The slot resolver writes nothing on the read path. The root uuid is computed
+from `crypt_skey` and the record is read; if it is absent, that is the valid
+state "no profile saved yet" and an empty result goes up.
 
-Причина не в опрятности. Создание пустой корневой записи на чтении означало бы:
-сессия, которая только смотрит, порождает серверную строку и тратит
-`owner_timestamp`; два устройства при одновременном первом входе гонятся на
-`insert`. Хуже того, на втором устройстве это способ **потерять профиль**:
-шейп ещё не принёс существующую строку, `getServerState` честно отвечает
-«отсутствует», пустая запись уходит с текущим временем — и настоящий профиль,
-записанный раньше и с меньшим `owner_timestamp`, проигрывает по LWW.
+The reason is not tidiness. Creating an empty root record on a read would mean:
+a session that only looks produces a server row and spends an
+`owner_timestamp`; two devices logging in for the first time race each other on
+the `insert`. Worse, on the second device it is a way to **lose the profile**:
+the shape has not delivered the existing row yet, `getServerState` honestly says
+"absent", the empty record goes out with the current time — and the real
+profile, written earlier with a smaller `owner_timestamp`, loses under LWW.
 
-Корневая запись появляется только на пути записи:
+The root record appears only on the write path:
 
-- **сохранение профиля** — это и есть запись корневой строки, отдельного шага
-  не нужно (при регистрации она создаётся здесь же);
-- **первое обращение к именованному слоту на запись** — сгенерировать случайный
-  uuid, записать строку слота, затем дописать пару `имя → uuid` в карту
-  корневой записи. Порядок обязателен: карта не должна ссылаться на ещё не
-  существующую строку, поэтому между двумя записями нужен барьер
-  `sendMutationsAndAwaitShape`.
+- **saving the profile** is itself the write of the root row, so no separate
+  step is needed (at registration it is created right here);
+- **the first write to a named slot** — generate a random uuid, write the slot
+  row, then add the `name → uuid` pair to the root record's map. The order is
+  mandatory: the map must not point at a row that does not exist yet, so the two
+  writes need a `sendMutationsAndAwaitShape` barrier between them.
 
-## Существующие записи
+## Existing records
 
-Миграция не нужна: обратная совместимость данных в проекте не требуется
-(инвариант §1a). Слоты по адресам `…0001` / `…0002` — тестовые данные, их можно
-просто бросить; легаси-адреса не читаются и не удаляются.
+No migration is needed: backward compatibility of data is not required in this
+project (invariant §1a). The slots at `…0001` / `…0002` are test data and can
+simply be abandoned; legacy addresses are neither read nor deleted.
 
-Отсюда же следует, что утечка через уже опубликованные предсказуемые адреса
-исправления не требует — данные под ними тестовые.
+It follows that the leak through already-published predictable addresses needs
+no fix either — the data behind them is test data.
 
-## Крайние случаи
+## Edge cases
 
-- **Vault заблокирован.** Корневой uuid требует `crypt_skey`, значит слоты не
-  резолвятся до логина. Это уже так для локального хранилища (ключ шифрования
-  оттуда же), новых ограничений не появляется.
-- **Гонка при создании слота.** Два устройства (или две вкладки) могут
-  одновременно не найти `contacts` и сгенерировать разные uuid. Запись корневой
-  карты сериализована очередью по слоту только внутри одного клиента, поэтому
-  проигравшая сторона создаст осиротевшую строку. Разрешение: после записи карты перечитать её
-  через барьер и, если победил чужой uuid, использовать его, а свою строку
-  пометить удалённой.
-- **Карта повреждена или ссылается на отсутствующую строку.** Не создавать
-  молча новый слот поверх — это потеря контактов текущей сессии. Сообщить об
-  ошибке и оставить решение пользователю.
-- **Корневая запись есть, а профиля в ней нет** (частично записанное
-  состояние) — трактовать как отсутствие профиля, карту сохранить.
+- **The vault is locked.** The root uuid needs `crypt_skey`, so slots do not
+  resolve before login. That is already true for local storage (its encryption
+  key comes from the same place), so no new limitation appears.
+- **A race when creating a slot.** Two devices (or two tabs) can both fail to
+  find `contacts` and generate different uuids. Writing the root map is
+  serialised per slot only inside one client, so the loser creates an orphaned
+  row. Resolution: after writing the map, re-read it through a barrier and, if
+  someone else's uuid won, adopt it and mark your own row deleted.
+- **The map is damaged or points at a missing row.** Do not silently create a
+  new slot over it — that loses the current session's contacts. Report the error
+  and leave the decision to the user.
+- **The root record exists but holds no profile** (a partially written state) —
+  treat it as "no profile" and keep the map.
 
-## Тесты
+## Tests
 
-Каждый должен падать без соответствующего фикса.
+Each must fail without the corresponding fix.
 
-1. Два разных аккаунта дают **разные** корневые uuid.
-2. Один аккаунт даёт **один и тот же** корневой uuid при повторной деривации
-   (эмуляция второго устройства).
-3. Корневой uuid проходит проверку формата `Ecto.UUID` (версия 8, вариант
-   RFC 4122).
-4. Чтение профиля на аккаунте без корневой записи **не создаёт** серверных
-   строк и возвращает пустой результат.
-5. Слот, отсутствующий в карте, создаётся один раз при двух параллельных
-   обращениях.
-6. Шейп `user_storage` запрашивается с фильтром по своему `user_hash`.
+1. Two different accounts produce **different** root uuids.
+2. One account produces **the same** root uuid on a repeated derivation
+   (emulating a second device).
+3. The root uuid passes `Ecto.UUID` format validation (version 8, RFC 4122
+   variant).
+4. Reading the profile on an account with no root record **creates no** server
+   rows and returns an empty result.
+5. A slot missing from the map is created once under two concurrent requests.
+6. The `user_storage` shape is requested with a filter on our own `user_hash`.
 
-## Открытые вопросы
+## Open questions
 
-- **Обмен аватарками** (бэклог §2) может потребовать чтения чужого
-  `user_storage`. Тогда фильтр шейпа станет шире, а адрес чужой аватарки
-  придётся передавать явно — вероятно, через `user_cards`. Решать вместе с той
-  задачей.
-- **Согласовать с параллельной веткой.** Замечание касается обеих реализаций;
-  выбранная схема должна быть общей, иначе аккаунт, созданный одним клиентом,
-  не найдёт свои слоты в другом.
+- **Avatar exchange** (backlog §2) may require reading someone else's
+  `user_storage`. The shape filter would then widen, and the address of their
+  avatar would have to be passed explicitly — probably through `user_cards`.
+  Decide it together with that task.
+- **Agree it with the parallel branch.** The remark applies to both
+  implementations; the chosen scheme has to be shared, or an account created by
+  one client will not find its slots in the other.

@@ -1,220 +1,222 @@
-# Инварианты проекта
+# Project invariants
 
-Правила, которые действуют для любого кода в этом репозитории, независимо от
-ветки и автора. Каждое появилось из реального «спотыкания» — потери времени,
-бага или расхождения с бэкендом, — поэтому у каждого есть дата и причина.
+Rules that hold for any code in this repository, whatever the branch and whoever
+the author. Each came from a real stumble — lost time, a bug, or a divergence
+from the backend — so each carries a date and a reason.
 
-Документ — не архитектурное описание и не список задач. Он отвечает на один
-вопрос: *что нельзя нарушать, даже если очень хочется*. Если правило кажется
-лишним — сначала прочитайте «почему», потом обсуждайте.
+This is neither an architecture description nor a task list. It answers one
+question: *what must not be broken, however tempting*. If a rule looks
+unnecessary, read the "why" first and argue afterwards.
 
-Порядок: от того, что ломает данные пользователя, к тому, что ломает процесс.
-
----
-
-## Данные пользователя
-
-### 1. Локальное хранилище не обязано скрывать метаданные
-
-**Снято:** 2026-08-19, решение CTO (введено 2026-08-12) ·
-**Подробно:** [persistence-encryption.md](persistence-encryption.md)
-
-Контроль доступа к метаданным — кто с кем, когда, как часто — начинается с
-бэкенда, а не с фронтенда: пока конверт открыт на сервере, его шифрование в
-браузерном профиле угрозу не закрывает. Поэтому локальные хранилища (IndexedDB,
-OPFS, localStorage) могут держать конверт — `user_hash`, `dialog_hash`,
-`sender_hash`, `owner_timestamp`, подписи, имена — открытым.
-
-Сквозное шифрование **контента** (`content_b64`, `value_b64`) этим не
-затрагивается: оно часть протокола, а не локального хранилища.
-
-**Следствия.**
-- Новое локальное хранилище не обязано проходить через `secureStore`; слой
-  существует и работает для outbox и localStore, использовать его для новых
-  данных — вопрос удобства, не требование.
-- Библиотека, которая пишет на диск открытым текстом (wa-sqlite, адаптеры
-  IndexedDB), не нуждается в шифрующей обёртке, чтобы быть принятой.
-- Персистентность шейпов (L1) выключена флагом; её включение — решение о
-  производительности и поддержке OPFS, не о безопасности.
-
-### 1a. Обратная совместимость данных пока не требуется
-
-**С:** 2026-08-26 (решение владельца)
-
-Проект в стадии активной разработки, пользовательской базы нет. При изменении
-формата — схемы, конверта контента, идентификаторов, локального хранилища —
-формат меняется напрямую: миграция существующих записей не пишется, legacy-путь
-чтения не поддерживается, совместимость версий не закладывается. Данные, уже
-опубликованные тестовыми аккаунтами, не считаются требующими защиты.
-
-**Почему.** Все существующие аккаунты тестовые. Миграционный код и слои
-совместимости здесь — чистая стоимость: их пишут, тестируют и вскоре удаляют, а
-попутно они маскируют настоящий формат от читателя.
-
-**Следствие.** Правило отменяется явным решением владельца — с этого момента
-формат становится контрактом, и обратная совместимость возвращается в объём
-любой задачи, меняющей данные.
-
-### 2. Записи не теряются молча
-
-**С:** 2026-08-11 (ревью 2–3)
-
-Любая мутация, которую пользователь инициировал (сообщение, правка, реакция,
-профиль), либо доходит до сервера, либо пользователь видит, что она не дошла.
-Третьего состояния — «отправилось в никуда» — быть не должно.
-
-**Почему.** Первые ревью нашли несколько мест, где отказ сервера глотался
-`.catch(() => {})` или уходил только в `console.warn`. Отклонённая правка
-выглядела как принятая; неотправленная карточка не мешала сохранить профиль,
-который на неё ссылается.
-
-**Следствия.**
-- Транспорт различает transient (сеть, 5xx — можно повторить) и permanent
-  (422, бизнес-правило — повторять бессмысленно). Permanent всплывает в UI.
-- Оптимистичное состояние откатывается или помечается ошибкой; не остаётся
-  «висеть» как будто всё хорошо.
-- Мутации, ожидающие сети, лежат в durable outbox и переживают перезагрузку.
+The order runs from what breaks user data to what breaks the process.
 
 ---
 
-## Контракт с бэкендом
+## User data
 
-### 3. `/shapes` — единственный read-эндпоинт
+### 1. Local storage is not required to hide metadata
 
-**С:** 2026-07-31 (подтверждено бэкенд-командой)
+**Lifted:** 2026-08-19, CTO decision (introduced 2026-08-12) ·
+**Detail:** [persistence-encryption.md](persistence-encryption.md)
 
-Чтение таблиц идёт через `/electric/v1/shapes?table=…&where=…`. Проксирующие
-эндпоинты `/user_card`, `/user_storage` и подобные — deprecated: у них особая
-логика оффсетов, и бэкенд их выводит.
+Access control over metadata — who talks to whom, when, how often — starts at
+the backend, not at the frontend: while the envelope is open on the server,
+encrypting it in a browser profile closes no threat. So local stores (IndexedDB,
+OPFS, localStorage) may keep the envelope — `user_hash`, `dialog_hash`,
+`sender_hash`, `owner_timestamp`, signatures, names — in the clear.
 
-**Почему.** Код на устаревшем эндпоинте будет переписан при его удалении, а
-до того — работает не так, как остальные шейпы (другой resume, другие
-заголовки).
+End-to-end encryption of **content** (`content_b64`, `value_b64`) is untouched by
+this: it belongs to the protocol, not to local storage.
 
-### 4. `owner_timestamp` строго монотонен на клиенте
+**Consequences.**
+- A new local store need not go through `secureStore`; the layer exists and
+  serves the outbox and localStore, and using it for new data is a convenience,
+  not a requirement.
+- A library that writes plaintext to disk (wa-sqlite, IndexedDB adapters) needs
+  no encrypting wrapper to be acceptable.
+- Shape persistence (L1) is behind a flag; enabling it is a decision about
+  performance and OPFS support, not about security.
 
-**С:** 2026-08-11 (ревью 3, находка 6)
+### 1a. Backward compatibility of data is not required yet
 
-Сервер отклоняет апдейт строки, чей `owner_timestamp` не строго больше
-сохранённого. `Math.floor(Date.now() / 1000)` даёт **одинаковое** значение
-двум правкам в одну секунду — вторая молча отклоняется как «not newer».
+**Since:** 2026-08-26 (owner's decision)
 
-**Следствие.** Новый таймстемп = `max(now, previous + 1)`
-(`src/lib/data/time.ts::nextOwnerTimestamp`), а запись одной сущности
-сериализуется, чтобы `previous` читался после барьера предыдущей записи.
+The project is in active development with no user base. When a format changes —
+a schema, a content envelope, identifiers, local storage — it changes outright:
+no migration is written for existing records, no legacy read path is supported,
+no version compatibility is built in. Data already published by test accounts is
+not treated as something to protect.
 
-### 5. Барьер HTTP → shape перед зависимой записью
+**Why.** Every existing account is a test account. Migration code and
+compatibility layers are pure cost here: they are written, tested and soon
+deleted, and along the way they hide the real format from the reader.
 
-**С:** 2026-08-11 (ревью 3, находка 1)
+**Consequence.** The rule is revoked by an explicit owner's decision — from that
+moment the format is a contract and backward compatibility returns to the scope
+of any task that touches data.
 
-HTTP 200 от `/ingest_each` доказывает коммит в Postgres — **не** доставку строки
-через Electric в коллекцию. Запись, чьё продолжение читает шейп как базу
-(следующая правка берёт `parent_sign_hash`, второе сообщение ждёт key-row,
-карточка нужна для `user_storage`), обязана дождаться `awaitTxId` полученного
-`txid`.
+### 2. Writes are never lost silently
 
-**Почему.** Без барьера каждый из перечисленных сценариев подписывал мутацию
-против устаревшей базы и получал отказ — иногда воспроизводимо, иногда раз в
-десять запусков, что хуже.
+**Since:** 2026-08-11 (reviews 2–3)
 
-**Следствие.** Точка входа для таких записей — `sendMutationsAndAwaitShape`,
-не голый `sendMutations`. Барьер таймаутится (10 с) и логирует, но не роняет
-запись: она уже принята сервером.
+Any mutation the user initiated (a message, an edit, a reaction, a profile
+change) either reaches the server or the user sees that it did not. There is no
+third state where something "went nowhere".
 
-### 5a. Base64: подпись с padding, шейп — без него
+**Why.** The first reviews found several places where a server rejection was
+swallowed by `.catch(() => {})` or reached only `console.warn`. A rejected edit
+looked accepted; an unsent card did not prevent saving a profile that referenced
+it.
 
-**С:** 2026-08-26
+**Consequences.**
+- The transport distinguishes transient (network, 5xx — retry) from permanent
+  (422, a business rule — retrying is pointless). Permanent surfaces in the UI.
+- Optimistic state is rolled back or marked as failed; it does not hang around
+  pretending everything is fine.
+- Mutations waiting for the network live in a durable outbox and survive a
+  reload.
 
-Одни и те же байты приезжают в двух разных представлениях, и перепутать их
-можно только один раз за отладочную сессию — подпись просто не сходится, без
-подсказки почему.
+---
 
-| Где | Как кодируется | Источник |
+## The contract with the backend
+
+### 3. `/shapes` is the only read endpoint
+
+**Since:** 2026-07-31 (confirmed by the backend team)
+
+Tables are read through `/electric/v1/shapes?table=…&where=…`. The proxy
+endpoints `/user_card`, `/user_storage` and their kin are deprecated: they have
+their own offset logic and the backend is retiring them.
+
+**Why.** Code on a deprecated endpoint gets rewritten when it is removed, and
+until then it behaves unlike the other shapes (a different resume, different
+headers).
+
+### 4. `owner_timestamp` is strictly monotonic on the client
+
+**Since:** 2026-08-11 (review 3, finding 6)
+
+The server rejects an update whose `owner_timestamp` is not strictly greater
+than the stored one. `Math.floor(Date.now() / 1000)` gives the **same** value to
+two edits within one second — the second is silently rejected as "not newer".
+
+**Consequence.** A new timestamp is `max(now, previous + 1)`
+(`src/lib/data/time.ts::nextOwnerTimestamp`), and writes to one entity are
+serialised so that `previous` is read after the previous write's barrier.
+
+### 5. The HTTP → shape barrier before a dependent write
+
+**Since:** 2026-08-11 (review 3, finding 1)
+
+HTTP 200 from `/ingest_each` proves a commit in Postgres — **not** the row's
+delivery through Electric into a collection. A write whose successor reads the
+shape as its base (the next edit takes `parent_sign_hash`, a second message
+waits for the key row, the card is needed for `user_storage`) must await
+`awaitTxId` on the returned `txid`.
+
+**Why.** Without the barrier every one of those scenarios signed a mutation
+against a stale base and was rejected — sometimes reproducibly, sometimes once
+in ten runs, which is worse.
+
+**Consequence.** The entry point for such writes is
+`sendMutationsAndAwaitShape`, not bare `sendMutations`. The barrier times out
+(10 s) and logs, but does not fail the write: the server has already accepted it.
+
+### 5a. Base64: the signature carries padding, the shape does not
+
+**Since:** 2026-08-26
+
+The same bytes arrive in two different encodings, and you can only confuse them
+once per debugging session — the signature simply does not verify, with no hint
+as to why.
+
+| Where | Encoding | Source |
 |---|---|---|
-| payload подписи | **с** padding (`=`) | `chat/lib/chat/data/integrity.ex:89,93` — `Base.encode64/1`, у Elixir это `padding: true` |
-| бинарные колонки из `/shapes` | **без** padding | `chat/lib/chat_web/plugs/hex_to_base64_adapter.ex:122,157` — `Base.encode64(bin, padding: false)` |
+| signature payload | **with** padding (`=`) | `chat/lib/chat/data/integrity.ex:89,93` — `Base.encode64/1`, which is `padding: true` in Elixir |
+| binary columns from `/shapes` | **without** padding | `chat/lib/chat_web/plugs/hex_to_base64_adapter.ex:122,157` — `Base.encode64(bin, padding: false)` |
 
-**Следствие.** Значение, взятое из шейпа, нельзя класть в payload подписи как
-есть — его нужно дополнить `=` до кратности четырём. Это касается и создания
-подписи, и её проверки: при верификации полученной строки payload собирается из
-padded-представления, иначе не сойдётся ни одна строка.
+**Consequence.** A value taken from a shape cannot go into a signature payload
+as-is — it has to be padded with `=` to a multiple of four. This applies to
+producing a signature and to checking one: when verifying a received row the
+payload is assembled from the padded form, or not a single row will verify.
 
-На пути отправки у нас это уже учтено (`encodeField` в `src/api/client.js`
-добивает padding для `_cert`, `_pkey`, `_b64`). На пути приёма проверки подписи
-пока нет вообще — правило сработает в тот момент, когда она появится.
+On the sending path we already handle it (`encodeField` in `src/api/client.js`
+pads `_cert`, `_pkey`, `_b64`). On the receiving path there is no signature check
+at all yet — the rule takes effect the moment one appears.
 
-### 6. Схема сервера — источник истины для wire-формата
+### 6. The server schema is the source of truth for the wire format
 
-**С:** 2026-08-12
+**Since:** 2026-08-12
 
-Поля мутации берутся из Ecto-схемы соответствующей таблицы
-(`chat/lib/chat/data/schemas/*.ex`), а не из соседней таблицы по аналогии.
-Пример: `sign_hash` есть только у `dialog_messages` и
-`dialog_messages_versions`; отправка его в `dialog_keys`, реакции или receipts —
-поле, которое схема не может скастить.
+A mutation's fields come from the Ecto schema of the table in question
+(`chat/lib/chat/data/schemas/*.ex`), not from a neighbouring table by analogy.
+For example: `sign_hash` exists only on `dialog_messages` and
+`dialog_messages_versions`; sending it in `dialog_keys`, reactions or receipts is
+a field the schema cannot cast.
 
-**Следствие.** Прежде чем добавить поле в мутацию — `grep` по схеме. Прежде чем
-принять утверждение ревью о бэкенде — открыть исходник бэкенда.
-
----
-
-## Доменные правила
-
-### 7. Сообщения версионируются, реакции — нет
-
-**С:** 2026-08-11 (продуктовое решение)
-
-`message_id` — логическая идентичность сообщения, `sign_hash` — идентичность
-ревизии. Старые ревизии хранятся в `dialog_messages_versions` и должны быть
-доступны в UI. Реакция привязана к **ревизии** (`message_sign_hash`); при
-правке сообщения реакция на старую ревизию не показывается, а новая реакция
-«переезжает» на новую ревизию (одна строка по детерминированному
-`reaction_hash`, у которого нет ревизии внутри — только `message_id`,
-`reactor_hash`, тип).
-
+**Consequence.** Before adding a field to a mutation, grep the schema. Before
+accepting a review's claim about the backend, open the backend source.
 
 ---
 
-## Процесс
+## Domain rules
 
-### 9. Разработка ведётся в отдельных ветках; `main` не трогаем без решения владельца
+### 7. Messages are versioned, reactions are not
 
-**С:** 2026-08-06
+**Since:** 2026-08-11 (product decision)
 
-Над миграцией параллельно работают два разработчика в разных ветках; результаты
-сравниваются, когда обе готовы. До этого ничто из миграционных веток не
-вливается в `main`, а решения одной ветки не навязываются другой.
+`message_id` is a message's logical identity, `sign_hash` a revision's identity.
+Old revisions live in `dialog_messages_versions` and must be reachable in the UI.
+A reaction binds to a **revision** (`message_sign_hash`); when a message is
+edited, a reaction on the old revision is not shown, and a new reaction "moves"
+to the new revision (one row under a deterministic `reaction_hash`, which
+contains no revision — only `message_id`, `reactor_hash` and the type).
 
-**Практика.** Рабочая ветка → интеграционная ветка (`tanstack-migration`)
-для тестирования → сравнение → решение владельца. «Сделано» означает «запушено
-и видно ревьюеру», а не «лежит локально».
-
-### 10. Тест обязан падать без фикса
-
-**С:** 2026-08-12
-
-Тест, который проходит и с багом, и без него, — не тест, а строка в отчёте.
-Каждый регрессионный тест проверяется на дискриминирующую силу: временно
-вернуть старое поведение → тест красный → вернуть фикс → зелёный.
-
-**Почему.** Так были пойманы два теста, которые «проверяли» очередь реакций,
-проходя тривиально из-за склейки кликов, и один, где `toContain` с асимметричным
-матчером проходил всегда.
-
-### 11. Утверждения о бэкенде проверяются по его исходникам
-
-**С:** 2026-08-06
-
-Три внешних ревью содержали утверждения о поведении бэкенда. Все они
-проверялись по коду и тестам бэкенда до того, как приниматься к исправлению;
-часть подтвердилась, часть потребовала уточнения формулировок. Ни одно не
-принято на веру — и ни одно из наших собственных утверждений тоже не должно.
 
 ---
 
-## Как пополнять
+## Process
 
-Правило попадает сюда, когда о него споткнулись **дважды** или один раз дорого.
-Формат: заголовок-императив, дата, «почему» с конкретным случаем, следствия
-для кода. Устаревшее правило не удаляется, а помечается «снято: дата, причина»
-— история отмен не менее полезна, чем история введений.
+### 9. Work happens in separate branches; `main` is not touched without the owner
+
+**Since:** 2026-08-06
+
+Two developers work on the migration in parallel in different branches, and the
+results are compared when both are ready. Until then nothing from the migration
+branches is merged into `main`, and one branch's decisions are not imposed on the
+other.
+
+**In practice.** A working branch → the integration branch
+(`tanstack-migration`) for testing → comparison → the owner's decision. "Done"
+means "pushed and visible to the reviewer", not "sitting locally".
+
+### 10. A test must fail without the fix
+
+**Since:** 2026-08-12
+
+A test that passes with the bug and without it is not a test, it is a line in a
+report. Every regression test is checked for discriminating power: restore the
+old behaviour temporarily → the test goes red → restore the fix → green.
+
+**Why.** This is how two tests that "checked" the reaction queue were caught —
+they passed trivially because clicks coalesced — along with one where `toContain`
+with an asymmetric matcher always passed.
+
+### 11. Claims about the backend are verified against its source
+
+**Since:** 2026-08-06
+
+Three external reviews contained claims about backend behaviour. All of them
+were checked against the backend's code and tests before anything was fixed;
+some held, some needed rewording. Not one was taken on faith — and none of our
+own claims should be either.
+
+---
+
+## How to extend this
+
+A rule lands here when it has been stumbled over **twice**, or once expensively.
+The format: an imperative heading, a date, a "why" with the concrete case, and
+the consequences for the code. An obsolete rule is not deleted but marked
+"lifted: date, reason" — the history of revocations is no less useful than the
+history of introductions.

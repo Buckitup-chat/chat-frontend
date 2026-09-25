@@ -1,306 +1,316 @@
-# Что бэкенд уже умеет, а интерфейс — ещё нет
+# What the backend can already do and the interface cannot
 
-Документ для дизайнера: перечень функций мессенджера, которые протокол и сервер
-уже поддерживают, но которых нет в клиенте. По каждой — что видит пользователь,
-что даёт сервер и какие решения нужно принять при отрисовке.
+A document for the designer: the messenger features the protocol and the server
+already support but the client does not have. For each one — what the user sees,
+what the server provides, and which decisions the drawing needs.
 
-Источник: `Buckitup-chat/chat`, `docs/pq/**`. Отзывы вынесены в отдельный
-документ — [reviews-frontend-context.md](reviews-frontend-context.md).
+Source: `Buckitup-chat/chat`, `docs/pq/**`. Reviews are in a separate
+document — [reviews-frontend-context.md](reviews-frontend-context.md).
 
-**Что в клиенте есть сегодня:** текстовые сообщения, правка своего сообщения,
-эмодзи-реакции, подтверждение прочтения по кнопке, список контактов и диалогов,
-профиль с аватаркой, создание и восстановление аккаунта. Всё остальное ниже —
-отсутствует.
+**What the client has today:** text messages, editing your own message, emoji
+reactions, read confirmation on a button, the contact and dialog lists, a
+profile with an avatar, account creation and recovery. Everything below is
+missing.
 
-**Три степени готовности** отмечены у каждого пункта:
+**Three degrees of readiness** are marked on every item:
 
-- **[готово]** — сервер поддерживает полностью, нужен только интерфейс;
-- **[есть основа]** — примитивы есть, но часть логики придётся спроектировать;
-- **[нужен бэкенд]** — потребует доработки сервера, рисовать пока рано.
-
----
-
-# 1. Типы содержимого сообщения
-
-Сегодня сообщение может быть только текстом. Протокол же описывает единый
-конверт, внутри которого лежит любой тип контента, и сервер про этот тип ничего
-не знает — он видит только зашифрованный блоб. Это значит, что новый тип
-контента не требует изменений на сервере вообще.
-
-## 1.1 Составное сообщение [готово]
-
-Одно сообщение может содержать несколько элементов подряд — например текст,
-затем картинку, затем ещё текст. В Telegram это подпись под фото; здесь модель
-шире: произвольная последовательность.
-
-**Что решить дизайнеру.** Как выглядит пузырь с несколькими элементами. Где
-находится подпись относительно медиа. Что происходит при длинном тексте и
-широкой картинке. Как выглядит составное сообщение в превью списка диалогов.
-
-## 1.2 Цитирование и ответ на сообщение [есть основа]
-
-Протокол резервирует тип содержимого `{"quote": …}` под ответы. Формат поля
-ещё не зафиксирован, но механизм — обычный элемент внутри составного
-сообщения, то есть ответ это «цитата + мой текст» в одном пузыре.
-
-**Что решить дизайнеру.** Вид цитаты внутри пузыря (полоска слева, имя автора,
-сокращённый текст). Поведение по нажатию на цитату — переход к оригиналу с
-подсветкой. Что показывать, если оригинал удалён или ещё не догрузился. Как
-выглядит цитирование картинки и файла, а не текста. Ввод: как выбирается
-сообщение для ответа (свайп, контекстное меню).
-
-## 1.3 Изображения [готово]
-
-Два варианта, между которыми выбирает отправитель по размеру:
-
-- **маленькие** (до 500 КБ) — байты лежат внутри самого сообщения, приходят
-  вместе с ним, показываются мгновенно;
-- **большие** — лежат отдельными зашифрованными кусками, сообщение содержит
-  только ссылку и ключ.
-
-В обоих случаях сообщение несёт **соотношение сторон** и **thumbhash** —
-крошечный отпечаток, из которого рисуется размытое превью до того, как
-загрузится сам файл. Это ровно тот блюр, который Telegram показывает под
-загрузкой.
-
-**Что решить дизайнеру.** Как выглядит место под картинку до загрузки: размытое
-превью правильных пропорций, поверх — индикатор прогресса. Максимальные размеры
-пузыря с картинкой. Открытие на полный экран. Что показывать, если картинка
-недоступна (см. §2.4).
-
-## 1.4 Видео с прогрессивным воспроизведением [готово]
-
-Видео начинает играть после расшифровки первого куска, а не после полной
-загрузки, и поддерживает **перемотку в произвольную точку** — браузер запрашивает
-нужный диапазон, клиент расшифровывает его на лету. Как и у картинок, есть
-соотношение сторон и thumbhash для превью-кадра.
-
-Чего нет и не будет: адаптивного качества, серверного перекодирования, живых
-трансляций — сервер принципиально не может смотреть внутрь файла.
-
-**Что решить дизайнеру.** Превью видео в ленте: thumbhash, длительность, кнопка
-проигрывания. Плеер — встроенный в пузырь или полноэкранный. Полоса перемотки и
-то, как на ней показана уже загруженная часть. Состояние «буферизуется».
-
-## 1.5 Файлы [готово]
-
-Тоже два варианта — маленькие внутри сообщения, большие отдельно. Сообщение
-несёт имя, размер, MIME-тип и дату создания файла.
-
-**Что решить дизайнеру.** Пузырь с файлом: иконка по типу, имя, размер,
-состояние. Действия — скачать, открыть, поделиться. Как выглядит файл, чья
-загрузка идёт прямо сейчас, и файл, который не догрузился.
-
-## 1.6 Несколько вложений в одном сообщении [есть основа]
-
-Составное сообщение позволяет приложить несколько файлов сразу. Отдельного
-понятия «альбом» в протоколе нет — это чисто интерфейсная сборка.
-
-**Что решить дизайнеру.** Сетка из нескольких изображений в одном пузыре
-(2, 3, 4+ картинки — как в Telegram). Карусель при открытии на полный экран:
-листание, счётчик «3 из 7», подпись под кадром. Смешанный набор — картинки и
-документы вместе. Ограничение на количество.
+- **[ready]** — the server supports it fully, only the interface is missing;
+- **[foundation]** — the primitives exist, but part of the logic has to be
+  designed;
+- **[needs backend]** — requires server work, too early to draw.
 
 ---
 
-# 2. Работа с файлами
+# 1. Message content types
 
-Самый большой пробел: клиент сегодня не умеет ни отправлять, ни принимать
-файлы, хотя протокол проработан детально.
+Today a message can only be text. The protocol describes a single envelope with
+any kind of content inside, and the server knows nothing about that kind — it
+sees an encrypted blob. Which means a new content type requires no server change
+at all.
 
-## 2.1 Отправка с прогрессом [готово]
+## 1.1 Composed message [ready]
 
-Большой файл режется на куски по 4 МБ, каждый шифруется и отправляется
-отдельно. Значит прогресс известен точно — не «ожидайте», а количество
-отправленных кусков из общего числа.
+One message can hold several elements in a row — text, then a picture, then more
+text. In Telegram this is the caption under a photo; here the model is wider: an
+arbitrary sequence.
 
-**Что решить дизайнеру.** Индикатор прогресса в пузыре сообщения. Отмена
-загрузки. Что показывать при отправке нескольких файлов сразу — общий прогресс
-или по каждому. Поведение при уходе с экрана диалога во время загрузки.
+**For the designer.** What a bubble with several elements looks like. Where the
+caption sits relative to the media. What happens with long text and a wide
+picture. How a composed message appears in the dialog-list preview.
 
-## 2.2 Докачка после обрыва [готово]
+## 1.2 Quoting and replying [foundation]
 
-Прерванная загрузка возобновляется: клиент спрашивает у сервера, какие куски
-уже приняты, и досылает недостающие. Файл не начинается заново — даже после
-перезагрузки вкладки или потери сети на середине.
+The protocol reserves the content type `{"quote": …}` for replies. The field
+format is not fixed yet, but the mechanism is an ordinary element inside a
+composed message — a reply is "quote + my text" in one bubble.
 
-**Что решить дизайнеру.** Как выглядит приостановленная загрузка. Возобновляется
-ли она автоматически при возврате сети или по кнопке. Что показывать после
-перезапуска приложения, когда есть незавершённые отправки. Сообщение о том, что
-незавершённые загрузки удаляются через 48 часов.
+**For the designer.** How a quote looks inside the bubble (a bar on the left,
+the author's name, shortened text). What tapping the quote does — jump to the
+original with a highlight. What to show when the original is deleted or has not
+arrived yet. How quoting a picture or a file looks rather than text. Input: how
+a message is chosen to reply to (swipe, context menu).
 
-## 2.3 Скачивание [готово]
+## 1.3 Images [ready]
 
-Симметрично: файл собирается из кусков, каждый проверяется по хешу. Прогресс
-так же точен.
+Two variants, chosen by the sender according to size:
 
-**Что решить дизайнеру.** Прогресс скачивания в пузыре. Отличие «скачивается»
-от «уже на устройстве». Просмотр без скачивания (картинки, видео) против
-явного сохранения (документы).
+- **small** (under 500 KB) — the bytes live inside the message itself, arrive
+  with it and render instantly;
+- **large** — kept as separate encrypted chunks, the message carries only a
+  reference and a key.
 
-## 2.4 Состояние доступности файла [готово] — важное отличие от Telegram
+In both cases the message carries the **aspect ratio** and a **thumbhash** — a
+tiny fingerprint that draws a blurred preview before the file itself arrives.
+Exactly the blur Telegram shows under a download.
 
-Узел может иметь **часть** кусков файла. Это не ошибка, а нормальное состояние
-сети без интернета: файл едет от узла к узлу постепенно. Сервер отдаёт честный
-счётчик «столько-то из стольких-то кусков на месте».
+**For the designer.** What the space for a picture looks like before it loads: a
+blurred preview in the right proportions with a progress indicator over it. The
+maximum size of a picture bubble. Opening it full screen. What to show when the
+picture is unavailable (see §2.4).
 
-Возможные состояния:
+## 1.4 Video with progressive playback [ready]
 
-- **доступен** — все куски на месте, можно открыть;
-- **частично доступен** — часть кусков есть, идёт добор; известна доля;
-- **известен, но недоступен** — сообщение и метаданные пришли, файла нет;
-- **удалён** — автор удалил, осталась только отметка.
+Video starts playing after the first chunk is decrypted rather than after the
+whole file arrives, and supports **seeking to an arbitrary point** — the browser
+requests the range it needs and the client decrypts it on the fly. As with
+pictures, there is an aspect ratio and a thumbhash for the preview frame.
 
-**Что решить дизайнеру.** Это ключевой экран для offline-first продукта. Как
-показать «файл придёт, но не сейчас», не пугая пользователя. Индикатор доли.
-Отличие «не докачано, потому что нет сети» от «автор удалил». Возможность
-запросить приоритетную докачку.
+What there is not and will not be: adaptive quality, server-side transcoding,
+live broadcasts — the server fundamentally cannot look inside the file.
 
----
+**For the designer.** The video preview in the feed: thumbhash, duration, a play
+button. The player — embedded in the bubble or full screen. The seek bar and how
+the already-downloaded part is shown on it. The "buffering" state.
 
-# 3. История и правки
+## 1.5 Files [ready]
 
-## 3.1 История версий сообщения [готово]
+Two variants again — small inside the message, large separately. The message
+carries the name, size, MIME type and creation date of the file.
 
-Каждая правка сохраняется: старые версии лежат в отдельной append-only таблице,
-новая версия ссылается на предыдущую. Полная цепочка правок доступна и
-криптографически подтверждена — то есть можно показать не только «изменено», но
-и что именно было раньше.
+**For the designer.** A file bubble: an icon by type, name, size, state. The
+actions — download, open, share. How a file currently uploading looks, and one
+that did not finish.
 
-**Что решить дизайнеру.** Метка «изменено» у пузыря. Как открыть историю правок.
-Вид самой истории — список версий с датами, или сравнение. Показывать ли
-историю чужих сообщений (протокол позволяет). Реакции привязаны к конкретной
-версии: как объяснить, что реакция на старую версию не перенеслась.
+## 1.6 Several attachments in one message [foundation]
 
-## 3.2 Удаление сообщения [есть основа]
+A composed message allows attaching several files at once. The protocol has no
+notion of an "album" — that is purely an interface construct.
 
-Удаление — это отметка и пустое содержимое, а не исчезновение строки. Собеседник
-видит, что сообщение было и удалено.
-
-**Что решить дизайнеру.** Вид удалённого сообщения в ленте. Различие «удалено у
-меня» и «удалено у всех» — сейчас протокол знает только второе. Что происходит
-с реакциями и цитатами на удалённое сообщение.
-
-## 3.3 Реакции [частично есть]
-
-Работают, но привязаны к версии сообщения: после правки реакция на старую
-версию не показывается, а новая реакция «переезжает» на актуальную.
-
-**Что решить дизайнеру.** Вид группы реакций под пузырём: эмодзи, счётчик,
-подсветка своей. Кто поставил — список по нажатию. Выбор эмодзи. Как объяснить
-поведение при правке.
-
-## 3.4 Подтверждение прочтения [частично есть]
-
-Отправляется только по явному действию и **необратимо** — отменить нельзя. Это
-сознательное продуктовое решение, а не техническое ограничение. Привязано к
-конкретной версии: правка требует нового подтверждения.
-
-**Что решить дизайнеру.** Как объяснить необратимость до нажатия. Вид
-подтверждённого сообщения у автора и у читателя. Отличие от привычных «галочек»
-Telegram — здесь это осознанный акт, а не автоматика.
+**For the designer.** A grid of several images in one bubble (2, 3, 4+ pictures,
+as in Telegram). The carousel when opened full screen: paging, a "3 of 7"
+counter, a caption under the frame. A mixed set — pictures and documents
+together. A limit on the count.
 
 ---
 
-# 4. Порядок сообщений и расхождения
+# 2. Working with files
 
-Особенность продукта: узлы могут работать без интернета и синхронизироваться
-позже. Из этого следуют состояния, которых у обычного мессенджера нет.
+The biggest gap: the client today can neither send nor receive files, although
+the protocol is worked out in detail.
 
-## 4.1 Одновременная отправка (расхождение) [есть основа]
+## 2.1 Upload with progress [ready]
 
-Двое написали одновременно, не видя сообщений друг друга. Протокол фиксирует
-это явно: у сообщений общий предок и нет ссылки друг на друга. Спека прямо
-говорит, что показ расхождения — задача интерфейса.
+A large file is cut into 4 MB chunks, each encrypted and sent separately. So the
+progress is known exactly — not "please wait" but a count of chunks sent out of
+the total.
 
-**Что решить дизайнеру.** Показывать ли расхождение вообще или тихо
-выстраивать по времени. Если показывать — как: разделитель, метка, ветвление.
-Как выглядит «схождение», когда следующее сообщение видит обе ветки.
+**For the designer.** The progress indicator in the message bubble. Cancelling
+an upload. What to show when several files are sent at once — a combined
+progress or one per file. What happens when the user leaves the dialog screen
+mid-upload.
 
-## 4.2 Сообщение пришло раньше своего предшественника [есть основа]
+## 2.2 Resuming after an interruption [ready]
 
-При догоняющей синхронизации сообщение может прийти раньше того, на которое
-оно ссылается. Такое сообщение нельзя показывать как обычное — контекст ещё не
-загружен.
+An interrupted upload resumes: the client asks the server which chunks it
+already has and sends the rest. The file does not start over — even after a tab
+reload or losing the network halfway.
 
-**Что решить дизайнеру.** Состояние «ожидает контекста». Показывать в ленте
-серым, скрывать до подгрузки, или выносить отдельно. Что делать, если контекст
-так и не приехал.
+**For the designer.** What a paused upload looks like. Whether it resumes
+automatically when the network returns or on a button. What to show after an app
+restart when there are unfinished uploads. The message that unfinished uploads
+are deleted after 48 hours.
 
-## 4.3 Состояния отправки [есть основа]
+## 2.3 Downloading [ready]
 
-Отправка проходит через несколько различимых состояний: сохранено локально →
-отправляется → принято сервером → доставлено собеседнику. Плюс ошибки:
-временная (повторим) и окончательная (не примут никогда).
+Symmetrical: the file is assembled from chunks, each verified by hash. The
+progress is just as exact.
 
-**Что решить дизайнеру.** Значки для каждого состояния. Что видит пользователь
-после перезагрузки при неотправленных сообщениях. Как выглядит окончательно
-отклонённое сообщение и какое действие ему доступно. Индикатор «N сообщений
-не отправлено» в шапке.
+**For the designer.** Download progress in the bubble. The difference between
+"downloading" and "already on the device". Viewing without downloading (pictures,
+video) against explicit saving (documents).
 
----
+## 2.4 File availability state [ready] — the important difference from Telegram
 
-# 5. Диалоги и контакты
+A node may hold **part** of a file's chunks. That is not an error but the normal
+state of a network without internet: the file travels from node to node
+gradually. The server gives an honest counter of "so many of so many chunks
+present".
 
-## 5.1 Аватарки собеседников [нужен бэкенд]
+The possible states:
 
-Своя аватарка есть, чужая — нет: она зашифрована личным ключом владельца, и
-расшифровать её нечем. Нужно продуктовое решение и доработка сервера.
+- **available** — every chunk is there, it can be opened;
+- **partially available** — some chunks are there and more are coming; the share
+  is known;
+- **known but unavailable** — the message and metadata arrived, the file did
+  not;
+- **deleted** — the author deleted it, only the mark remains.
 
-**Что решить дизайнеру.** Пока — как выглядит заглушка вместо аватарки
-(сейчас генеративная). Стоит заложить оба варианта.
-
-## 5.2 Групповые чаты [нужен бэкенд]
-
-Спецификация комнат не написана. Экраны комнат в клиенте есть, но за ними нет
-протокола. Рисовать преждевременно.
-
-## 5.3 Функции, не требующие сервера [есть основа]
-
-Всё это можно сделать на клиенте, потому что сообщения и так расшифрованы
-локально, а личные настройки лежат в пользовательском хранилище:
-
-- **поиск по сообщениям** — локальный, по расшифрованному тексту;
-- **черновики** — сохранение недописанного;
-- **закреплённые диалоги и сообщения**;
-- **пересылка** — технически это отправка того же содержимого в другой диалог;
-- **избранное / заметки себе**;
-- **настройки уведомлений**.
-
-**Что решить дизайнеру.** Приоритет: что из этого входит в первую версию.
-Поиск — отдельный экран или строка в шапке. Пересылка — выбор адресата,
-указание на источник.
+**For the designer.** This is the key screen for an offline-first product. How to
+show "the file is coming, but not now" without alarming the user. The
+completeness indicator. The difference between "not downloaded because there is
+no network" and "the author deleted it". The option to request a priority fetch.
 
 ---
 
-# 6. Чего протокол не даёт — не рисовать
+# 3. History and edits
 
-Чтобы не тратить работу впустую:
+## 3.1 Message revision history [ready]
 
-- **индикатор «печатает…» и статус «в сети»** — явно вне области протокола,
-  продукт не рассчитан на постоянное соединение;
-- **адаптивное качество видео, перекодирование, живые трансляции** — сервер не
-  может смотреть внутрь зашифрованного файла;
-- **упоминания с уведомлением** — механизма нет;
-- **групповые комнаты** — спецификация не написана;
-- **удаление «только у меня»** — протокол знает только удаление для всех;
-- **ветвящиеся треды ответов** — цепочка версий линейна, дерево обсуждений
-  потребует другой структуры.
+Every edit is kept: old versions live in a separate append-only table and the new
+version references the previous one. The full chain of edits is available and
+cryptographically attested — so it is possible to show not just "edited" but what
+exactly was there before.
+
+**For the designer.** The "edited" mark on the bubble. How to open the revision
+history. What that history looks like — a list of versions with dates, or a
+comparison. Whether to show the history of other people's messages (the protocol
+allows it). Reactions bind to a specific version: how to explain that a reaction
+on the old version did not carry over.
+
+## 3.2 Deleting a message [foundation]
+
+Deletion is a mark and empty content, not a row disappearing. The other side sees
+that a message existed and was deleted.
+
+**For the designer.** What a deleted message looks like in the feed. The
+difference between "deleted for me" and "deleted for everyone" — the protocol
+currently knows only the second. What happens to reactions and quotes pointing at
+a deleted message.
+
+## 3.3 Reactions [partly there]
+
+They work, but bind to a message version: after an edit a reaction on the old
+version is not shown, and a new reaction "moves" to the current one.
+
+**For the designer.** The look of the reaction group under a bubble: emoji, a
+counter, your own highlighted. Who reacted — a list on tap. Choosing an emoji.
+How to explain the behaviour around edits.
+
+## 3.4 Read confirmation [partly there]
+
+It is sent only on an explicit action and is **irreversible** — it cannot be
+taken back. That is a deliberate product decision, not a technical limitation. It
+binds to a specific version: an edit calls for a new confirmation.
+
+**For the designer.** How to explain the irreversibility before the tap. What a
+confirmed message looks like to the author and to the reader. The difference from
+Telegram's familiar ticks — here it is a conscious act, not automation.
 
 ---
 
-# 7. Предлагаемый порядок работы
+# 4. Message order and divergence
 
-По убыванию отдачи на единицу усилий:
+A peculiarity of the product: nodes can work without internet and sync later.
+That produces states an ordinary messenger does not have.
 
-1. **Файлы и картинки целиком** (§1.3, §1.5, §2) — самый заметный пробел;
-   мессенджер без вложений выглядит незаконченным. Здесь же состояния
-   доступности — то, чем продукт отличается от аналогов.
-2. **Составные сообщения и цитирование** (§1.1, §1.2) — базовое ожидание от
-   переписки.
-3. **Состояния отправки и офлайн** (§4.3) — уже почти работает под капотом,
-   не хватает отображения.
-4. **Видео** (§1.4) — самостоятельный крупный кусок.
-5. **История версий** (§3.1) — редкий сценарий, но отличающий продукт.
-6. **Расхождения и ожидание контекста** (§4.1, §4.2) — нужны, когда появятся
-   реальные узлы без интернета.
+## 4.1 Simultaneous sends (divergence) [foundation]
+
+Two people wrote at once without seeing each other's messages. The protocol
+records this explicitly: the messages share an ancestor and neither references
+the other. The spec says outright that showing divergence is the interface's job.
+
+**For the designer.** Whether to show divergence at all or quietly order by time.
+If shown — how: a separator, a mark, a branch. What "convergence" looks like when
+the next message sees both branches.
+
+## 4.2 A message arrived before its predecessor [foundation]
+
+During catch-up sync a message can arrive before the one it references. Such a
+message cannot be shown as an ordinary one — its context is not loaded yet.
+
+**For the designer.** The "waiting for context" state. Show it greyed in the
+feed, hide it until the context loads, or set it apart. What to do if the context
+never arrives.
+
+## 4.3 Send states [foundation]
+
+Sending passes through several distinguishable states: saved locally → sending →
+accepted by the server → delivered to the peer. Plus errors: temporary (we retry)
+and final (it will never be accepted).
+
+Deleting adds a fifth state: a retraction the peer's device has confirmed.
+Its mark is a tombstone rather than the delivered double check, because what
+arrived was the deletion and not the message.
+
+**For the designer.** The marks for each state. What the user sees after a reload
+with unsent messages. What a finally rejected message looks like and what action
+it offers. An "N messages unsent" indicator in the header.
+
+---
+
+# 5. Dialogs and contacts
+
+## 5.1 Contacts' avatars [needs backend]
+
+Your own avatar exists, other people's do not: theirs is encrypted with the
+owner's personal key and there is nothing to decrypt it with. It needs a product
+decision and server work.
+
+**For the designer.** For now — what the placeholder instead of an avatar looks
+like (generated today). Worth designing for both outcomes.
+
+## 5.2 Group chats [needs backend]
+
+The room specification is not written. The client has room screens, but there is
+no protocol behind them. Drawing is premature.
+
+## 5.3 Features that need no server [foundation]
+
+All of this can be done on the client, because messages are decrypted locally
+anyway and personal settings live in user storage:
+
+- **message search** — local, over the decrypted text;
+- **drafts** — keeping what was typed but not sent;
+- **pinned dialogs and messages**;
+- **forwarding** — technically sending the same content into another dialog;
+- **favourites / notes to self**;
+- **notification settings**.
+
+**For the designer.** Priority: which of these belong in the first version.
+Search — a separate screen or a field in the header. Forwarding — choosing the
+recipient, marking the source.
+
+---
+
+# 6. What the protocol does not give — do not draw it
+
+So that no work is wasted:
+
+- **a "typing…" indicator and an "online" status** — explicitly outside the
+  protocol's scope; the product does not assume a permanent connection;
+- **adaptive video quality, transcoding, live broadcasts** — the server cannot
+  look inside an encrypted file;
+- **mentions with a notification** — there is no mechanism;
+- **group rooms** — the specification is not written;
+- **"delete for me only"** — the protocol knows only deletion for everyone;
+- **branching reply threads** — the version chain is linear, and a discussion
+  tree would need a different structure.
+
+---
+
+# 7. Proposed order of work
+
+By return per unit of effort:
+
+1. **Files and pictures in full** (§1.3, §1.5, §2) — the most visible gap; a
+   messenger without attachments looks unfinished. Availability states belong
+   here too — the thing that sets this product apart.
+2. **Composed messages and quoting** (§1.1, §1.2) — a basic expectation of a
+   conversation.
+3. **Send states and offline** (§4.3) — mostly working under the hood already,
+   the display is what is missing.
+4. **Video** (§1.4) — a substantial piece in its own right.
+5. **Revision history** (§3.1) — a rare scenario, but one that distinguishes the
+   product.
+6. **Divergence and waiting for context** (§4.1, §4.2) — needed once real nodes
+   without internet appear.

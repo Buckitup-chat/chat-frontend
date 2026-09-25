@@ -704,6 +704,15 @@ describe('§4.3 delivered and rejected', () => {
 		expect(w.find('.sync-status.synced').exists()).toBe(false);
 	});
 
+	// The mark names what actually reached the peer: after a retraction that
+	// is the deletion, so calling the message delivered would be a lie the
+	// recipient can no longer check.
+	it('marks a delivered deletion with a tombstone rather than the double check', () => {
+		const w = render([message({ isMine: true, _deleted: true, _syncStatus: 'synced', _deliveredToPeers: 1 })]);
+		expect(w.find('.sync-status.tombstone').text()).toBe('🪦');
+		expect(w.find('.sync-status.delivered').exists()).toBe(false);
+	});
+
 	it('keeps the single check while nothing confirmed arrival', () => {
 		const w = render([message({ isMine: true, _syncStatus: 'synced', _deliveredToPeers: 0 })]);
 		expect(w.find('.sync-status.synced').exists()).toBe(true);

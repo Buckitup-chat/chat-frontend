@@ -43,124 +43,22 @@
 </template>
 
 <script setup>
-import { userPQStore } from '@/store/userPQ.store';
-
-
-import { inject, ref, watch, computed } from 'vue';
+import { useLocalBackupExport } from '@/composables/useLocalBackupExport';
+import { inject } from 'vue';
 import errorMessage from '@/utils/errorMessage';
 
-const $enigma = inject('$enigma');
-const $userPQ = userPQStore();
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');
 
-const protect = ref(true);
-const showPassword = ref(true);
-const password = ref('');
-const dirty = ref(false);
-const processing = ref(false);
-
-watch(
-	() => protect.value,
-	(val) => {
-		if (!val) {
-			password.value = '';
-			showPassword.value = true;
-			dirty.value = false;
-		}
-	},
-);
-
-watch(
-	() => password.value,
-	(val) => {
-		if (val) {
-			password.value = password.value.replaceAll(' ', '');
-			if (val.length > 3) dirty.value = true;
-		}
-	},
-);
+const { protect, showPassword, password, dirty, processing, passwordErrors, exportToFile } =
+	useLocalBackupExport();
 
 const backup = async () => {
-	dirty.value = true;
-	if (passwordErrors.value.length) return;
-	
-	processing.value = true;
-	
-	await new Promise(r => setTimeout(r, 100));
-
 	try {
-		const backup = await $userPQ.exportBackup();
-		if (!backup) {
-			$swal.fire({
-				icon: 'error',
-				title: 'Backup error',
-				text: 'Unable to export backup data. Make sure you are logged in.',
-				timer: 5000,
-			});
-			return;
-		}
-
-		const jsonString = JSON.stringify(backup, null, 2);
-
-		let backupString;
-		if (password.value) {
-			const base64PlainData = btoa(unescape(encodeURIComponent(jsonString)));
-			const base64Password = btoa(password.value);
-			backupString = $enigma.encryptData(base64PlainData, base64Password);
-		} else {
-			backupString = jsonString;
-		}
-
-		const blob = new Blob([backupString], { type: 'text/plain' });
-		const url = URL.createObjectURL(blob);
-		const a = document.createElement('a');
-		a.href = url;
-		a.download = generateBackupName($userPQ.currentUser?.name || 'account');
-		document.body.appendChild(a);
-		a.click();
-		document.body.removeChild(a);
-		URL.revokeObjectURL(url);
-
-		showPassword.value = true;
-		password.value = '';
-		dirty.value = false;
-		
-		$mitt.emit('modal::close');
+		if (await exportToFile()) $mitt.emit('modal::close');
 	} catch (e) {
 		console.error(e);
-		$swal.fire({
-			icon: 'error',
-			title: 'Backup error',
-			text: errorMessage(e),
-			timer: 8000,
-		});
-	} finally {
-		processing.value = false;
+		$swal.fire({ icon: 'error', title: 'Backup error', text: errorMessage(e), timer: 8000 });
 	}
 };
-
-function generateBackupName(rawName) {
-	const now = new Date();
-	const yyyy = now.getFullYear();
-	const mm = String(now.getMonth() + 1).padStart(2, '0');
-	const dd = String(now.getDate()).padStart(2, '0');
-	const datePart = `${yyyy}_${mm}_${dd}`;
-	const safeName = rawName.replace(/[^a-zA-Z0-9_-]/g, '');
-	return `backup_${datePart}_${safeName}${password.value ? '_encrypted' : '_raw'}.bukitup`;
-}
-
-const passwordErrors = computed(() => {
-	const errors = [];
-	if (!protect.value) return errors;
-	if (!password.value) return ['Password is required'];
-
-	if (password.value.length < 10) errors.push('Must be at least 10 characters long.');
-	if (!/[A-Z]/.test(password.value)) errors.push('Must contain an uppercase letter (A-Z).');
-	if (!/[a-z]/.test(password.value)) errors.push('Must contain a lowercase letter (a-z).');
-	if (!/\d/.test(password.value)) errors.push('Must contain a digit (0-9).');
-	if (!/[!@#$%^&*(),.?":{}|<>]/.test(password.value)) errors.push('Must contain a special character (e.g. !@#$%^&*).');
-
-	return errors;
-});
 </script>

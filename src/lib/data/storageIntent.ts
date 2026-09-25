@@ -29,7 +29,40 @@ export function mergeJsonPatch(
 	const baseSlots = (base?.slots ?? {}) as Record<string, unknown>;
 	const patchSlots = (patch.slots ?? {}) as Record<string, unknown>;
 	if (base?.slots || patch.slots) merged.slots = { ...baseSlots, ...patchSlots };
+	if (base?.staleVaults || base?.retiredVaults || 'vaultUuid' in patch || patch.retiredVaults) {
+		mergeVaultList(merged, base, patch);
+	}
 	return merged;
+}
+
+const uuidList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+
+// The recovery-vault list lives in the root record, which another device may
+// patch between our read and the moment this patch lands on its base. So the
+// list is never written as a value computed from a read: a replaced vaultUuid
+// joins staleVaults here, against the actual base, and a patch removes entries
+// only by naming them in retiredVaults. A vault dropped from the list would
+// stay live and keep an old set of shares able to open the account.
+//
+// `base` is either the stored record or an earlier pending patch being
+// coalesced with this one, so retiredVaults survives the merge; the
+// materializer strips it (stripPatchDirectives) before encrypting.
+function mergeVaultList(merged: Record<string, unknown>, base: Record<string, unknown> | null, patch: Record<string, unknown>): void {
+	const stale = new Set([...uuidList(base?.staleVaults), ...uuidList(patch.staleVaults)]);
+	const replaced = base?.vaultUuid;
+	if ('vaultUuid' in patch && typeof replaced === 'string' && replaced !== patch.vaultUuid) stale.add(replaced);
+	const retired = new Set([...uuidList(base?.retiredVaults), ...uuidList(patch.retiredVaults)]);
+	for (const uuid of retired) stale.delete(uuid);
+	if (typeof merged.vaultUuid === 'string') stale.delete(merged.vaultUuid);
+	merged.staleVaults = [...stale];
+	if (retired.size) merged.retiredVaults = [...retired];
+	else delete merged.retiredVaults;
+}
+
+/** Keys of a patch that steer the merge and are not part of the stored record. */
+export function stripPatchDirectives(record: Record<string, unknown>): Record<string, unknown> {
+	const { retiredVaults: _retired, ...stored } = record;
+	return stored;
 }
 
 export interface StorageJsonCodec {
@@ -113,7 +146,7 @@ async function materializeJsonPatchValue(patch: Record<string, unknown>, baseRow
 		throw new Error('materializeStorageIntent: a jsonPatch intent requires setStorageJsonCodec to have been called (vault locked or codec never registered)');
 	}
 	const base = baseRow?.value_b64 ? await jsonCodec.decrypt(baseRow.value_b64) : null;
-	const merged = mergeJsonPatch(base, patch);
+	const merged = stripPatchDirectives(mergeJsonPatch(base, patch));
 	const { valueB64 } = await jsonCodec.encrypt(merged);
 	return valueB64;
 }

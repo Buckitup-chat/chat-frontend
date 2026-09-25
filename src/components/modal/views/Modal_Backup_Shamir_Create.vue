@@ -12,7 +12,7 @@
 						<span>Total shares (n):</span>
 						<span class="fw-bold fs-5">{{ totalShares }}</span>
 					</label>
-					<input type="range" class="form-range" min="2" max="10" step="1" v-model="totalShares" @input="onTotalSharesChange" />
+					<input type="range" class="form-range" min="2" max="10" step="1" v-model.number="totalShares" @input="onTotalSharesChange" />
 				</div>
 
 				<div class="mb-3">
@@ -20,7 +20,7 @@
 						<span>Threshold (t):</span>
 						<span class="fw-bold fs-5">{{ threshold }}</span>
 					</label>
-					<input type="range" class="form-range" min="2" :max="totalShares" step="1" v-model="threshold" />
+					<input type="range" class="form-range" min="2" :max="totalShares" step="1" v-model.number="threshold" />
 				</div>
 
 				<div class="alert alert-warning small">
@@ -46,7 +46,8 @@
 			</div>
 
 			<div class="alert alert-info small mt-2">
-				Store each share in a different secure location or give to trusted contacts.
+				Your account is now stored sealed on the server, and these shares are the only key to it.
+				Store each one in a different secure place or give it to a trusted contact.
 			</div>
 
 			<div class="_shares_list mt-3">
@@ -76,16 +77,12 @@
 </style>
 
 <script setup>
-import { web3Store } from '@/store/web3.store';
-
 import { userPQStore } from '@/store/userPQ.store';
-
 
 import { inject, ref } from 'vue';
 import copyToClipboard from '@/utils/copyToClipboard';
 
 const $userPQ = userPQStore();
-const $web3 = web3Store();
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');
 
@@ -113,17 +110,11 @@ const copyShare = (share) => {
 
 const generateShares = async () => {
 	processing.value = true;
-	await new Promise(r => setTimeout(r, 100));
-
 	try {
-		const backup = await $userPQ.exportBackup();
-		if (!backup) throw new Error('Unable to export backup. Make sure you are logged in.');
-
-		const secretStr = JSON.stringify(backup);
-		generatedShares.value = $web3.bukitupClient.generateShares(secretStr, parseInt(totalShares.value), parseInt(threshold.value));
-		
-		if (!generatedShares.value?.length) throw new Error('No shares were generated');
-		
+		generatedShares.value = await $userPQ.createRecoveryBackup({
+			total: totalShares.value,
+			threshold: threshold.value,
+		});
 		step.value = 2;
 	} catch (e) {
 		console.error(e);

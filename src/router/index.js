@@ -83,12 +83,6 @@ const routes = [
 				meta: { auth: true, name: 'Backup Center', sub: true },
 			},
 			{
-				path: 'teststand',
-				name: 'account_backup_teststand',
-				component: () => import('../views/backup/Page_Backup_ShamirTestbed.vue'),
-				meta: { auth: true, name: 'Backup Teststand', sub: true },
-			},
-			{
 				path: 'admin',
 				name: 'account_admin',
 				component: () => import('../views/account/Page_Account_Admin.vue'),

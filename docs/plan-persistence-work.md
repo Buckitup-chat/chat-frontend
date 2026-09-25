@@ -1,96 +1,99 @@
-# План работ: персистентность, шифрование, перевод записи на транзакции
+# Work plan: persistence, encryption, moving writes onto transactions
 
-**Дата:** 2026-08-12
-**Ветка:** `docs/tanstack-migration`
-**Базовый коммит:** `f5386a1` — «shape persistence and durable outbox on the
-official TanStack stack» (сделан параллельным агентом)
+**Date:** 2026-08-12
+**Branch:** `docs/tanstack-migration`
+**Base commit:** `f5386a1` — "shape persistence and durable outbox on the
+official TanStack stack" (written by a parallel agent)
 
 ---
 
-## 0. Что изменилось с момента прошлого плана
+## 0. What changed since the previous plan
 
-Параллельный агент **уже реализовал и закоммитил** два слоя из трёх:
+The parallel agent **has already implemented and committed** two of the three
+layers:
 
-- **L1 — персистентность коллекций:** `persistence.ts`, wa-sqlite поверх OPFS,
-  обёртка `persisted()` в `collections.ts`, `initPersistence()` в `App.vue`.
-- **L3 — durable outbox:** `outbox.ts` на примитивах
+- **L1 — collection persistence:** `persistence.ts`, wa-sqlite over OPFS, the
+  `persisted()` wrapper in `collections.ts`, `initPersistence()` in `App.vue`.
+- **L3 — durable outbox:** `outbox.ts` on the primitives of
   `@tanstack/offline-transactions` (`IndexedDBAdapter`, `WebLocksLeader`,
-  `BackoffCalculator`), подключён в `ingest.ts` (`enqueue`, `drainOutbox`,
+  `BackoffCalculator`), wired into `ingest.ts` (`enqueue`, `drainOutbox`,
   `drainPendingWrites`).
 
-Это меняет смысл ваших решений: они принимались как «что делать», а по факту
-часть уже сделана. Ниже — что из этого следует.
+That changes what your decisions mean: they were taken as "what to do", and part
+of it is already done. What follows from that is below.
 
 ---
 
-## 1. Ваши решения и что с ними делать
+## 1. Your decisions and what to do with them
 
-| Решение | Статус | Действие |
+| Decision | Status | Action |
 |---|---|---|
-| **L1 отложить** | ⚠️ конфликтует: L1 уже написан и закоммичен | нужен выбор: откатить, спрятать за флаг, или пересмотреть решение (§2) |
-| **Доступ к локальным данным после логина — ок** | ✅ | закладываем в проект шифрования |
-| **Путь записи → транзакции TanStack DB** | ⚠️ агент выбрал другой путь и обосновал | см. §4 — обоснование сильное, предлагаю пересмотреть |
+| **Defer L1** | ⚠️ conflict: L1 is already written and committed | a choice is needed: revert, hide behind a flag, or revisit the decision (§2) |
+| **Local data available after login — fine** | ✅ | folded into the encryption design |
+| **Write path → TanStack DB transactions** | ⚠️ the agent took another route and argued for it | see §4 — the argument is strong, I suggest revisiting |
 
 ---
 
-## 2. L1: «отложить» против уже написанного кода
+## 2. L1: "defer" versus code that already exists
 
-**Почему решение вообще принималось:** официальная SQLite-персистентность
-пишет на диск открытым текстом, а по вашему требованию всё локальное должно
-быть зашифровано. Штатной опции ключа у `openBrowserWASQLiteOPFSDatabase` нет.
+**Why the decision was taken at all:** the official SQLite persistence writes to
+disk in plaintext, while your requirement is that everything local be encrypted.
+`openBrowserWASQLiteOPFSDatabase` has no key option.
 
-**Что реально утекает** (повторю, потому что это определяет цену вопроса):
-содержимое сообщений на диск открытым **не попадает** — `content_b64`,
-`refs_map_b64`, `type_b64`, `value_b64` зашифрованы сквозным шифрованием ещё
-до попадания в коллекцию. Открытыми оказываются метаданные: `user_hash`,
-`dialog_hash`, `sender_hash`, `owner_timestamp`, подписи, и **имена контактов**
-(`user_cards.name` — по протоколу они публичны и на сервере лежат открытыми).
+**What actually leaks** (worth repeating, because it sets the price of the
+question): message contents do **not** reach the disk in the clear —
+`content_b64`, `refs_map_b64`, `type_b64`, `value_b64` are end-to-end encrypted
+before they ever enter a collection. What ends up readable is metadata:
+`user_hash`, `dialog_hash`, `sender_hash`, `owner_timestamp`, signatures, and
+**contact names** (`user_cards.name` — public by protocol and stored in the
+clear on the server).
 
-То есть на диске восстановим **социальный граф, тайминги и имена**, но не
-переписка.
+So from the disk one recovers **the social graph, the timings and the names**,
+but not the correspondence.
 
-**Три варианта, из которых надо выбрать:**
+**Three options, one of which has to be chosen:**
 
-| | Вариант | Что делаем | Цена |
+| | Option | What we do | Price |
 |---|---|---|---|
-| **2A** | Спрятать за флагом | `initPersistence()` вызывается только если включён явный флаг; по умолчанию выключено | ~20 строк, код сохраняется, включим после шифрования |
-| **2B** | Откатить L1 | revert части `f5386a1` | теряем готовую работу; вернуть потом дороже, чем не удалять |
-| **2C** | Оставить включённым как согласованное отступление | зафиксировать в доке, что метаданные на диске открыты | требование нарушено осознанно |
+| **2A** | Hide behind a flag | `initPersistence()` runs only under an explicit flag; off by default | ~20 lines, the code survives, we enable it after encryption |
+| **2B** | Revert L1 | revert part of `f5386a1` | finished work is lost; bringing it back later costs more than not deleting it |
+| **2C** | Leave it on as an agreed exception | record in the doc that metadata is readable on disk | the requirement is broken knowingly |
 
-**Рекомендую 2A.** Ваше решение «отложить» соблюдается буквально (в проде
-персистентности нет), работа не выбрасывается, включение — одна строка после
-того, как появится шифрование. Откат (2B) — худший вариант: он уничтожает
-готовый код ради того же результата, что даёт флаг.
+**I recommend 2A.** Your "defer" decision is honoured literally (there is no
+persistence in production), no work is thrown away, and enabling it is one line
+once encryption exists. The revert (2B) is the worst of the three: it destroys
+finished code for the same result the flag gives.
 
 ---
 
-## 3. Главное, что сейчас не соответствует требованию
+## 3. The main thing that does not meet the requirement right now
 
-**Outbox тоже пишет открытым текстом.** В `outbox.ts`:
+**The outbox writes in plaintext too.** In `outbox.ts`:
 
 ```js
 let storage = new IndexedDBAdapter(DB_NAME);
 ```
 
-Никакого шифрования. А хранит он **подписанные мутации целиком** — то есть в
-IndexedDB открытым текстом лежат `user_hash`, `dialog_hash`, `message_id`,
-таймстемпы и подписи. Содержимое (`content_b64`) внутри мутации зашифровано,
-но конверт — нет.
+No encryption anywhere. And what it stores is **whole signed mutations** — so
+IndexedDB holds `user_hash`, `dialog_hash`, `message_id`, timestamps and
+signatures in the clear. The content (`content_b64`) inside the mutation is
+encrypted; the envelope around it is not.
 
-Это прямо противоречит требованию и, в отличие от L1, **чинится штатно**:
-`StorageAdapter` — строковый интерфейс (`get`/`set`/`delete`/`keys`/`clear`),
-и в `outbox.ts` уже есть тестовый хук для подмены адаптера. То есть точка
-расширения готова — нужно вставить туда шифрующую обёртку.
+This contradicts the requirement directly and, unlike L1, **has a supported
+fix**: `StorageAdapter` is a string interface (`get`/`set`/`delete`/`keys`/
+`clear`), and `outbox.ts` already has a test hook for swapping the adapter. The
+extension point is ready — an encrypting wrapper goes into it.
 
-**Это самая приоритетная задача плана:** незашифрованный outbox появился
-только что, и чем раньше он станет зашифрованным, тем меньше устройств
-успеет накопить открытые данные.
+**This is the plan's top priority:** the unencrypted outbox appeared only just
+now, and the sooner it becomes encrypted the fewer devices accumulate readable
+data.
 
 ---
 
-## 4. Про перевод записи на транзакции TanStack DB
+## 4. On moving writes onto TanStack DB transactions
 
-Вы решили переводить. Но агент выбрал иной путь и **обосновал его в коде**:
+You decided to move. The agent took a different route and **argued for it in the
+code**:
 
 > The package's full OfflineExecutor is not used: it replays through a static
 > collection registry, and dialog collections are created lazily per
@@ -98,106 +101,106 @@ IndexedDB открытым текстом лежат `user_hash`, `dialog_hash`,
 > mutations don't need a collection to replay anyway — they are self-contained
 > signed rows.
 
-Проверил — обоснование верное. `OfflineExecutor` принимает
-`collections: { name: collection }` статической картой при старте. Наши
-диалоговые коллекции создаются лениво по `dialog_hash` и вытесняются LRU
-(8 штук) — после перезагрузки исполнитель физически не сможет разрешить
-коллекцию для диалога, который ещё не открыт.
+I checked, and the argument holds. `OfflineExecutor` takes
+`collections: { name: collection }` as a static map at startup. Our dialog
+collections are created lazily per `dialog_hash` and evicted by LRU (eight of
+them) — after a reload the executor physically cannot resolve the collection for
+a dialog that has not been opened yet.
 
-Обойти это можно (предсоздавать коллекции всех диалогов из очереди при
-старте), но цена — переделка стабилизированного пути записи ради того, чтобы
-получить то, что уже работает: durable-хранение, лидер-вкладка, backoff — всё
-это агент взял из того же пакета, только собрал сам.
+It can be worked around (pre-create the collections of every dialog in the queue
+at startup), but the price is rebuilding a settled write path to obtain what
+already works: durable storage, a leader tab, backoff — all taken from the same
+package, just assembled by hand.
 
-**Рекомендую пересмотреть решение №3** и оставить текущий гибрид. Он
-использует официальные примитивы там, где они подходят, и не тащит
-`OfflineExecutor` туда, где он не ложится на нашу ленивую модель коллекций.
+**I suggest revisiting decision №3** and keeping the current hybrid. It uses the
+official primitives where they fit and does not drag `OfflineExecutor` into a
+place where it does not sit on our lazy collection model.
 
-Если вы всё же хотите полный переход — это отдельный крупный этап, и я бы
-делал его **после** шифрования, а не вместо него.
-
----
-
-## 5. Что заметил попутно: компромисс в дизайне outbox
-
-Агент хранит **подписанные** мутации. Это упрощает всё (запись самодостаточна,
-переживает потерю ключа, реплей безопасен), но имеет следствие, которое стоит
-знать:
-
-Подпись фиксирует `parent_sign_hash` и `owner_timestamp` **на момент
-создания**. Если запись пролежала в очереди, а тем временем то же сообщение
-отредактировали с другого устройства — при доставке она окажется устаревшей.
-Сервер такую не применит (правильно: свежая ревизия не должна затираться
-старой), но **правка пользователя будет потеряна** с пометкой permanent.
-
-Альтернатива — хранить намерение и подписывать при доставке — сложнее и
-требует ключа в момент отправки. Для одного устройства разница незаметна; для
-мультидевайса — заметна.
-
-**Это не баг, а осознанный компромисс.** Предлагаю зафиксировать его в доке и
-вернуться, если мультидевайс станет приоритетом. Отдельного решения сейчас не
-требует.
+If you do want the full move, it is a large separate stage, and I would do it
+**after** encryption rather than instead of it.
 
 ---
 
-## 6. Предлагаемая последовательность работ
+## 5. Noticed along the way: a trade-off in the outbox design
 
-### Этап 1 — Крипто-обёртка хранилища `secureStore.ts`
-AES-GCM поверх произвольного строкового хранилища. Ключ — из vault
-(`EncryptionManagerPQ`), уникальный nonce на запись, namespace по `user_hash`.
+The agent stores **signed** mutations. That simplifies everything (a record is
+self-contained, survives the loss of a key, replays safely) but has a consequence
+worth knowing:
 
-**Обоснование:** общий фундамент для этапов 2 и 3, писать дважды не нужно.
-Интерфейс подгоняется под `StorageAdapter` из `offline-transactions`, чтобы
-подставляться без адаптации.
+The signature fixes `parent_sign_hash` and `owner_timestamp` **at creation
+time**. If a record sat in the queue while the same message was edited from
+another device, it arrives stale. The server will not apply it (rightly: a fresh
+revision must not be overwritten by an old one), but **the user's edit is lost**,
+marked permanent.
 
-**Тесты:** круг зашифровал/расшифровал; чужой ключ не читает; отсутствие
-ключа — явная ошибка, а не пустой результат.
+The alternative — storing an intent and signing at delivery — is more complex and
+needs the key at send time. On a single device the difference is invisible; on
+several devices it is not.
 
-### Этап 2 — Шифрование outbox (приоритет)
-Подставить обёртку в `outbox.ts` вместо голого `IndexedDBAdapter` (тестовый
-хук уже есть). Миграция: записи, созданные до шифрования, прочитать открытыми
-один раз и перезаписать.
-
-**Обоснование приоритета:** единственное место, где прямо сейчас пишутся
-незашифрованные пользовательские данные, и оно активно.
-
-**Зависимость:** очередь становится доступной только после логина. Проверить,
-что `drainPendingWrites` вызывается после разблокировки, а не при старте.
-
-### Этап 3 — Шифрование `localStore` (L2)
-Тот же приём. Заодно закрывается давний пробел: сейчас там открытыми лежат
-`user_hash`, таймстемпы, подписи (зашифрован только `value_b64`).
-
-**Обоснование:** пробел мой, возник по недосмотру, требование его закрывает.
-
-### Этап 4 — Флаг для L1
-`initPersistence()` за явным флагом, по умолчанию выключен; в доке — почему.
-
-**Обоснование:** исполняет ваше решение «отложить», не уничтожая код.
-
-### Этап 5 — Тесты и живая проверка
-- запись при недоступном узле → очередь → доставка после восстановления;
-- перезагрузка вкладки с непустой очередью → доставка после логина, без дублей;
-- permanent-отказ → зависящие записи пропускаются, независимые доставляются;
-- проверка в DevTools, что в IndexedDB нет читаемых `user_hash` / `dialog_hash`.
-
-**Обоснование:** пункт про DevTools — единственный способ доказать выполнение
-требования, а не поверить в него.
-
-### Этап 6 (отдельно) — Шифрование L1
-Свой VFS поверх wa-sqlite (`vfsName` — документированная точка расширения).
-Крупная и крипто-критичная работа; браться после того, как этапы 1–5 закрыты
-и стабильны.
+**This is a deliberate trade-off, not a bug.** I suggest recording it in the docs
+and returning to it if multi-device becomes a priority. It needs no decision now.
 
 ---
 
-## 7. Что нужно от вас перед стартом
+## 6. Proposed order of work
 
-1. **Подтвердить 2A** (флаг вместо отката) — или выбрать 2B/2C.
-2. **Подтвердить пересмотр решения №3** — оставляем гибридный outbox, полный
-   `OfflineExecutor` не внедряем. Либо настаиваете, и тогда это отдельный
-   этап после шифрования.
-3. Принять к сведению §5 (компромисс подписанных мутаций) — решения не
-   требует, но лучше знать.
+### Stage 1 — the storage crypto wrapper `secureStore.ts`
+AES-GCM over any string storage. The key comes from the vault
+(`EncryptionManagerPQ`), a unique nonce per write, namespaced by `user_hash`.
 
-После ответов начинаю с этапа 1.
+**Why:** a shared foundation for stages 2 and 3, so it is not written twice. The
+interface matches `StorageAdapter` from `offline-transactions` so it drops in
+without adaptation.
+
+**Tests:** a round trip encrypts and decrypts; another key cannot read it; a
+missing key is an explicit error rather than an empty result.
+
+### Stage 2 — encrypting the outbox (priority)
+Put the wrapper into `outbox.ts` in place of the bare `IndexedDBAdapter` (the
+test hook is already there). Migration: records written before encryption are
+read in the clear once and rewritten.
+
+**Why first:** it is the only place writing unencrypted user data right now, and
+it is active.
+
+**Dependency:** the queue becomes readable only after login. Check that
+`drainPendingWrites` runs after unlock rather than at startup.
+
+### Stage 3 — encrypting `localStore` (L2)
+The same move. It also closes a long-standing gap: `user_hash`, timestamps and
+signatures sit there in the clear today (only `value_b64` is encrypted).
+
+**Why:** the gap is mine, it came from an oversight, and the requirement closes
+it.
+
+### Stage 4 — a flag for L1
+`initPersistence()` behind an explicit flag, off by default; the doc says why.
+
+**Why:** it executes your "defer" decision without destroying the code.
+
+### Stage 5 — tests and a live check
+- a write while the node is unreachable → the queue → delivery after recovery;
+- reloading a tab with a non-empty queue → delivery after login, no duplicates;
+- a permanent rejection → dependent records are skipped, independent ones are
+  delivered;
+- a DevTools check that IndexedDB holds no readable `user_hash` / `dialog_hash`.
+
+**Why:** the DevTools item is the only way to demonstrate the requirement is met
+rather than to believe it.
+
+### Stage 6 (separate) — encrypting L1
+A custom VFS over wa-sqlite (`vfsName` is a documented extension point). Large
+and crypto-critical; start it after stages 1–5 are closed and stable.
+
+---
+
+## 7. What is needed from you before starting
+
+1. **Confirm 2A** (a flag instead of a revert) — or choose 2B/2C.
+2. **Confirm revisiting decision №3** — we keep the hybrid outbox and do not
+   adopt the full `OfflineExecutor`. Or you insist, and then it is a separate
+   stage after encryption.
+3. Note §5 (the signed-mutation trade-off) — it needs no decision, but it is
+   better known than not.
+
+Once answered, I start with stage 1.

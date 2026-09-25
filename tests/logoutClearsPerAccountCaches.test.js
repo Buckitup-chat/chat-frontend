@@ -45,8 +45,8 @@ vi.mock('@/lib/data/ingest', () => ({
 }));
 vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async () => null,
-	upsertStorageRow: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
-	upsertStorageJsonPatch: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
+	putStorageRow: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
+	putStorageJsonPatch: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
 }));
 
 const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');

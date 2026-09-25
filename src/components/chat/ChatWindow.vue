@@ -231,8 +231,11 @@
           <div class="message-time text-end mt-1" :class="msg.isMine ? 'text-dark' : 'text-muted'">
             {{ msg.timestamp }}
             <!-- §4.3: ◌ stored locally → pale ✓ in flight → ✓ server-accepted
-                 → ✓✓ delivery receipt. ↻ = durably queued in the outbox, or
-                 an intent kept for recovery before it got there; 🔒 = waiting
+                 → ✓✓ the peer's delivery receipt landed. A delivered deletion
+                 gets a tombstone rather than ✓✓: what reached the peer is the
+                 retraction, so saying "delivered" about the message would name
+                 the wrong thing. ↻ = durably queued in the outbox, or an
+                 intent kept for recovery before it got there; 🔒 = waiting
                  for the vault; ! only for a permanent rejection. -->
             <!-- a terminal verification failure outranks any transport ✓ -->
             <span v-if="msg._verify === 'blocked' || (msg._verify === 'invalid' && msg._verifyTerminal)" class="sync-status error" title="Delivered, but it failed verification in this conversation">!</span>
@@ -241,7 +244,9 @@
             <span v-else-if="msg._syncStatus === 'queued'" class="sync-status local" title="Queued — will retry automatically">↻</span>
             <span v-else-if="msg._syncStatus === 'awaiting_unlock'" class="sync-status local" title="Waiting for unlock">🔒</span>
             <span v-else-if="msg._syncStatus === 'awaiting_recovery'" class="sync-status local" title="Not sent yet — kept on this device, retried on reconnect or next login">↻</span>
-            <span v-else-if="msg._syncStatus === 'synced' && msg._deliveredToPeers" class="sync-status delivered" title="Delivered to the recipient">✓✓</span>
+            <span v-else-if="msg._syncStatus === 'synced' && msg._deliveredToPeers"
+              :class="['sync-status', msg._deleted ? 'tombstone' : 'delivered']"
+              :title="msg._deleted ? 'Deletion delivered to the recipient' : 'Delivered to the recipient'">{{ msg._deleted ? '🪦' : '✓✓' }}</span>
             <span v-else-if="msg._syncStatus === 'synced'" class="sync-status synced" title="Accepted by server">✓</span>
             <span v-else-if="msg._syncStatus === 'error'" class="sync-status error" title="Rejected — not sent">!</span>
             <span v-if="msg._raw && msg._raw.parent_sign_hash" class="msg-edited" role="button"
@@ -702,7 +707,7 @@ const onFilePicked = (e) => {
   e.target.value = '';
   if (!files.length) return;
   // Everything picked travels as ONE composed message, captioned by whatever
-  // sits in the input (board screen 02: "подпись набирается в том же поле").
+  // sits in the input (board screen 02: the caption is typed in the same field).
   emit('sendFile', files, newMessage.value.trim());
   newMessage.value = '';
   dropDraft();
@@ -717,7 +722,7 @@ const findOriginal = (q) => props.messages.find((m) => m.id === q.messageId);
 const quoteOriginalPresent = (q) => !!findOriginal(q);
 const quoteOriginalDeleted = (q) => !!findOriginal(q)?._deleted;
 
-// §1.2 "Ссылка и переход": scroll to the original, highlight for 1.5s.
+// §1.2, reference and jump: scroll to the original, highlight for 1.5s.
 const jumpToMessage = (messageId) => {
   const el = messagesContainer.value?.querySelector(`[data-msg-id="${messageId}"]`);
   if (!el) return; // original not synced yet — the note under the quote says so
@@ -1196,7 +1201,8 @@ watch(() => props.messages, () => {
 
 /* ---------- design board: send states (§4.3) ---------- */
 .sync-status.local { color: #9a9c9d; }        /* ◌ stored locally */
-.sync-status.delivered { color: #2e7d32; letter-spacing: -2px; } /* ✓✓ green per board */
+.sync-status.delivered, .sync-status.tombstone { color: #2e7d32; } /* delivered, green per board */
+.sync-status.delivered { letter-spacing: -2px; }  /* tightens the ✓✓ pair */
 .sync-status.pending { opacity: .45; }         /* pale ✓ in flight */
 /* rejected outright: red frame on the bubble itself, not just the glyph */
 .message-error { border: 1.5px solid #dc3545; }

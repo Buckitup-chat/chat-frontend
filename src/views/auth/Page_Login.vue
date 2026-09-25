@@ -62,7 +62,7 @@
 			<button class="btn btn-outline-light w-100" @click="setMode('restore')">Import from local backup</button>
 		</div>
 
-		<div class="px-3 w-100 mb-3">
+		<div v-if="sharesRestoreAvailable" class="px-3 w-100 mb-3">
 			<button class="btn btn-outline-light w-100" @click="setMode('shares')">Restore from shares</button>
 		</div>
 
@@ -222,6 +222,11 @@
 
 <script setup>
 import { userPQStore } from '@/store/userPQ.store';
+import { isModalAvailable } from '@/components/modal/registry';
+
+// The button is hidden when the modal it opens is not in this build — asking
+// the registry rather than the flag keeps one owner of what is reachable.
+const sharesRestoreAvailable = isModalAvailable('account_restore_shares');
 
 import { userStore } from '@/store/user.store';
 
@@ -236,7 +241,6 @@ const $mitt = inject('$mitt');
 const $user = userStore();
 const $userPQ = userPQStore();
 // const $swal = inject('$swal');
-const $route = inject('$route');
 // const $loader = useLoader();
 // const $isProd = inject('$isProd');
 // const $router = inject('$router');
@@ -250,10 +254,7 @@ onMounted(async () => {
 
 	await updateData();
 
-	if ($route.query.sessionId) {
-		mode.value = 'connect';
-		$mitt.emit('modal::open', { id: 'account_connect' });
-	} else if ($userPQ.myLocalUsers?.length) {
+	if ($userPQ.myLocalUsers?.length) {
 		mode.value = 'existing';
 	}
 
@@ -270,6 +271,9 @@ const updateData = async () => {
 
 const wipe = async () => {
 	await $user.clearIndexedDB();
+	// clearIndexedDB does what its name says and no more, but this button says
+	// "all" — and it is the exit a person takes before handing the device on.
+	await $userPQ.endSession();
 	location.reload();
 };
 
@@ -278,7 +282,7 @@ function setMode(m) {
 	if (m === 'create') $mitt.emit('modal::open', { id: 'account_create' });
 	if (m === 'restore') $mitt.emit('modal::open', { id: 'account_restore_local' });
 	if (m === 'shares') $mitt.emit('modal::open', { id: 'account_restore_shares' });
-	if (m === 'connect') $mitt.emit('modal::open', { id: 'account_connect' });
+	if (m === 'connect') $mitt.emit('modal::open', { id: 'account_link_device' });
 }
 
 const connectVaultLocalApp = async () => {

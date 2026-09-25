@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia';
+import { newWrapKey } from '@/lib/pq/vaultEnvelope';
 import { ref, shallowRef, computed, watch, onScopeDispose } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
@@ -75,6 +76,7 @@ export const userPQStore = defineStore('userPQ', () => {
 
   const initialize = async () => {
     if (isInitialized.value) return;
+    reapTestbedKeys();
 
     // Phase 1: local vault registry (fast, offline)
     em.value = EncryptionManagerPQ.getInstance();
@@ -154,7 +156,16 @@ export const userPQStore = defineStore('userPQ', () => {
   const login = async (userHash) => {
     await initialize();
 
-    let identity = await em.value.login(userHash);
+    const identity = await em.value.login(userHash);
+    afterSignIn(identity);
+    return identity;
+  };
+
+  // Everything a signed-in session needs beyond the manager's own login:
+  // the store's currentUser (which the router guard reads), the profile
+  // merge and the contacts map. Shared by login and importBackup, so an
+  // imported account is not a second-class session until the next sign-in.
+  const afterSignIn = (identity) => {
     currentUser.value = identity;
 
     // Load profile + contacts in background (PGlite may not be ready yet)
@@ -183,10 +194,10 @@ export const userPQStore = defineStore('userPQ', () => {
     }).catch(() => {});
 
     refreshAllData();
-
-    return identity;
   };
 
+  // Tearing down the session object, which is also the first half of signing
+  // in: switching accounts and importing a backup both go through here.
   const logout = async () => {
     if (em.value) {
       await em.value.logout();
@@ -196,6 +207,35 @@ export const userPQStore = defineStore('userPQ', () => {
 
     console.log('[userStore] User logged out');
   };
+
+  // Device-lifetime material is wiped here and never in logout(): logout() is
+  // also the first half of signing in, so a wipe there would destroy material
+  // the next session still needs. Callers that mean "the session is over" call
+  // this instead of remembering what has to go.
+  const endSession = async () => {
+    await logout();
+  };
+
+  /**
+   * A one-time reaper, not testbed code. Builds up to this one registered the
+   * teststand route unconditionally, so a profile that opened it holds guardian
+   * EOA and spending private keys in localStorage as plaintext, alongside a
+   * payload carrying the owner key and the master secret. Nothing else in the
+   * app clears localStorage.
+   *
+   * It runs on boot rather than on sign-out because most profiles never sign
+   * out — they close the tab — and the keys have to go from those too. Each key
+   * is removed on its own: if one throw took the other with it, the half left
+   * behind would be the half holding the payload. Drop this once a build
+   * containing it has shipped.
+   */
+  function reapTestbedKeys() {
+    for (const key of ['testbed.guardians', 'testbed.backups']) {
+      try {
+        localStorage.removeItem(key);
+      } catch { /* no storage in this environment */ }
+    }
+  }
 
   const deleteAccount = async (userHash) => {
     if (em.value) {
@@ -324,13 +364,40 @@ export const userPQStore = defineStore('userPQ', () => {
   };
 
   const exportBackup = async () => {
-    if (!em.value) return null;
+    if (!em.value) throw new Error('Not signed in.');
     const keys = await em.value.exportVaultKeys();
+    if (!keys.contact_skey) {
+      // A vault restored before contact_skey was carried has none, and an
+      // import refuses a backup without it - so refuse here, before it is
+      // sealed, downloaded or sent.
+      throw new Error('This account has no contact key in its vault and cannot be backed up or linked.');
+    }
     return {
       version: 1,
       identity: currentUser.value,
       keys
     };
+  };
+
+  // The account sealed under a fresh wrap key and published where only that
+  // key can find it; the key is the one thing a share scheme ever splits
+  // (docs/backup-recovery-overview.md §6), and it never leaves this function.
+  // Split before publishing, so a parameter the split refuses leaves no vault
+  // behind; publish before returning, so nothing is shown until the server has
+  // the vault - shares of a key that opens nothing are worse than none.
+  const createRecoveryBackup = async ({ total, threshold }) => {
+    const backup = await exportBackup();
+    // Loaded here and not at the top: Shamir and its Buffer polyfill serve
+    // this one dev-gated screen and have no place in the startup bundle.
+    const { splitWrapKey } = await import('@/lib/wrapKeyShares');
+    const wrapKey = newWrapKey();
+    try {
+      const shares = splitWrapKey(wrapKey, total, threshold);
+      await em.value.publishRecoveryVault(wrapKey, JSON.stringify(backup));
+      return shares;
+    } finally {
+      wrapKey.fill(0);
+    }
   };
 
   const importBackup = async (backupData) => {
@@ -343,7 +410,10 @@ export const userPQStore = defineStore('userPQ', () => {
     const { identity, keys } = backupData;
     if (!identity?.name) identity.name = 'Imported Account';
     await em.value.importVaultKeys(keys, identity);
-    await refreshAllData();
+    // importVaultKeys signs in at the manager level only; the store's side of
+    // a session is the same as after login, or the import lands on the login
+    // page with no contacts.
+    afterSignIn(identity);
   };
 
   watch(isAuthenticated, (authenticated) => {
@@ -387,6 +457,7 @@ export const userPQStore = defineStore('userPQ', () => {
     registerNewUser,
     login,
     logout,
+    endSession,
     deleteAccount,
     updateCurrentUserName,
     updateCurrentUserProfile,
@@ -400,6 +471,7 @@ export const userPQStore = defineStore('userPQ', () => {
     getEvmPrivateKey,
     getEvmMetaKeys,
     exportBackup,
+    createRecoveryBackup,
     importBackup,
     signContactChallenge,
 

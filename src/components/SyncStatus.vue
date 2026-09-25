@@ -44,7 +44,7 @@ const LABELS: Record<AccountSyncState, string> = {
 
 .status-dot.synced {
   background-color: #22c55e;
-  /* зелений — синхронізовано */
+  /* green — synced */
   box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
 }
 
@@ -62,7 +62,7 @@ const LABELS: Record<AccountSyncState, string> = {
   font-size: 12px;
 }
 
-/* Анімація пульсації при свіжій синхронізації (опціонально) */
+/* pulse animation on a fresh sync (optional) */
 .status-dot.synced {
   animation: pulse 2s infinite;
 }

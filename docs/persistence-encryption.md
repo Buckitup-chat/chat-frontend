@@ -1,93 +1,97 @@
-# Локальное хранилище: слои и шифрование
+# Local storage: the layers and their encryption
 
-**Ветка:** `docs/tanstack-migration`
+**Branch:** `docs/tanstack-migration`
 
-Сокрытие метаданных на клиенте не требуется (решение CTO, 2026-08-19): контроль
-доступа к метаданным начинается с бэкенда. Сквозное шифрование контента
-(`content_b64`, `value_b64`) — часть протокола и действует независимо от того,
-что написано ниже. Этот документ описывает, какие локальные слои есть, что из
-них зашифровано и какие следствия это имеет для кода.
+Hiding metadata on the client is not required (CTO decision, 2026-08-19):
+access control for metadata starts at the backend. End-to-end encryption of
+content (`content_b64`, `value_b64`) is part of the protocol and holds
+regardless of anything below. This document describes which local layers exist,
+which of them are encrypted, and what that means for the code.
 
 ---
 
-## Что где лежит
+## What lives where
 
-| Слой | Хранилище | Состояние | Ключ записи | Значение |
+| Layer | Storage | State | Record key | Value |
 |---|---|---|---|---|
-| **L3 — outbox** | IndexedDB `buckitup-outbox` | зашифрован | непрозрачный сортируемый id | AES-GCM |
-| **L2 — localStore** | IndexedDB `buckitup-local-store` | зашифрован | HMAC-производное имя | AES-GCM |
-| **L1 — кэш коллекций** | OPFS `buckitup-shapes` | выключен флагом | — | открытый текст (wa-sqlite) |
+| **L3 — outbox** | IndexedDB `buckitup-outbox` | encrypted | opaque sortable id | AES-GCM |
+| **L2 — localStore** | IndexedDB `buckitup-local-store` | encrypted | HMAC-derived name | AES-GCM |
+| **L1 — collection cache** | OPFS `buckitup-shapes` | behind a flag | — | plaintext (wa-sqlite) |
 
-L2 и L3 шифруются через `secureStore` (`src/lib/data/secureStore.ts`): AES-GCM-256,
-ключ — PBKDF2 (100k) от `crypt_skey` аккаунта, соль `buckitup-local-storage-v1`.
-Соль отделена от соли контентного шифрования (`avatar-encryption`), поэтому
-компрометация одного производного ключа не отдаёт второй. Свой случайный IV на
-каждую запись: перезапись с тем же содержимым неотличима от изменения.
+L2 and L3 are encrypted through `secureStore` (`src/lib/data/secureStore.ts`):
+AES-GCM-256 with a key from PBKDF2 (100k) over the account's `crypt_skey`, salt
+`buckitup-local-storage-v1`. That salt is separate from the content-encryption
+salt (`avatar-encryption`), so compromising one derived key does not hand over
+the other. Every write gets its own random IV: rewriting the same content is
+indistinguishable from changing it.
 
-Шифрование L2/L3 — свойство реализации, а не требование: новое хранилище может
-писать в IndexedDB напрямую. `secureStore` остаётся доступным, когда нужно,
-чтобы записи одного аккаунта не читались другим в том же браузере.
+Encrypting L2/L3 is a property of the implementation rather than a requirement:
+a new store may write to IndexedDB directly. `secureStore` stays available for
+when one account's records must not be readable by another in the same browser.
 
-## Что закрывает шифрование L2/L3
+## What L2/L3 encryption covers
 
-Зашифрован конверт целиком: `user_hash`, `dialog_hash`, `message_id`,
-таймстемпы, подписи — не только полезная нагрузка.
+The whole envelope is encrypted: `user_hash`, `dialog_hash`, `message_id`,
+timestamps and signatures, not only the payload.
 
-Остаётся видимым по свойствам самого IndexedDB:
+What remains visible through IndexedDB itself:
 
-- количество записей и их примерный размер;
-- порядок появления записей в outbox — ключ там сортируемый по времени
-  (идентификаторов не содержит).
+- the number of records and their approximate size;
+- the order in which outbox records appeared — that key sorts by time (and
+  carries no identifiers).
 
-## L1 выключен флагом
+## L1 is behind a flag
 
-`@tanstack/browser-db-sqlite-persistence` пишет файл OPFS открытым текстом —
-это допустимо. Слой выключен по умолчанию (`src/lib/data/persistence.ts`) до
-отдельного решения о включении: оно касается производительности (тёплый старт,
-докачка дельты по сохранённому оффсету) и поддержки OPFS в целевых браузерах,
-а не безопасности. Включение:
+`@tanstack/browser-db-sqlite-persistence` writes its OPFS file in plaintext,
+which is acceptable. The layer is off by default
+(`src/lib/data/persistence.ts`) pending a separate decision to enable it: that
+decision is about performance (a warm start, fetching the delta from a stored
+offset) and about OPFS support in the target browsers, not about security.
+To enable:
 
-- сборкой — `VITE_SHAPE_PERSISTENCE=1`;
-- на задеплоенной сборке — `localStorage.buckitup_shape_persistence = '1'`.
+- at build time — `VITE_SHAPE_PERSISTENCE=1`;
+- on a deployed build — `localStorage.buckitup_shape_persistence = '1'`.
 
-## Следствие шифрования L2/L3: данные читаются только после логина
+## A consequence of L2/L3 encryption: data is readable only after login
 
-Ключ существует, пока аккаунт разблокирован. Поэтому:
+The key exists while the account is unlocked. Therefore:
 
-- очередь и локальные ревизии `user_storage` не читаются до входа;
-- `drainPendingWrites` вызывается после логина (`EncryptionManagerPQ.js`) и по
-  событию `online`;
-- нечитаемая запись **никогда не удаляется**: «не читается» чаще всего значит
-  «чужой аккаунт», и стирание уничтожило бы его неотправленные записи.
-  Удаляется только то, что расшифровалось, но не разобралось как запись.
+- the queue and local `user_storage` revisions are unreadable before login;
+- `drainPendingWrites` runs after login (`EncryptionManagerPQ.js`) and on the
+  `online` event;
+- an unreadable record is **never deleted**: "does not decrypt" usually means
+  "belongs to another account", and wiping it would destroy that account's
+  unsent writes. Only a record that decrypted but failed to parse is removed.
 
-## Миграция записей, созданных до шифрования L2/L3
+## Migrating records written before L2/L3 encryption
 
-Обе миграции ленивые, по одной записи, без единовременного прохода:
+Both migrations are lazy, one record at a time, with no sweeping pass:
 
-- **outbox** — запись, начинающаяся с `{`, написана открыто; владелец
-  перечитывает её и перезаписывает зашифрованной. Чужие остаются как есть до
-  входа их владельца: ключа для них нет, а удалять их нельзя.
-- **localStore** — открытое значение лежит объектом под читаемым именем
-  `us|<user_hash>|<uuid>`. При первом чтении переносится под производное имя,
-  читаемая копия удаляется.
+- **outbox** — a record starting with `{` was written in the clear; its owner
+  re-reads it and rewrites it encrypted. Records belonging to others stay as
+  they are until their owner logs in: there is no key for them, and deleting
+  them is not an option.
+- **localStore** — a plaintext value sits as an object under the readable name
+  `us|<user_hash>|<uuid>`. On the first read it moves to the derived name and
+  the readable copy is deleted.
 
-## Проверка руками
+## Manual verification
 
-Автоматически покрыто: `tests/secureStore.test.ts`,
-`tests/outboxEncryption.test.ts`, `tests/localStore.test.ts` (25 тестов), в том
-числе «на диске нет читаемых `user_hash` / `dialog_hash`» и «чужая запись не
-удаляется и не отдаётся».
+Covered automatically: `tests/secureStore.test.ts`,
+`tests/outboxEncryption.test.ts`, `tests/localStore.test.ts` (25 tests),
+including "no readable `user_hash` / `dialog_hash` on disk" and "another
+account's record is neither deleted nor served".
 
-Живым аккаунтом (требуется WebAuthn, поэтому не автоматизировано):
+With a live account (needs WebAuthn, hence not automated):
 
-1. Войти, отправить сообщение, изменить профиль.
-2. DevTools → Application → IndexedDB → `buckitup-outbox` и
-   `buckitup-local-store`. В именах и значениях не должно встречаться `u_…`,
-   `di_…`, `us|`, `owner_timestamp`.
-3. Выключить сеть, отправить сообщение → запись появляется в `buckitup-outbox`
-   (нечитаемая). Включить сеть → запись исчезает, сообщение доставлено.
-4. Перезагрузить вкладку с непустой очередью → после логина доставляется ровно
-   один раз, дублей нет.
-5. Второй аккаунт в том же браузере: его вход не должен стирать очередь
-   первого (`buckitup-outbox` сохраняет обе записи).
+1. Log in, send a message, change the profile.
+2. DevTools → Application → IndexedDB → `buckitup-outbox` and
+   `buckitup-local-store`. Neither names nor values should contain `u_…`,
+   `di_…`, `us|`, or `owner_timestamp`.
+3. Go offline, send a message → a record appears in `buckitup-outbox`
+   (unreadable). Go back online → the record disappears and the message is
+   delivered.
+4. Reload the tab with a non-empty queue → after login it is delivered exactly
+   once, with no duplicates.
+5. A second account in the same browser: its login must not wipe the first
+   account's queue (`buckitup-outbox` keeps both records).
