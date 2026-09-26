@@ -20,12 +20,19 @@
 // sign_hash) pin the exact revision for the jump-to-original affordance; the
 // snapshot stays frozen at citation time regardless of later edits.
 
+/** Positions past the ones this build knows, from a newer build (07: fields
+ * are append-only): kept, so re-encoding — a quote's snapshot above all —
+ * loses nothing. Absent when the envelope had no such tail. */
+interface Extensible {
+	rest?: unknown[];
+}
+
 export interface TextPart {
 	kind: 'text';
 	text: string;
 }
 
-export interface QuotePart {
+export interface QuotePart extends Extensible {
 	kind: 'quote';
 	authorHash: string;
 	messageId: string;
@@ -36,7 +43,7 @@ export interface QuotePart {
 
 /** Out-of-band file attachment (07 §"file"): the bytes live as encrypted
  * chunks on the device; the envelope carries the reference and the key. */
-export interface FilePart {
+export interface FilePart extends Extensible {
 	kind: 'file';
 	name: string;
 	size: number;
@@ -52,7 +59,7 @@ export interface FilePart {
  * ratio and a ThumbHash to blur in behind it, so the bubble does not jump
  * when the real image lands.
  */
-export interface ImagePart {
+export interface ImagePart extends Extensible {
 	kind: 'image';
 	widthAspect: number;
 	heightAspect: number;
@@ -83,7 +90,7 @@ export interface VideoPart extends Omit<ImagePart, 'kind'> {
  * inside the ciphertext and the signature/transport come for free — the
  * server sees a normal row. Semantics and derivations: src/lib/pq/checkpoint.ts.
  */
-export interface CheckpointPart {
+export interface CheckpointPart extends Extensible {
 	kind: 'checkpoint';
 	version: number;
 	reducerVersion: string;
@@ -154,14 +161,21 @@ const encodePart = (part: ContentPart): unknown => {
 		case 'text':
 			return part.text;
 		case 'quote':
-			return { quote: [part.authorHash, part.messageId, part.signHash, encodeValue(part.snapshot.map(quotable))] };
+			return {
+				quote: [
+					part.authorHash, part.messageId, part.signHash, encodeValue(part.snapshot.map(quotable)),
+					...(part.rest ?? []),
+				],
+			};
 		case 'file':
-			return { file: [part.name, part.size, part.mimeType, part.createdAt, part.fileId, part.encSecretB64] };
+			return {
+				file: [part.name, part.size, part.mimeType, part.createdAt, part.fileId, part.encSecretB64, ...(part.rest ?? [])],
+			};
 		case 'image':
 			return {
 				image: [
 					part.widthAspect, part.heightAspect, part.thumbHashB64, part.name, part.size,
-					part.mimeType, part.createdAt, part.fileId, part.encSecretB64,
+					part.mimeType, part.createdAt, part.fileId, part.encSecretB64, ...(part.rest ?? []),
 				],
 			};
 		case 'video':
@@ -169,14 +183,14 @@ const encodePart = (part: ContentPart): unknown => {
 				video: [
 					part.widthAspect, part.heightAspect, part.thumbHashB64, part.name, part.size,
 					part.mimeType, part.createdAt, part.durationSeconds || 0,
-					part.fileId, part.encSecretB64,
+					part.fileId, part.encSecretB64, ...(part.rest ?? []),
 				],
 			};
 		case 'checkpoint':
 			return {
 				checkpoint: [
 					part.version, part.reducerVersion, part.treeVersion,
-					part.frontierRoot, part.viewRoot, part.frontier, part.createdAt,
+					part.frontierRoot, part.viewRoot, part.frontier, part.createdAt, ...(part.rest ?? []),
 				],
 			};
 		case 'recovery_share':
@@ -247,6 +261,7 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					messageId: q[1],
 					signHash: q[2],
 					snapshot: decodeValue(q[3]),
+					...tailOf(q, 4),
 				}];
 			}
 			if (type === 'image' || type === 'video') {
@@ -273,12 +288,13 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					return [{
 						kind: 'video', ...media, fileId: im[8], encSecretB64: im[9],
 						durationSeconds: Math.max(0, Math.round(Number(im[7]))) || 0,
+						...tailOf(im, 10),
 					}];
 				}
 				if (im.length < 9 || typeof im[7] !== 'string' || typeof im[8] !== 'string') {
 					throw new ContentDecodeError('malformed image envelope');
 				}
-				return [{ kind: 'image', ...media, fileId: im[7], encSecretB64: im[8] }];
+				return [{ kind: 'image', ...media, fileId: im[7], encSecretB64: im[8], ...tailOf(im, 9) }];
 			}
 			if (type === 'checkpoint') {
 				const c = obj.checkpoint;
@@ -307,6 +323,7 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					viewRoot: c[4],
 					frontier: c[5] as Record<string, string>,
 					createdAt: Number(c[6]),
+					...tailOf(c, 7),
 				}];
 			}
 			if (type === 'file') {
@@ -322,6 +339,7 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					createdAt: Number(f[3]),
 					fileId: f[4],
 					encSecretB64: f[5],
+					...tailOf(f, 6),
 				}];
 			}
 			if (type === 'recovery_share') return [decodeRecoveryShare(obj.recovery_share)];
@@ -331,6 +349,9 @@ const decodeValue = (value: unknown): ContentPart[] => {
 
 	throw new ContentDecodeError(`unrecognized content shape: ${JSON.stringify(value)?.slice(0, 80)}`);
 };
+
+const tailOf = (arr: unknown[], known: number): Extensible =>
+	arr.length > known ? { rest: arr.slice(known) } : {};
 
 const isInt = (v: unknown): v is number => Number.isInteger(v);
 
