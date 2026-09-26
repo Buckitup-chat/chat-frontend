@@ -180,6 +180,40 @@ describe('video envelope (§1.4)', () => {
 	});
 });
 
+// 07: positional fields are append-only. A newer build's tail must survive a
+// decode → encode here, or quoting its message strips the field it added.
+describe('T-CONTENT-APPEND-ONLY: a longer envelope round-trips intact', () => {
+	const ref = 'f_' + '3'.repeat(32);
+	const sign = 'dms_' + 'a'.repeat(128);
+	const mid = 'dmsg_0190a3b2-1c4d-7e5f-8a6b-7c8d9e0f1a2b';
+	const envelopes = {
+		file: ['a.pdf', 1, 'application/pdf', 1715000000, ref, 'c2VjcmV0'],
+		image: [16, 9, 'YTg4', 'shot.png', 5, 'image/png', 1715000000, ref, 'c2VjcmV0'],
+		video: [16, 9, 'YTg4', 'clip.mp4', 5, 'video/mp4', 1715000000, 127, ref, 'c2VjcmV0'],
+		quote: ['u_a', 'm', 's', 'cited'],
+		checkpoint: [1, 'r1', 't1', 'froot', 'vroot', { [mid]: sign }, 1715000000],
+	};
+
+	for (const [type, known] of Object.entries(envelopes)) {
+		it(`${type}: keeps the fields past the known layout`, () => {
+			const wire = JSON.stringify({ [type]: [...known, 'a future field', { nested: 1 }] });
+			expect(encodeContent(decodeContent(wire))).toBe(wire);
+		});
+
+		it(`${type}: the known layout gains no tail`, () => {
+			const wire = JSON.stringify({ [type]: known });
+			expect(decodeContent(wire)[0]).not.toHaveProperty('rest');
+			expect(encodeContent(decodeContent(wire))).toBe(wire);
+		});
+	}
+
+	it('a quoted newer message keeps its tail inside the snapshot', () => {
+		const newer = decodeContent(JSON.stringify({ video: [...envelopes.video, 'a future field'] }));
+		const reply = encodeContent([{ kind: 'quote', authorHash: 'u_a', messageId: 'm', signHash: 's', snapshot: newer }]);
+		expect(JSON.parse(reply).quote[3].video.at(-1)).toBe('a future field');
+	});
+});
+
 describe('T-CONTENT-RECOVERY-SHARE: a guardian share envelope', () => {
 	const part = {
 		kind: 'recovery_share' as const,
