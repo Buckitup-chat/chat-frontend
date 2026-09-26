@@ -16,6 +16,7 @@ import { recoverIntents } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { freshestOf, getAccepted, recordAccepted } from '@/lib/data/acceptedSnapshot';
 import { getUserCardsCollection } from '@/lib/data/collections';
+import { readShapeOnce } from '@/lib/data/shapeRead';
 import { getStorageRow, putStorageRow, putStorageJsonPatch } from '@/lib/data/userStorage';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
@@ -104,13 +105,25 @@ export class EncryptionManagerPQ extends EventTarget {
   // registration would race its own profile save. Serialized per user_hash
   // and monotonic, because the server rejects a card update whose timestamp
   // is not strictly newer than the stored one — user_cards carries no
-  async #pushOwnCard(card, { isUpdate = false, signSkey = null } = {}) {
+  //
+  // Insert vs update is decided by asking the server, not by the caller or
+  // local state: the server can forget a card (a wipe, a restore, a fresh
+  // Pi) while local caches still hold it, and an update of a missing row is
+  // rejected. `isUpdate` is only the fallback when that read fails.
+  // `onlyIfMissing` makes it a no-op when the server already has the card.
+  async #pushOwnCard(card, { isUpdate = false, signSkey = null, onlyIfMissing = false } = {}) {
     const key = signSkey || this.#signSkey;
     if (!key) throw new Error('No signing key for user card');
 
     const userHash = card.user_hash;
     const previous = EncryptionManagerPQ.#cardQueues.get(userHash) ?? Promise.resolve();
     const run = async () => {
+      const onServer = await readShapeOnce('user_cards', `user_hash='${userHash}'`)
+        .then((rows) => rows.length > 0)
+        .catch(() => null);
+      if (onlyIfMissing && onServer !== false) return null;
+      const asUpdate = onServer ?? isUpdate;
+
       const sessionCard = EncryptionManagerPQ.#acceptedCardCache.get(userHash) ?? null;
       if (sessionCard) {
         try {
@@ -132,7 +145,7 @@ export class EncryptionManagerPQ extends EventTarget {
         crypt_pkey: decodeHexOrBase64(card.crypt_pkey),
         crypt_cert: decodeHexOrBase64(card.crypt_cert),
         sign_skey: key,
-      }, isUpdate ? 'update' : 'insert', ownerTimestamp);
+      }, asUpdate ? 'update' : 'insert', ownerTimestamp);
       const signedRow = mutation.modified ?? mutation.changes;
 
       // Best-effort durability: card publication runs while the vault may
@@ -146,7 +159,7 @@ export class EncryptionManagerPQ extends EventTarget {
       const outcome = handle.phase === 'accepted' ? { kind: 'accepted' } : await handle.acceptance;
       if (outcome.kind !== 'accepted') {
         const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
-        throw new Error(`User card ${isUpdate ? 'update' : 'creation'} was not accepted: ${reason}`);
+        throw new Error(`User card ${asUpdate ? 'update' : 'creation'} was not accepted: ${reason}`);
       }
       EncryptionManagerPQ.#acceptedCardCache.set(userHash, signedRow);
       if (unlocked) await this.#recordSessionCard(userHash);
@@ -346,6 +359,10 @@ export class EncryptionManagerPQ extends EventTarget {
     // Writes queued before a reload/crash can replay now that the signing key
     // is available again. Background: a slow drain must not delay login.
     this.#startOutboxDrain();
+
+    // Background, like the drain: a card the server lost is republished here.
+    this.#pushOwnCard(identity, { signSkey: this.#signSkey, onlyIfMissing: true })
+      .catch((e) => console.warn('[EncryptionManagerPQ] card republication failed:', e?.message ?? e));
 
     return identity;
   }

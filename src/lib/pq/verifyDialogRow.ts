@@ -7,7 +7,7 @@
 
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { verifyFields, deriveSignHash, canonicalPayload } from './signature';
+import { verifyFields, deriveSignHash, canonicalPayload, toBase64 } from './signature';
 import { signableFields } from './schema';
 import type {
 	DialogMessageRow,
@@ -37,7 +37,7 @@ const lengthFramed = (parts: string[]): Uint8Array => {
 
 export const presentedRowFingerprint = (row: Record<string, unknown>): string => {
 	const fields = signableFields('dialog_messages', row);
-	const payload = fields ? canonicalPayload(fields as never) : '';
+	const payload = fields ? toBase64(canonicalPayload(fields as never)) : '';
 	const signB64 = typeof row.sign_b64 === 'string' ? row.sign_b64 : '';
 	const signHash = typeof row.sign_hash === 'string' ? row.sign_hash : '';
 	return bytesToHex(sha3_512(lengthFramed([payload, signB64, signHash])));

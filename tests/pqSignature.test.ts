@@ -15,39 +15,73 @@ import {
 
 // The payload is a wire contract with the Elixir server
 // (Chat.Data.Integrity.signature_payload/1). These vectors pin the exact
-// string, so a well-meant refactor here fails loudly instead of turning every
+// bytes, so a well-meant refactor here fails loudly instead of turning every
 // write into a server-side "invalid_signature".
+//
+// Each field is u32be(byte length) || UTF-8 encoded value, sorted by key.
+const framed = (...values: string[]): number[] =>
+	values.flatMap((v) => {
+		const bytes = Array.from(new TextEncoder().encode(v));
+		const n = bytes.length;
+		return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff, ...bytes];
+	});
+
+const payloadOf = (fields: Parameters<typeof canonicalPayload>[0]): number[] => Array.from(canonicalPayload(fields));
+
 describe('canonicalPayload — cross-implementation vectors', () => {
-	it('sorts by column name and concatenates without delimiters', () => {
+	it('sorts by column name and length-frames every field', () => {
 		// sorted: deleted_flag, name, owner_timestamp, user_hash
 		expect(
-			canonicalPayload({
+			payloadOf({
 				user_hash: 'u_ab',
 				name: 'Bob',
 				deleted_flag: false,
 				owner_timestamp: 7,
 			}),
-		).toBe('falseBob7u_ab');
+		).toEqual(framed('false', 'Bob', '7', 'u_ab'));
+	});
+
+	it('matches a hand-computed golden byte vector', () => {
+		expect(payloadOf({ a: 'x', b: 1 })).toEqual([0, 0, 0, 1, 0x78, 0, 0, 0, 1, 0x31]);
 	});
 
 	it('is insensitive to the order keys were inserted in', () => {
-		const a = canonicalPayload({ z_col: 'z', a_col: 'a', m_col: 'm' });
-		const b = canonicalPayload({ m_col: 'm', z_col: 'z', a_col: 'a' });
-		expect(a).toBe(b);
-		expect(a).toBe('amz');
+		const a = payloadOf({ z_col: 'z', a_col: 'a', m_col: 'm' });
+		const b = payloadOf({ m_col: 'm', z_col: 'z', a_col: 'a' });
+		expect(a).toEqual(b);
+		expect(a).toEqual(framed('a', 'm', 'z'));
 	});
 
 	it('drops sign_b64 and sign_hash — the signature cannot cover itself', () => {
-		const withSig = canonicalPayload({
+		const withSig = payloadOf({
 			name: 'Bob',
 			sign_b64: 'AAAA',
 			sign_hash: 'dms_beef',
 		});
-		expect(withSig).toBe(canonicalPayload({ name: 'Bob' }));
+		expect(withSig).toEqual(payloadOf({ name: 'Bob' }));
 	});
 
 	it('renders booleans, integers and nulls the way the server does', () => {
-		expect(canonicalPayload({ a: true, b: false, c: null, d: 42 })).toBe('truefalsenull42');
+		expect(payloadOf({ a: true, b: false, c: null, d: 42 })).toEqual(framed('true', 'false', 'null', '42'));
+	});
+
+	it('frames by UTF-8 byte length, not UTF-16 code units', () => {
+		const name = 'Аркадий 🚀';
+		expect(payloadOf({ name })).toEqual(framed(name));
+		expect(payloadOf({ name }).slice(0, 4)).toEqual([0, 0, 0, new TextEncoder().encode(name).length]);
+	});
+
+	// The reason for the framing: unframed, "Agent7" + 1788470000 and
+	// "Agent" + 71788470000 concatenate to the same bytes, so one signature
+	// would cover both — a truncated name with a far-future timestamp.
+	it('does not collapse a boundary shift between adjacent fields', () => {
+		const a = payloadOf({ name: 'Agent7', owner_timestamp: 1_788_470_000 });
+		const b = payloadOf({ name: 'Agent', owner_timestamp: 71_788_470_000 });
+		expect(a).not.toEqual(b);
+	});
+
+	it('distinguishes an empty string from a null value', () => {
+		expect(payloadOf({ a: '' })).not.toEqual(payloadOf({ a: null }));
 	});
 });
 

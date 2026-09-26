@@ -5,6 +5,10 @@
 //
 //   E2E=1 npx vitest run tests/e2e.staging.test.ts
 //
+// Point it at a local chat instead of staging with E2E_BASE:
+//
+//   E2E=1 E2E_BASE=http://localhost:4444/electric/v1 npx vitest run tests/e2e.staging.test.ts
+//
 // Two fresh accounts hold a conversation: keys are wrapped and unwrapped for
 // real, messages travel through the real production write path — the
 // coordinator's dispatchMutations, its durable outbox, exact SERVER_ACCEPTED
@@ -36,7 +40,7 @@ import {
 import { _setAcceptedSnapshotStorageForTests, getAccepted } from '@/lib/data/acceptedSnapshot';
 import { reconcileAccepted } from '@/lib/data/coordinator';
 
-const BASE = 'https://buckitup.xyz/electric/v1';
+const BASE = process.env.E2E_BASE ?? 'https://buckitup.xyz/electric/v1';
 (globalThis as Record<string, unknown>).ELECTRIC_API_URL = BASE;
 
 const makeMemStore = () => {

@@ -6,8 +6,12 @@
 // padding, "" vs null), both times caught only against the live server. The
 // vectors pin those bytes as data, so BOTH implementations assert the same
 // file: this test runs them against src/lib/pq, and the copy in the backend
-// repo (docs/pq/conformance/vectors.json + test/chat/pq_conformance_test.exs)
-// runs them against Chat.Data.Integrity and EnigmaPq.
+// repo (test/fixtures/pq_conformance_vectors.json +
+// test/chat/data/pq_conformance_test.exs) runs them against Chat.Data.Integrity
+// and EnigmaPq.
+//
+// The payload is raw binary (u32be length-framed fields), so vectors carry it
+// base64-encoded.
 //
 // Regenerate after a deliberate protocol change:
 //   WRITE_VECTORS=1 npx vitest run tests/pqConformance.test.ts
@@ -283,12 +287,14 @@ const buildHashCases = (): HashCase[] => {
 
 // ---------- generate or verify ----------
 
+const payloadB64 = (fields: Record<string, FieldSpec>): string => toBase64(canonicalPayload(rowOf(fields) as never));
+
 const buildVectors = () => ({
-	version: 1,
+	version: 2,
 	source: 'chat-frontend tests/pqConformance.test.ts — regenerate with WRITE_VECTORS=1',
 	payload_cases: payloadCases.map((c) => ({
 		...c,
-		expected_payload: canonicalPayload(rowOf(c.fields) as never),
+		expected_payload: payloadB64(c.fields),
 	})),
 	hash_cases: buildHashCases(),
 });
@@ -307,13 +313,16 @@ describe('PQ conformance vectors', () => {
 
 	it('the committed file matches this implementation exactly', () => {
 		// Any drift — a payload rule change, a new case — must be a deliberate
-		// regeneration carried to the backend repo in the same change.
-		expect(buildVectors()).toEqual(vectors);
+		// regeneration carried to the backend repo in the same change. `source`
+		// is left out: either side may be the one that regenerated the file.
+		const { source: _ours, ...built } = buildVectors();
+		const { source: _theirs, ...committed } = vectors;
+		expect(built).toEqual(committed);
 	});
 
 	for (const c of vectors.payload_cases) {
 		it(`payload: ${c.name}`, () => {
-			expect(canonicalPayload(rowOf(c.fields as Record<string, FieldSpec>) as never)).toBe(c.expected_payload);
+			expect(payloadB64(c.fields as Record<string, FieldSpec>)).toBe(c.expected_payload);
 		});
 	}
 

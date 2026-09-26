@@ -417,12 +417,18 @@ describe('createStorageMutation signing', () => {
 		return String(value);
 	};
 
-	// Exactly the fields the server keeps, in its sort order.
-	const serverPayload = (fields: Record<string, unknown>) =>
-		Object.keys(fields)
-			.sort()
-			.map((k) => serverEncodeField(k, fields[k]))
-			.join('');
+	// Exactly the fields the server keeps, in its sort order, each
+	// u32be(byte length) || UTF-8 value.
+	const serverPayload = (fields: Record<string, unknown>): Uint8Array =>
+		Uint8Array.from(
+			Object.keys(fields)
+				.sort()
+				.flatMap((k) => {
+					const bytes = Array.from(new TextEncoder().encode(serverEncodeField(k, fields[k])));
+					const n = bytes.length;
+					return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff, ...bytes];
+				}),
+		);
 
 	const build = () =>
 		createStorageMutation(
@@ -448,7 +454,7 @@ describe('createStorageMutation signing', () => {
 			value_b64: valueB64,
 		});
 		const signBytes = Uint8Array.from(atob(m.modified.sign_b64), (c) => c.charCodeAt(0));
-		const ok = ml_dsa87.verify(signBytes, new TextEncoder().encode(payload), publicKey);
+		const ok = ml_dsa87.verify(signBytes, payload, publicKey);
 		expect(ok).toBe(true);
 	});
 });

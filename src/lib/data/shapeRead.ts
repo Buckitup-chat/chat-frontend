@@ -43,7 +43,9 @@ export const electricUrl = (path: string): string => {
 let probe = 0;
 
 export const readShapeOnce = async <T>(table: string, where: string, signal?: AbortSignal): Promise<T[]> => {
-	const salt = `${Math.floor(Math.random() * 1e9)}${++probe}`;
+	// Kept under 2^31: chat's where-clause parser rejects a literal wider than
+	// int4 with HTTP 500, and random digits + counter concatenated overflowed it.
+	const salt = Math.floor(Math.random() * 1e6) * 1000 + (++probe % 1000);
 	const query = encodeURIComponent(`${where} AND ${salt}=${salt}`);
 	const res = await fetch(electricUrl(`/shapes?table=${table}&where=${query}&offset=-1`), { signal });
 	if (!res.ok) throw new Error(`${table} read failed: HTTP ${res.status}`);

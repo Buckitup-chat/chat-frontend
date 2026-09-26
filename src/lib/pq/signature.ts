@@ -9,7 +9,10 @@
 //
 // The rule: drop `sign_b64` and anything derived from it (`sign_hash`), sort
 // the remaining fields lexicographically by column name, encode each by the
-// suffix convention below, concatenate with no delimiter.
+// suffix convention below, and length-frame it: u32be(byte length) followed
+// by the UTF-8 bytes. The framing makes the payload injective — without it
+// adjacent variable-length fields (`name` + `owner_timestamp`) could shift a
+// boundary and reuse someone else's signature on forged values.
 //
 // This is the protocol layer — it knows nothing about transport, collections
 // or stores. It signs and it verifies; callers decide which fields go in.
@@ -130,28 +133,48 @@ export const encodeField = (key: string, value: SignableValue): string => {
 };
 
 /** Fields the signature never covers: the signature itself and what derives
- * from it. Exported so other canonicalizers (signaturePayloadV2.ts) drop
- * exactly this set instead of maintaining their own copy that could drift. */
-export const NOT_SIGNED = new Set(['sign_b64', 'sign_hash']);
+ * from it. */
+const NOT_SIGNED = new Set(['sign_b64', 'sign_hash']);
+
+const u32be = (n: number): Uint8Array => {
+	const out = new Uint8Array(4);
+	new DataView(out.buffer).setUint32(0, n, false);
+	return out;
+};
+
+const lengthFramed = (encoded: string): Uint8Array[] => {
+	const bytes = new TextEncoder().encode(encoded);
+	return [u32be(bytes.length), bytes];
+};
+
+const concatBytes = (chunks: Uint8Array[]): Uint8Array => {
+	const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+	let offset = 0;
+	for (const c of chunks) {
+		out.set(c, offset);
+		offset += c.length;
+	}
+	return out;
+};
 
 /**
- * Builds the canonical payload string. Pass the row's signable fields; any
+ * Builds the canonical payload bytes. Pass the row's signable fields; any
  * `sign_b64`/`sign_hash` present is dropped rather than trusted, so callers
  * can hand over a whole row without pre-filtering it.
+ *
+ * The result is raw binary (length prefixes are not UTF-8), never a string.
  */
-export const canonicalPayload = (fields: SignableFields): string =>
-	Object.keys(fields)
-		.filter((key) => !NOT_SIGNED.has(key))
-		.sort()
-		.map((key) => encodeField(key, fields[key]))
-		.join('');
-
-const payloadBytes = (fields: SignableFields): Uint8Array =>
-	new TextEncoder().encode(canonicalPayload(fields));
+export const canonicalPayload = (fields: SignableFields): Uint8Array =>
+	concatBytes(
+		Object.keys(fields)
+			.filter((key) => !NOT_SIGNED.has(key))
+			.sort()
+			.flatMap((key) => lengthFramed(encodeField(key, fields[key]))),
+	);
 
 /** Signs a row's fields, returning padded base64 ready for the `sign_b64` column. */
 export const signFields = (fields: SignableFields, signSkey: Uint8Array): string =>
-	toBase64(ml_dsa87.sign(payloadBytes(fields), signSkey));
+	toBase64(ml_dsa87.sign(canonicalPayload(fields), signSkey));
 
 /**
  * Verifies a row against the author's `sign_pkey`.
@@ -173,7 +196,7 @@ export const verifyFields = (
 	try {
 		const signature = toBytes(signB64);
 		const pkey = toBytes(signPkey);
-		return ml_dsa87.verify(signature, payloadBytes(fields), pkey);
+		return ml_dsa87.verify(signature, canonicalPayload(fields), pkey);
 	} catch {
 		return false;
 	}

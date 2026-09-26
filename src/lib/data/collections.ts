@@ -64,7 +64,10 @@ const shapeDefaults = { parser, runtimeVisibility: alwaysActiveVisibility };
 // Bump SCHEMA_VERSION when a row type changes shape; mismatched local data is
 // then dropped and re-synced from the server (the server is always the source
 // of truth — local SQLite is only a cache plus outbox).
-const SCHEMA_VERSION = 1;
+//
+// 2: signature payloads became length-framed; rows (and outbox entries)
+//    signed under the old payload no longer verify and the server wiped them.
+const SCHEMA_VERSION = 2;
 
 // The wrapped config's generics survive at runtime; typing the passthrough
 // exactly would just duplicate the library's own overloads.
