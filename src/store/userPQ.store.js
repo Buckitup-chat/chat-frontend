@@ -278,10 +278,13 @@ export const userPQStore = defineStore('userPQ', () => {
     return true;
   };
 
+  // Resolves `{ pending }` once the profile is saved on this device; pending
+  // while the server does not have all of it yet (offline, the outbox sends
+  // it when the connection is back). Throws when it can never get there.
   const updateCurrentUserProfile = async ({ name, notes, avatarUuid, avatarDataUrl }) => {
-    if (!em.value || !currentUserHash.value) return false;
+    if (!em.value || !currentUserHash.value) return null;
 
-    await em.value.updateUserStorage({ name, notes, avatarUuid, avatarDataUrl });
+    const saved = await em.value.updateUserStorage({ name, notes, avatarUuid, avatarDataUrl });
 
     if (currentUser.value) {
       if (name !== undefined) currentUser.value.name = name;
@@ -295,10 +298,10 @@ export const userPQStore = defineStore('userPQ', () => {
 
     // updateUserStorage already republished the card when it changed; this
     // keeps name-only edits in sync and surfaces a failed publication.
-    await em.value.pushCurrentUserCard();
+    const card = await em.value.pushCurrentUserCard();
 
     await refreshMyLocalUsers();
-    return true;
+    return { pending: saved.pending || card === 'queued' };
   };
 
   const saveContact = async (userHash, contactData) => {

@@ -77,6 +77,25 @@ export function _getStorageJsonCodecForTests(): StorageJsonCodec | null {
 	return jsonCodec;
 }
 
+/**
+ * What a JSON-patch edit makes of the value this device shows, for showing
+ * the edit before it is signed or delivered: the materializer's own merge.
+ * Undefined when there is no codec or the value cannot be read; the local
+ * copy then keeps the value it had.
+ */
+export async function projectJsonPatchValue(
+	previousValueB64: string | null | undefined,
+	patch: Record<string, unknown>
+): Promise<string | undefined> {
+	if (!jsonCodec) return undefined;
+	try {
+		const base = previousValueB64 ? await jsonCodec.decrypt(previousValueB64) : null;
+		return (await jsonCodec.encrypt(stripPatchDirectives(mergeJsonPatch(base, patch)))).valueB64;
+	} catch {
+		return undefined;
+	}
+}
+
 export function isReconcilableStorageConflict(e: unknown): boolean {
 	return e instanceof IngestError && e.permanent && e.uniqueConflictOnly;
 }

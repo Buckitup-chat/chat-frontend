@@ -75,6 +75,9 @@ it.
   pretending everything is fine.
 - Mutations waiting for the network live in a durable outbox and survive a
   reload.
+- A write waiting in the outbox is reported as what it is — saved on this
+  device, waiting for the network — not as failed and not as done. The device
+  shows it from there, across reloads.
 
 ---
 

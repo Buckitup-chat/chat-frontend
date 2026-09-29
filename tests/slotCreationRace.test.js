@@ -46,6 +46,12 @@ vi.mock('@/lib/data/userStorage', () => ({
 		upsertCalls.push({ uuid, valueB64, deletedFlag: !!deletedFlag });
 		return { sync: Promise.resolve({ status: 'synced' }) };
 	},
+	saveStorageJsonPatch: async ({ uuid, jsonPatch, deletedFlag }) => {
+		const valueB64 = JSON.stringify(jsonPatch);
+		rows.set(uuid, { valueB64, deletedFlag: !!deletedFlag });
+		upsertCalls.push({ uuid, valueB64, deletedFlag: !!deletedFlag });
+		return 'synced';
+	},
 }));
 
 const WINNER_UUID = 'uuid-from-the-device-that-won-the-race';

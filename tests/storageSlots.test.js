@@ -53,16 +53,19 @@ vi.mock('@/lib/data/userStorage', () => ({
 	},
 	// The real merge, so the fake lands a patch on its base the way the
 	// materializer does (slot map and vault list included).
-	putStorageJsonPatch: async ({ uuid, jsonPatch }) => {
-		const { _getStorageJsonCodecForTests, mergeJsonPatch, stripPatchDirectives } = await import('@/lib/data/storageIntent');
-		const codec = _getStorageJsonCodecForTests();
-		const existing = rows.get(uuid) ? await codec.decrypt(rows.get(uuid)) : null;
-		const { valueB64 } = await codec.encrypt(stripPatchDirectives(mergeJsonPatch(existing, jsonPatch)));
-		rows.set(uuid, valueB64);
-		await onRowWritten?.(uuid);
-		return { uuid, value_b64: valueB64 };
-	},
+	putStorageJsonPatch: (opts) => landJsonPatch(opts),
+	saveStorageJsonPatch: async (opts) => { await landJsonPatch(opts); return 'synced'; },
 }));
+
+async function landJsonPatch({ uuid, jsonPatch }) {
+	const { _getStorageJsonCodecForTests, mergeJsonPatch, stripPatchDirectives } = await import('@/lib/data/storageIntent');
+	const codec = _getStorageJsonCodecForTests();
+	const existing = rows.get(uuid) ? await codec.decrypt(rows.get(uuid)) : null;
+	const { valueB64 } = await codec.encrypt(stripPatchDirectives(mergeJsonPatch(existing, jsonPatch)));
+	rows.set(uuid, valueB64);
+	await onRowWritten?.(uuid);
+	return { uuid, value_b64: valueB64 };
+}
 
 const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
 
