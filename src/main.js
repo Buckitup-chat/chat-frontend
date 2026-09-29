@@ -1,3 +1,5 @@
+// First: the page moves under the build base before anything creates the router.
+import './enterBase';
 import { createApp } from 'vue';
 
 import App from './App.vue';

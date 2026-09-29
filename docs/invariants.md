@@ -79,6 +79,26 @@ it.
   device, waiting for the network — not as failed and not as done. The device
   shows it from there, across reloads.
 
+### 2a. The app runs inside its service worker's scope
+
+**Since:** 2026-09-29 (staging, offline use)
+
+The service worker and the installed app are scoped to the build base
+(`vite.config.js` `base`: `/app/` where the chat server hosts the build). Every
+route of the app lives under it, and an entry through another path moves
+inside before the router starts (`src/lib/appBase.ts`).
+
+**Why.** The router used root-level paths (`/chat/…`) while the worker
+controlled `/app/`. A reload with no connection anywhere in the app was a
+browser error page, and pages were never controlled by the worker at all —
+the offline shell and the encrypted-video streamer existed only on paper.
+
+**Consequences.**
+- The router is created with `import.meta.env.BASE_URL`; links go through the
+  router, not through hand-built paths.
+- A deployment that moves the build changes `base`, and with it the scope,
+  the manifest's `start_url` and every route together.
+
 ---
 
 ## The contract with the backend
