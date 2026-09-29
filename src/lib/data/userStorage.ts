@@ -230,8 +230,9 @@ async function upsertStorageEditLive(
 		? await freshestKnownValue(userHash, uuid).then((base) => (base ? projectJsonPatchValue(base, edit.jsonPatch!) : undefined))
 		: edit.valueB64;
 	const projected = provisionalRow(userHash, uuid, projectedValue, deletedFlag, local?.row ?? null);
-	// Nothing to show yet: the local copy must not outrank the server's.
-	if (!local && projectedValue === undefined) projected.owner_timestamp = 0;
+	// Nothing new to show: the local copy must not outrank the server's — not
+	// on the first such edit, and not on a later one over that empty copy.
+	if (projectedValue === undefined) projected.owner_timestamp = local ? tsOf(local.row) : 0;
 	assertSessionUnchanged(token, 'upsertStorageEditLive:beforeOptimisticProjection');
 	await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'syncing' } satisfies LocalStorageEntry, userHash);
 

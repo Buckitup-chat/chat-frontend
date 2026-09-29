@@ -143,6 +143,20 @@ describe('a profile edit with no connection', () => {
 		// A record of only { name } would hide the slot map and the vault.
 		expect(await shown()).toBeNull();
 	});
+
+	it('with no version known at all, a second edit does not outrank the server record either', async () => {
+		kv.clear();
+		_setAcceptedSnapshotStorageForTests(makeStorage());
+		online = false;
+		await saveStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { name: 'New' }, signSkey });
+		await saveStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { notes: 'm' }, signSkey });
+		online = true;
+		collection.rows.set(`${USER}|${ROOT}`, {
+			user_hash: USER, uuid: ROOT, value_b64: JSON.stringify({ name: 'Old', notes: 'n', slots: { contacts: 's1' } }),
+			deleted_flag: false, owner_timestamp: 1, parent_sign_hash: null, sign_hash: 'uss_1', sign_b64: 'sig',
+		});
+		expect(await shown()).toEqual({ name: 'Old', notes: 'n', slots: { contacts: 's1' } });
+	});
 });
 
 describe('a profile edit the server refuses', () => {
