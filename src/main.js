@@ -3,6 +3,7 @@ import './enterBase';
 import { createApp } from 'vue';
 
 import App from './App.vue';
+import { listenForInstallPrompt } from './composables/useInstallPrompt';
 
 //
 import '@fontsource/inter/400.css';
@@ -109,3 +110,6 @@ import('virtual:pwa-register')
 // Everything offline-first lives in browser storage (vault, shapes, chunk
 // cache, outbox, drafts) — ask the browser not to evict it under pressure.
 navigator.storage?.persist?.().catch(() => { });
+
+// The browser offers installation once, early; keep the offer for the menu.
+listenForInstallPrompt();
