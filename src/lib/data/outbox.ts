@@ -51,6 +51,8 @@ export interface OutboxEntry {
 	serverAcceptedAt?: number;
 	reconciledAt?: number;
 	nextAttemptAt?: number;
+	/** The last attempt got no answer at all (IngestError.network): its backoff ends the moment any write is answered. */
+	lastErrorNetwork?: true;
 	dependsOn?: string[];
 	dependsOnDurableMarkers?: true;
 	scope?: string;
@@ -68,6 +70,10 @@ export const MAX_OUTBOX_ENTRIES = 1000;
 
 const RETRY_BASE_MS = 5_000;
 const RETRY_MAX_MS = 5 * 60_000;
+// A missing connection is probed more often than a failing server is retried:
+// the probe costs the server nothing, and it is how a reconnection nobody
+// announced (no `online` event, as behind an always-on VPN) gets noticed.
+const RETRY_NETWORK_MAX_MS = 30_000;
 
 const indexedDb = new IndexedDBAdapter(DB_NAME);
 
@@ -303,9 +309,17 @@ async function drainFallbackOperations(userHash: string): Promise<void> {
 	await Promise.allSettled([...ops]);
 }
 
+/**
+ * Run `fn` holding the account's send lock. By default a held lock means
+ * "someone else is sending" and the call gives up at once. `wait` queues for
+ * the lock instead: the leader tab's drain uses it, because there the holder
+ * is this tab's own live send, and giving up would leave everything queued
+ * behind that send for the non-leader poll interval.
+ */
 export async function withAcquiredLeadership<T>(
 	userHash: string,
-	fn: () => Promise<T>
+	fn: () => Promise<T>,
+	opts: { wait?: boolean } = {}
 ): Promise<{ acquired: true; result: T } | { acquired: false }> {
 	if (leaderOverrideForTests !== null) {
 		if (!leaderOverrideForTests) return { acquired: false };
@@ -315,7 +329,7 @@ export async function withAcquiredLeadership<T>(
 	if (WebLocksLeader.isSupported()) {
 		return await navigator.locks.request(
 			`${SEND_LOCK_NAME}:${userHash}`,
-			{ ifAvailable: true },
+			opts.wait ? {} : { ifAvailable: true },
 			async (lock): Promise<{ acquired: true; result: T } | { acquired: false }> => {
 				if (!lock) return { acquired: false };
 				return { acquired: true, result: await fn() };
@@ -688,6 +702,9 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 		if (entry.status === 'server_accepted_pending_reconcile' || entry.status === 'accepted' || entry.status === 'discarded') return;
 		entry.attempts += 1;
 		entry.lastError = error instanceof Error ? error.message : String(error);
+		const network = error instanceof IngestError && error.network;
+		if (network) entry.lastErrorNetwork = true;
+		else delete entry.lastErrorNetwork;
 		if (error instanceof IngestError && error.permanent) {
 			entry.status = 'quarantined';
 			entry.quarantinedAt = Date.now();
@@ -696,7 +713,7 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 			// RETRYABLE_FAILURE carries the time of its next attempt (ADR §5),
 			// persisted so a reload resumes the schedule instead of resetting
 			// it. Exponential per entry, jittered so parallel clients spread.
-			const backoff = Math.min(RETRY_BASE_MS * 2 ** (entry.attempts - 1), RETRY_MAX_MS);
+			const backoff = Math.min(RETRY_BASE_MS * 2 ** (entry.attempts - 1), network ? RETRY_NETWORK_MAX_MS : RETRY_MAX_MS);
 			entry.nextAttemptAt = Date.now() + backoff + Math.floor(Math.random() * 1000);
 		}
 		await storage.set(id, JSON.stringify(entry));
@@ -1064,12 +1081,19 @@ export async function drainOutbox(
 		let sent = 0;
 		let dropped = 0;
 		let hadTransientFailure = false;
+		let answered = false;
 
 		const processEntry = async (entry: OutboxEntry): Promise<void> => {
 			try {
 				const result = await send(entry.mutations);
 				await markServerAccepted(entry.id);
 				sent++;
+				// The first answer in this drain ends every backoff that only
+				// waited for a connection, so the rest go in this same pass.
+				if (!answered) {
+					answered = true;
+					await clearNetworkSchedules(userHash);
+				}
 
 				if (!reconcile) {
 					await markReconciled(entry.id);
@@ -1114,7 +1138,7 @@ export async function drainOutbox(
 
 		await Promise.all(Array.from({ length: DRAIN_CONCURRENCY }, worker));
 		return { sent, dropped, hadTransientFailure };
-	});
+	}, { wait: leader?.isLeader() === true });
 
 	if (!outcome.acquired) {
 		return { sent: 0, dropped: 0, remaining: await pendingCount(userHash), stoppedEarly: false, wasLeader: false };
@@ -1145,20 +1169,28 @@ const nextDelay = (): number => {
 /**
  * Drains now, and keeps draining on its own timer until the queue is empty.
  *
- * External triggers (login, 'online') call this too — they reset the loop and
- * fire immediately, so a real connectivity change is never held hostage to a
- * backoff scheduled before it.
+ * External triggers (login, 'online', the page coming back into view) call
+ * this too — they reset the loop and fire immediately, so a real connectivity
+ * change is never held hostage to a backoff scheduled before it
+ * (`resetSchedules`). A live write the server just answered calls it with
+ * `releaseNetworkBackoffs`: the answer proves the connection only, so only
+ * the backoffs that waited for one end.
  */
 export function ensureDrainLoop(
 	userHash: string,
 	send: (mutations: unknown[]) => Promise<unknown>,
-	opts: { resetSchedules?: boolean; reconcile?: (mutations: unknown[], result?: unknown) => Promise<void> } = {},
+	opts: {
+		resetSchedules?: boolean;
+		releaseNetworkBackoffs?: boolean;
+		reconcile?: (mutations: unknown[], result?: unknown) => Promise<void>;
+	} = {},
 ): void {
 	stopDrainLoop(); // also bumps loopGeneration, invalidating any in-flight chain from a previous call
 	loopFailures = 0;
 	const generation = loopGeneration;
 	void (async () => {
 		if (opts.resetSchedules) await clearSchedules(userHash);
+		else if (opts.releaseNetworkBackoffs) await clearNetworkSchedules(userHash);
 		await runLoopOnce(userHash, send, opts.reconcile, generation);
 	})();
 }
@@ -1166,9 +1198,21 @@ export function ensureDrainLoop(
 /** An external trigger (login, 'online') invalidates backoffs computed
  * against the previous network conditions — entries become due now. */
 async function clearSchedules(userHash: string): Promise<void> {
+	await clearSchedulesWhere(userHash, () => true);
+}
+
+/** A write was answered: entries that only waited for a connection are due now. */
+async function clearNetworkSchedules(userHash: string): Promise<void> {
+	await clearSchedulesWhere(userHash, (entry) => entry.lastErrorNetwork === true);
+}
+
+async function clearSchedulesWhere(userHash: string, applies: (entry: OutboxEntry) => boolean): Promise<void> {
 	try {
 		for (const entry of await entriesOf(userHash)) {
-			if (entry.status !== 'quarantined' && entry.status !== 'discarded' && entry.nextAttemptAt) {
+			// An entry a worker holds is written by that worker; rewriting it
+			// from this older read could undo the outcome it is recording.
+			if (inFlightEntryIds.has(entry.id)) continue;
+			if (entry.status !== 'quarantined' && entry.status !== 'discarded' && entry.nextAttemptAt && applies(entry)) {
 				delete entry.nextAttemptAt;
 				await storage.set(entry.id, JSON.stringify(entry));
 			}

@@ -3,6 +3,7 @@ import { awaitShapeVisibility, collectionForRelation, scopeForRelation } from '.
 import { markUnconfirmed, clearUnconfirmed, assertFreshBase } from './staleBase';
 import { recordAccepted } from './acceptedSnapshot';
 import { entityKeyFor as userStorageEntityKey } from './userStorageBase';
+import { getOwnObservedTails } from './ownObservedTails';
 import {
 	pendingEntries, quarantinedEntries,
 	markServerAccepted, markReconciled, resolveEntry,
@@ -98,6 +99,24 @@ export async function dependenciesFor(mutations: unknown[], userHash: string, ex
 		if (typeof dialogHash === 'string' && dialogHash) {
 			for (const e of all) {
 				if (e.relation === 'dialog_keys' && rowOfEntry(e)?.dialog_hash === dialogHash) deps.add(e.id);
+			}
+		}
+	}
+
+	// A new message's refs_map cites the author's own revisions that are still
+	// in this outbox (captureObservedTails reads it), and every peer parks a
+	// message whose parent has not arrived. So the revisions it cites go
+	// first; a queued message it does not cite stays independent (ADR §7.2).
+	// The cited set is the one recorded when the message was composed — the
+	// same map refs_map_b64 encrypts.
+	if (relation === 'dialog_messages' && first?.type === 'insert' && typeof row?.message_id === 'string') {
+		const cited = await getOwnObservedTails(row.message_id);
+		if (cited) {
+			for (const e of all) {
+				if (e.relation !== 'dialog_messages') continue;
+				const entryRow = rowOfEntry(e);
+				const id = entryRow?.message_id;
+				if (typeof id === 'string' && Object.hasOwn(cited, id) && cited[id] === entryRow?.sign_hash) deps.add(e.id);
 			}
 		}
 	}

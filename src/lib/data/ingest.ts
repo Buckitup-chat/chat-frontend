@@ -13,7 +13,7 @@ import { mutationAppliedOnServer, type MutationLike } from './confirm';
 import { dispatchMutations, dependenciesFor, reconcileAccepted, AlreadyDispatchingError } from './coordinator';
 import { StaleBaseError } from './staleBase';
 import { OWNER_FIELD } from './writeContracts';
-import { enqueue, recordFailure, ensureDrainLoop, stopDrainLoop, isLeader, awaitEntryOutcome, type EntryOutcome } from './outbox';
+import { enqueue, recordFailure, ensureDrainLoop, stopDrainLoop, isLeader, awaitEntryOutcome, pendingCount, type EntryOutcome } from './outbox';
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
@@ -25,6 +25,8 @@ export class IngestError extends Error {
 	conflictIndexes: number[];
 	status: number | null;
 	results: IngestRowResult[] | null;
+	/** true when no answer came back at all: a fact about connectivity, not about this write */
+	network: boolean;
 
 	constructor(
 		message: string,
@@ -34,6 +36,7 @@ export class IngestError extends Error {
 			conflictIndexes?: number[];
 			status?: number | null;
 			results?: IngestRowResult[] | null;
+			network?: boolean;
 		} = {}
 	) {
 		super(message);
@@ -43,6 +46,7 @@ export class IngestError extends Error {
 		this.conflictIndexes = opts.conflictIndexes ?? [];
 		this.status = opts.status ?? null;
 		this.results = opts.results ?? null;
+		this.network = opts.network ?? false;
 	}
 }
 
@@ -106,7 +110,7 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 	try {
 		resp = await api.ingestWithAuthEach(mutations, signSkey);
 	} catch (e) {
-		throw new IngestError(`ingest network error: ${e}`, { permanent: false });
+		throw new IngestError(`ingest network error: ${e}`, { permanent: false, network: true });
 	}
 
 	// The server reports per-row outcomes in the body even on 4xx.
@@ -157,6 +161,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export interface RetryOptions {
 	retries?: number;
+	/**
+	 * In-process retries after a request that got no answer at all; defaults
+	 * to `retries`. A write already in the outbox keeps at most one: beyond a
+	 * lost response its retry belongs to the outbox schedule, and waiting here
+	 * would hold the send lock that every other write of the account needs.
+	 */
+	networkRetries?: number;
 	baseDelayMs?: number;
 	maxDelayMs?: number;
 	/** Identity check for unique-key conflicts; overridable for tests. */
@@ -182,6 +193,7 @@ export async function sendMutationsWithRetry(
 		maxDelayMs = 30000,
 		confirmApplied = mutationAppliedOnServer,
 	} = opts;
+	const networkRetries = opts.networkRetries ?? retries;
 	let lastError: unknown;
 
 	for (let attempt = 0; attempt <= retries; attempt++) {
@@ -211,6 +223,7 @@ export async function sendMutationsWithRetry(
 
 			if (e instanceof IngestError && e.permanent) throw e;
 			if (attempt === retries) break;
+			if (e instanceof IngestError && e.network && attempt >= networkRetries) break;
 			const delay = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
 			await sleep(delay + Math.random() * delay * 0.25);
 		}
@@ -296,9 +309,7 @@ export async function sendMutationsAndAwaitShape(
 	}
 	if (outboxId !== null) await opts.onDurable?.(outboxId);
 	if (!isLeader() || dependsOn.length > 0) {
-		ensureDrainLoop(owner, (queued) => sendMutationsWithRetry(queued, signSkey, { retries: 1 }),
-			{ reconcile: reconcileAccepted },
-		);
+		armDrain(owner, signSkey);
 		return {
 			outboxId,
 			phase: 'queued',
@@ -308,16 +319,19 @@ export async function sendMutationsAndAwaitShape(
 		};
 	}
 
+	// A write already in the outbox does not wait out a missing connection
+	// here: one quick retry covers a lost response, and after that the retry
+	// is the outbox's — a longer loop in this call would hold the send lock
+	// every other write of the account is waiting for.
+	const sendOpts = outboxId !== null ? { ...opts, networkRetries: 1 } : opts;
 	let result: SendResult;
 	try {
-		result = await dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, opts), outboxId, {
+		result = await dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, sendOpts), outboxId, {
 			recordAcceptedSnapshot: opts.recordAcceptedSnapshot,
 		});
 	} catch (e) {
 		if (e instanceof AlreadyDispatchingError) {
-			ensureDrainLoop(owner, (queued) => sendMutationsWithRetry(queued, signSkey, { retries: 1 }),
-				{ reconcile: reconcileAccepted },
-			);
+			armDrain(owner, signSkey);
 			return {
 				outboxId,
 				phase: 'queued',
@@ -335,17 +349,35 @@ export async function sendMutationsAndAwaitShape(
 		// with nothing scheduled to retry it — waiting on a later login or an
 		// 'online' event that may never come. Arming the loop here is what
 		// makes "retryable" mean the client will actually try again (ADR §5).
-		ensureDrainLoop(owner, (queued) => sendMutationsWithRetry(queued, signSkey, { retries: 1 }),
-			{ reconcile: reconcileAccepted },
-		);
+		armDrain(owner, signSkey);
 		throw e;
 	}
+	// The server answered, so the account is reachable: whatever waits in the
+	// outbox — queued behind this send, or backing off after a lost
+	// connection that no `online` event reported — goes now.
+	void resumeQueueAfterAnswer(owner, signSkey);
 	return {
 		outboxId,
 		phase: 'accepted',
 		result,
 		acceptance: outboxId ? awaitEntryOutcome(outboxId, owner) : Promise.resolve({ kind: 'accepted' }),
 	};
+}
+
+/** How the outbox replays an entry: one quick retry for a server hiccup, none for a missing connection. */
+const replaySend = (signSkey: Uint8Array) => (mutations: unknown[]) =>
+	sendMutationsWithRetry(mutations, signSkey, { retries: 1, networkRetries: 0 });
+
+function armDrain(owner: string, signSkey: Uint8Array, opts: { resetSchedules?: boolean; releaseNetworkBackoffs?: boolean } = {}): void {
+	ensureDrainLoop(owner, replaySend(signSkey), { ...opts, reconcile: reconcileAccepted });
+}
+
+async function resumeQueueAfterAnswer(owner: string, signSkey: Uint8Array): Promise<void> {
+	try {
+		if ((await pendingCount(owner)) > 0) armDrain(owner, signSkey, { releaseNetworkBackoffs: true });
+	} catch {
+		/* the loop's own schedule still covers the queue */
+	}
 }
 
 /**
@@ -356,12 +388,10 @@ export async function sendMutationsAndAwaitShape(
 export function drainPendingWrites(userHash: string, signSkey: Uint8Array): void {
 	// The loop owns pacing from here: it drains now and keeps its own timer
 	// until the queue empties, so a 503 with no connectivity change cannot
-	// strand the queue until the next login (ADR §5). `reconcile` runs the
-	ensureDrainLoop(userHash, (mutations) => sendMutationsWithRetry(mutations, signSkey, { retries: 1 }),
-		// login/'online' is a fresh signal: backoffs computed before it no
-		// longer describe the world — everything pending becomes due now
-		{ resetSchedules: true, reconcile: reconcileAccepted },
-	);
+	// strand the queue until the next login (ADR §5).
+	// login/'online'/back in view is a fresh signal: backoffs computed before
+	// it no longer describe the world — everything pending becomes due now
+	armDrain(userHash, signSkey, { resetSchedules: true });
 }
 
 export { stopDrainLoop };

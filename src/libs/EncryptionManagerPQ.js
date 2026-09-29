@@ -368,10 +368,13 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   // Replays the durable outbox for the logged-in account: once right away,
-  // and again whenever connectivity returns. The listener is bound to the
-  // account and dropped on logout — entries signed by another user must not
-  // be replayed with this session's auth.
+  // again whenever connectivity returns, and whenever the page comes back
+  // into view — a backgrounded tab or installed app has its timers frozen,
+  // so a retry scheduled while it was hidden may not have run. The listeners
+  // are bound to the account and dropped on logout — entries signed by
+  // another user must not be replayed with this session's auth.
   #outboxOnlineListener = null;
+  #outboxVisibleListener = null;
   #outboxWakeUnsubscribe = null;
 
   #recoverIntents(userHash, signSkey) {
@@ -403,8 +406,14 @@ export class EncryptionManagerPQ extends EventTarget {
       drainPendingWrites(userHash, signSkey);
       this.#recoverIntents(userHash, signSkey);
     };
+    this.#outboxVisibleListener = () => {
+      if (document.visibilityState === 'visible') this.#outboxOnlineListener?.();
+    };
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.#outboxOnlineListener);
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.#outboxVisibleListener);
     }
     this.#outboxWakeUnsubscribe = onOutboxWake((wokenUserHash) => {
       if (wokenUserHash === userHash) {
@@ -420,7 +429,11 @@ export class EncryptionManagerPQ extends EventTarget {
     if (this.#outboxOnlineListener && typeof window !== 'undefined') {
       window.removeEventListener('online', this.#outboxOnlineListener);
     }
+    if (this.#outboxVisibleListener && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.#outboxVisibleListener);
+    }
     this.#outboxOnlineListener = null;
+    this.#outboxVisibleListener = null;
     this.#outboxWakeUnsubscribe?.();
     this.#outboxWakeUnsubscribe = null;
   }
