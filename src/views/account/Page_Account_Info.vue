@@ -164,8 +164,8 @@ async function saveProfile() {
 		console.error('[account] profile save failed:', e);
 		$swal.fire({
 			icon: 'error',
-			title: 'Profile not saved',
-			text: 'The change could not be saved. Try again.',
+			title: 'Profile not fully saved',
+			text: `Part of the change may be kept on this device, but this went wrong: ${e?.message ?? e}`,
 		});
 	}
 }

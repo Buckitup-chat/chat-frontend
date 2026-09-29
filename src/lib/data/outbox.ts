@@ -703,7 +703,10 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 		entry.attempts += 1;
 		entry.lastError = error instanceof Error ? error.message : String(error);
 		const network = error instanceof IngestError && error.network;
-		if (network) entry.lastErrorNetwork = true;
+		if (network) {
+			entry.lastErrorNetwork = true;
+			accountsWaitingForConnection.add(entry.userHash);
+		}
 		else delete entry.lastErrorNetwork;
 		if (error instanceof IngestError && error.permanent) {
 			entry.status = 'quarantined';
@@ -1201,21 +1204,36 @@ async function clearSchedules(userHash: string): Promise<void> {
 	await clearSchedulesWhere(userHash, () => true);
 }
 
+/**
+ * Accounts with an entry whose last attempt got no answer, in this tab. Lets
+ * an answered write skip the queue scan when nothing waits for a connection
+ * (a reload starts empty, and login drains everything anyway).
+ */
+const accountsWaitingForConnection = new Set<string>();
+
+export function hasNetworkBackoffs(userHash: string): boolean {
+	return accountsWaitingForConnection.has(userHash);
+}
+
 /** A write was answered: entries that only waited for a connection are due now. */
 async function clearNetworkSchedules(userHash: string): Promise<void> {
+	accountsWaitingForConnection.delete(userHash);
 	await clearSchedulesWhere(userHash, (entry) => entry.lastErrorNetwork === true);
 }
 
 async function clearSchedulesWhere(userHash: string, applies: (entry: OutboxEntry) => boolean): Promise<void> {
+	const due = (entry: OutboxEntry) =>
+		entry.status !== 'quarantined' && entry.status !== 'discarded' && entry.status !== 'accepted'
+		&& entry.status !== 'server_accepted_pending_reconcile' && !!entry.nextAttemptAt && applies(entry);
 	try {
-		for (const entry of await entriesOf(userHash)) {
-			// An entry a worker holds is written by that worker; rewriting it
-			// from this older read could undo the outcome it is recording.
-			if (inFlightEntryIds.has(entry.id)) continue;
-			if (entry.status !== 'quarantined' && entry.status !== 'discarded' && entry.nextAttemptAt && applies(entry)) {
-				delete entry.nextAttemptAt;
-				await storage.set(entry.id, JSON.stringify(entry));
-			}
+		for (const { id } of (await entriesOf(userHash)).filter(due)) {
+			// Re-read right before writing, and leave alone what a sender holds:
+			// rewriting from an older read could undo an outcome just recorded.
+			if (inFlightEntryIds.has(id)) continue;
+			const fresh = await readEntry(id);
+			if (fresh.kind !== 'entry' || !due(fresh.entry) || inFlightEntryIds.has(id)) continue;
+			delete fresh.entry.nextAttemptAt;
+			await storage.set(id, JSON.stringify(fresh.entry));
 		}
 	} catch { /* schedule reset is best-effort */ }
 }

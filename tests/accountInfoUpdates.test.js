@@ -46,4 +46,30 @@ describe('Account_Info updates', () => {
 		}
 		expect(saves).toEqual(['Anna']);
 	});
+
+	it('an edit back to the value it started from is still an edit', async () => {
+		setActivePinia(createPinia());
+		const drafts = [];
+		// The account page: keep the latest draft, save only on a button.
+		const Parent = defineComponent({
+			setup() {
+				const account = ref({ user_hash: 'u_a', name: 'Bob', notes: '' });
+				return () => h(Account_Info, { accountIn: account.value, onUpdate: (next) => drafts.push(next.name) });
+			},
+		});
+		const wrapper = mount(Parent, {
+			global: {
+				provide: { $swal: {}, $mitt: { emit() {} }, $encryptionManagerPQ: null },
+				stubs: { Avatar: true },
+				mocks: { $filters: { txHashShort: (s) => s } },
+			},
+		});
+		await flushPromises();
+		const input = wrapper.find('#name');
+		await input.setValue('Bobx');
+		await flushPromises();
+		await input.setValue('Bob');
+		await flushPromises();
+		expect(drafts.at(-1)).toBe('Bob');
+	});
 });

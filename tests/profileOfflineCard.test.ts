@@ -146,6 +146,8 @@ describe('saving the profile with no connection', () => {
 		const saved = await em.updateUserStorage({ name: 'Renamed', notes: '', avatarUuid: null });
 
 		expect(saved.pending).toBe(true);
+		// Published with the save: the store must not publish it a second time.
+		expect((saved as { cardPublished?: boolean }).cardPublished).toBe(true);
 		expect((await em.getLocalUserCards()).find((c) => c.user_hash === userHash)?.name).toBe('Renamed');
 		expect((await pendingEntries(userHash)).map((e) => e.relation)).toContain('user_cards');
 	});

@@ -128,12 +128,20 @@ describe('a profile edit with no connection', () => {
 		expect(sent.map((r) => JSON.parse(r.value_b64))).toEqual([{ name: 'New', notes: 'n' }]);
 	});
 
-	it('is shown even before it can be signed, when no base for it is known', async () => {
+	it('on a device with no copy of its own, is merged over the version the server last accepted', async () => {
+		kv.clear();
+		online = false;
+		await expect(saveStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { name: 'New' }, signSkey })).resolves.toBe('queued');
+		expect(await shown()).toEqual({ name: 'New', notes: 'n' });
+	});
+
+	it('with no version known at all, is kept for recovery without passing the patch off as the whole record', async () => {
 		kv.clear();
 		_setAcceptedSnapshotStorageForTests(makeStorage());
 		online = false;
 		await expect(saveStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { name: 'New' }, signSkey })).resolves.toBe('awaiting-recovery');
-		expect(await shown()).toEqual({ name: 'New' });
+		// A record of only { name } would hide the slot map and the vault.
+		expect(await shown()).toBeNull();
 	});
 });
 

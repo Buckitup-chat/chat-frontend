@@ -296,9 +296,10 @@ export const userPQStore = defineStore('userPQ', () => {
       if (avatarUuid !== undefined) currentUser.value.userStorage.avatarUuid = avatarUuid;
     }
 
-    // updateUserStorage already republished the card when it changed; this
-    // keeps name-only edits in sync and surfaces a failed publication.
-    const card = await em.value.pushCurrentUserCard();
+    // updateUserStorage publishes the card when it changed. A second
+    // publication right after it would carry the same timestamp while the
+    // first is still queued, and the server refuses it as not newer.
+    const card = saved.cardPublished ? null : await em.value.pushCurrentUserCard();
 
     await refreshMyLocalUsers();
     return { pending: saved.pending || card === 'queued' };

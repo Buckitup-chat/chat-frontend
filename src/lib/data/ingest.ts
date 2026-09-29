@@ -13,7 +13,7 @@ import { mutationAppliedOnServer, type MutationLike } from './confirm';
 import { dispatchMutations, dependenciesFor, reconcileAccepted, AlreadyDispatchingError } from './coordinator';
 import { StaleBaseError } from './staleBase';
 import { OWNER_FIELD } from './writeContracts';
-import { enqueue, recordFailure, ensureDrainLoop, stopDrainLoop, isLeader, awaitEntryOutcome, pendingCount, type EntryOutcome } from './outbox';
+import { enqueue, recordFailure, ensureDrainLoop, stopDrainLoop, isLeader, awaitEntryOutcome, hasNetworkBackoffs, type EntryOutcome } from './outbox';
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
@@ -110,7 +110,10 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 	try {
 		resp = await api.ingestWithAuthEach(mutations, signSkey);
 	} catch (e) {
-		throw new IngestError(`ingest network error: ${e}`, { permanent: false, network: true });
+		// Only a request that got no answer — fetch failed or timed out — is a
+		// fact about connectivity; a server that answered with garbage is not.
+		const network = e instanceof TypeError || (e as Error)?.name === 'TimeoutError' || (e as Error)?.name === 'AbortError';
+		throw new IngestError(`ingest network error: ${e}`, { permanent: false, network });
 	}
 
 	// The server reports per-row outcomes in the body even on 4xx.
@@ -355,7 +358,7 @@ export async function sendMutationsAndAwaitShape(
 	// The server answered, so the account is reachable: whatever waits in the
 	// outbox — queued behind this send, or backing off after a lost
 	// connection that no `online` event reported — goes now.
-	void resumeQueueAfterAnswer(owner, signSkey);
+	resumeQueueAfterAnswer(owner, signSkey);
 	return {
 		outboxId,
 		phase: 'accepted',
@@ -372,12 +375,18 @@ function armDrain(owner: string, signSkey: Uint8Array, opts: { resetSchedules?: 
 	ensureDrainLoop(owner, replaySend(signSkey), { ...opts, reconcile: reconcileAccepted });
 }
 
-async function resumeQueueAfterAnswer(owner: string, signSkey: Uint8Array): Promise<void> {
-	try {
-		if ((await pendingCount(owner)) > 0) armDrain(owner, signSkey, { releaseNetworkBackoffs: true });
-	} catch {
-		/* the loop's own schedule still covers the queue */
-	}
+function resumeQueueAfterAnswer(owner: string, signSkey: Uint8Array): void {
+	if (hasNetworkBackoffs(owner)) armDrain(owner, signSkey, { releaseNetworkBackoffs: true });
+}
+
+/**
+ * The page came back into view: timers frozen while it was hidden may not
+ * have run. Replays what is due and what only waited for a connection;
+ * backoffs after a server failure stand — a visible page says nothing about
+ * the server.
+ */
+export function resumePendingWrites(userHash: string, signSkey: Uint8Array): void {
+	armDrain(userHash, signSkey, { releaseNetworkBackoffs: true });
 }
 
 /**

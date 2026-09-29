@@ -221,10 +221,17 @@ async function upsertStorageEditLive(
 
 	assertSessionUnchanged(token, 'upsertStorageEditLive:afterDurableIntent');
 	const local = await getLocalEntry(userHash, uuid);
-	// A JSON-patch edit is kept locally as what it makes of the value shown
-	// now, so a reload before the write reaches the server still shows it.
-	const projectedValue = edit.jsonPatch ? await projectJsonPatchValue(local?.row.value_b64, edit.jsonPatch) : edit.valueB64;
+	// A JSON-patch edit is kept locally as what it makes of the freshest value
+	// known, so a reload before the write reaches the server still shows it.
+	// With no known value there is nothing to merge onto: a record holding
+	// only the patch would hide the rest of it (the slot map, the vault) for
+	// as long as the write waits.
+	const projectedValue = edit.jsonPatch
+		? await freshestKnownValue(userHash, uuid).then((base) => (base ? projectJsonPatchValue(base, edit.jsonPatch!) : undefined))
+		: edit.valueB64;
 	const projected = provisionalRow(userHash, uuid, projectedValue, deletedFlag, local?.row ?? null);
+	// Nothing to show yet: the local copy must not outrank the server's.
+	if (!local && projectedValue === undefined) projected.owner_timestamp = 0;
 	assertSessionUnchanged(token, 'upsertStorageEditLive:beforeOptimisticProjection');
 	await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'syncing' } satisfies LocalStorageEntry, userHash);
 
@@ -234,6 +241,7 @@ async function upsertStorageEditLive(
 		return { row: projected, sync: Promise.resolve({ status: 'awaiting-recovery' as const }) };
 	}
 
+	const queuedBefore = new Set(await queuedSlotWrites(userHash, uuid));
 	const result = await materializeSignEnqueueStorageIntent(userHash, uuid, intentId, signSkey, token, materializeStorageIntent);
 
 	if (result.kind === 'already-claimed') {
@@ -247,6 +255,10 @@ async function upsertStorageEditLive(
 
 	const settle = async (outcome: EntryOutcome): Promise<UpsertResult> => {
 		assertSessionUnchanged(token, 'upsertStorageEditLive:afterAcceptanceWait');
+		// A later edit to this slot owns the local copy now; this verdict is
+		// about an older one.
+		const current = await getLocalEntry(userHash, uuid);
+		if (current && tsOf(current.row) > tsOf(projected)) return { row: current.row, sync: Promise.resolve({ status: current.syncStatus }) };
 		if (outcome.kind === 'accepted') {
 			const finalRow = await refreshedRowAfterAcceptance(userHash, uuid, projected);
 			assertSessionUnchanged(token, 'upsertStorageEditLive:beforeSyncedProjection');
@@ -281,7 +293,11 @@ async function upsertStorageEditLive(
 		// A send the server has not refused, of a write the outbox still
 		// holds, is queued rather than failed: the outbox delivers it when the
 		// connection is back, and the local copy follows that outcome.
-		const queuedId = !handle && !(e instanceof IngestError && e.permanent) ? await queuedSlotWrite(userHash, uuid) : null;
+		// Only an entry this call put in the outbox: one queued earlier says
+		// nothing about whether this edit got there.
+		const queuedId = !handle && !(e instanceof IngestError && e.permanent)
+			? (await queuedSlotWrites(userHash, uuid)).filter((id) => !queuedBefore.has(id)).at(-1) ?? null
+			: null;
 		if (queuedId) {
 			void awaitEntryOutcome(queuedId, userHash).then(settle).catch(() => { /* session changed: the next session reads the server */ });
 			return markQueued(e);
@@ -294,18 +310,30 @@ async function upsertStorageEditLive(
 	}
 }
 
-/** The newest write to this slot the outbox still holds and the server has not refused. */
-async function queuedSlotWrite(userHash: string, uuid: string): Promise<string | null> {
+/** Writes to this slot the outbox holds and the server has not refused, oldest first. */
+async function queuedSlotWrites(userHash: string, uuid: string): Promise<string[]> {
 	try {
-		const queued = (await pendingEntries(userHash)).filter((entry) => {
-			if (entry.relation !== 'user_storage') return false;
-			const m = entry.mutations[0] as { modified?: UserStorageRow; changes?: UserStorageRow } | undefined;
-			return (m?.modified ?? m?.changes)?.uuid === uuid;
-		});
-		return queued.at(-1)?.id ?? null;
+		return (await pendingEntries(userHash))
+			.filter((entry) => {
+				if (entry.relation !== 'user_storage') return false;
+				const m = entry.mutations[0] as { modified?: UserStorageRow; changes?: UserStorageRow } | undefined;
+				return (m?.modified ?? m?.changes)?.uuid === uuid;
+			})
+			.map((entry) => entry.id);
 	} catch {
-		return null;
+		return [];
 	}
+}
+
+/** The freshest value of a slot this device knows: its own copy, what it last had accepted, or the server's. */
+async function freshestKnownValue(userHash: string, uuid: string): Promise<string | null> {
+	const [shown, accepted] = await Promise.all([
+		getStorageRow(userHash, uuid).catch(() => null),
+		getAccepted('user_storage', entityKeyFor(userHash, uuid), userHash).catch(() => null) as Promise<UserStorageRow | null>,
+	]);
+	const best = [shown, accepted].filter((r): r is UserStorageRow => !!r?.value_b64)
+		.reduce<UserStorageRow | null>((a, b) => (!a || tsOf(b) > tsOf(a) ? b : a), null);
+	return best?.value_b64 ?? null;
 }
 
 /**

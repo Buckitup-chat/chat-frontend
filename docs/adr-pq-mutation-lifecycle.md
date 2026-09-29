@@ -121,7 +121,7 @@ A request that got no answer at all is a fact about connectivity, not about the 
 - its backoff is capped at 30 seconds — the rate at which a missing connection is probed, since a reconnection may come with no `online` event (an always-on VPN keeps the browser "online" throughout);
 - it ends the moment any write of the account is answered: the answer proves the connection, so everything that only waited for one is due, and goes in the same pass;
 - a live send of a mutation that is already `DURABLE` retries a missing connection once, briefly — enough for a lost response — and then leaves the retry to the queue instead of holding the send lock through its own retry loop;
-- the page coming back into view is an external event like `online`: a hidden tab or an installed app has its timers frozen, so a retry scheduled while it was hidden may never have run.
+- the page coming back into view replays what is due and what only waited for a connection: a hidden tab or an installed app has its timers frozen, so a retry scheduled while it was hidden may never have run. Backoffs after a server failure stand — a visible page says nothing about the server.
 
 ### `PERMANENT_FAILURE`
 

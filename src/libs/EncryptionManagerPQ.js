@@ -10,7 +10,7 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { api } from '@/api/client';
-import { sendMutationsAndAwaitShape, drainPendingWrites, stopDrainLoop } from '@/lib/data/ingest';
+import { sendMutationsAndAwaitShape, drainPendingWrites, resumePendingWrites, stopDrainLoop } from '@/lib/data/ingest';
 import { startLeaderElection, stopLeaderElection, onOutboxWake, pendingEntries } from '@/lib/data/outbox';
 import { recoverIntents } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
@@ -382,7 +382,8 @@ export class EncryptionManagerPQ extends EventTarget {
   // Replays the durable outbox for the logged-in account: once right away,
   // again whenever connectivity returns, and whenever the page comes back
   // into view — a backgrounded tab or installed app has its timers frozen,
-  // so a retry scheduled while it was hidden may not have run. The listeners
+  // so a retry scheduled while it was hidden may not have run (a server's
+  // 5xx backoff stands then; only connection backoffs end). The listeners
   // are bound to the account and dropped on logout — entries signed by
   // another user must not be replayed with this session's auth.
   #outboxOnlineListener = null;
@@ -419,7 +420,9 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#recoverIntents(userHash, signSkey);
     };
     this.#outboxVisibleListener = () => {
-      if (document.visibilityState === 'visible') this.#outboxOnlineListener?.();
+      if (document.visibilityState !== 'visible') return;
+      resumePendingWrites(userHash, signSkey);
+      this.#recoverIntents(userHash, signSkey);
     };
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.#outboxOnlineListener);
@@ -582,20 +585,22 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   async #publishCardOrQueue(card) {
+    const queuedBefore = new Set(await this.#queuedCardWrites(card.user_hash));
     try {
       const handle = await this.#pushOwnCard(card, { isUpdate: true, untilQueued: true });
       return handle?.phase === 'queued' ? 'queued' : 'synced';
     } catch (e) {
-      // A send the server has not refused, of a card the outbox still holds,
-      // is waiting for the connection rather than failed.
-      if (e?.permanent !== true && (await this.#cardQueued(card.user_hash))) return 'queued';
+      // A send the server has not refused, of a card this call put in the
+      // outbox, is waiting for the connection rather than failed. One queued
+      // earlier says nothing about this one.
+      if (e?.permanent !== true && (await this.#queuedCardWrites(card.user_hash)).some((id) => !queuedBefore.has(id))) return 'queued';
       throw e;
     }
   }
 
-  async #cardQueued(userHash) {
+  async #queuedCardWrites(userHash) {
     const entries = await pendingEntries(userHash).catch(() => []);
-    return entries.some((entry) => entry.relation === 'user_cards');
+    return entries.filter((entry) => entry.relation === 'user_cards').map((entry) => entry.id);
   }
 
   /**
@@ -902,9 +907,10 @@ export class EncryptionManagerPQ extends EventTarget {
   /**
    * Save the profile. It is saved once durable on this device — shown from
    * there, across reloads — and the outbox takes it to the server. Resolves
-   * `{ card, pending }`: `pending` while the server does not have all of it
-   * yet (offline, it waits for the connection). Throws only when the change
-   * can never reach the server.
+   * `{ card, pending, cardPublished }`: `pending` while the server does not
+   * have all of it yet (offline, it waits for the connection);
+   * `cardPublished` when the public card went out with it. Throws only when
+   * the change can never reach the server.
    */
   async updateUserStorage({ name, notes, avatarUuid, avatarDataUrl }) {
     if (!this.#currentUserHash) {
@@ -966,7 +972,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     const cardStatus = cardChanged ? await this.#publishCardOrQueue(updated) : 'synced';
 
-    return { card: updated, pending: rootStatus !== 'synced' || cardStatus !== 'synced' };
+    return { card: updated, pending: rootStatus !== 'synced' || cardStatus !== 'synced', cardPublished: cardChanged };
   }
 
   async loadUserProfile() {
