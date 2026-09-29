@@ -75,6 +75,10 @@ vi.mock('@/lib/data/userStorage', () => ({
 		order.push('user_storage');
 		return { sync: Promise.resolve({ status: 'synced' }) };
 	},
+	saveStorageJsonPatch: async () => {
+		order.push('user_storage');
+		return 'synced';
+	},
 }));
 
 const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');

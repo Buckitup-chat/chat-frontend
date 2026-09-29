@@ -10,14 +10,14 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { api } from '@/api/client';
-import { sendMutationsAndAwaitShape, drainPendingWrites, stopDrainLoop } from '@/lib/data/ingest';
-import { startLeaderElection, stopLeaderElection, onOutboxWake } from '@/lib/data/outbox';
+import { sendMutationsAndAwaitShape, drainPendingWrites, resumePendingWrites, stopDrainLoop } from '@/lib/data/ingest';
+import { startLeaderElection, stopLeaderElection, onOutboxWake, pendingEntries } from '@/lib/data/outbox';
 import { recoverIntents } from '@/lib/data/intentRecovery';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { freshestOf, getAccepted, recordAccepted } from '@/lib/data/acceptedSnapshot';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { readShapeOnce } from '@/lib/data/shapeRead';
-import { getStorageRow, putStorageRow, putStorageJsonPatch } from '@/lib/data/userStorage';
+import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch } from '@/lib/data/userStorage';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
 import { publishVault } from '@/lib/recovery/vault';
@@ -111,7 +111,10 @@ export class EncryptionManagerPQ extends EventTarget {
   // Pi) while local caches still hold it, and an update of a missing row is
   // rejected. `isUpdate` is only the fallback when that read fails.
   // `onlyIfMissing` makes it a no-op when the server already has the card.
-  async #pushOwnCard(card, { isUpdate = false, signSkey = null, onlyIfMissing = false } = {}) {
+  // untilQueued: return once the card is durably in the outbox, instead of
+  // waiting for the server — offline, that wait lasts until the connection
+  // is back. The returned handle's phase says which it was.
+  async #pushOwnCard(card, { isUpdate = false, signSkey = null, onlyIfMissing = false, untilQueued = false } = {}) {
     const key = signSkey || this.#signSkey;
     if (!key) throw new Error('No signing key for user card');
 
@@ -156,13 +159,22 @@ export class EncryptionManagerPQ extends EventTarget {
         durability: 'best-effort',
         recordAcceptedSnapshot: unlocked,
       });
+      const recordAcceptance = async () => {
+        EncryptionManagerPQ.#acceptedCardCache.set(userHash, signedRow);
+        if (unlocked) await this.#recordSessionCard(userHash);
+      };
+      if (untilQueued && handle.phase !== 'accepted' && handle.outboxId) {
+        handle.acceptance
+          .then((outcome) => (outcome.kind === 'accepted' ? recordAcceptance() : undefined))
+          .catch(() => {});
+        return handle;
+      }
       const outcome = handle.phase === 'accepted' ? { kind: 'accepted' } : await handle.acceptance;
       if (outcome.kind !== 'accepted') {
         const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
         throw new Error(`User card ${asUpdate ? 'update' : 'creation'} was not accepted: ${reason}`);
       }
-      EncryptionManagerPQ.#acceptedCardCache.set(userHash, signedRow);
-      if (unlocked) await this.#recordSessionCard(userHash);
+      await recordAcceptance();
       return handle;
     };
 
@@ -368,10 +380,14 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   // Replays the durable outbox for the logged-in account: once right away,
-  // and again whenever connectivity returns. The listener is bound to the
-  // account and dropped on logout — entries signed by another user must not
-  // be replayed with this session's auth.
+  // again whenever connectivity returns, and whenever the page comes back
+  // into view — a backgrounded tab or installed app has its timers frozen,
+  // so a retry scheduled while it was hidden may not have run (a server's
+  // 5xx backoff stands then; only connection backoffs end). The listeners
+  // are bound to the account and dropped on logout — entries signed by
+  // another user must not be replayed with this session's auth.
   #outboxOnlineListener = null;
+  #outboxVisibleListener = null;
   #outboxWakeUnsubscribe = null;
 
   #recoverIntents(userHash, signSkey) {
@@ -403,8 +419,16 @@ export class EncryptionManagerPQ extends EventTarget {
       drainPendingWrites(userHash, signSkey);
       this.#recoverIntents(userHash, signSkey);
     };
+    this.#outboxVisibleListener = () => {
+      if (document.visibilityState !== 'visible') return;
+      resumePendingWrites(userHash, signSkey);
+      this.#recoverIntents(userHash, signSkey);
+    };
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.#outboxOnlineListener);
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.#outboxVisibleListener);
     }
     this.#outboxWakeUnsubscribe = onOutboxWake((wokenUserHash) => {
       if (wokenUserHash === userHash) {
@@ -420,7 +444,11 @@ export class EncryptionManagerPQ extends EventTarget {
     if (this.#outboxOnlineListener && typeof window !== 'undefined') {
       window.removeEventListener('online', this.#outboxOnlineListener);
     }
+    if (this.#outboxVisibleListener && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.#outboxVisibleListener);
+    }
     this.#outboxOnlineListener = null;
+    this.#outboxVisibleListener = null;
     this.#outboxWakeUnsubscribe?.();
     this.#outboxWakeUnsubscribe = null;
   }
@@ -545,11 +573,34 @@ export class EncryptionManagerPQ extends EventTarget {
     return [...this.#localUserCards];
   }
 
-  // Re-push the current user's card (e.g. after a name change).
+  /**
+   * Re-push the current user's card (e.g. after a name change). Resolves
+   * 'synced' once the server has it, 'queued' when it waits in the outbox for
+   * the connection; throws when it can never get there.
+   */
   async pushCurrentUserCard() {
     const card = this.#localUserCards.find(u => u.user_hash === this.#currentUserHash);
-    if (!card) return;
-    return this.#pushOwnCard(card, { isUpdate: true });
+    if (!card) return 'synced';
+    return this.#publishCardOrQueue(card);
+  }
+
+  async #publishCardOrQueue(card) {
+    const queuedBefore = new Set(await this.#queuedCardWrites(card.user_hash));
+    try {
+      const handle = await this.#pushOwnCard(card, { isUpdate: true, untilQueued: true });
+      return handle?.phase === 'queued' ? 'queued' : 'synced';
+    } catch (e) {
+      // A send the server has not refused, of a card this call put in the
+      // outbox, is waiting for the connection rather than failed. One queued
+      // earlier says nothing about this one.
+      if (e?.permanent !== true && (await this.#queuedCardWrites(card.user_hash)).some((id) => !queuedBefore.has(id))) return 'queued';
+      throw e;
+    }
+  }
+
+  async #queuedCardWrites(userHash) {
+    const entries = await pendingEntries(userHash).catch(() => []);
+    return entries.filter((entry) => entry.relation === 'user_cards').map((entry) => entry.id);
   }
 
   /**
@@ -853,6 +904,14 @@ export class EncryptionManagerPQ extends EventTarget {
 
   // Update User Storage
 
+  /**
+   * Save the profile. It is saved once durable on this device — shown from
+   * there, across reloads — and the outbox takes it to the server. Resolves
+   * `{ card, pending, cardPublished }`: `pending` while the server does not
+   * have all of it yet (offline, it waits for the connection);
+   * `cardPublished` when the public card went out with it. Throws only when
+   * the change can never reach the server.
+   */
   async updateUserStorage({ name, notes, avatarUuid, avatarDataUrl }) {
     if (!this.#currentUserHash) {
       throw new Error('No user is currently logged in');
@@ -873,9 +932,12 @@ export class EncryptionManagerPQ extends EventTarget {
     if (name !== undefined) patch.name = name;
     if (notes !== undefined) patch.notes = notes;
     if (avatarUuid !== undefined) patch.avatarUuid = avatarUuid;
-    // Profile is a user-visible "saved" action: #writeRootPatch waits for the
-    // server verdict instead of reporting success while the write stays local.
-    await this.#writeRootPatch(patch);
+    const rootStatus = await saveStorageJsonPatch({
+      userHash: this.#currentUserHash,
+      uuid: this.#rootSlotUuid(),
+      jsonPatch: patch,
+      signSkey: this.#signSkey,
+    });
 
     // 2. Update local cards
     const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
@@ -908,11 +970,9 @@ export class EncryptionManagerPQ extends EventTarget {
       current.contact_cert !== updated.contact_cert
     );
 
-    if (cardChanged) {
-      await this.#pushOwnCard(updated, { isUpdate: true });
-    }
+    const cardStatus = cardChanged ? await this.#publishCardOrQueue(updated) : 'synced';
 
-    return updated;
+    return { card: updated, pending: rootStatus !== 'synced' || cardStatus !== 'synced', cardPublished: cardChanged };
   }
 
   async loadUserProfile() {

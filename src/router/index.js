@@ -115,8 +115,10 @@ const routes = [
 	},
 ];
 
+// Routes live under the build base, the scope of the service worker and of
+// the installed app (src/lib/appBase.ts).
 const router = createRouter({
-	history: createWebHistory(),
+	history: createWebHistory(import.meta.env.BASE_URL),
 	routes,
 });
 

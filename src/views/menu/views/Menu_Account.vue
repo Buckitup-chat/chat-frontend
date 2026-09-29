@@ -38,6 +38,13 @@
 			<div>Transactions</div>
 		</div>
 	</router-link>
+
+	<div v-if="canPrompt || needsManualInstall" class="_sub_menu_btn" @click="installApp">
+		<div class="_i_block">
+			<i class="_icon_buckup_devices"></i>
+		</div>
+		<div>Install app</div>
+	</div>
 	<!--router-link :to="{ name: 'account_admin' }" custom v-slot="{ isExactActive, navigate }">
 		<div class="_sub_menu_btn" :class="{ _active: isExactActive }" @click="select(navigate)">
 			<div class="_i_block">
@@ -68,11 +75,26 @@ import { useMenu } from '@/composables/useMenu';
 // import Account_Item from '@/components/Account_Item.vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 import { inject } from 'vue';
+import { useInstallPrompt } from '@/composables/useInstallPrompt';
 
 const { isOpen: $menuOpened, close: closeMenu } = useMenu();
+const $swal = inject('$swal');
+const { canPrompt, needsManualInstall, install } = useInstallPrompt();
 
 const select = (navigate) => {
 	closeMenu();
 	navigate();
+};
+
+const installApp = async () => {
+	if (canPrompt.value) {
+		await install();
+		return;
+	}
+	$swal.fire({
+		icon: 'info',
+		title: 'Install BuckitUp',
+		text: 'In Safari, tap Share, then "Add to Home Screen", and open BuckitUp from the new icon. It then works with no connection, and Safari no longer clears its data after a week without a visit.',
+	});
 };
 </script>

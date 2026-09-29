@@ -116,6 +116,13 @@ The mutation remains durable and returns to the queue for controlled retry.
 
 The return to `QUEUED` must carry a time for the next attempt. An implementation that relies only on external events — login, a browser `online` transition — does not conform: a server can answer 5xx while connectivity never changes, and the queue would then never move again.
 
+A request that got no answer at all is a fact about connectivity, not about the mutation, and its schedule follows from that:
+
+- its backoff is capped at 30 seconds — the rate at which a missing connection is probed, since a reconnection may come with no `online` event (an always-on VPN keeps the browser "online" throughout);
+- it ends the moment any write of the account is answered: the answer proves the connection, so everything that only waited for one is due, and goes in the same pass;
+- a live send of a mutation that is already `DURABLE` retries a missing connection once, briefly — enough for a lost response — and then leaves the retry to the queue instead of holding the send lock through its own retry loop;
+- the page coming back into view replays what is due and what only waited for a connection: a hidden tab or an installed app has its timers frozen, so a retry scheduled while it was hidden may never have run. Backoffs after a server failure stand — a visible page says nothing about the server.
+
 ### `PERMANENT_FAILURE`
 
 A failure where retrying the same mutation unchanged is not expected to succeed.
@@ -207,6 +214,13 @@ waiting on prerequisites, or a reload must not silently replace it with
 fresher tails: the refs record what the author saw, not the newest state the
 client has since learned.
 
+What the author saw includes their own revisions still in the queue: a
+message written offline cites the one written before it. Such a message is
+not independent of the revisions it cites — it is dispatched only after each
+of them reaches `SERVER_ACCEPTED`, because every peer parks a message whose
+parent has not arrived, and shows it as waiting for as long as the parent is
+missing. A queued message it does not cite stays independent.
+
 Independent writes may be constructed, enqueued, and dispatched concurrently.
 The client must not block them on confirmation of prior unrelated mutations.
 Concurrency here means the dependency contract, not the transport: the
@@ -243,7 +257,10 @@ Dispatch order is expressed through explicit dependencies, not a global
 account barrier:
 
 - one sender per account — live-send, retry and replay all pass through the
-  same coordinator under the leader lock; no send path bypasses it;
+  same coordinator under the leader lock; no send path bypasses it. In the
+  leader tab, replay waits for that lock while the tab's own live send holds
+  it and runs the moment it is released; a tab that is not the leader does
+  not wait, and checks back later;
 - creation order is the deterministic priority among mutations that are
   ready; it is not a promise that a later mutation waits for an earlier
   unrelated one;

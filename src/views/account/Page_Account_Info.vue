@@ -145,20 +145,27 @@ async function saveProfile() {
 			draftAvatarBlob.value = null;
 		}
 
-		await $userPQ.updateCurrentUserProfile({
+		const saved = await $userPQ.updateCurrentUserProfile({
 			name: draftAccount.value.name,
 			notes: draftAccount.value.notes,
 			avatarUuid: uuid,
 			avatarDataUrl: draftAccount.value.avatar
 		});
+		// Saved here; the server gets it when the connection is back. Say so
+		// rather than claim it is everywhere already.
+		if (saved?.pending) {
+			$swal.fire({
+				icon: 'info',
+				title: 'Saved on this device',
+				text: 'The server is out of reach. The change is kept here and goes out when the connection is back; until then your other devices and contacts see the previous profile.',
+			});
+		}
 	} catch (e) {
-		// The write survives locally; what failed is server sync — say so
-		// instead of pretending the save fully succeeded (review finding 12)
 		console.error('[account] profile save failed:', e);
 		$swal.fire({
 			icon: 'error',
-			title: 'Profile not synced',
-			text: 'Changes are saved on this device but could not reach the server. They will not appear on your other devices yet.',
+			title: 'Profile not fully saved',
+			text: `Part of the change may be kept on this device, but this went wrong: ${e?.message ?? e}`,
 		});
 	}
 }

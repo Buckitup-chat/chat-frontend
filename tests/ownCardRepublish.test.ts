@@ -65,6 +65,7 @@ vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async () => null,
 	putStorageRow: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
 	putStorageJsonPatch: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
+	saveStorageJsonPatch: async () => 'synced',
 }));
 
 let ingestImpl: (mutations: unknown[]) => Promise<Response>;

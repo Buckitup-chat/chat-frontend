@@ -123,6 +123,8 @@ const { accountIn } = defineProps({
 	accountIn: { type: Object },
 });
 
+let resetFromProp = false;
+
 onMounted(async () => {
 	account.value = JSON.parse(JSON.stringify(accountIn));
 
@@ -134,6 +136,7 @@ onMounted(async () => {
 		() => accountIn,
 		async (newVal) => {
 			if (newVal) {
+				resetFromProp = true;
 				account.value = JSON.parse(JSON.stringify(accountIn));
 				if (accountIn?.avatarUuid && accountIn.avatarUuid !== avatarUuid.value) {
 					await loadAvatarFromStorage(accountIn.avatarUuid);
@@ -149,6 +152,14 @@ onMounted(async () => {
 		}
 		if (newVal.notes && newVal.notes.length > maxNotesLength) {
 			newVal.notes = newVal.notes.slice(0, maxNotesLength);
+		}
+		// Only an edit is an update. The copy is also reset from the prop, and
+		// echoing that back saved what was just saved, which changed the prop
+		// again: an endless loop of signed writes while the page is open. An
+		// edit that happens to restore the prop's value is still an edit.
+		if (resetFromProp) {
+			resetFromProp = false;
+			return;
 		}
 		emit('update', newVal);
 	}, { deep: true });

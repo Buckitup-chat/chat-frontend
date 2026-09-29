@@ -30,9 +30,10 @@ import { getServerState, entityKeyFor } from './userStorageBase';
 import { getAccepted } from './acceptedSnapshot';
 import { enqueueIntent, updateIntent, intentsOf } from './intents';
 import { materializeSignEnqueueStorageIntent } from './intentRecovery';
-import { materializeStorageIntent, mergeJsonPatch, type StorageIntentPayload } from './storageIntent';
+import { materializeStorageIntent, mergeJsonPatch, projectJsonPatchValue, type StorageIntentPayload } from './storageIntent';
 import { pinActiveSession, assertSessionUnchanged } from './sessionGuard';
-import { SessionFencedError } from './outbox';
+import { SessionFencedError, pendingEntries, awaitEntryOutcome, type EntryOutcome } from './outbox';
+import { IngestError, type DeliveryHandle } from './ingest';
 import { nextOwnerTimestamp } from './time';
 import type { UserStorageRow } from './types';
 import { readShapeOnce } from './shapeRead';
@@ -42,7 +43,13 @@ import { wireBool } from '@/lib/pq/schema';
 // per slot would be the same address on every account. See lib/pq/slotId for
 // the derived root address and lib/data/slots for the map of the rest.
 
-export type StorageSyncStatus = 'synced' | 'syncing' | 'failed' | 'awaiting-recovery';
+/**
+ * 'queued': signed and in the outbox, which delivers it — the connection was
+ * missing, or the write waits behind another. 'awaiting-recovery': durable
+ * but not yet signed (locked vault, or no known base); intent recovery signs
+ * it later. Neither is on the server yet; neither is lost.
+ */
+export type StorageSyncStatus = 'synced' | 'syncing' | 'queued' | 'failed' | 'awaiting-recovery';
 
 // What we persist locally: the server-shaped row plus local-only metadata.
 interface LocalStorageEntry {
@@ -191,7 +198,12 @@ async function refreshedRowAfterAcceptance(userHash: string, uuid: string, fallb
 	return (accepted as UserStorageRow | null) ?? fallback;
 }
 
-async function upsertStorageEditLive(edit: StorageEdit, hashB64: string | null, signSkey: Uint8Array | null): Promise<UpsertResult> {
+async function upsertStorageEditLive(
+	edit: StorageEdit,
+	hashB64: string | null,
+	signSkey: Uint8Array | null,
+	opts: { untilQueued?: boolean } = {}
+): Promise<UpsertResult> {
 	const { userHash, uuid, deletedFlag } = edit;
 	const key = kvKey(userHash, uuid);
 	const token = pinActiveSession(userHash, 'upsertStorageRow');
@@ -209,7 +221,18 @@ async function upsertStorageEditLive(edit: StorageEdit, hashB64: string | null, 
 
 	assertSessionUnchanged(token, 'upsertStorageEditLive:afterDurableIntent');
 	const local = await getLocalEntry(userHash, uuid);
-	const projected = provisionalRow(userHash, uuid, edit.valueB64, deletedFlag, local?.row ?? null);
+	// A JSON-patch edit is kept locally as what it makes of the freshest value
+	// known, so a reload before the write reaches the server still shows it.
+	// With no known value there is nothing to merge onto: a record holding
+	// only the patch would hide the rest of it (the slot map, the vault) for
+	// as long as the write waits.
+	const projectedValue = edit.jsonPatch
+		? await freshestKnownValue(userHash, uuid).then((base) => (base ? projectJsonPatchValue(base, edit.jsonPatch!) : undefined))
+		: edit.valueB64;
+	const projected = provisionalRow(userHash, uuid, projectedValue, deletedFlag, local?.row ?? null);
+	// Nothing new to show: the local copy must not outrank the server's — not
+	// on the first such edit, and not on a later one over that empty copy.
+	if (projectedValue === undefined) projected.owner_timestamp = local ? tsOf(local.row) : 0;
 	assertSessionUnchanged(token, 'upsertStorageEditLive:beforeOptimisticProjection');
 	await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'syncing' } satisfies LocalStorageEntry, userHash);
 
@@ -219,6 +242,7 @@ async function upsertStorageEditLive(edit: StorageEdit, hashB64: string | null, 
 		return { row: projected, sync: Promise.resolve({ status: 'awaiting-recovery' as const }) };
 	}
 
+	const queuedBefore = new Set(await queuedSlotWrites(userHash, uuid));
 	const result = await materializeSignEnqueueStorageIntent(userHash, uuid, intentId, signSkey, token, materializeStorageIntent);
 
 	if (result.kind === 'already-claimed') {
@@ -230,10 +254,12 @@ async function upsertStorageEditLive(edit: StorageEdit, hashB64: string | null, 
 		return { row: projected, sync: Promise.resolve({ status: 'awaiting-recovery' as const, error: result.message }) };
 	}
 
-	try {
-		const handle = await result.dispatchPromise;
-		const outcome = handle.phase === 'accepted' ? ({ kind: 'accepted' } as const) : await handle.acceptance;
+	const settle = async (outcome: EntryOutcome): Promise<UpsertResult> => {
 		assertSessionUnchanged(token, 'upsertStorageEditLive:afterAcceptanceWait');
+		// A later edit to this slot owns the local copy now; this verdict is
+		// about an older one.
+		const current = await getLocalEntry(userHash, uuid);
+		if (current && tsOf(current.row) > tsOf(projected)) return { row: current.row, sync: Promise.resolve({ status: current.syncStatus }) };
 		if (outcome.kind === 'accepted') {
 			const finalRow = await refreshedRowAfterAcceptance(userHash, uuid, projected);
 			assertSessionUnchanged(token, 'upsertStorageEditLive:beforeSyncedProjection');
@@ -244,14 +270,71 @@ async function upsertStorageEditLive(edit: StorageEdit, hashB64: string | null, 
 		await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'failed', syncError: message } satisfies LocalStorageEntry, userHash);
 		console.warn(`[userStorage] ${uuid}: sync failed:`, message);
 		return { row: projected, sync: Promise.resolve({ status: 'failed' as const, error: message }) };
+	};
+	const markQueued = async (error?: unknown): Promise<UpsertResult> => {
+		assertSessionUnchanged(token, 'upsertStorageEditLive:beforeQueuedProjection');
+		const syncError = error === undefined ? undefined : String((error as Error)?.message || error);
+		await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'queued', syncError } satisfies LocalStorageEntry, userHash);
+		return { row: projected, sync: Promise.resolve({ status: 'queued' as const, error }) };
+	};
+
+	let handle: DeliveryHandle | null = null;
+	try {
+		handle = await result.dispatchPromise;
+		if (handle.phase === 'accepted') return await settle({ kind: 'accepted' });
+		if (opts.untilQueued) {
+			// Done for the caller once durable; the local copy still follows
+			// the server's verdict when it comes.
+			void handle.acceptance.then(settle).catch(() => { /* session changed: the next session reads the server */ });
+			return await markQueued();
+		}
+		return await settle(await handle.acceptance);
 	} catch (e: unknown) {
 		if (e instanceof SessionFencedError) throw e;
+		// A send the server has not refused, of a write the outbox still
+		// holds, is queued rather than failed: the outbox delivers it when the
+		// connection is back, and the local copy follows that outcome.
+		// Only an entry this call put in the outbox: one queued earlier says
+		// nothing about whether this edit got there.
+		const queuedId = !handle && !(e instanceof IngestError && e.permanent)
+			? (await queuedSlotWrites(userHash, uuid)).filter((id) => !queuedBefore.has(id)).at(-1) ?? null
+			: null;
+		if (queuedId) {
+			void awaitEntryOutcome(queuedId, userHash).then(settle).catch(() => { /* session changed: the next session reads the server */ });
+			return markQueued(e);
+		}
 		assertSessionUnchanged(token, 'upsertStorageEditLive:beforeFailedProjectionOnThrow');
 		const message = String((e as Error)?.message || e);
 		await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'failed', syncError: message } satisfies LocalStorageEntry, userHash);
 		console.warn(`[userStorage] ${uuid}: sync failed:`, message);
 		return { row: projected, sync: Promise.resolve({ status: 'failed' as const, error: e }) };
 	}
+}
+
+/** Writes to this slot the outbox holds and the server has not refused, oldest first. */
+async function queuedSlotWrites(userHash: string, uuid: string): Promise<string[]> {
+	try {
+		return (await pendingEntries(userHash))
+			.filter((entry) => {
+				if (entry.relation !== 'user_storage') return false;
+				const m = entry.mutations[0] as { modified?: UserStorageRow; changes?: UserStorageRow } | undefined;
+				return (m?.modified ?? m?.changes)?.uuid === uuid;
+			})
+			.map((entry) => entry.id);
+	} catch {
+		return [];
+	}
+}
+
+/** The freshest value of a slot this device knows: its own copy, what it last had accepted, or the server's. */
+async function freshestKnownValue(userHash: string, uuid: string): Promise<string | null> {
+	const [shown, accepted] = await Promise.all([
+		getStorageRow(userHash, uuid).catch(() => null),
+		getAccepted('user_storage', entityKeyFor(userHash, uuid), userHash).catch(() => null) as Promise<UserStorageRow | null>,
+	]);
+	const best = [shown, accepted].filter((r): r is UserStorageRow => !!r?.value_b64)
+		.reduce<UserStorageRow | null>((a, b) => (!a || tsOf(b) > tsOf(a) ? b : a), null);
+	return best?.value_b64 ?? null;
 }
 
 /**
@@ -278,10 +361,11 @@ export function upsertStorageJsonPatch(opts: UpsertJsonPatchOptions): Promise<Up
 }
 
 /**
- * A write that counts only once the server has it. "Saved on this device" is
- * not something to tell a person who just pressed Save, nor a vault the
- * shares would find, so every caller with a person or a key behind it uses
- * this; upsertStorageRow is for the ones that can live with a local-only row.
+ * A write that counts only once the server has it: what another device or a
+ * recovering client reads from the server — a vault the shares must find, a
+ * slot a map points to — is not written until it is there.
+ * upsertStorageRow is for the ones that can live with a local-only row, and
+ * saveStorageJsonPatch for an edit a person makes on this device.
  */
 export async function putStorageRow(opts: UpsertOptions): Promise<UserStorageRow> {
 	return settledOnServer(await upsertStorageRow(opts));
@@ -290,6 +374,26 @@ export async function putStorageRow(opts: UpsertOptions): Promise<UserStorageRow
 /** putStorageRow for a JSON-patch intent (the root record). */
 export async function putStorageJsonPatch(opts: UpsertJsonPatchOptions): Promise<UserStorageRow> {
 	return settledOnServer(await upsertStorageJsonPatch(opts));
+}
+
+/**
+ * An edit a person makes to their own record — the profile. It is saved once
+ * it is durable on this device and shown from there, across reloads; the
+ * outbox or intent recovery takes it to the server. Resolves with where it
+ * is: 'synced' when the server has it, 'queued' when it waits in the
+ * outbox, 'awaiting-recovery' when it waits to be signed. Throws only when
+ * it can never get there: refused by the server, or not durable at all.
+ */
+export async function saveStorageJsonPatch(
+	opts: UpsertJsonPatchOptions
+): Promise<'synced' | 'queued' | 'awaiting-recovery'> {
+	const { userHash, uuid, jsonPatch, signSkey, deletedFlag = false } = opts;
+	const write = await upsertStorageEditLive({ userHash, uuid, deletedFlag, jsonPatch }, null, signSkey, { untilQueued: true });
+	const sync = await write.sync;
+	if (sync.status === 'failed') throw new Error('The change could not be saved', { cause: sync.error });
+	// 'syncing' here means another context holds this intent for signing: it
+	// is durable and on its way, like a queued write.
+	return sync.status === 'syncing' ? 'queued' : sync.status;
 }
 
 // 'awaiting-recovery' is a durable local intent, not a server verdict: it
