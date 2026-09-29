@@ -202,7 +202,8 @@ contains no revision — only `message_id`, `reactor_hash` and the type).
 
 ### 9. Work happens in separate branches; `main` is not touched without the owner
 
-**Since:** 2026-08-06
+**Lifted:** 2026-09-29, `main` became the only integration branch and the source
+of the staging deployment (introduced 2026-08-06) · **Replaced by:** rule 9a
 
 Two developers work on the migration in parallel in different branches, and the
 results are compared when both are ready. Until then nothing from the migration
@@ -212,6 +213,28 @@ other.
 **In practice.** A working branch → the integration branch
 (`tanstack-migration`) for testing → comparison → the owner's decision. "Done"
 means "pushed and visible to the reviewer", not "sitting locally".
+
+### 9a. Every change reaches `main` through a PR from a branch off `origin/main`
+
+**Since:** 2026-09-29 (owner's decision)
+
+`main` is the only integration branch, and staging deploys from it. A feature or
+fix branch starts from the current `origin/main` and returns to `main` through a
+PR, after review and with CI green. Only the repository owner pushes or merges
+into `main` directly.
+
+**Why.** What staging runs is what gets tested, so work integrates where it
+ships. Recovery shares and contact slots were written on `tanstack-migration`
+against a storage layer `main` had already replaced, and reaching `main` meant
+porting them by hand onto its JSON-patch intents.
+
+**In practice.**
+- `git fetch origin` before starting work and before opening a PR, then bring
+  the branch up to date with `origin/main` (merge it, or rebase unpushed work
+  onto it).
+- `tanstack-migration` is not a base for new work, and new changes are not
+  ported back into it.
+- "Done" means "pushed and visible to the reviewer", not "sitting locally".
 
 ### 10. A test must fail without the fix
 
