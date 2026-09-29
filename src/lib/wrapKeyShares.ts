@@ -5,12 +5,12 @@
 // id catches mixing; a wrong key surfaces when the vault fails to open
 // (lib/recovery/vault).
 //
-// Its own module because it is the only thing that needs Shamir and the
-// Buffer polyfill, and its callers are the sandbox-gated share screens: the
-// store that mints the key loads it on demand, so nothing here reaches the
-// startup bundle.
-import sss from 'shamirs-secret-sharing';
+// Its own module because it needs Shamir (lib/shamir) and the Buffer
+// polyfill, and its callers are the sandbox-gated share screens: the store
+// that mints the key loads it on demand, so nothing here reaches the startup
+// bundle.
 import { Buffer } from 'buffer';
+import { shamirCombine, shamirSplit } from '@/lib/shamir';
 import { deriveVaultLocator } from '@/lib/pq/vaultEnvelope';
 import { BackupFormatError } from '@/lib/backupCrypto';
 import { fetchVault } from '@/lib/recovery/vault';
@@ -56,15 +56,10 @@ export const splitWrapKey = (wrapKey: Uint8Array, total: number, threshold: numb
 	if (threshold > total || total > 255) throw new BackupFormatError('bad parameters');
 
 	const set = setId(wrapKey); // refuses anything but 32 bytes
-	const secret = Buffer.from(wrapKey);
-	try {
-		return (sss.split(secret, { shares: total, threshold }) as Buffer[]).map((ks, i) => {
-			const body = `${SHARE_TAG}.${set}.${i + 1}.${total}.${threshold}.${toB64(new Uint8Array(ks))}`;
-			return `${body}.${crc32(body)}`;
-		});
-	} finally {
-		secret.fill(0);
-	}
+	return shamirSplit(wrapKey, total, threshold).map((ks, i) => {
+		const body = `${SHARE_TAG}.${set}.${i + 1}.${total}.${threshold}.${toB64(ks)}`;
+		return `${body}.${crc32(body)}`;
+	});
 };
 
 interface ParsedShare {
@@ -104,9 +99,7 @@ export const combineWrapKeyShares = (lines: string[]): Uint8Array => {
 	if (unique.size < first.threshold) {
 		throw new BackupFormatError(`need ${first.threshold} different shares, got ${unique.size}`);
 	}
-	const combined = sss.combine([...unique.values()].map((s) => Buffer.from(s.keyShare)));
-	const wrapKey = new Uint8Array(combined);
-	combined.fill(0);
+	const wrapKey = shamirCombine([...unique.values()].map((s) => s.keyShare));
 	// The set id names the key, not the split: two splits of one key carry
 	// the same id and their shares pass every check above, then combine into
 	// garbage. The key itself is the last word.

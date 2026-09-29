@@ -32,6 +32,29 @@ export function mergeJsonPatch(
 	if (base?.staleVaults || base?.retiredVaults || 'vaultUuid' in patch || patch.retiredVaults) {
 		mergeVaultList(merged, base, patch);
 	}
+	if (base?.contacts || patch.contacts) merged.contacts = mergeContacts(base?.contacts, patch.contacts);
+	return merged;
+}
+
+type ContactEdits = Record<string, Record<string, unknown> | null>;
+
+// The contacts slot holds { contacts: { [user_hash]: contact } }. A patch edits
+// contacts by user_hash: its fields merge into the stored contact, and null
+// deletes it. A contact deleted and added again in patches not sent yet must
+// not inherit the deleted one's fields — `confirmed` above all, which only the
+// QR handshake sets — so that addition is marked to replace, not merge.
+// `base` is the stored record or an earlier pending patch, as for the vault
+// list; the materializer strips the deletions and the marker.
+const REPLACES = '$replaces';
+
+function mergeContacts(base: unknown, patch: unknown): ContactEdits {
+	const merged: ContactEdits = { ...((base ?? {}) as ContactEdits) };
+	for (const [hash, edit] of Object.entries((patch ?? {}) as ContactEdits)) {
+		const prev = merged[hash];
+		if (edit === null) merged[hash] = null;
+		else if (prev === null || edit[REPLACES]) merged[hash] = { ...edit, [REPLACES]: true };
+		else merged[hash] = { ...(prev ?? {}), ...edit };
+	}
 	return merged;
 }
 
@@ -62,6 +85,13 @@ function mergeVaultList(merged: Record<string, unknown>, base: Record<string, un
 /** Keys of a patch that steer the merge and are not part of the stored record. */
 export function stripPatchDirectives(record: Record<string, unknown>): Record<string, unknown> {
 	const { retiredVaults: _retired, ...stored } = record;
+	if (stored.contacts) {
+		stored.contacts = Object.fromEntries(
+			Object.entries(stored.contacts as ContactEdits)
+				.filter((entry): entry is [string, Record<string, unknown>] => entry[1] !== null)
+				.map(([hash, { [REPLACES]: _marker, ...contact }]) => [hash, contact])
+		);
+	}
 	return stored;
 }
 

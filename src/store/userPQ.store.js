@@ -204,6 +204,10 @@ export const userPQStore = defineStore('userPQ', () => {
     }
 
     currentUser.value = null;
+    // The next account loads its own; until then this one's must not show,
+    // and no edit still out may put any of it back.
+    contactsMap.value = {};
+    contactsSession = newContactsSession();
 
     console.log('[userStore] User logged out');
   };
@@ -305,43 +309,99 @@ export const userPQStore = defineStore('userPQ', () => {
     return { pending: saved.pending || card === 'queued' };
   };
 
+  // What a contact keeps in the contacts slot, out of whatever the caller
+  // holds: saveContact is handed whole view objects that mix in network card
+  // fields. `confirmed` marks a contact whose key was checked in person,
+  // through the QR handshake: the only kind a recovery share may be issued
+  // to. It is set by confirmContact alone; a save leaves whatever the stored
+  // contact says, and only a delete takes it back.
+  const STORED_FIELDS = ['name', 'notes', 'hidden', 'contact_pkey'];
+  const storedFields = (data) =>
+    Object.fromEntries(STORED_FIELDS.filter((key) => data[key] !== undefined).map((key) => [key, data[key]]));
+
+  // Every write is a patch of the list the server holds, not this tab's copy:
+  // it is merged onto the stored list when it is signed, so another tab's
+  // confirmation survives, and a tab whose load had not finished cannot write
+  // a list of one over every other contact. The edit shows at once, and the
+  // server's answer replaces it — unless a later edit has shown since (its
+  // own answer will), or the account changed while the write was out, in
+  // which case it belongs to nobody here.
+  // A write the server does not take is taken back. Each edit still out keeps
+  // what the contacts it touches showed before it, and each contact remembers
+  // the newest edit of it the server has taken. A failed edit leaves a contact
+  // alone when the server has taken a newer edit of it, hands what to go back
+  // to on to the next newer edit of it still out, and otherwise restores it.
+  // All of this belongs to one session: logout starts a new one, and an edit
+  // from an earlier session changes nothing when it settles.
+  let contactsEdits = 0;
+  const newContactsSession = () => ({ editsOut: [], acceptedOf: {} });
+  let contactsSession = newContactsSession();
+
+  const takeBack = (session, failed) => {
+    const shown = { ...contactsMap.value };
+    for (const [hash, previous] of Object.entries(failed.before)) {
+      if ((session.acceptedOf[hash] ?? 0) > failed.generation) continue;
+      const newer = session.editsOut.find((e) => e.generation > failed.generation && hash in e.before);
+      if (newer) newer.before[hash] = previous;
+      else if (previous === undefined) delete shown[hash];
+      else shown[hash] = previous;
+    }
+    contactsMap.value = shown;
+  };
+
+  const writeContacts = async (edits) => {
+    const account = currentUserHash.value;
+    const session = contactsSession;
+    const generation = ++contactsEdits;
+    const shown = { ...contactsMap.value };
+    const edit = { generation, before: {} };
+    for (const [hash, change] of Object.entries(edits)) {
+      edit.before[hash] = shown[hash];
+      if (change === null) delete shown[hash];
+      else shown[hash] = { ...shown[hash], ...change };
+    }
+    contactsMap.value = shown;
+    session.editsOut.push(edit);
+    const stillCurrent = () => currentUserHash.value === account && contactsSession === session;
+    let next;
+    try {
+      next = await em.value.patchContacts(edits);
+    } catch (e) {
+      session.editsOut.splice(session.editsOut.indexOf(edit), 1);
+      if (stillCurrent()) takeBack(session, edit);
+      throw e;
+    }
+    session.editsOut.splice(session.editsOut.indexOf(edit), 1);
+    for (const hash of Object.keys(edits)) {
+      session.acceptedOf[hash] = Math.max(session.acceptedOf[hash] ?? 0, generation);
+    }
+    if (stillCurrent() && generation === contactsEdits) {
+      contactsMap.value = Object.fromEntries(next.map((c) => [c.user_hash, c]));
+    }
+  };
+
   const saveContact = async (userHash, contactData) => {
     if (!em.value || !currentUserHash.value) return false;
-    
-    // Maintain backward compatibility fields if they are missing
-    contactsMap.value[userHash] = {
-      ...contactsMap.value[userHash],
-      ...contactData,
-      user_hash: userHash
-    };
+    await writeContacts({ [userHash]: { ...storedFields(contactData), user_hash: userHash } });
+    return true;
+  };
 
-    const contactsArray = Object.values(contactsMap.value).map(c => ({
-      user_hash: c.user_hash,
-      name: c.name,
-      notes: c.notes,
-      hidden: c.hidden,
-      contact_pkey: c.contact_pkey
-    }));
-
-    await em.value.updateContacts(contactsArray);
+  /**
+   * Marks a contact as met in person, with the key the handshake proved —
+   * adding it if it is not a contact yet. The caller has checked that key
+   * against the contact's certified card (lib/pq/verifyCard).
+   */
+  const confirmContact = async (userHash, contactPkey, fields = {}) => {
+    if (!em.value || !currentUserHash.value) return false;
+    await writeContacts({
+      [userHash]: { ...storedFields(fields), user_hash: userHash, contact_pkey: contactPkey, confirmed: true },
+    });
     return true;
   };
 
   const deleteContact = async (userHash) => {
     if (!em.value || !currentUserHash.value) return false;
-    
-    if (contactsMap.value[userHash]) {
-      delete contactsMap.value[userHash];
-      
-      const contactsArray = Object.values(contactsMap.value).map(c => ({
-        user_hash: c.user_hash,
-        name: c.name,
-        notes: c.notes,
-        hidden: c.hidden
-      }));
-      
-      await em.value.updateContacts(contactsArray);
-    }
+    await writeContacts({ [userHash]: null });
     return true;
   };
 
@@ -455,6 +515,7 @@ export const userPQStore = defineStore('userPQ', () => {
     contacts,
     contactsMap,
     saveContact,
+    confirmContact,
     deleteContact,
 
     initialize,
