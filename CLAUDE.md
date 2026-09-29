@@ -22,15 +22,16 @@ Phoenix / Ecto).
    reviewer's claim. Wire fields come from `chat/lib/chat/data/schemas/*.ex`;
    protocol from `chat/docs/reqs/pq_dialogs.md`. When a review says "the backend
    does X", open the backend and check before fixing.
-3. **Branch discipline.** The TanStack migration is collaborative work with
-   `tanstack-migration` as the shared integration branch. Everyone builds on
-   the same tip: start every working session — and always before opening a
+3. **Branch discipline.** `main` is the only integration branch, and staging
+   deploys from it. Every feature or fix branch starts from the current
+   `origin/main`. Start every working session — and always before opening a
    PR — with `git fetch origin` and a merge of (or rebase of your unpushed
-   work onto) `origin/tanstack-migration`. A stale base is not a style issue:
-   it reproduces bugs that are already fixed upstream and turns the eventual
-   merge into an archaeology dig. Feature branches fork from the integration
-   tip and merge back into it; `main` stays owner-merged — do not merge
-   migration work there yourself. "Done" means pushed and visible to the
+   work onto) `origin/main`. A stale base is not a style issue: it reproduces
+   bugs that are already fixed upstream and turns the eventual merge into an
+   archaeology dig. Every change reaches `main` through a PR, after review and
+   with CI green. `tanstack-migration` is not a base for new work, and new
+   changes are not ported back into it. Only the repository owner pushes or
+   merges directly into `main`. "Done" means pushed and visible to the
    others, not sitting in a local commit.
 
 4. **No backward compatibility is owed.** The project is in active development
@@ -78,7 +79,7 @@ Phoenix / Ecto).
 ## Review
 
 For reviewing a branch, PR or release candidate use the `deep-review` skill
-(`/deep-review <branch> --base main`); `deep-review-loop` alternates review
+(`/deep-review <branch> --base origin/main`); `deep-review-loop` alternates review
 and fixes until no confirmed critical/high defect remains. Neither is for a
 quick look at a small diff — they fan out subagents and cost real money.
 
@@ -86,8 +87,9 @@ Facts reviewers cannot infer from the code:
 
 - Tests: `npm test` (vitest). If the sandbox has no network or registry
   access, say so in the limitations — do not invent run results.
-- Feature branches sit on a stack of unmerged migration work. Always compute
-  the merge-base and compare the commit count with what the author claimed.
+- Compare a branch against the current `origin/main` (`git fetch origin`
+  first): compute the merge-base with it and check the commit count against
+  what the author claimed.
 - `src/lib/pq/` is the cryptographic layer: diffs touching it get their own
   security axis and canonicalization checks by execution. Root derivations
   are pinned byte-for-byte by golden vectors in `tests/pqCheckpoint.test.ts`

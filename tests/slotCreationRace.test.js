@@ -40,11 +40,16 @@ vi.mock('@/lib/data/userStorage', () => ({
 		upsertCalls.push({ uuid, valueB64, deletedFlag: !!deletedFlag });
 		return { sync: Promise.resolve({ status: 'synced' }) };
 	},
+	// The real merge onto the stored value, as the materializer lands a patch.
 	putStorageJsonPatch: async ({ uuid, jsonPatch, deletedFlag }) => {
-		const valueB64 = JSON.stringify(jsonPatch);
+		const { _getStorageJsonCodecForTests, mergeJsonPatch, stripPatchDirectives } = await import('@/lib/data/storageIntent');
+		const codec = _getStorageJsonCodecForTests();
+		const stored = rows.get(uuid)?.valueB64;
+		const base = stored ? await codec.decrypt(stored).catch(() => null) : null;
+		const { valueB64 } = await codec.encrypt(stripPatchDirectives(mergeJsonPatch(base, jsonPatch)));
 		rows.set(uuid, { valueB64, deletedFlag: !!deletedFlag });
 		upsertCalls.push({ uuid, valueB64, deletedFlag: !!deletedFlag });
-		return { sync: Promise.resolve({ status: 'synced' }) };
+		return { uuid, value_b64: valueB64 };
 	},
 	saveStorageJsonPatch: async ({ uuid, jsonPatch, deletedFlag }) => {
 		const valueB64 = JSON.stringify(jsonPatch);
@@ -100,7 +105,7 @@ describe('slot creation race (§4.7): EncryptionManagerPQ acts on an orphaned sl
 		const em = await login();
 		upsertCalls = [];
 
-		await em.updateContacts([{ hash: 'mine' }]);
+		await em.patchContacts({ mine: { user_hash: 'mine' } });
 
 		const mineUuid = upsertCalls[0].uuid;
 		expect(mineUuid).not.toBe(WINNER_UUID);
@@ -113,9 +118,9 @@ describe('slot creation race (§4.7): EncryptionManagerPQ acts on an orphaned sl
 	it('resolves later reads through the winner, not its own mint', async () => {
 		const em = await login();
 		upsertCalls = [];
-		await em.updateContacts([{ hash: 'mine' }]);
+		await em.patchContacts({ mine: { user_hash: 'mine' } });
 
-		expect(await em.loadContacts()).toEqual([{ hash: 'mine' }]);
+		expect(await em.loadContacts()).toEqual([{ user_hash: 'mine' }]);
 		expect(rows.has(WINNER_UUID)).toBe(true);
 	});
 });

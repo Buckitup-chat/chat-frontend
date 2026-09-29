@@ -745,20 +745,26 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   /**
-   * Decrypted root record, or null when this account has none yet. A row that
-   * is there but does not decrypt is null for a reader and an error for a
-   * writer: a patch built on that null would sign a root with no slot map.
+   * The decrypted JSON at `uuid`, or null when there is none. A row that is
+   * there but does not decrypt is null for a reader and an error for a
+   * writer: a write built on that null would replace what it could not read —
+   * a root with no slot map, a list with nothing in it.
    */
-  async #readRoot({ strict = false } = {}) {
-    const row = await getStorageRow(this.#currentUserHash, this.#rootSlotUuid());
+  async #readJsonAt(uuid, label, { strict = false } = {}) {
+    const row = await getStorageRow(this.#currentUserHash, uuid);
     if (!row || !row.value_b64) return null;
     try {
       return await this.#decryptJson(row.value_b64);
     } catch (e) {
-      if (strict) throw new Error('The account record on the server cannot be read; nothing was written', { cause: e });
-      console.error('Failed to decrypt the user_storage root record:', e);
+      if (strict) throw new Error(`${label} on the server cannot be read; nothing was written`, { cause: e });
+      console.error(`Failed to decrypt ${label}:`, e);
       return null;
     }
+  }
+
+  /** Decrypted root record, or null when this account has none yet. */
+  #readRoot(opts) {
+    return this.#readJsonAt(this.#rootSlotUuid(), 'The account record', opts);
   }
 
   // Root writes are JSON-patch intents (storageIntent.ts): the patch is merged
@@ -809,9 +815,15 @@ export class EncryptionManagerPQ extends EventTarget {
 
   #slots() {
     if (!this.#slotResolver) {
+      // Bound to the account it resolves for: a slot creation still running
+      // after an account switch must not read or patch the next account's root.
+      const owner = this.#currentUserHash;
+      const sameAccount = () => {
+        if (owner !== null && this.#currentUserHash !== owner) throw new Error('The account changed before this write ran; nothing was written');
+      };
       this.#slotResolver = createSlotResolver({
-        read: () => this.#readRoot(),
-        write: (patch) => this.#writeRootPatch(patch),
+        read: () => { sameAccount(); return this.#readRoot(); },
+        write: (patch) => { sameAccount(); return this.#writeRootPatch(patch); },
       });
     }
     return this.#slotResolver;
@@ -827,21 +839,22 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   /**
-   * Writes a named slot, creating it on first use. The slot row lands before
-   * the map entry that names it, so a failure between the two leaves an
-   * unreferenced row rather than a map pointing at nothing.
+   * Runs `writeRow` against the named slot's row, creating the slot on first
+   * use. The slot row lands before the map entry that names it, so a failure
+   * between the two leaves an unreferenced row rather than a map pointing at
+   * nothing.
    */
-  async #writeSlot(name, valueB64, hashB64) {
+  async #ensureSlot(name, writeRow) {
     const { uuid, orphaned } = await this.#slots().ensureSlotUuid(name, {
       mint: randomSlotUuid,
-      writeRow: (uuid) => this.#writeSlotRow(uuid, valueB64, hashB64),
+      writeRow,
       recallPendingMint: () => kvGet(this.#pendingSlotMintKey(name)),
       rememberPendingMint: (uuid) => kvSet(this.#pendingSlotMintKey(name), uuid),
       forgetPendingMint: () => kvDelete(this.#pendingSlotMintKey(name)),
     });
     if (orphaned) {
       await this.#tombstoneSlotRow(orphaned);
-      await this.#writeSlotRow(uuid, valueB64, hashB64);
+      await writeRow(uuid);
     }
   }
 
@@ -995,60 +1008,58 @@ export class EncryptionManagerPQ extends EventTarget {
     return root;
   }
 
-  // Contacts Encryption
+  // Contacts: a named JSON slot like any other, { contacts: { [user_hash]:
+  // contact } }. An edit is a patch by user_hash (storageIntent
+  // mergeJsonPatch): its fields merge into the stored contact, null deletes it.
 
-  async updateContacts(contactsArray) {
-    if (!this.#currentUserHash) throw new Error('No user is currently logged in');
-    if (!this.#cryptSkey) throw new Error('Crypt key not loaded');
-
-    const contactsJson = JSON.stringify(contactsArray);
-    const contactsData = new TextEncoder().encode(contactsJson);
-
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-
-    const encryptedData = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      await this.#deriveKeyFromCryptSkey(),
-      contactsData
-    );
-
-    const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
-    const combined = arrayToBase64(ivData);
-
-    await this.#writeSlot('contacts', combined, bytesToHex(sha256(new Uint8Array(encryptedData))));
-
-    return true;
+  /** Applies `edits` to the contacts the server holds; resolves to the accepted list. */
+  async patchContacts(edits) {
+    const record = await this.patchSlotJson('contacts', { contacts: edits });
+    return Object.values(record?.contacts ?? {});
   }
 
   async loadContacts() {
+    return Object.values((await this.loadSlotJson('contacts'))?.contacts ?? {});
+  }
+
+  // Named JSON slots
+
+  /**
+   * A named slot's JSON value, or null when the slot was never written or
+   * does not decrypt. For readers only: a writer goes through patchSlotJson,
+   * which refuses rather than build on a value it could not read.
+   */
+  async loadSlotJson(name) {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
-    if (!this.#cryptSkey) return [];
+    if (!this.#cryptSkey) return null;
+    const uuid = await this.#slotUuid(name);
+    return uuid ? this.#readJsonAt(uuid, `the ${name} slot`) : null;
+  }
 
-    // No slot yet means this account has never saved contacts. Reading must
-    // not create one: doing so on a transient failure to load the map would
-    // start a second, empty contacts row alongside the real one.
-    const contactsUuid = await this.#slotUuid('contacts');
-    if (!contactsUuid) return [];
-
-    const storage = await getStorageRow(this.#currentUserHash, contactsUuid);
-    if (!storage || !storage.value_b64) return [];
-
-    const combined = decodeHexOrBase64(storage.value_b64);
-
-    const iv = combined.slice(0, 12);
-    const encryptedData = combined.slice(12);
-
-    try {
-      const decryptedData = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv },
-        await this.#deriveKeyFromCryptSkey(),
-        encryptedData
-      );
-      return JSON.parse(new TextDecoder().decode(decryptedData));
-    } catch (e) {
-      console.error('Failed to decrypt contacts:', e);
-      return [];
-    }
+  /**
+   * Merges `patch` into a named slot's JSON value, creating the slot on first
+   * use, and resolves to the value the server accepted. Like the root's, the
+   * write is a JSON-patch intent (storageIntent.ts): it is merged onto the
+   * base the signer uses, under the storage slot lock, so two updates — in
+   * this tab, another tab or another device — never drop each other's change
+   * without a read-modify-write here. A value that is there and does not
+   * decrypt fails the update instead of being overwritten.
+   */
+  async patchSlotJson(name, patch) {
+    const userHash = this.#currentUserHash;
+    const signSkey = this.#signSkey;
+    if (!userHash || !signSkey || !this.#cryptSkey) throw new Error('No user is currently logged in');
+    let accepted = null;
+    await this.#ensureSlot(name, async (uuid) => {
+      // Slot writes queue behind each other; one that runs after an account
+      // switch belongs to nobody here.
+      if (this.#currentUserHash !== userHash) throw new Error('The account changed before this write ran; nothing was written');
+      await this.#readJsonAt(uuid, `The ${name} slot`, { strict: true });
+      accepted = await putStorageJsonPatch({ userHash, uuid, jsonPatch: patch, signSkey });
+    });
+    // Written for its own account; this session no longer holds that key.
+    if (this.#currentUserHash !== userHash) throw new Error('The account changed while this write was out');
+    return this.#decryptJson(accepted.value_b64);
   }
 
   // Avatar Encryption
