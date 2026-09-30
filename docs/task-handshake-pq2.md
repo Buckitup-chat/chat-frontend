@@ -36,9 +36,8 @@ An account has (`src/libs/EncryptionManagerPQ.js`, `createUserVault`):
 | `contact_skey` / `contact_pkey` | secp256k1, compressed (33 B) | `contact_pkey`, `contact_cert = ML-DSA-87.sign(contact_pkey, sign_skey)` | What the QR carries and what signs the optical transcript |
 | `crypt_skey` / `crypt_pkey` | ML-KEM-1024 | `crypt_pkey`, `crypt_cert` | Not used by the handshake |
 
-The QR carries `contact_pkey` because a post-quantum key does not fit one
-code: a QR code holds 2,953 bytes at most, `sign_pkey` alone is 2,592 and its
-signature 4,627. The certificate is what ties the small key to the identity:
+The QR carries `contact_pkey` because neither the ML-DSA key nor its
+signature fits one code (2,953 bytes at most; sizes above). The certificate is what ties the small key to the identity:
 **a contact is confirmed only when the key proved optically is the one the
 identity's verified card certifies** (`cardVouchesForContactKey`,
 `src/lib/pq/verifyCard.ts`) — without that, anyone can show a friend's
@@ -94,8 +93,8 @@ between fields).
 - **Post-quantum signature** (over the channel, §5):
   `sigPQ = ML-DSA-87.sign(M, sign_skey)`, with
   `M = "buckitup/handshake/v2/pq\n" || T || fp_lo (32 B) || fp_hi (32 B)`,
-  where `fp` is each side's DTLS certificate fingerprint — the 32 bytes at
-  offset 2 of its QWBP payload (QWBP spec §4.3). Verified under `sign_pkey` of
+  where `fp` is each side's DTLS certificate fingerprint — the 32-byte
+  fingerprint in its QWBP payload (`decode(payload).fingerprint`). Verified under `sign_pkey` of
   the counterpart's verified card.
 - **Short authentication string**:
   `sas = u32be(hkdfDerive(T || fp_lo || fp_hi, "buckitup/handshake/v2", "sas", 4)) mod 10^6`,
@@ -105,9 +104,6 @@ between fields).
   the optical signatures, so a relay that swaps the bootstrap payloads would
   leave a `T`-only code equal on both screens. With the fingerprints in it,
   the two screens differ whenever the channel does not join the two phones.
-
-Golden vectors for `T`, `M` and `sas` (over fixed fingerprints) are pinned in tests (§9), as the
-checkpoint and recovery-share derivations are.
 
 ## 5. Sequence
 
@@ -144,20 +140,19 @@ rest of the session: a later code naming a different `user_hash` or
    { "type": "PQ2_CONFIRM", "card": <own signed user card row>, "sig": "<base64 sigPQ>" }
    ```
 
-   The card must be the signed row as published — with `sign_b64` and every
-   field it signs — not the local registry entry (`currentUser`,
-   `#localUserCards`), which has no signature and whose name is replaced by the
-   profile's. `EncryptionManagerPQ.signedOwnCard()` (new) returns the freshest
-   signed row: the `user_cards` collection row, the accepted snapshot
-   (`getAccepted('user_cards', …)`) or the session cache of `#pushOwnCard`. If
-   none exists (never published, offline), the handshake ends *optically
-   verified*.
+   The card is the freshest self-signed card row (with `sign_b64`), not the
+   unsigned local registry entry. `EncryptionManagerPQ.signedOwnCard()` (new)
+   returns it through the same freshest-of lookup `#pushOwnCard` uses today,
+   taken out into one private helper. If none exists (never published,
+   offline), the handshake ends *optically verified*.
 
-   On receipt: `verifyUserCard(card)` is `verified`; `card.user_hash` equals
-   the bound counterpart's; `card.contact_pkey` equals the bound
-   `contact_pkey` (bytes); `ML-DSA-87.verify(sig, M, card.sign_pkey)`. All
-   four, and the counterpart is **confirmed**. Any failure is logged, the
+   On receipt: the card vouches for the bound counterpart and key —
+   `cardVouchesForContactKey`, extended to check `user_hash` as well — and
+   `ML-DSA-87.verify(sig, M, card.sign_pkey)` holds. Both, and the
+   counterpart is **confirmed**. Any failure is logged, the
    handshake ends *optically verified* only, and the card is dropped.
+   The camera stops decoding once both payloads are known; nothing is left to
+   read while the channel opens and the ML-DSA work runs.
 7. **Done.** Stop the camera; keep the last code on screen (the counterpart
    may still be reading it — `docs/handshake_fix_report.md`); show the SAS;
    emit `completed`:
@@ -194,39 +189,34 @@ an ended session verify against nothing.
 - The contact page opens by `user_hash`.
 
 `confirmContact` is the only path that sets `confirmed` (`src/store/userPQ.store.js`),
-and it also sets `confirmedAt` (unix seconds) itself. The field is not added
-to the fields `saveContact` callers may write (`STORED_FIELDS`), for the same
-reason `confirmed` is not.
+and it no longer trusts its caller: it takes the verified card and runs
+`cardVouchesForContactKey` itself, refusing when it fails. It sets
+`confirmedAt` (unix seconds) itself; neither field is among those
+`saveContact` callers may write (`STORED_FIELDS`). A `saveContact` that
+changes the `contact_pkey` of a confirmed contact clears `confirmed`: the
+confirmation was of the old key. The modal no longer derives `confirmed` from
+the card alone (`onHandshakeCompleted`); the engine decides.
 
 The modal keeps its own-account check: a handshake whose counterpart is the
 signed-in account is refused before anything is saved.
 
-The card in the result is used for the name and for
-`cardVouchesForContactKey`; it is not written into `allNetworkUsers`, which
-is a view of the `user_cards` shape and receives the card when the client is
-online.
+The card is not written into `allNetworkUsers` (§1).
 
-## 7. Removals
-
-- `src/libs/QRHandshakeManager.js` and its mention in `Modal_QrHandshake.vue`.
-- The two-signature scheme and the `myNeedCard` / `peerNeedCard` flags: the channel always opens.
-- The `stun.l.google.com` servers.
-- `confirmed` derived in the modal from the card alone (`onHandshakeCompleted`): the engine decides, with the post-quantum signature.
-
-## 8. Code layout
+## 7. Code layout
 
 - `src/lib/pq/handshake.ts` — pure functions, no DOM: `encode`/`parse` for A–D
   (length-checked), `transcript(a, b)`, `pqMessage(T, fpA, fpB)`, `sasOf(T)`,
-  `fingerprintOf(qwbpPayload)`, and the confirm-message check
+  the transport fingerprint via `qwbp`'s own `decode(payload).fingerprint`
+  (no second parser of its format), and the confirm-message check
   (`checkConfirm(msg, bound, T, fps) → { ok, card } | { ok: false, reason }`).
 - `src/components/engines/QRScannerEngine.vue` — camera, QR rendering, the
   state machine and the QWBP connection, calling the module above. Session
   state is one object, reset by `start()`.
 - `EncryptionManagerPQ` gains `signHandshakePQ(M)` (ML-DSA-87 under
   `sign_skey`) beside `signContactChallenge`.
-- `src/store/userPQ.store.js` — `confirmContact` records `confirmedAt`.
+- `src/store/userPQ.store.js` — `confirmContact(userHash, card)` as in §6.
 
-## 9. Tests
+## 8. Tests
 
 `tests/handshake.test.ts` (node, real crypto — `@noble` runs under node):
 
@@ -258,7 +248,7 @@ online.
 Each regression test is run against the `PQ1` engine once before it is
 deleted, to show it fails there (CLAUDE.md, verification standard).
 
-## 10. Acceptance
+## 9. Acceptance
 
 - Two phones, face to face, on one Wi-Fi: both show "Contact confirmed" and
   the same six digits within about two seconds of both cameras opening.
@@ -270,7 +260,7 @@ deleted, to show it fails there (CLAUDE.md, verification standard).
 - A recorded B replayed to a fresh session: ignored (nonce differs).
 - `npm test`, `npm run lint`, `npm run build` green.
 
-## 11. Out of scope, noted for later
+## 10. Out of scope, noted for later
 
 - **Multi-frame (animated) QR** for the post-quantum signature and the card,
   so confirmation works with no network at all: ~2 frames of 2.9 KB for the
