@@ -67,13 +67,16 @@ D  PQ2:D:<qwbp>
 | `sig` | 64 | ECDSA over the transcript, §4, compact `r‖s` |
 | `qwbp` | 55–100 | The sender's QWBP bootstrap payload (`QWBPConnection.getQRPayload()`), which carries its DTLS certificate fingerprint |
 
-Sizes: A ≈ 205 bytes, B ≈ 292, C ≈ 230, D ≈ 140 — QR versions 10–13 at
+Sizes: A ≈ 205 bytes, B ≈ 292, C ≈ 230, D ≈ 140 — QR versions 7–11 at
 error-correction level L, as today.
 
 ## 4. Transcript and signatures
 
 Both sides compute the same transcript. The two parties are ordered by their
-`user_hash` strings (byte-wise, they are hex): `lo` and `hi`.
+`user_hash` strings (byte-wise, they are hex): `lo` and `hi`. The two are
+never equal: a code carrying the reader's own `user_hash` (its own screen in
+a reflection, or a second device of the same account) is ignored at every
+step.
 
 ```
 T = "buckitup/handshake/v2\n"
@@ -95,11 +98,15 @@ between fields).
   offset 2 of its QWBP payload (QWBP spec §4.3). Verified under `sign_pkey` of
   the counterpart's verified card.
 - **Short authentication string**:
-  `sas = u32be(hkdfDerive(T, "buckitup/handshake/v2", "sas", 4)) mod 10^6`,
-  six digits, zero-padded — the derivation device-link uses
-  (`src/lib/pq/deviceLink.ts`).
+  `sas = u32be(hkdfDerive(T || fp_lo || fp_hi, "buckitup/handshake/v2", "sas", 4)) mod 10^6`,
+  six digits, zero-padded, with `hkdfDerive` from `src/lib/pq/hkdf.ts` (the
+  derivation device-link uses). It covers the fingerprints on purpose: `T`
+  holds only values shown in plain codes, and the `qwbp` fields are not under
+  the optical signatures, so a relay that swaps the bootstrap payloads would
+  leave a `T`-only code equal on both screens. With the fingerprints in it,
+  the two screens differ whenever the channel does not join the two phones.
 
-Golden vectors for `T`, `M` and `sas` are pinned in tests (§9), as the
+Golden vectors for `T`, `M` and `sas` (over fixed fingerprints) are pinned in tests (§9), as the
 checkpoint and recovery-share derivations are.
 
 ## 5. Sequence
@@ -118,19 +125,33 @@ rest of the session: a later code naming a different `user_hash` or
    compute `T`; verify `sig` under the counterpart's `contact_pkey`. If it
    fails, log and stay. Otherwise sign `T`, create the QWBP connection with
    **no ICE servers**, take its payload, show **C**; mark *optically verified*.
-4. **Read C** (state 2 only — this device showed B): verify `sig` as in 3;
+4. **Read C** in state 2 (this device showed B): verify `sig` as in 3;
    mark *optically verified*; create the QWBP connection, feed it the
    counterpart's payload, take own payload, show **D**.
+   **Read C** in state 3 (this device showed C too — both read B at once, the
+   symmetric race): verify `sig` as in 3 and feed the counterpart's payload to
+   the connection this device already has. Both hold both payloads; QWBP picks
+   offerer and answerer by comparing fingerprints, so neither needs a D.
 5. **Read D** (state 3 only — this device showed C): feed the payload to the
    connection.
-6. **Channel.** QWBP compares the DTLS fingerprint of the connecting peer
-   with the one it scanned (QWBP spec, step 11) — that is what makes the
-   channel the one negotiated on screen. When the data channel opens, each
-   side sends **one** message and expects one:
+6. **Channel.** QWBP derives the ICE credentials from the scanned
+   fingerprint, and WebRTC's DTLS handshake accepts only a peer whose
+   certificate has that fingerprint — that is what makes the channel the one
+   negotiated on screen. When the data channel opens, each side sends **one**
+   message and expects one:
 
    ```json
-   { "type": "PQ2_CONFIRM", "card": <own user card row>, "sig": "<base64 sigPQ>" }
+   { "type": "PQ2_CONFIRM", "card": <own signed user card row>, "sig": "<base64 sigPQ>" }
    ```
+
+   The card must be the signed row as published — with `sign_b64` and every
+   field it signs — not the local registry entry (`currentUser`,
+   `#localUserCards`), which has no signature and whose name is replaced by the
+   profile's. `EncryptionManagerPQ.signedOwnCard()` (new) returns the freshest
+   signed row: the `user_cards` collection row, the accepted snapshot
+   (`getAccepted('user_cards', …)`) or the session cache of `#pushOwnCard`. If
+   none exists (never published, offline), the handshake ends *optically
+   verified*.
 
    On receipt: `verifyUserCard(card)` is `verified`; `card.user_hash` equals
    the bound counterpart's; `card.contact_pkey` equals the bound
@@ -172,8 +193,13 @@ an ended session verify against nothing.
 - not `confirmed` → `saveContact(user_hash, { name, notes: '', hidden: false, contact_pkey })` if new; toast "Key verified in person; not yet confirmed" with the reason.
 - The contact page opens by `user_hash`.
 
-`confirmContact` is the only path that sets `confirmed` (`src/store/userPQ.store.js`);
-it also records `confirmedAt` (unix seconds) — new field, added to `toStored`.
+`confirmContact` is the only path that sets `confirmed` (`src/store/userPQ.store.js`),
+and it also sets `confirmedAt` (unix seconds) itself. The field is not added
+to the fields `saveContact` callers may write (`STORED_FIELDS`), for the same
+reason `confirmed` is not.
+
+The modal keeps its own-account check: a handshake whose counterpart is the
+signed-in account is refused before anything is saved.
 
 The card in the result is used for the name and for
 `cardVouchesForContactKey`; it is not written into `allNetworkUsers`, which
@@ -220,7 +246,9 @@ online.
 `tests/qrHandshakeEngine.test.js` (jsdom, camera and QWBP stubbed):
 
 - Two engines driven against each other complete in both orders (A→B→C→D from
-  either side) and in the symmetric race (both read A first).
+  either side), in the symmetric race (both read A first, then both read B
+  first — both show C, and the channel still opens), and a code carrying the
+  reader's own `user_hash` is ignored.
 - A code from another session (different nonce) is ignored; a code naming a
   different `user_hash` mid-session is ignored; after 90 s the session is gone.
 - A channel that never opens ends *optically verified*; `completed` carries
