@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+	<meta name="theme-color" content="#241824" />
+	<title>PQ2 handshake sandbox</title>
+  <script type="module" crossorigin src="./assets/index-BhAq4-GX.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-DUZV3V-w.css">
+</head>
+<body>
+	<header>
+		<div>
+			<div class="title">PQ2 handshake sandbox</div>
+			<div class="who" id="who"></div>
+		</div>
+		<button id="settingsBtn" class="ghost" aria-label="Settings">⚙︎</button>
+	</header>
+
+	<section id="settings" hidden>
+		<label>Name <input id="name" autocomplete="off" /></label>
+		<label>Channel
+			<select id="ice">
+				<option value="none">STUN off — phones on one network</option>
+				<option value="stun">STUN on — Google, across networks</option>
+			</select>
+		</label>
+		<label>Camera
+			<select id="camera">
+				<option value="user">Front (face to face)</option>
+				<option value="environment">Back</option>
+			</select>
+		</label>
+		<label>Mode
+			<select id="mode">
+				<option value="honest">Honest</option>
+				<option value="impostor">Impostor — show another identity</option>
+			</select>
+		</label>
+		<div class="row">
+			<button id="newIdentity" class="ghost">New identity</button>
+			<button id="applySettings">Apply and restart</button>
+		</div>
+		<p class="hint" id="impostorHint"></p>
+	</section>
+
+	<main>
+		<div id="stage" class="stage"></div>
+		<div id="result" hidden></div>
+		<div id="qrWrap" class="qr"><canvas id="qr"></canvas></div>
+		<video id="video" playsinline muted></video>
+		<div class="row">
+			<button id="restart">New session</button>
+			<button id="manual" class="ghost">Paste a code</button>
+			<button id="copy" class="ghost">Copy my code</button>
+		</div>
+		<details id="timingsBox" hidden><summary>Timings</summary><ul id="timings"></ul></details>
+		<details open><summary>Log</summary><ol id="log" reversed></ol></details>
+	</main>
+
+</body>
+</html>
