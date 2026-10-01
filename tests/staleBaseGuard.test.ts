@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { dependenciesFor } from '@/lib/data/coordinator';
+import { discoverDependencies } from '@/lib/data/coordinator';
 import { _setStorageForTests } from '@/lib/data/outbox';
-import { markUnconfirmed, clearUnconfirmed, StaleBaseError, _resetStaleBase } from '@/lib/data/staleBase';
+import { markUnconfirmed, clearUnconfirmed, _resetStaleBase } from '@/lib/data/staleBase';
 
 const MY_HASH = 'u_' + 'a'.repeat(128);
 
@@ -33,20 +33,22 @@ afterEach(() => {
 	_resetStaleBase();
 });
 
-describe('dependenciesFor refuses a chained write on an unconfirmed scope (§4.6)', () => {
-	it('throws for a chained write of the exact scope a shape timeout flagged', async () => {
+describe('discoverDependencies refuses a chained write on an unconfirmed scope (§4.6)', () => {
+	it('blocks a chained write of the exact scope a shape timeout flagged', async () => {
 		markUnconfirmed('brand_new_relation');
-		await expect(dependenciesFor(unmodeledMutation(), MY_HASH)).rejects.toThrow(StaleBaseError);
+		expect(await discoverDependencies(unmodeledMutation(), MY_HASH)).toMatchObject({
+			kind: 'blocked', block: { reason: 'stale_base', admission: { scope: 'brand_new_relation' } },
+		});
 	});
 
 	it('does not affect an unrelated relation/scope', async () => {
 		markUnconfirmed('brand_new_relation');
-		await expect(dependenciesFor(dialogMessage(), MY_HASH)).resolves.toEqual([]);
+		expect(await discoverDependencies(dialogMessage(), MY_HASH)).toEqual({ kind: 'found', dependsOn: [] });
 	});
 
-	it('stops throwing once the scope catches up', async () => {
+	it('stops blocking once the scope catches up', async () => {
 		markUnconfirmed('brand_new_relation');
 		clearUnconfirmed('brand_new_relation');
-		await expect(dependenciesFor(unmodeledMutation(), MY_HASH)).resolves.toEqual([]);
+		expect(await discoverDependencies(unmodeledMutation(), MY_HASH)).toEqual({ kind: 'found', dependsOn: [] });
 	});
 });

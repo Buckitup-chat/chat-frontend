@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { dependenciesFor } from '@/lib/data/coordinator';
+import { foundDependencies } from './helpers/dependencies';
 import {
 	enqueue, recordFailure, discardEntry, requeueEntry, resolveEntry,
 	readyEntries, blockedEntries, quarantinedEntries, pendingEntries, drainOutbox,
@@ -23,7 +23,8 @@ const makeStorage = () => {
 
 const editMessage = (messageId: string) => ([{
 	type: 'update',
-	modified: {
+	original: {},
+	changes: {
 		message_id: messageId, sender_hash: MY_HASH, dialog_hash: 'dh1',
 		content_b64: 'x', parent_sign_hash: null, owner_timestamp: 1,
 	},
@@ -32,7 +33,8 @@ const editMessage = (messageId: string) => ([{
 
 const storageSlot = (uuid: string) => ([{
 	type: 'update',
-	modified: { user_hash: MY_HASH, uuid, content_b64: 'x' },
+	original: {},
+	changes: { user_hash: MY_HASH, uuid, content_b64: 'x' },
 	syncMetadata: { relation: 'user_storage' },
 }]);
 
@@ -48,19 +50,19 @@ afterEach(() => {
 describe('§4.9 audit fix: chained dependency is per-entity, not per-dialog/per-account', () => {
 	it('editing message Y does not wait on an unrelated in-flight edit of message X', async () => {
 		await enqueue(editMessage('msg_X'), MY_HASH);
-		const deps = await dependenciesFor(editMessage('msg_Y'), MY_HASH);
+		const deps = await foundDependencies(editMessage('msg_Y'), MY_HASH);
 		expect(deps).toEqual([]);
 	});
 
 	it('saving one user_storage slot does not wait on an unrelated slot of the same account', async () => {
 		await enqueue(storageSlot('slot-profile'), MY_HASH);
-		const deps = await dependenciesFor(storageSlot('slot-contacts'), MY_HASH);
+		const deps = await foundDependencies(storageSlot('slot-contacts'), MY_HASH);
 		expect(deps).toEqual([]);
 	});
 
 	it('still serializes two edits of the exact same message', async () => {
 		const firstId = await enqueue(editMessage('msg_X'), MY_HASH);
-		const deps = await dependenciesFor(editMessage('msg_X'), MY_HASH);
+		const deps = await foundDependencies(editMessage('msg_X'), MY_HASH);
 		expect(deps).toEqual([firstId]);
 	});
 });
@@ -71,7 +73,7 @@ describe('§4.9: a permanently failed predecessor blocks its dependent, visibly'
 		await recordFailure(aId, new IngestError('rejected', { permanent: true }));
 		expect(await quarantinedEntries(MY_HASH)).toHaveLength(1);
 
-		const bDeps = await dependenciesFor(editMessage('msg_X'), MY_HASH);
+		const bDeps = await foundDependencies(editMessage('msg_X'), MY_HASH);
 		const bId = await enqueue(editMessage('msg_X'), MY_HASH, { dependsOn: bDeps });
 
 		const ready = await readyEntries(MY_HASH);
@@ -86,7 +88,7 @@ describe('§L17-09: Discard is not acceptance — a discarded prerequisite still
 	const setupAB = async () => {
 		const aId = await enqueue(editMessage('msg_X'), MY_HASH);
 		await recordFailure(aId, new IngestError('rejected', { permanent: true }));
-		const bDeps = await dependenciesFor(editMessage('msg_X'), MY_HASH);
+		const bDeps = await foundDependencies(editMessage('msg_X'), MY_HASH);
 		const bId = await enqueue(editMessage('msg_X'), MY_HASH, { dependsOn: bDeps });
 		return { aId: aId as string, bId: bId as string };
 	};
@@ -160,7 +162,7 @@ describe('§L17-09: Discard is not acceptance — a discarded prerequisite still
 
 	it('7. chain A -> B -> C: discarding A leaves both B and C blocked (C\'s own prerequisite B never resolves)', async () => {
 		const { aId, bId } = await setupAB();
-		const cDeps = await dependenciesFor(editMessage('msg_X'), MY_HASH);
+		const cDeps = await foundDependencies(editMessage('msg_X'), MY_HASH);
 		expect(cDeps).toContain(bId); // C picks up B, still pending on the same chained scope
 		const cId = await enqueue(editMessage('msg_X'), MY_HASH, { dependsOn: cDeps });
 
@@ -176,7 +178,7 @@ describe('§L17-09: Discard is not acceptance — a discarded prerequisite still
 
 	it('8. discarding B after A was already discarded does not auto-dispatch C', async () => {
 		const { aId, bId } = await setupAB();
-		const cDeps = await dependenciesFor(editMessage('msg_X'), MY_HASH);
+		const cDeps = await foundDependencies(editMessage('msg_X'), MY_HASH);
 		const cId = await enqueue(editMessage('msg_X'), MY_HASH, { dependsOn: cDeps });
 		await discardEntry(aId);
 		expect((await blockedEntries(MY_HASH)).map((e) => e.id)).toContain(cId);
@@ -190,7 +192,7 @@ describe('§L17-09: Discard is not acceptance — a discarded prerequisite still
 		const { aId } = await setupAB();
 		await discardEntry(aId);
 
-		const deps = await dependenciesFor(editMessage('msg_X'), MY_HASH);
+		const deps = await foundDependencies(editMessage('msg_X'), MY_HASH);
 
 		expect(deps).not.toContain(aId);
 	});
@@ -287,7 +289,7 @@ describe('§L17-09: Discard is not acceptance — a discarded prerequisite still
 		const aId = await enqueue(editMessage('msg_RACE'), MY_HASH);
 		await recordFailure(aId, new IngestError('rejected', { permanent: true }));
 
-		const bDeps = await dependenciesFor(editMessage('msg_RACE'), MY_HASH);
+		const bDeps = await foundDependencies(editMessage('msg_RACE'), MY_HASH);
 		expect(bDeps).toEqual([aId]);
 
 		await discardEntry(aId as string);
