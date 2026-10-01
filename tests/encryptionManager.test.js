@@ -1,5 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
+import { _setIntentStorageForTests } from '@/lib/data/intents';
+import { _setStorageForTests as setOutboxStorage, _setLeaderForTests as setLeaderForTests } from '@/lib/data/outbox';
 
 // Backend contract under test (chat/lib/chat/data/user.ex): a user_storage
 // write is authorised through User.get_card(user_hash).sign_pkey, so the card
@@ -53,16 +55,39 @@ vi.mock('@/lib/data/collections', () => ({
 	}),
 }));
 
-vi.mock('@/lib/data/ingest', () => ({
-	sendMutationsAndAwaitShape: async (m) => {
-		const result = await sendImpl(m);
-		if (result && typeof result === 'object' && 'phase' in result) return result;
-		return { outboxId: 'test-outbox-id', phase: 'accepted', result, acceptance: Promise.resolve({ kind: 'accepted' }) };
-	},
-	// Login triggers a background outbox drain; irrelevant to these tests.
-	drainPendingWrites: async () => {},
-	stopDrainLoop: () => {},
-}));
+// Most tests drive the transport through sendImpl with a fake delivery
+// handle. `realTransport` switches to the real ingest/outbox/reconciliation
+// path, with only the HTTP call (api.ingestWithAuthEach) faked through
+// sendImpl — for tests whose subject is what that path records locally.
+let realTransport = false;
+vi.mock('@/lib/data/ingest', async () => {
+	const actual = await vi.importActual('@/lib/data/ingest');
+	return {
+		...actual,
+		sendMutationsAndAwaitShape: async (m, skey, opts) => {
+			if (realTransport) return actual.sendMutationsAndAwaitShape(m, skey, opts);
+			const result = await sendImpl(m);
+			if (result && typeof result === 'object' && 'phase' in result) return result;
+			return { outboxId: 'test-outbox-id', phase: 'accepted', result, acceptance: Promise.resolve({ kind: 'accepted' }) };
+		},
+		// Login triggers a background outbox drain; irrelevant to these tests.
+		drainPendingWrites: async () => {},
+		stopDrainLoop: () => {},
+	};
+});
+
+vi.mock('@/api/client', async () => {
+	const actual = await vi.importActual('@/api/client');
+	return {
+		api: {
+			...actual.api,
+			ingestWithAuthEach: async (mutations) => {
+				await sendImpl(mutations);
+				return { status: 200, json: async () => ({ results: mutations.map((_, index) => ({ index, status: 'ok', txid: 1 })) }) };
+			},
+		},
+	};
+});
 
 
 vi.mock('@/lib/data/userStorage', () => ({
@@ -88,10 +113,21 @@ const freshManager = () => {
 	return EncryptionManagerPQ.getInstance();
 };
 
+const memoryStore = () => ({
+	_map: new Map(),
+	async get(k) { return this._map.get(k) ?? null; },
+	async set(k, v) { this._map.set(k, v); },
+	async delete(k) { this._map.delete(k); },
+	async keys() { return [...this._map.keys()]; },
+	async clear() { this._map.clear(); },
+});
+
 beforeEach(() => {
 	order = [];
 	cardRows = new Map();
 	vaults = new Map();
+	_setIntentStorageForTests(memoryStore());
+	setOutboxStorage(memoryStore());
 	_setAcceptedSnapshotStorageForTests({
 		_map: new Map(),
 		async get(k) { return this._map.get(k) ?? null; },
@@ -223,6 +259,8 @@ describe('user_cards base does not go stale under shape lag (L17-01/backend-repo
 	it('a second rapid update does not start signing until the first write\'s real acceptance is known (follower/queued path)', async () => {
 		const em = freshManager();
 		await em.createUserVault({ name: MY_NAME });
+		realTransport = true;
+		setLeaderForTests(true);
 
 		const applied = [];
 		let resolveFirstAcceptance;
@@ -231,30 +269,35 @@ describe('user_cards base does not go stale under shape lag (L17-01/backend-repo
 			const row = mutations[0].modified ?? mutations[0].changes;
 			callCount++;
 			if (callCount === 1) {
-				const acceptance = new Promise((resolve) => {
+				await new Promise((resolve) => {
 					resolveFirstAcceptance = () => {
 						cardRows.set(row.user_hash, { ...cardRows.get(row.user_hash), ...row });
 						applied.push(row.owner_timestamp);
-						resolve({ kind: 'accepted' });
+						resolve();
 					};
 				});
-				return { outboxId: 'ob-1', phase: 'queued', acceptance };
+				return { txids: [] };
 			}
 			cardRows.set(row.user_hash, { ...cardRows.get(row.user_hash), ...row });
 			applied.push(row.owner_timestamp);
 			return { txids: [] };
 		};
 
-		const firstUpdate = em.updateOwnUserCardName('Second');
-		await vi.waitFor(() => expect(callCount).toBe(1));
+		try {
+			const firstUpdate = em.updateOwnUserCardName('Second');
+			await vi.waitFor(() => expect(callCount).toBe(1));
 
-		const secondUpdate = em.updateOwnUserCardName('Third');
-		await new Promise((r) => setTimeout(r, 20));
-		expect(callCount).toBe(1);
+			const secondUpdate = em.updateOwnUserCardName('Third');
+			await new Promise((r) => setTimeout(r, 20));
+			expect(callCount).toBe(1);
 
-		resolveFirstAcceptance();
-		await firstUpdate;
-		await secondUpdate;
+			resolveFirstAcceptance();
+			await firstUpdate;
+			await secondUpdate;
+		} finally {
+			realTransport = false;
+			setLeaderForTests(null);
+		}
 
 		expect(callCount).toBe(2);
 		expect(applied).toHaveLength(2);
@@ -273,7 +316,7 @@ describe('user_cards base does not go stale under shape lag (L17-01/backend-repo
 			name: 'AcceptedElsewhere',
 			owner_timestamp: staleShapeRow.owner_timestamp + 50,
 		};
-		await recordAccepted('user_cards', userHash, acceptedButNotYetVisible);
+		await recordAccepted('user_cards', userHash, acceptedButNotYetVisible, userHash);
 
 		let sentTimestamp = null;
 		sendImpl = async (mutations) => {
@@ -290,6 +333,15 @@ describe('user_cards base does not go stale under shape lag (L17-01/backend-repo
 });
 
 describe('#pushOwnCard survives a failed local accepted-snapshot write without exposing a stale base to the next call (L17-01/R4)', () => {
+	beforeEach(() => {
+		realTransport = true;
+		setLeaderForTests(true);
+	});
+	afterEach(() => {
+		realTransport = false;
+		setLeaderForTests(null);
+	});
+
 	it('1-6. A is HTTP accepted, its local snapshot write fails, and B still gets a strictly newer timestamp — with no repeated HTTP call for A', async () => {
 		const em = freshManager();
 
@@ -389,7 +441,7 @@ describe('#pushOwnCard survives a failed local accepted-snapshot write without e
 		if (acceptedAStill) expect(acceptedAStill.user_hash).toBe(hashA); // never resurrected under B
 	});
 
-	it('9. LIMITATION: a reload before the durable snapshot write ever lands loses the session-local continuation and can re-collide on owner_timestamp', async () => {
+	it('9. a reload with the accepted-snapshot store still down and the shape stale still gives the next card write a strictly newer timestamp', async () => {
 		const em = freshManager();
 		let broken = true;
 		const map = new Map();
@@ -409,7 +461,6 @@ describe('#pushOwnCard survives a failed local accepted-snapshot write without e
 		const userHash = (await em.getLocalUserCards())[0].user_hash;
 		expect(await getAcceptedUserCard(userHash)).toBeNull(); // durable write never landed
 
-		EncryptionManagerPQ._clearAcceptedCardCacheForTests();
 		const em2 = freshManager();
 		await em2.login(userHash); // a real reload logs back in the same account
 
@@ -420,8 +471,8 @@ describe('#pushOwnCard survives a failed local accepted-snapshot write without e
 		};
 		await em2.updateOwnUserCardName('Second try');
 
-		expect(bTimestamp).not.toBeNull();
 		expect(aTimestamp).not.toBeNull();
+		expect(bTimestamp).toBeGreaterThan(aTimestamp); // the durable card clock, not the lost snapshot, is the base
 	});
 });
 

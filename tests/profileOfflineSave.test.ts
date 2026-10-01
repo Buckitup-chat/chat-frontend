@@ -32,6 +32,7 @@ vi.mock('@/api/client', () => ({
 	api: {
 		createStorageMutation: (userHash: string, uuid: string, valueB64: string, _h: unknown, _v: unknown, ownerTimestamp: number, _sk: unknown, _d: unknown, deletedFlag: boolean, parentSignHash: string | null, _sh: unknown, _sb: unknown, mutationType: string) => ({
 			type: mutationType,
+			...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
 			[mutationType === 'insert' ? 'modified' : 'changes']: {
 				user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
 				owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
@@ -58,7 +59,7 @@ vi.mock('@/api/client', () => ({
 
 const { saveStorageJsonPatch, upsertStorageJsonPatch, getStorageRow, getStorageSyncStatus } = await import('@/lib/data/userStorage');
 const { setStorageJsonCodec } = await import('@/lib/data/storageIntent');
-const { drainPendingWrites } = await import('@/lib/data/ingest');
+const { drainPendingWrites, resumePendingWrites } = await import('@/lib/data/ingest');
 const {
 	_setStorageForTests, _setLeaderForTests, stopDrainLoop, startLeaderElection, stopLeaderElection, pendingEntries,
 } = await import('@/lib/data/outbox');
@@ -123,7 +124,7 @@ describe('a profile edit with no connection', () => {
 		online = false;
 		await saveStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { name: 'New' }, signSkey });
 		online = true;
-		drainPendingWrites(USER, signSkey);
+		resumePendingWrites(USER, signSkey);
 		await vi.waitFor(async () => expect(await getStorageSyncStatus(USER, ROOT)).toBe('synced'));
 		expect(sent.map((r) => JSON.parse(r.value_b64))).toEqual([{ name: 'New', notes: 'n' }]);
 	});

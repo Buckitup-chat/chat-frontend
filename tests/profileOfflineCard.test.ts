@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { _setStorageForTests as setOutboxStorage, _setLeaderForTests, pendingEntries, stopDrainLoop } from '@/lib/data/outbox';
 import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
+import { _setIntentStorageForTests } from '@/lib/data/intents';
 
 const makeMemoryStore = () => {
 	const map = new Map<string, string>();
@@ -92,7 +93,7 @@ vi.mock('@/api/client', async () => {
 });
 
 const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
-const { drainPendingWrites } = await import('@/lib/data/ingest');
+const { drainPendingWrites, resumePendingWrites } = await import('@/lib/data/ingest');
 
 interface TestManager {
 	createUserVault(opts: { name: string }): Promise<unknown>;
@@ -118,6 +119,7 @@ beforeEach(() => {
 	};
 	setOutboxStorage(makeMemoryStore());
 	_setAcceptedSnapshotStorageForTests(makeMemoryStore());
+	_setIntentStorageForTests(makeMemoryStore());
 	_setLeaderForTests(true);
 });
 
@@ -163,7 +165,7 @@ describe('saving the profile with no connection', () => {
 		serverCards = new Set([userHash]);
 		// The signing key is the vault's; the manager hands it to the drain on login.
 		const signSkey = (vaults.values().next().value as ReturnType<typeof makeVault>);
-		drainPendingWrites(userHash, (await signSkey.get('sign_skey')) as Uint8Array);
+		resumePendingWrites(userHash, (await signSkey.get('sign_skey')) as Uint8Array);
 		await vi.waitFor(() => expect(sent.filter((m) => m.syncMetadata.relation === 'user_cards')).toHaveLength(1));
 		await vi.waitFor(async () => expect(await pendingEntries(userHash)).toHaveLength(0));
 	});
