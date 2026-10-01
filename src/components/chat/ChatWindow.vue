@@ -256,6 +256,7 @@
                  see the previous revision, so say so instead of showing the
                  attempted text as if it had landed. -->
             <span v-if="msg._editStatus === 'syncing' || msg._editStatus === 'awaiting_echo'" class="sync-status pending" title="Saving edit…">✎</span>
+            <span v-else-if="msg._editStatus === 'awaiting_unlock'" class="sync-status local" title="Waiting for unlock">🔒</span>
             <span v-else-if="msg._editStatus === 'error'" class="sync-status error" title="Edit not saved — others still see the previous version">✎!</span>
             <!-- Read receipts are irreversible and tied to this exact revision,
                  so they are only ever produced by the explicit action below. -->

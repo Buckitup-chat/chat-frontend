@@ -1,13 +1,17 @@
-import { getAccepted, freshestOf } from './acceptedSnapshot';
-import { getServerState, tsOf, entityKeyFor } from './userStorageBase';
-import { pendingEntries, quarantinedEntries, transitiveDependencyClosure } from './outbox';
+import { readAcceptedBase, freshestOf } from './acceptedSnapshot';
+import { getLiveServerState, tsOf, entityKeyFor, type ServerLookup } from './userStorageBase';
+import { readableOwnEntries, transitiveDependencyClosure, SessionFencedError, type OutboxEntry, type SessionToken } from './outbox';
+import { intentsOf, type IntentScanResult } from './intents';
+import { AccountMismatchError, VaultLockedError } from './keyCustody';
+import { assertNever, type StoredRead } from './storedRead';
 import { assertSessionUnchanged } from './sessionGuard';
-import { SessionFencedError, type SessionToken } from './outbox';
 import { nextOwnerTimestamp } from './time';
 import { IngestError } from './ingest';
 import type { ReadyRowIntent } from './intentRecovery';
 import type { DeliveryHandle } from './ingest';
 import type { UserStorageRow } from './types';
+import { verifyReplicatedRow, type RowVerification } from './rowVerification';
+import { getVerifiedSignPkey } from './cardRegistry';
 
 export interface StorageIntentPayload {
 	kind: 'storage';
@@ -174,27 +178,123 @@ const rowOfMutation = (m: unknown): Record<string, unknown> | null => {
 	return shaped?.modified ?? shaped?.changes ?? null;
 };
 
-async function pendingChainRow(userHash: string, uuid: string, excludeIds: string[] = []): Promise<UserStorageRow | null> {
-	const entries = await pendingEntries(userHash);
-	const exclude = excludeIds.length
-		? transitiveDependencyClosure([...entries, ...(await quarantinedEntries(userHash))], excludeIds)
-		: null;
+export type StorageBaseBlockReason =
+	| 'accepted_locked'
+	| 'accepted_corrupt'
+	| 'accepted_unavailable'
+	/** An own outbox or intent record that could be a write to this slot cannot be read. */
+	| 'pending_unreadable'
+	/** An own write to this slot is built but not signed yet: it has no sign_hash to build on. */
+	| 'pending_unsigned'
+	/** No base is proven, and the shape is not live, so absence is not proven either. */
+	| 'replicated_unavailable'
+	/** The slot's replicated row does not verify, and nothing trusted here is newer: it may be the slot's state. */
+	| 'replicated_unverified'
+	/** The slot's replicated row cannot be verified yet (its author's card is not here), and nothing trusted here is newer. */
+	| 'replicated_unverifiable';
+
+export type StorageBaseDecision =
+	| { kind: 'update'; base: UserStorageRow }
+	| { kind: 'insert' }
+	| { kind: 'blocked'; reason: StorageBaseBlockReason };
+
+type PendingBase =
+	| { kind: 'read'; row: UserStorageRow | null }
+	| { kind: 'blocked'; reason: 'pending_unreadable' | 'pending_unsigned' };
+
+const isOpenEntry = (entry: OutboxEntry): boolean =>
+	entry.status !== 'quarantined' && entry.status !== 'discarded' && entry.status !== 'accepted';
+
+async function pendingStorageBase(userHash: string, uuid: string, excludeIds: string[]): Promise<PendingBase> {
+	const unreadable = { kind: 'blocked', reason: 'pending_unreadable' } as const;
+	let outbox: OutboxEntry[];
+	let intents: IntentScanResult;
+	try {
+		[outbox, intents] = await Promise.all([readableOwnEntries(userHash), intentsOf(userHash)]);
+	} catch (e) {
+		if (e instanceof SessionFencedError || e instanceof AccountMismatchError) throw e;
+		return unreadable;
+	}
+	if (intents.issues.some((issue) => issue.owner === 'current')) return unreadable;
+
+	const exclude = excludeIds.length ? transitiveDependencyClosure(outbox, excludeIds) : null;
+	const slotRows: unknown[] = [];
+	for (const entry of outbox) {
+		if (entry.relation === 'user_storage' && isOpenEntry(entry) && !exclude?.has(entry.id)) slotRows.push(rowOfMutation(entry.mutations[0]));
+	}
+	for (const { intent } of intents.entries) {
+		const built = intent as { kind?: unknown; relation?: unknown; row?: UserStorageRow; signedMutation?: unknown; outboxId?: string };
+		if (built.kind === 'storage' || built.relation !== 'user_storage') continue;
+		if (built.row?.user_hash !== userHash || built.row.uuid !== uuid) continue;
+		if (built.outboxId && exclude?.has(built.outboxId)) continue;
+		if (!built.signedMutation) return { kind: 'blocked', reason: 'pending_unsigned' };
+		slotRows.push(rowOfMutation(built.signedMutation));
+	}
+
 	let best: UserStorageRow | null = null;
-	for (const entry of entries) {
-		if (entry.relation !== 'user_storage') continue;
-		if (exclude?.has(entry.id)) continue;
-		const row = rowOfMutation(entry.mutations[0]) as UserStorageRow | null;
+	for (const candidate of slotRows) {
+		const row = candidate as UserStorageRow | null;
 		if (!row || row.user_hash !== userHash || row.uuid !== uuid) continue;
+		if (typeof row.sign_hash !== 'string' || !row.sign_hash) return unreadable;
 		best = freshestOf(best, row);
 	}
-	return best;
+	return { kind: 'read', row: best };
 }
 
-async function materializeJsonPatchValue(patch: Record<string, unknown>, baseRow: UserStorageRow | null): Promise<string> {
+function decideStorageBase(
+	accepted: StoredRead<UserStorageRow>,
+	pending: PendingBase,
+	replicated: ServerLookup,
+	replicatedVerification: RowVerification | null
+): StorageBaseDecision {
+	switch (accepted.kind) {
+		case 'locked': return { kind: 'blocked', reason: 'accepted_locked' };
+		case 'corrupt': return { kind: 'blocked', reason: 'accepted_corrupt' };
+		case 'unavailable': return { kind: 'blocked', reason: 'accepted_unavailable' };
+		case 'present':
+		case 'missing': break;
+		default: return assertNever(accepted);
+	}
+	if (pending.kind === 'blocked') return pending;
+
+	const trusted = freshestOf(accepted.kind === 'present' ? accepted.row : null, pending.row);
+	let replicatedBase: UserStorageRow | null = null;
+	if (replicated.state === 'found') {
+		if (replicatedVerification?.status === 'verified') replicatedBase = replicated.row;
+		else if (!trusted || Number(replicated.row.owner_timestamp) >= Number(trusted.owner_timestamp)) {
+			return { kind: 'blocked', reason: replicatedVerification?.status === 'unavailable' ? 'replicated_unverifiable' : 'replicated_unverified' };
+		}
+	}
+	const base = freshestOf(replicatedBase, trusted);
+	if (base) return { kind: 'update', base };
+	if (accepted.kind === 'missing' && pending.row === null && replicated.state === 'absent') return { kind: 'insert' };
+	return { kind: 'blocked', reason: 'replicated_unavailable' };
+}
+
+export async function resolveStorageBase(
+	userHash: string,
+	uuid: string,
+	token: SessionToken,
+	excludeIds: string[] = []
+): Promise<StorageBaseDecision> {
+	const [accepted, replicated, pending] = await Promise.all([
+		readAcceptedBase('user_storage', entityKeyFor(userHash, uuid), userHash),
+		getLiveServerState(userHash, uuid),
+		pendingStorageBase(userHash, uuid, excludeIds),
+	]);
+	const replicatedVerification = replicated.state === 'found'
+		? await verifyReplicatedRow('user_storage', replicated.row as unknown as Record<string, unknown>, getVerifiedSignPkey)
+		: null;
+	assertSessionUnchanged(token, 'resolveStorageBase:afterBaseLookup');
+	return decideStorageBase(accepted, pending, replicated, replicatedVerification);
+}
+
+async function materializeJsonPatchValue(patch: Record<string, unknown>, decision: StorageBaseDecision & { kind: 'update' | 'insert' }): Promise<string> {
 	if (!jsonCodec) {
 		throw new Error('materializeStorageIntent: a jsonPatch intent requires setStorageJsonCodec to have been called (vault locked or codec never registered)');
 	}
-	const base = baseRow?.value_b64 ? await jsonCodec.decrypt(baseRow.value_b64) : null;
+	const baseValue = decision.kind === 'update' ? decision.base.value_b64 : '';
+	const base = baseValue ? await jsonCodec.decrypt(baseValue) : null;
 	const merged = stripPatchDirectives(mergeJsonPatch(base, patch));
 	const { valueB64 } = await jsonCodec.encrypt(merged);
 	return valueB64;
@@ -212,43 +312,33 @@ export async function materializeStorageIntent(
 	}
 	assertSessionUnchanged(token, 'materializeStorageIntent:start');
 
-	const entityKey = entityKeyFor(payload.userHash, payload.uuid);
-	const [acceptedRaw, server, pending] = await Promise.all([
-		getAccepted('user_storage', entityKey, payload.userHash),
-		getServerState(payload.userHash, payload.uuid),
-		pendingChainRow(payload.userHash, payload.uuid, excludeIds),
-	]);
-	assertSessionUnchanged(token, 'materializeStorageIntent:afterBaseLookup');
-
-	const accepted = acceptedRaw as UserStorageRow | null;
-	if (server.state === 'unavailable' && !accepted && !pending) {
+	const decision = await resolveStorageBase(payload.userHash, payload.uuid, token, excludeIds);
+	if (decision.kind === 'blocked' && decision.reason === 'accepted_locked') {
+		throw new VaultLockedError(`user_storage base for ${entityKeyFor(payload.userHash, payload.uuid)} cannot be read while the account is locked`);
+	}
+	if (decision.kind === 'blocked') {
 		throw new BaseUnavailableError(
-			`user_storage base for ${entityKey} is unavailable and no accepted or in-flight local base exists`
+			`user_storage base for ${entityKeyFor(payload.userHash, payload.uuid)} is not proven (${decision.reason}); the intent waits for recovery`
 		);
 	}
-
-	const serverRow = server.state === 'found' ? server.row : null;
-	const baseRow = freshestOf(freshestOf(serverRow, accepted), pending);
-	const mutationType = baseRow ? 'update' : 'insert';
-	const parentSignHash = baseRow?.sign_hash ?? null;
-	const ownerTimestamp = nextOwnerTimestamp(tsOf(baseRow));
+	const base = decision.kind === 'update' ? decision.base : null;
 
 	const valueB64 = payload.jsonPatch
-		? await materializeJsonPatchValue(payload.jsonPatch, baseRow)
+		? await materializeJsonPatchValue(payload.jsonPatch, decision)
 		: payload.valueB64;
 	assertSessionUnchanged(token, 'materializeStorageIntent:afterJsonPatchMerge');
 
 	return {
 		kind: 'ready-row',
 		relation: 'user_storage',
-		mutationType,
+		mutationType: decision.kind,
 		row: {
 			user_hash: payload.userHash,
 			uuid: payload.uuid,
 			value_b64: valueB64,
 			deleted_flag: payload.deletedFlag,
-			owner_timestamp: ownerTimestamp,
-			parent_sign_hash: parentSignHash,
+			owner_timestamp: nextOwnerTimestamp(tsOf(base)),
+			parent_sign_hash: base?.sign_hash ?? null,
 		},
 	};
 }

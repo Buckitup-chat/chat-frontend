@@ -9,14 +9,14 @@ import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
-import { api } from '@/api/client';
-import { sendMutationsAndAwaitShape, drainPendingWrites, resumePendingWrites, stopDrainLoop } from '@/lib/data/ingest';
-import { startLeaderElection, stopLeaderElection, onOutboxWake, pendingEntries } from '@/lib/data/outbox';
-import { recoverIntents } from '@/lib/data/intentRecovery';
-import { nextOwnerTimestamp } from '@/lib/data/time';
-import { freshestOf, getAccepted, recordAccepted } from '@/lib/data/acceptedSnapshot';
-import { getUserCardsCollection } from '@/lib/data/collections';
-import { readShapeOnce } from '@/lib/data/shapeRead';
+import { drainPendingWrites, resumePendingWrites, stopDrainLoop, deliverStoredWrite, IngestError, DurabilityError } from '@/lib/data/ingest';
+import {
+  storeUserCardIntentUnderLock, storeCardIntentUnderLock, withCardLock, decideCardConstruction,
+  BootstrapCardRejectedError, CardAuthoringBlockedError,
+} from '@/lib/data/userCardIntent';
+import { VaultLockedError } from '@/lib/data/keyCustody';
+import { startLeaderElection, stopLeaderElection, currentSessionUserHash, onOutboxWake, awaitServerAccepted, awaitDeliveryVerdict } from '@/lib/data/outbox';
+import { recoverIntents, signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch } from '@/lib/data/userStorage';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
@@ -63,6 +63,34 @@ if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
   };
 }
 
+class VaultKeyError extends Error {}
+
+class CardNotDurableError extends Error {
+  constructor(cause) {
+    super(cause?.message ?? String(cause));
+    this.name = 'CardNotDurableError';
+    this.cause = cause;
+  }
+}
+
+export class LoginDeferredError extends Error {
+  constructor(userHash, cause) {
+    super('Your profile card could not be published yet, so this account cannot be opened right now. Try signing in again when you are online.');
+    this.name = 'LoginDeferredError';
+    this.userHash = userHash;
+    this.cause = cause;
+  }
+}
+
+export class AccountImportIncompleteError extends Error {
+  constructor(userHash, cause) {
+    super('The account was restored on this device, but its profile card could not be saved for publishing — nothing was sent. Import it again to finish.');
+    this.name = 'AccountImportIncompleteError';
+    this.userHash = userHash;
+    this.cause = cause;
+  }
+}
+
 /**
  * Class for managing encryption and data storage.
  * Implements the Singleton pattern to ensure a single instance.
@@ -71,18 +99,16 @@ if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
  */
 export class EncryptionManagerPQ extends EventTarget {
   static instance = null;
-  static #cardQueues = new Map();
-  static #acceptedCardCache = new Map();
 
   #rawStore = rawStorage('idb');
   #currentVault = null;
 
   #localUserCards = []
   #currentUserHash = null;
+  #bootstrapUserHash = null;
   #signSkey = null;
   #cryptSkey = null;
   #slotResolver = null;
-  #cryptPubKey = null;
   #contactSkey = null;
   #evmSkey = null;
 
@@ -102,91 +128,60 @@ export class EncryptionManagerPQ extends EventTarget {
 
   // Publishing the public user card. Awaited, not fire-and-forget: the
   // backend refuses a user_storage write until the card exists, so
-  // registration would race its own profile save. Serialized per user_hash
-  // and monotonic, because the server rejects a card update whose timestamp
-  // is not strictly newer than the stored one — user_cards carries no
+  // registration would race its own profile save. Each call is one durable
+  // card intent, signed once and stored before any request (userCardIntent):
+  // a reload replays that exact snapshot, and the next change is a new intent
+  // with a strictly newer owner_timestamp. Needs the account's keys open
+  // locally — the intent and outbox stores are sealed with its key.
   //
-  // Insert vs update is decided by asking the server, not by the caller or
-  // local state: the server can forget a card (a wipe, a restore, a fresh
-  // Pi) while local caches still hold it, and an update of a missing row is
-  // rejected. `isUpdate` is only the fallback when that read fails.
-  // `onlyIfMissing` makes it a no-op when the server already has the card.
-  // untilQueued: return once the card is durably in the outbox, instead of
-  // waiting for the server — offline, that wait lasts until the connection
-  // is back. The returned handle's phase says which it was.
-  async #pushOwnCard(card, { isUpdate = false, signSkey = null, onlyIfMissing = false, untilQueued = false } = {}) {
-    const key = signSkey || this.#signSkey;
-    if (!key) throw new Error('No signing key for user card');
-
+  // Resolves 'accepted' once the server accepted the card. With
+  // `deferDelivery`, resolves 'deferred' instead when the write is stored but
+  // could not be delivered now (the outbox sends that same write later).
+  // Throws on a rejection, and when the write could not be made durable —
+  // with nothing stored, or with the signed snapshot kept out of the outbox.
+  // Never reports either as deferred.
+  //
+  // `bootstrap` is 'register' or 'import': the account's first card, one
+  // operation reused by every retry. Without it, an ordinary update.
+  async #pushOwnCard(card, { deferDelivery = false, bootstrap = null } = {}) {
     const userHash = card.user_hash;
-    const previous = EncryptionManagerPQ.#cardQueues.get(userHash) ?? Promise.resolve();
-    const run = async () => {
-      const onServer = await readShapeOnce('user_cards', `user_hash='${userHash}'`)
-        .then((rows) => rows.length > 0)
-        .catch(() => null);
-      if (onlyIfMissing && onServer !== false) return null;
-      const asUpdate = onServer ?? isUpdate;
+    if (this.localStorageOwnerHash !== userHash || !this.#signSkey) {
+      throw new Error('User card publication needs the account\'s keys open on this device');
+    }
+    if (bootstrap) return this.#passBootstrapCard(userHash, { mode: bootstrap, card, deferDelivery });
+    const signSkey = this.#signSkey;
 
-      const sessionCard = EncryptionManagerPQ.#acceptedCardCache.get(userHash) ?? null;
-      if (sessionCard) {
-        try {
-          await recordAccepted('user_cards', userHash, sessionCard, userHash);
-        } catch {
-        }
-      }
-
-      const serverCard = getUserCardsCollection().get(userHash);
-      const acceptedCard = await getAccepted('user_cards', userHash, userHash);
-      const baseCard = freshestOf(freshestOf(serverCard, acceptedCard), sessionCard);
-      const ownerTimestamp = nextOwnerTimestamp(baseCard?.owner_timestamp);
-
-      const { mutation } = api.createUserCard(card.name || 'User', {
-        user_hash: userHash,
-        sign_pkey: decodeHexOrBase64(card.sign_pkey),
-        contact_pkey: decodeHexOrBase64(card.contact_pkey),
-        contact_cert: decodeHexOrBase64(card.contact_cert),
-        crypt_pkey: decodeHexOrBase64(card.crypt_pkey),
-        crypt_cert: decodeHexOrBase64(card.crypt_cert),
-        sign_skey: key,
-      }, asUpdate ? 'update' : 'insert', ownerTimestamp);
-      const signedRow = mutation.modified ?? mutation.changes;
-
-      // Best-effort durability: card publication runs while the vault may
-      // still be locked (no key to encrypt the outbox with), and a lost card
-      // write is recoverable — the identity republishes on the next login.
-      const unlocked = this.#currentUserHash === userHash;
-      const handle = await sendMutationsAndAwaitShape([mutation], key, {
-        durability: 'best-effort',
-        recordAcceptedSnapshot: unlocked,
+    let stored = false;
+    let outcome;
+    try {
+      // Under the account's card lock (this tab and every other) until the
+      // signed snapshot is in the outbox, as for the bootstrap card: a later
+      // card write — newer timestamp — can never be queued ahead of this one
+      // and get it refused as not newer.
+      const handle = await withCardLock(userHash, async () => {
+        const { intentId, readyRow } = await storeUserCardIntentUnderLock(card);
+        // The durable milestone: from here an unsigned or signed intent, or an
+        // outbox entry, exists that recovery finishes.
+        stored = true;
+        return signAndDispatchIntent(intentId, readyRow, signSkey);
       });
-      const recordAcceptance = async () => {
-        EncryptionManagerPQ.#acceptedCardCache.set(userHash, signedRow);
-        if (unlocked) await this.#recordSessionCard(userHash);
-      };
-      if (untilQueued && handle.phase !== 'accepted' && handle.outboxId) {
-        handle.acceptance
-          .then((outcome) => (outcome.kind === 'accepted' ? recordAcceptance() : undefined))
-          .catch(() => {});
-        return handle;
-      }
-      const outcome = handle.phase === 'accepted' ? { kind: 'accepted' } : await handle.acceptance;
-      if (outcome.kind !== 'accepted') {
-        const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
-        throw new Error(`User card ${asUpdate ? 'update' : 'creation'} was not accepted: ${reason}`);
-      }
-      await recordAcceptance();
-      return handle;
-    };
-
-    const next = previous.then(run, run);
-    const settled = next.then(() => undefined, () => undefined);
-    EncryptionManagerPQ.#cardQueues.set(userHash, settled);
-    settled.then(() => {
-      if (EncryptionManagerPQ.#cardQueues.get(userHash) === settled) {
-        EncryptionManagerPQ.#cardQueues.delete(userHash);
-      }
-    });
-    return next;
+      if (handle.phase === 'accepted') outcome = { kind: 'accepted' };
+      else if (!handle.outboxId) outcome = await handle.acceptance;
+      else outcome = deferDelivery
+        ? await awaitDeliveryVerdict(handle.outboxId, userHash)
+        : await awaitServerAccepted(handle.outboxId, userHash);
+    } catch (e) {
+      if (!stored) throw e;
+      if (!deferDelivery || e instanceof DurabilityError || (e instanceof IngestError && e.permanent)) throw e;
+      console.warn('[EncryptionManagerPQ] card write is stored; its delivery is deferred to the outbox:', e?.message ?? e);
+      return 'deferred';
+    }
+    if (outcome.kind === 'retrying') return 'deferred';
+    if (outcome.kind !== 'accepted') {
+      const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
+      throw new Error(`User card update was not accepted: ${reason}`);
+    }
+    return 'accepted';
   }
 
   /** @returns {EncryptionManagerPQ} always lazily initialized, never null. */
@@ -198,16 +193,16 @@ export class EncryptionManagerPQ extends EventTarget {
     return EncryptionManagerPQ.instance;
   }
 
-  static _clearAcceptedCardCacheForTests() {
-    EncryptionManagerPQ.#acceptedCardCache.clear();
-  }
-
   get isAuth() {
     return !!this.#currentUserHash && !!this.#signSkey;
   }
 
   get currentUserHash() {
     return this.#currentUserHash;
+  }
+
+  get localStorageOwnerHash() {
+    return this.#bootstrapUserHash ?? this.#currentUserHash;
   }
 
   async initialize() {
@@ -272,13 +267,18 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await this.#saveLocalUserCards();
 
-    startLeaderElection(userHash, () => drainPendingWrites(userHash, signSkey));
-
-    // The backend refuses a user_storage write until this card exists, so
-    // the profile save below must not start before it is accepted.
-    await this.#pushOwnCard({ ...identity, name }, { signSkey });
-
-    await this.login(userHash);
+    // Bootstrap: the keys open locally (the card intent and snapshot are
+    // sealed with them), the card is published and accepted, and only then is
+    // the session activated — the UI never sees an account whose prerequisite
+    // card the server does not have yet.
+    await this.#openForBootstrap(userHash);
+    try {
+      await this.#pushOwnCard({ ...identity, name }, { bootstrap: 'register' });
+    } catch (e) {
+      await this.#abortBootstrap();
+      throw e;
+    }
+    this.#activateSession(userHash, identity);
 
     let avatarUuid = null;
     if (avatar instanceof Blob || avatar instanceof File) {
@@ -319,42 +319,127 @@ export class EncryptionManagerPQ extends EventTarget {
       await this.#clearAccountReadCache();
     }
 
+    let identity;
+    try {
+      identity = await this.#openAccountLocally(userHash);
+    } catch (e) {
+      if (e instanceof VaultKeyError) {
+        // isAuth is currentUserHash && signSkey: leaving the hash set with the
+        // key gone would strand the app half-logged-in — and this is the one
+        // state change in the file listeners would otherwise never hear about.
+        this.#signSkey = null;
+        this.#currentUserHash = null;
+        this.#bootstrapUserHash = null;
+        this.#dispatchAuthChange();
+      }
+      throw e;
+    }
+    try {
+      startLeaderElection(userHash, () => {});
+      const card = await this.#passBootstrapCard(userHash, { mode: 'sign-in', deferDelivery: true });
+      if (card === 'deferred') throw new LoginDeferredError(userHash);
+    } catch (e) {
+      await this.#abortBootstrap();
+      throw e;
+    }
+    this.#activateSession(userHash, identity);
+    return identity;
+  }
+
+  async #passBootstrapCard(userHash, { mode, card = null, deferDelivery = false }) {
+    const signSkey = this.#signSkey;
+    let locked = false;
+    try {
+      return await this.#passBootstrapCardLocked(userHash, signSkey, { mode, card, deferDelivery, onLocked: () => { locked = true; } });
+    } catch (e) {
+      if (!locked && mode === 'import') throw new CardNotDurableError(e);
+      throw e;
+    }
+  }
+
+  async #passBootstrapCardLocked(userHash, signSkey, { mode, card, deferDelivery, onLocked }) {
+    return withCardLock(userHash, async () => {
+      onLocked();
+      let target;
+      try {
+        const decision = await decideCardConstruction(userHash, mode);
+        switch (decision.kind) {
+          case 'proven': return 'accepted';
+          case 'rejected': throw new BootstrapCardRejectedError(decision.reason);
+          case 'blocked': throw new CardAuthoringBlockedError(decision.reason);
+          case 'reuse-bootstrap': target = decision.operation; break;
+          case 'author-bootstrap': {
+            const { intentId, readyRow } = await storeCardIntentUnderLock(card, decision);
+            target = { kind: 'intent', intentId, intent: readyRow };
+            break;
+          }
+          default: throw new Error(`a bootstrap card cannot be decided as ${decision.kind}`);
+        }
+      } catch (e) {
+        if (mode === 'import' && !(e instanceof BootstrapCardRejectedError)) throw new CardNotDurableError(e);
+        throw e;
+      }
+      return this.#deliverBootstrapCard(userHash, target, signSkey, { deferDelivery });
+    });
+  }
+
+  async #deliverBootstrapCard(userHash, target, signSkey, { deferDelivery }) {
+    let outboxId = target.kind === 'stored' ? target.outboxId : null;
+    try {
+      if (target.kind === 'intent') {
+        const handle = await signAndDispatchIntent(target.intentId, target.intent, signSkey, { bootstrap: true });
+        if (handle.phase === 'accepted') return 'accepted';
+        outboxId = handle.outboxId;
+      }
+      const verdict = deferDelivery
+        ? await deliverStoredWrite(outboxId, userHash, signSkey)
+        : await awaitServerAccepted(outboxId, userHash);
+      if (verdict.kind === 'accepted') return 'accepted';
+      if (verdict.kind === 'retrying') return 'deferred';
+      throw new BootstrapCardRejectedError(verdict.kind === 'rejected' ? verdict.error : 'discarded');
+    } catch (e) {
+      if (e instanceof BootstrapCardRejectedError) throw e;
+      if (e instanceof IngestError && e.permanent) throw new BootstrapCardRejectedError(e.message);
+      if (!deferDelivery) throw e;
+      console.warn('[EncryptionManagerPQ] bootstrap card is stored; its delivery is deferred to the next sign-in:', e?.message ?? e);
+      return 'deferred';
+    }
+  }
+
+  async #openAccountLocally(userHash) {
     await this.#loadLocalUserCards();
 
     const identity = this.#localUserCards.find(i => i.user_hash === userHash);
 
     if (!identity) throw new Error(`User ${userHash} not found in local identities`);
 
-    this.#currentVault = await connect({
+    const vault = await connect({
       vaultID: identity.vaultId,
       storageType: 'idb',
       keyOptions: VAULT_KEY_OPTIONS
     });
 
-    this.#signSkey = await this.#currentVault.get('sign_skey');
-    this.#cryptSkey = await this.#currentVault.get('crypt_skey');
-    this.#evmSkey = await this.#currentVault.get('evm_skey');
-    this.#contactSkey = await this.#currentVault.get('contact_skey');
+    const signSkey = this.#normalizeKey(await vault.get('sign_skey'));
+    const cryptSkey = this.#normalizeKey(await vault.get('crypt_skey'));
+    const evmSkey = await vault.get('evm_skey');
+    const contactSkey = await vault.get('contact_skey');
 
-    this.#signSkey = this.#normalizeKey(this.#signSkey);
-    this.#cryptSkey = this.#normalizeKey(this.#cryptSkey);
+    if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
 
-    if (!(this.#signSkey instanceof Uint8Array)) {
-      // isAuth is currentUserHash && signSkey: leaving the hash set with the
-      // key gone would strand the app half-logged-in — and this is the one
-      // state change in the file listeners would otherwise never hear about.
-      this.#signSkey = null;
-      this.#currentUserHash = null;
-      this.#dispatchAuthChange();
-      throw new Error('Failed to load secret key from vault');
-    }
-
-    if (this.#cryptSkey instanceof Uint8Array) {
-      this.#cryptPubKey = identity.crypt_pkey;
-    } else {
+    this.#currentVault = vault;
+    this.#signSkey = signSkey;
+    this.#cryptSkey = cryptSkey;
+    this.#evmSkey = evmSkey;
+    this.#contactSkey = contactSkey;
+    if (!(this.#cryptSkey instanceof Uint8Array)) {
       console.warn('Crypt key not found in vault, avatar encryption will not work');
     }
+    this.#bootstrapUserHash = userHash;
+    return identity;
+  }
 
+  #activateSession(userHash, identity) {
+    this.#bootstrapUserHash = null;
     this.#currentUserHash = userHash;
 
     setStorageJsonCodec({
@@ -364,19 +449,40 @@ export class EncryptionManagerPQ extends EventTarget {
 
     console.log(`Logged in: ${identity.name} (${userHash})`);
 
-    await this.#recordSessionCard(userHash);
-
     this.#dispatchAuthChange();
 
     // Writes queued before a reload/crash can replay now that the signing key
     // is available again. Background: a slow drain must not delay login.
     this.#startOutboxDrain();
+  }
 
-    // Background, like the drain: a card the server lost is republished here.
-    this.#pushOwnCard(identity, { signSkey: this.#signSkey, onlyIfMissing: true })
-      .catch((e) => console.warn('[EncryptionManagerPQ] card republication failed:', e?.message ?? e));
-
+  // Registration and import: open the account locally without activating it.
+  // An active session of another account ends first — the stores can be
+  // sealed for one account at a time. The outbox session is started for the
+  // account (its card goes out through the outbox) without the general drain
+  // or intent recovery, which wait for #activateSession.
+  async #openForBootstrap(userHash) {
+    if (this.#currentUserHash !== null) await this.logout();
+    this.#slotResolver = null;
+    resetUserStorageCollection();
+    const identity = await this.#openAccountLocally(userHash);
+    startLeaderElection(userHash, () => {});
     return identity;
+  }
+
+  async #abortBootstrap() {
+    if (!this.#bootstrapUserHash || currentSessionUserHash() === this.#bootstrapUserHash) {
+      stopDrainLoop();
+      stopLeaderElection();
+    }
+    this.#signSkey?.fill?.(0);
+    this.#cryptSkey?.fill?.(0);
+    this.#signSkey = null;
+    this.#cryptSkey = null;
+    this.#evmSkey = null;
+    this.#contactSkey = null;
+    this.#currentVault = null;
+    this.#bootstrapUserHash = null;
   }
 
   // Replays the durable outbox for the logged-in account: once right away,
@@ -390,12 +496,22 @@ export class EncryptionManagerPQ extends EventTarget {
   #outboxVisibleListener = null;
   #outboxWakeUnsubscribe = null;
 
-  #recoverIntents(userHash, signSkey) {
+  #signingKeyOf(userHash) {
+    return async () => {
+      if (this.#currentUserHash !== userHash || !(this.#signSkey instanceof Uint8Array)) {
+        throw new VaultLockedError('the account\'s signing key is not open on this device');
+      }
+      return this.#signSkey;
+    };
+  }
+
+  #recoverIntents(userHash) {
+    const signingKey = this.#signingKeyOf(userHash);
     Promise.all([
       import('@/lib/data/messageIntent'),
       import('@/lib/data/storageIntent'),
     ]).then(([{ materializeMessageIntent }, { materializeStorageIntent }]) =>
-      recoverIntents(userHash, signSkey, {
+      recoverIntents(userHash, signingKey, {
         materializeMessage: materializeMessageIntent,
         materializeStorage: materializeStorageIntent,
       })
@@ -406,23 +522,23 @@ export class EncryptionManagerPQ extends EventTarget {
 
   #startOutboxDrain() {
     const userHash = this.#currentUserHash;
-    const signSkey = this.#signSkey;
-    if (!userHash || !signSkey) return;
+    if (!userHash || !this.#signSkey) return;
+    const signSkey = this.#signingKeyOf(userHash);
 
     this.#stopOutboxDrain();
     startLeaderElection(userHash, () => drainPendingWrites(userHash, signSkey));
 
-    this.#recoverIntents(userHash, signSkey);
+    this.#recoverIntents(userHash);
     drainPendingWrites(userHash, signSkey);
 
     this.#outboxOnlineListener = () => {
-      drainPendingWrites(userHash, signSkey);
-      this.#recoverIntents(userHash, signSkey);
+      resumePendingWrites(userHash, signSkey);
+      this.#recoverIntents(userHash);
     };
     this.#outboxVisibleListener = () => {
       if (document.visibilityState !== 'visible') return;
       resumePendingWrites(userHash, signSkey);
-      this.#recoverIntents(userHash, signSkey);
+      this.#recoverIntents(userHash);
     };
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.#outboxOnlineListener);
@@ -433,7 +549,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#outboxWakeUnsubscribe = onOutboxWake((wokenUserHash) => {
       if (wokenUserHash === userHash) {
         drainPendingWrites(userHash, signSkey);
-        this.#recoverIntents(userHash, signSkey);
+        this.#recoverIntents(userHash);
       }
     });
   }
@@ -458,16 +574,6 @@ export class EncryptionManagerPQ extends EventTarget {
     await clearDialogCache();
   }
 
-  async #recordSessionCard(userHash) {
-    const card = EncryptionManagerPQ.#acceptedCardCache.get(userHash);
-    if (!card || this.#currentUserHash !== userHash) return;
-    try {
-      await recordAccepted('user_cards', userHash, card, userHash);
-    } catch (e) {
-      console.warn('[EncryptionManagerPQ] could not record accepted card snapshot locally (session-local continuation still covers this account):', e);
-    }
-  }
-
   async logout() {
     const hadActiveAccount = this.#currentUserHash !== null;
     this.#stopOutboxDrain();
@@ -481,8 +587,8 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#cryptSkey = null;
     }
     this.#evmSkey = null;
-    this.#cryptPubKey = null;
     this.#currentUserHash = null;
+    this.#bootstrapUserHash = null;
     this.#currentVault = null;
     // Slot addresses and the storage shape belong to the account that just
     // left; carrying either into the next login would point at its rows.
@@ -585,28 +691,15 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   async #publishCardOrQueue(card) {
-    const queuedBefore = new Set(await this.#queuedCardWrites(card.user_hash));
-    try {
-      const handle = await this.#pushOwnCard(card, { isUpdate: true, untilQueued: true });
-      return handle?.phase === 'queued' ? 'queued' : 'synced';
-    } catch (e) {
-      // A send the server has not refused, of a card this call put in the
-      // outbox, is waiting for the connection rather than failed. One queued
-      // earlier says nothing about this one.
-      if (e?.permanent !== true && (await this.#queuedCardWrites(card.user_hash)).some((id) => !queuedBefore.has(id))) return 'queued';
-      throw e;
-    }
-  }
-
-  async #queuedCardWrites(userHash) {
-    const entries = await pendingEntries(userHash).catch(() => []);
-    return entries.filter((entry) => entry.relation === 'user_cards').map((entry) => entry.id);
+    const outcome = await this.#pushOwnCard(card, { deferDelivery: true });
+    return outcome === 'accepted' ? 'synced' : 'queued';
   }
 
   /**
    * Rename: local vault registry and the public card are one logical
    * operation. Doing only half of it let the persisted registry keep the old
-   * name and silently revert it on the next login.
+   * name and silently revert it on the next login. With no connection the
+   * card waits in the outbox, like any other profile edit.
    */
   async updateOwnUserCardName(newName) {
     const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
@@ -614,7 +707,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     this.#localUserCards[idx] = { ...this.#localUserCards[idx], name: newName };
     await this.#saveLocalUserCards();
-    await this.#pushOwnCard(this.#localUserCards[idx], { isUpdate: true });
+    await this.#publishCardOrQueue(this.#localUserCards[idx]);
     return this.#localUserCards[idx];
   }
 
@@ -661,8 +754,8 @@ export class EncryptionManagerPQ extends EventTarget {
       crypt_skey: arrayToBase64(this.#cryptSkey),
       evm_skey: this.#evmSkey,
       contact_skey: this.#contactSkey,
-      sign_pkey: this.#localUserCards.find(u => u.user_hash === this.#currentUserHash).sign_pkey,
-      crypt_pkey: this.#localUserCards.find(u => u.user_hash === this.#currentUserHash).crypt_pkey
+      sign_pkey: this.#localUserCards.find(u => u.user_hash === this.localStorageOwnerHash).sign_pkey,
+      crypt_pkey: this.#localUserCards.find(u => u.user_hash === this.localStorageOwnerHash).crypt_pkey
     };
   }
 
@@ -678,14 +771,18 @@ export class EncryptionManagerPQ extends EventTarget {
       throw new Error('Contact key missing from backup. Cannot safely restore account.');
     }
 
-    const userVault = await connect({
-      storageType: 'idb',
-      addNewVault: true,
-      keyOptions: { ...VAULT_KEY_OPTIONS, username: identity.name, displayName: identity.name }
-    });
-
     const signSkey = new Uint8Array(atob(keys.sign_skey).split('').map(c => c.charCodeAt(0)));
     const cryptSkey = new Uint8Array(atob(keys.crypt_skey).split('').map(c => c.charCodeAt(0)));
+
+    await this.#loadLocalUserCards();
+    const existing = this.#localUserCards.find(i => i.user_hash === identity.user_hash);
+    const userVault = existing
+      ? await connect({ vaultID: existing.vaultId, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS })
+      : await connect({
+        storageType: 'idb',
+        addNewVault: true,
+        keyOptions: { ...VAULT_KEY_OPTIONS, username: identity.name, displayName: identity.name }
+      });
 
     await userVault.set(`sign_skey`, signSkey);
     await userVault.set(`crypt_skey`, cryptSkey);
@@ -693,20 +790,30 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`contact_skey`, keys.contact_skey);
 
     identity.vaultId = userVault.id;
-    this.#localUserCards.push(identity);
+    if (existing) {
+      Object.assign(existing, identity);
+    } else {
+      this.#localUserCards.push(identity);
+    }
     await this.#saveLocalUserCards();
 
-    // Same dependency as registration: the card may not exist on this Pi yet.
-    // Not fatal: the vault and the local card are complete, and a card write
-    // lost here is republished on the next login. Failing the import instead
-    // would leave an account that is here but cannot be imported again.
+    // Same card boundary as registration: the card may not exist on this Pi
+    // yet, and the session activates only once it is accepted.
+    await this.#openForBootstrap(identity.user_hash);
+    let card;
     try {
-      await this.#pushOwnCard(identity, { signSkey });
+      card = await this.#pushOwnCard(identity, { deferDelivery: true, bootstrap: 'import' });
     } catch (e) {
-      console.warn('[EncryptionManagerPQ] card publication deferred to next login:', e?.message ?? e);
+      await this.#abortBootstrap();
+      if (e instanceof CardNotDurableError) throw new AccountImportIncompleteError(identity.user_hash, e.cause);
+      throw e;
     }
-
-    await this.login(identity.user_hash);
+    if (card === 'deferred') {
+      await this.#abortBootstrap();
+      return { status: 'card-deferred', userHash: identity.user_hash };
+    }
+    this.#activateSession(identity.user_hash, identity);
+    return { status: 'active', userHash: identity.user_hash };
   }
 
 

@@ -8,7 +8,10 @@ vi.mock('@/api/client', () => ({
 	api: {
 		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => {
 			signCount++;
-			return { type, relation, row, changes: { ...row, sign_hash: `sig_${signCount}` }, syncMetadata: { relation } };
+			const signed = { ...row, sign_hash: `sig_${signCount}` };
+			return type === 'insert'
+				? { type, relation, row, modified: signed, syncMetadata: { relation } }
+				: { type, relation, row, original: {}, changes: signed, syncMetadata: { relation } };
 		},
 	},
 }));

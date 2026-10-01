@@ -1,15 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { startLeaderElection, stopLeaderElection, currentSessionToken, SessionFencedError } from '@/lib/data/outbox';
 import { pinActiveSession } from '@/lib/data/sessionGuard';
+import { makeTestIdentity, signedStorageRow } from './helpers/signedFixtures';
 
-const MY_HASH = 'u_' + 'a'.repeat(128);
+const ME = makeTestIdentity(13, 'me');
+const MY_HASH = ME.userHash;
 const OTHER_HASH = 'u_' + 'b'.repeat(128);
 const ROOT_UUID = 'root-0000-0000-0000-000000000000';
 
 const collection = { rows: new Map<string, unknown>(), async preload() {}, get: (k: string) => collection.rows.get(k) };
+const cards = new Map<string, unknown>([[MY_HASH, ME.card]]);
 vi.mock('@/lib/data/collections', () => ({
 	getUserStorageCollection: () => collection,
+	getUserCardsCollection: () => ({ preload: async () => {}, get: (k: string) => cards.get(k) }),
 }));
+
+const serverRoot = () => signedStorageRow(ME, {
+	uuid: ROOT_UUID, value_b64: JSON.stringify({ slots: { alpha: 'A0' } }), owner_timestamp: 1000,
+});
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -25,6 +33,7 @@ const makeStorage = () => {
 const { materializeStorageIntent, setStorageJsonCodec } = await import('@/lib/data/storageIntent');
 const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 const { _setStorageForTests: setOutboxStorage } = await import('@/lib/data/outbox');
+const { _setIntentStorageForTests } = await import('@/lib/data/intents');
 
 let releaseEncrypt: (() => void) | null = null;
 let encryptDeferred = false;
@@ -33,6 +42,7 @@ let encryptCalls = 0;
 beforeEach(() => {
 	collection.rows.clear();
 	setOutboxStorage(makeStorage());
+	_setIntentStorageForTests(makeStorage());
 	_setAcceptedSnapshotStorageForTests(makeStorage());
 	encryptDeferred = false;
 	encryptCalls = 0;
@@ -56,10 +66,7 @@ afterEach(() => {
 
 describe('materializeStorageIntent: a session switch during the jsonPatch merge is caught before signing (§ account isolation)', () => {
 	it('a switch strictly between decrypt and encrypt is rejected, never returning a ready row built from the wrong account\'s codec window', async () => {
-		collection.rows.set(`${MY_HASH}|${ROOT_UUID}`, {
-			user_hash: MY_HASH, uuid: ROOT_UUID, value_b64: JSON.stringify({ slots: { alpha: 'A0' } }),
-			deleted_flag: false, parent_sign_hash: null, sign_hash: 'server-h10', owner_timestamp: 1000, sign_b64: 'sig',
-		});
+		collection.rows.set(`${MY_HASH}|${ROOT_UUID}`, serverRoot());
 		encryptDeferred = true;
 		const token = pinActiveSession(MY_HASH, 'test:start');
 
@@ -77,10 +84,7 @@ describe('materializeStorageIntent: a session switch during the jsonPatch merge 
 	});
 
 	it('with no switch at all, the same merge completes normally', async () => {
-		collection.rows.set(`${MY_HASH}|${ROOT_UUID}`, {
-			user_hash: MY_HASH, uuid: ROOT_UUID, value_b64: JSON.stringify({ slots: { alpha: 'A0' } }),
-			deleted_flag: false, parent_sign_hash: null, sign_hash: 'server-h10', owner_timestamp: 1000, sign_b64: 'sig',
-		});
+		collection.rows.set(`${MY_HASH}|${ROOT_UUID}`, serverRoot());
 		const token = pinActiveSession(MY_HASH, 'test:start');
 
 		const ready = await materializeStorageIntent(

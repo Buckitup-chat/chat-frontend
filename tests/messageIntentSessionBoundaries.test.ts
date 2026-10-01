@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { startLeaderElection, stopLeaderElection, currentSessionToken, SessionFencedError } from '@/lib/data/outbox';
+import { makeTestIdentity } from './helpers/signedFixtures';
 
-const MY_HASH = 'u_' + 'a'.repeat(128);
+const ME = makeTestIdentity(1, 'me');
+const PEER = makeTestIdentity(3, 'peer');
+const MY_HASH = ME.userHash;
 const OTHER_HASH = 'u_' + 'b'.repeat(128);
-const PEER_HASH = 'u_' + 'c'.repeat(128);
+const PEER_HASH = PEER.userHash;
 const DIALOG_HASH = 'di_' + '1'.repeat(128);
 
 let releaseVaultExport: (() => void) | null = null;
@@ -23,7 +26,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 			exportVaultKeys: async () => {
 				vaultExportCalls++;
 				if (vaultExportDeferred) await new Promise<void>((resolve) => { releaseVaultExport = resolve; });
-				return { sign_skey: 'AAAA', crypt_skey: 'BBBB', evm_skey: 'cc' };
+				return ME.vault;
 			},
 		}),
 	},
@@ -50,7 +53,7 @@ const keysCollection = {
 };
 
 const cardsCollection = {
-	rows: new Map<string, unknown>([[PEER_HASH, { user_hash: PEER_HASH, crypt_pkey: 'peer-pkey' }]]),
+	rows: new Map<string, unknown>([[PEER_HASH, PEER.card]]),
 	async preload() {
 		cardsPreloadCalls++;
 		if (cardsPreloadDeferred) await new Promise<void>((resolve) => { releaseCardsPreload = resolve; });
@@ -70,8 +73,21 @@ vi.mock('@/lib/data/intents', () => ({
 }));
 
 const { ensureOwnDialogKeyPublished, pinActiveSession } = await import('@/lib/data/messageIntent');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
+
+const memoryStore = () => {
+	const map = new Map<string, string>();
+	return {
+		async get(k: string) { return map.get(k) ?? null; },
+		async set(k: string, v: string) { map.set(k, v); },
+		async delete(k: string) { map.delete(k); },
+		async keys() { return [...map.keys()]; },
+		async clear() { map.clear(); },
+	};
+};
 
 beforeEach(() => {
+	_setAcceptedSnapshotStorageForTests(memoryStore());
 	keysCollection.rows.clear();
 	vaultExportDeferred = false;
 	vaultExportCalls = 0;
