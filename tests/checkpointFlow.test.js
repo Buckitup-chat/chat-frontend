@@ -13,17 +13,15 @@
 //   rejects — and tails/closure logic degenerates to "every row is a tail".
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import * as secp from '@noble/secp256k1';
-import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
+import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
 import { startLeaderElection, stopLeaderElection, enqueue, _setStorageForTests } from '@/lib/data/outbox';
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
 import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import { _setStoreForTests } from '@/lib/data/localStore';
+import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { loadPointer } from '@/lib/data/checkpointAlerts';
 import { deriveFrontierRoot, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@/lib/pq/checkpoint';
 import { decodeContent } from '@/lib/pq/content';
@@ -91,6 +89,19 @@ vi.mock('@/lib/data/intents', () => {
 		resolveIntent: async () => true,
 		getIntent: async (id) => store.get(id) ?? null,
 		intentsOf: async (userHash) => ({ entries: [...store.values()].filter((e) => e.userHash === userHash), issues: [] }),
+		markIntentAwaitingUnlock: async (id, userHash) => {
+			const existing = store.get(id);
+			if (!existing || existing.userHash !== userHash) return false;
+			store.set(id, { ...existing, awaiting: existing.awaiting ?? { phase: 'AWAITING_UNLOCK', since: Date.now() } });
+			return true;
+		},
+		resumeIntentAfterUnlock: async (id, userHash) => {
+			const existing = store.get(id);
+			if (!existing || existing.userHash !== userHash) return false;
+			const { awaiting: _awaiting, ...moved } = existing;
+			store.set(id, moved);
+			return true;
+		},
 	};
 });
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
@@ -106,34 +117,6 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
 const { DialogCrypto } = await import('@/libs/DialogCrypto');
-
-const makeIdentity = (seed) => {
-	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
-	const kem = ml_kem1024.keygen(new Uint8Array(64).fill(seed));
-	const contactSk = new Uint8Array(32).fill(seed);
-	const contactPk = secp.getPublicKey(contactSk, true);
-	const userHash = 'u_' + bytesToHex(sha3_512(sign.publicKey));
-	const card = {
-		user_hash: userHash,
-		sign_pkey: toBase64(sign.publicKey),
-		crypt_pkey: toBase64(kem.publicKey),
-		crypt_cert: toBase64(ml_dsa87.sign(kem.publicKey, sign.secretKey)),
-		contact_pkey: toBase64(contactPk),
-		contact_cert: toBase64(ml_dsa87.sign(contactPk, sign.secretKey)),
-		name: `sender-${seed}`,
-		deleted_flag: false,
-		owner_timestamp: 1_700_000_000,
-	};
-	card.sign_b64 = signFields(card, sign.secretKey);
-	return {
-		sign, kem, contactSk, userHash, card,
-		vault: {
-			sign_skey: toBase64(sign.secretKey),
-			crypt_skey: toBase64(kem.secretKey),
-			evm_skey: bytesToHex(contactSk),
-		},
-	};
-};
 
 // The fake server: a write is readable through the collection once the send
 // resolves (the real path only resolves after the shape barrier).
@@ -173,7 +156,7 @@ const makeRow = async (mid, refs, tweak = {}) => {
 		owner_timestamp: 1_700_000_500,
 		...tweak,
 	};
-	const sign_b64 = signFields(fields, author.sign.secretKey);
+	const sign_b64 = signFields(fields, author.signSkey);
 	return { ...fields, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64) };
 };
 
@@ -197,8 +180,8 @@ describe('checkpoint through the store', () => {
 			async keys() { return [...mem.keys()]; },
 			async clear() { mem.clear(); },
 		});
-		author = makeIdentity(7);
-		const peerId = makeIdentity(3);
+		author = makeTestIdentity(7);
+		const peerId = makeTestIdentity(3);
 		peer = peerId.userHash;
 		HOLDER.user.currentUserHash = author.userHash;
 		HOLDER.vault = author.vault;
@@ -221,6 +204,14 @@ describe('checkpoint through the store', () => {
 			async keys() { return [...this._map.keys()]; },
 			async clear() { this._map.clear(); },
 		});
+		_setAcceptedSnapshotStorageForTests({
+			_map: new Map(),
+			async get(k) { return this._map.get(k) ?? null; },
+			async set(k, v) { this._map.set(k, v); },
+			async delete(k) { this._map.delete(k); },
+			async keys() { return [...this._map.keys()]; },
+			async clear() { this._map.clear(); },
+		});
 		collections = {
 			cards: makeCollection({ [author.userHash]: author.card, [peer]: peerId.card }),
 			dialog: { keys: makeCollection(), messages: makeCollection(), versions: makeCollection(), reactions: makeCollection(), receipts: makeCollection() },
@@ -233,11 +224,11 @@ describe('checkpoint through the store', () => {
 		dialogHash = store.getDialogHash(peer);
 		// The author's dialog key exists before any message — the backend
 		// enforces exactly this order (check_dialog_key_published).
-		collections.dialog.keys.rows.set(`${dialogHash}|${author.userHash}`, {
-			dialog_hash: dialogHash, sender_hash: author.userHash, peer_hash: peer, deleted_flag: false,
-		});
+		// Really signed: an unverifiable key row yields no key and proves no publish.
+		collections.dialog.keys.rows.set(`${dialogHash}|${author.userHash}`,
+			signedDialogKeyRow(author, { dialog_hash: dialogHash, peer_hash: peer }));
 		senderKey = DialogCrypto.deriveSenderMsgKey(
-			author.sign.secretKey, author.kem.secretKey, bytesToHex(author.contactSk), peer,
+			author.signSkey, author.kemSkey, bytesToHex(author.contactSk), peer,
 		);
 	});
 
@@ -251,7 +242,7 @@ describe('checkpoint through the store', () => {
 
 	it('refuses to checkpoint while a row cannot be verified (§7)', async () => {
 		const r1 = await makeRow(M1, {});
-		const stranger = makeIdentity(9); // card never published
+		const stranger = makeTestIdentity(9); // card never published
 		const foreign = { ...(await makeRow(M2, { [M1]: r1.sign_hash })), sender_hash: stranger.userHash };
 		seed(r1, foreign);
 		await expect(store.createDialogCheckpoint(peer)).rejects.toThrow('INCOMPLETE_CAUSAL_HISTORY');
@@ -511,7 +502,7 @@ describe('checkpoint through the store', () => {
 	// unquenchable dot for a carrier that does not exist in B's dialog.
 	it('an account switch during the send leaves the new account untouched', async () => {
 		seed(await makeRow(M1, {}));
-		const other = makeIdentity(21);
+		const other = makeTestIdentity(21);
 		sendImpl = async (mutations) => {
 			mutations.forEach(applyMutation);
 			HOLDER.user.currentUserHash = other.userHash; // switch mid-flight
@@ -563,7 +554,7 @@ describe('checkpoint through the store', () => {
 		await store.createDialogCheckpoint(peer);
 		expect(store.checkpointAlerts.has(peer)).toBe(true);
 
-		HOLDER.user.currentUserHash = makeIdentity(21).userHash;
+		HOLDER.user.currentUserHash = makeTestIdentity(21).userHash;
 		await new Promise((r) => setTimeout(r, 0));
 		expect(store.checkpointAlerts.size).toBe(0);
 	});
@@ -681,7 +672,7 @@ describe('checkpoint through the store', () => {
 			store = useDialogsStore();
 
 			HOLDER.vaultLocked = false;
-			await recoverIntents(author.userHash, author.sign.secretKey, {
+			await recoverIntents(author.userHash, author.signSkey, {
 				materializeMessage: materializeMessageIntent,
 			});
 

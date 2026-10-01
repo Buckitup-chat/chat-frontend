@@ -2,15 +2,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { mount } from '@vue/test-utils';
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import * as secp from '@noble/secp256k1';
-import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
+import { fromBase64 } from '@/lib/pq/signature';
+import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import { encodeContent } from '@/lib/pq/content';
 import { DialogCrypto } from '@/libs/DialogCrypto';
-import type { UserCardRow, DialogMessageReceiptRow } from '@/lib/data/types';
+import type { DialogMessageReceiptRow } from '@/lib/data/types';
 import type { StringStore } from '@/lib/data/secureStore';
 import type { App, ApplyResult } from './helpers/twoClients';
 
@@ -19,28 +16,10 @@ type HeldUser = { currentUserHash: string; contacts: unknown[]; getUserByHash: (
 type ChangesListener = (changes: unknown[]) => void;
 type Mutation = { modified?: DialogMessageReceiptRow; changes: DialogMessageReceiptRow; syncMetadata?: { relation?: string } };
 
-const makeIdentity = (seed: number) => {
-	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
-	const kem = ml_kem1024.keygen(new Uint8Array(64).fill(seed));
-	const contactSk = new Uint8Array(32).fill(seed);
-	const contactPk = secp.getPublicKey(contactSk, true);
-	const userHash = 'u_' + bytesToHex(sha3_512(sign.publicKey));
-	const card = {
-		user_hash: userHash, sign_pkey: toBase64(sign.publicKey), crypt_pkey: toBase64(kem.publicKey),
-		crypt_cert: toBase64(ml_dsa87.sign(kem.publicKey, sign.secretKey)),
-		contact_pkey: toBase64(contactPk), contact_cert: toBase64(ml_dsa87.sign(contactPk, sign.secretKey)),
-		name: `user-${seed}`, deleted_flag: false, owner_timestamp: 1_700_000_000,
-	} as UserCardRow;
-	card.sign_b64 = signFields(card as never, sign.secretKey);
-	return {
-		sign, kem, contactSk, userHash, card,
-		vault: { sign_skey: toBase64(sign.secretKey), crypt_skey: toBase64(kem.secretKey), evm_skey: bytesToHex(contactSk) },
-	};
-};
-const ME = makeIdentity(50);
-const PEER = makeIdentity(51);
+const ME = makeTestIdentity(50);
+const PEER = makeTestIdentity(51);
 const DIALOG = DialogCrypto.computeDialogHash(ME.userHash, PEER.userHash);
-const PEER_KEY = DialogCrypto.deriveSenderMsgKey(PEER.sign.secretKey, PEER.kem.secretKey, bytesToHex(PEER.contactSk), ME.userHash);
+const PEER_KEY = DialogCrypto.deriveSenderMsgKey(PEER.signSkey, PEER.kemSkey, bytesToHex(PEER.contactSk), ME.userHash);
 
 const signedMessage = async (id: string, text: string, tweak: Record<string, unknown> = {}) => {
 	const fields = {
@@ -49,8 +28,7 @@ const signedMessage = async (id: string, text: string, tweak: Record<string, unk
 		deleted_flag: false, refs_map_b64: await DialogCrypto.encryptContent(PEER_KEY, JSON.stringify({})),
 		parent_sign_hash: null, owner_timestamp: 1_700_000_500, ...tweak,
 	};
-	const sign_b64 = signFields(fields as never, PEER.sign.secretKey);
-	return { ...fields, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64) };
+	return signRow(PEER, fields, 'dms_') as typeof fields & { sign_b64: string; sign_hash: string };
 };
 const MSG_ID = 'dmsg_' + 'a'.repeat(8) + '-0000-7000-8000-000000000000';
 
@@ -133,12 +111,13 @@ let disk: Record<string, StringStore>;
 
 let app: TestApp = null as never;
 const startApp = async () => {
+	app?.outbox?.stopDrainLoop();
+	app?.outbox?.stopLeaderElection();
 	vi.resetModules();
 	(await import('@/lib/data/localStore'))._setStoreForTests(disk.localStore);
 	(await import('@/lib/data/intents'))._setIntentStorageForTests(disk.intents);
 	(await import('@/lib/data/acceptedSnapshot'))._setAcceptedSnapshotStorageForTests(disk.accepted);
 	(await import('@/lib/data/ownObservedTails'))._setOwnObservedTailsStorageForTests(disk.tails);
-	(await import('@/lib/data/readCache'))._setReadCacheStorageForTests(disk.readCache);
 	const outbox = await import('@/lib/data/outbox');
 	outbox._setStorageForTests(disk.outbox);
 	outbox.stopLeaderElection();
@@ -204,7 +183,7 @@ let message: Awaited<ReturnType<typeof signedMessage>>;
 beforeEach(async () => {
 	disk = {
 		localStore: memoryStore(), intents: memoryStore(), accepted: memoryStore(),
-		tails: memoryStore(), readCache: memoryStore(), outbox: memoryStore(),
+		tails: memoryStore(), outbox: memoryStore(),
 	};
 	server.rows = new Map();
 	server.posts = [];
@@ -214,17 +193,17 @@ beforeEach(async () => {
 	vi.stubGlobal('fetch', server.fetch);
 
 	message = await signedMessage(MSG_ID, 'hello');
-	const wrapped = await DialogCrypto.wrapSenderMsgKey(PEER_KEY, ME.kem.publicKey);
+	const wrapped = await DialogCrypto.wrapSenderMsgKey(PEER_KEY, fromBase64(ME.card.crypt_pkey as string));
 	collections = {
 		cards: liveCollection({ [ME.userHash]: ME.card, [PEER.userHash]: PEER.card }),
 		dialog: {
 			keys: liveCollection({
-				[`${DIALOG}|${PEER.userHash}`]: {
-					dialog_hash: DIALOG, sender_hash: PEER.userHash, peer_hash: ME.userHash,
+				[`${DIALOG}|${PEER.userHash}`]: signedDialogKeyRow(PEER, {
+					dialog_hash: DIALOG, peer_hash: ME.userHash,
 					peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
-					deleted_flag: false, owner_timestamp: 999,
-				},
-				[`${DIALOG}|${ME.userHash}`]: { dialog_hash: DIALOG, sender_hash: ME.userHash, peer_hash: PEER.userHash, deleted_flag: false, owner_timestamp: 998 },
+					owner_timestamp: 999,
+				}),
+				[`${DIALOG}|${ME.userHash}`]: signedDialogKeyRow(ME, { dialog_hash: DIALOG, peer_hash: PEER.userHash, owner_timestamp: 998 }),
 			}),
 			messages: liveCollection({ [MSG_ID]: message }),
 			versions: liveCollection(),
@@ -235,6 +214,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
 	closeChat();
+	app?.outbox.stopDrainLoop();
 	app?.outbox.stopLeaderElection();
 	app = null as never;
 	vi.unstubAllGlobals();
@@ -295,7 +275,7 @@ describe('automatic delivered receipt: one logical identity, one signed snapshot
 
 		await rebuildProjection();
 		const { drainPendingWrites } = await import('@/lib/data/ingest');
-		await drainPendingWrites(ME.userHash, ME.sign.secretKey);
+		await drainPendingWrites(ME.userHash, ME.signSkey);
 
 		expectOneSignedSnapshot(deliveredHash());
 		expect(server.rows.size).toBe(1);
@@ -314,8 +294,8 @@ describe('automatic delivered receipt: one logical identity, one signed snapshot
 		await settleAttempts(1);
 
 		server.offline = false;
-		const { drainPendingWrites } = await import('@/lib/data/ingest');
-		await drainPendingWrites(ME.userHash, ME.sign.secretKey);
+		const { resumePendingWrites } = await import('@/lib/data/ingest');
+		resumePendingWrites(ME.userHash, ME.signSkey);
 		await rebuildProjection();
 
 		expectOneSignedSnapshot(deliveredHash());

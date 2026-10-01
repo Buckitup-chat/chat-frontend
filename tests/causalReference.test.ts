@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { dependenciesFor } from '@/lib/data/coordinator';
+import { foundDependencies } from './helpers/dependencies';
 import { enqueue, readyEntries, _setStorageForTests } from '@/lib/data/outbox';
+import { _setOwnObservedTailsStorageForTests, recordOwnObservedTails } from '@/lib/data/ownObservedTails';
 
 const MY_HASH = 'u_' + 'a'.repeat(128);
 const SAME_TAIL_B64 = 'opaque-encrypted-refs-map-both-authors-observed';
@@ -41,14 +42,17 @@ const reaction = (messageSignHash: string) => ([{
 
 beforeEach(() => {
 	_setStorageForTests(makeStorage());
+	_setOwnObservedTailsStorageForTests(makeStorage());
 });
 
 describe('causal reference does not become a dispatch dependency (§4.3)', () => {
 	it('two new messages with an identical observed tail (a fork) are not serialized', async () => {
-		const firstDeps = await dependenciesFor(forkMessage('dmsg_a'), MY_HASH);
+		await recordOwnObservedTails('dmsg_a', { dmsg_peer: 'dms_peer' }, MY_HASH);
+		await recordOwnObservedTails('dmsg_b', { dmsg_peer: 'dms_peer' }, MY_HASH);
+		const firstDeps = await foundDependencies(forkMessage('dmsg_a'), MY_HASH);
 		const firstId = await enqueue(forkMessage('dmsg_a'), MY_HASH, { dependsOn: firstDeps });
 
-		const secondDeps = await dependenciesFor(forkMessage('dmsg_b'), MY_HASH);
+		const secondDeps = await foundDependencies(forkMessage('dmsg_b'), MY_HASH);
 		expect(secondDeps).not.toContain(firstId);
 		expect(secondDeps).toEqual([]);
 
@@ -61,7 +65,7 @@ describe('causal reference does not become a dispatch dependency (§4.3)', () =>
 	it('a reaction does not depend on the outbox entry of the message it references', async () => {
 		const msgId = await enqueue(forkMessage('dmsg_a'), MY_HASH);
 
-		const deps = await dependenciesFor(reaction('sign-hash-of-dmsg_a'), MY_HASH);
+		const deps = await foundDependencies(reaction('sign-hash-of-dmsg_a'), MY_HASH);
 		expect(deps).not.toContain(msgId);
 		expect(deps).toEqual([]);
 

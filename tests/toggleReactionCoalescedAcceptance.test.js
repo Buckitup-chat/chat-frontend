@@ -1,46 +1,17 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { sha3_512 } from '@noble/hashes/sha3';
-import { bytesToHex } from '@noble/hashes/utils';
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import * as secp from '@noble/secp256k1';
-import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
+import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { _setStorageForTests, startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
 
-const makeIdentity = (seed) => {
-	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
-	const kem = ml_kem1024.keygen(new Uint8Array(64).fill(seed));
-	const contactSk = new Uint8Array(32).fill(seed || 1);
-	const contactPk = secp.getPublicKey(contactSk, true);
-	const userHash = 'u_' + bytesToHex(sha3_512(sign.publicKey));
-	const card = {
-		user_hash: userHash,
-		sign_pkey: toBase64(sign.publicKey),
-		crypt_pkey: toBase64(kem.publicKey),
-		crypt_cert: toBase64(ml_dsa87.sign(kem.publicKey, sign.secretKey)),
-		contact_pkey: toBase64(contactPk),
-		contact_cert: toBase64(ml_dsa87.sign(contactPk, sign.secretKey)),
-		name: `user-${seed}`,
-		deleted_flag: false,
-		owner_timestamp: 1_700_000_000,
-	};
-	card.sign_b64 = signFields(card, sign.secretKey);
-	return { sign, userHash, card };
-};
-
-const myIdentity = makeIdentity(1);
-const peerIdentity = makeIdentity(2);
+const myIdentity = makeTestIdentity(1);
+const peerIdentity = makeTestIdentity(2);
 const MY_HASH = myIdentity.userHash;
 const PEER_HASH = peerIdentity.userHash;
 const DIALOG_HASH = 'di_' + '3'.repeat(128);
 const MSG_ID = 'dmsg_' + '4'.repeat(128);
 
-const signedMessageRow = (author, fields) => {
-	const sign_b64 = signFields(fields, author.sign.secretKey);
-	return { ...fields, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64) };
-};
+const signedMessageRow = (author, fields) => signRow(author, fields, 'dms_');
 const GENESIS_ROW = signedMessageRow(myIdentity, {
 	message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
 	content_b64: 'enc(original)', deleted_flag: false, refs_map_b64: null,
@@ -124,7 +95,7 @@ vi.mock('@/libs/enigma', () => ({
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
 		getInstance: () => ({
-			exportVaultKeys: async () => ({ sign_skey: 'AAAA', crypt_skey: 'BBBB', evm_skey: 'cc' }),
+			exportVaultKeys: async () => myIdentity.vault,
 		}),
 	},
 }));
@@ -177,7 +148,7 @@ beforeEach(() => {
 		cards: makeCollection({ [MY_HASH]: myIdentity.card, [PEER_HASH]: peerIdentity.card }),
 		dialog: {
 			keys: makeCollection({
-				[`${DIALOG_HASH}|${MY_HASH}`]: { dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, deleted_flag: false },
+				[`${DIALOG_HASH}|${MY_HASH}`]: signedDialogKeyRow(myIdentity, { dialog_hash: DIALOG_HASH, peer_hash: PEER_HASH }),
 			}),
 			messages: makeCollection(),
 			reactions: makeCollection(),
@@ -187,11 +158,17 @@ beforeEach(() => {
 	};
 });
 
-const toggle = (store) =>
-	store.toggleReaction(PEER_HASH, { messageId: MSG_ID, messageSignHash: SIGN_HASH, emoji: '👍' });
+const rowOf = (call) => call[0].row;
+
+const LOGICAL_KEY = `${DIALOG_HASH}|${MSG_ID}|👍`;
 
 const liveReactionItem = (store) =>
-	[...store.optimisticItems.values()].find((item) => item.type === 'reaction');
+	[...store.optimisticItems.values()].find((item) => item.type === 'reaction' && item.logicalKey === LOGICAL_KEY);
+
+const seenActive = (store) => liveReactionItem(store)?.desiredActive ?? false;
+
+const toggle = (store) =>
+	store.toggleReaction(PEER_HASH, { messageId: MSG_ID, messageSignHash: SIGN_HASH, emoji: '👍', active: seenActive(store) });
 
 describe('toggleReaction coalescing tracks the REAL dispatch, never invents acceptance (L17-01/R4)', () => {
 	it('rapid on/off/on: the live optimistic entry stays syncing until the real (shared) dispatch actually settles', async () => {
@@ -220,11 +197,13 @@ describe('toggleReaction coalescing tracks the REAL dispatch, never invents acce
 
 		const p1 = toggle(store);
 		const p2 = toggle(store);
+		const p3 = toggle(store);
 		await flush();
 		expect(dispatchCalls).toHaveLength(1);
+		expect(rowOf(dispatchCalls[0]).deleted_flag).toBe(false);
 
 		pendingHandles[0].resolveAcceptance({ kind: 'rejected', error: 'validation_failed' });
-		await Promise.all([p1, p2]);
+		await Promise.all([p1, p2, p3]);
 		await flush();
 
 		expect(liveReactionItem(store).status).toBe('error');
@@ -235,11 +214,13 @@ describe('toggleReaction coalescing tracks the REAL dispatch, never invents acce
 
 		const p1 = toggle(store);
 		const p2 = toggle(store);
+		const p3 = toggle(store);
 		await flush();
 		expect(dispatchCalls).toHaveLength(1);
+		expect(rowOf(dispatchCalls[0]).deleted_flag).toBe(false);
 
 		pendingHandles[0].resolveAcceptance({ kind: 'discarded' });
-		await Promise.all([p1, p2]);
+		await Promise.all([p1, p2, p3]);
 		await flush();
 
 		expect(liveReactionItem(store).status).not.toBe('synced');
@@ -268,8 +249,6 @@ describe('toggleReaction coalescing tracks the REAL dispatch, never invents acce
 });
 
 const REACTION_HASH = `dmr_${MSG_ID}:${MY_HASH}:👍`;
-
-const rowOf = (call) => call[0].row;
 
 describe('the reaction operation stays in flight until the REAL terminal outcome, not just a queued handle (L17-01/R4)', () => {
 	it('a click during pending acceptance does not start a second transport, and the eventual second write is a toggle, not a duplicate insert', async () => {
@@ -326,12 +305,19 @@ describe('the reaction operation stays in flight until the REAL terminal outcome
 		toggle(store); // click A: ON
 		await vi.waitFor(() => expect(dispatchCalls).toHaveLength(1));
 
-		toggle(store); // click B: OFF — queued behind A, gets its OWN dispatch once A settles
+		// Clicks B (OFF) and C (ON) while A is pending: B is not signed yet, so C
+		// folds into it — one newer, independent write (ON) queued behind A.
+		// (A lone OFF would end at the state A's rejection leaves: nothing to send.)
+		await toggle(store); // click B: OFF
+		expect(liveReactionItem(store).desiredActive).toBe(false);
+		await toggle(store); // click C: ON — folded into B's unsigned intent
+		expect(liveReactionItem(store).desiredActive).toBe(true);
 		await new Promise((r) => setTimeout(r, 20));
 		expect(dispatchCalls).toHaveLength(1);
 
 		pendingHandles[0].resolveAcceptance({ kind: 'rejected', error: 'validation_failed' });
 		await vi.waitFor(() => expect(dispatchCalls).toHaveLength(2)); // B's own write, now unblocked, proceeds
+		expect(rowOf(dispatchCalls[1]).deleted_flag).toBe(false);
 
 		const live = liveReactionItem(store);
 		expect(live).toBeTruthy();

@@ -82,6 +82,8 @@ const makeIdentity = (seed) => {
 		vault: { sign_skey: toBase64(sign.secretKey), crypt_skey: toBase64(kem.secretKey), evm_skey: bytesToHex(contactSk) } };
 };
 
+const signedKeyRow = (signer, fields) => ({ ...fields, sign_b64: signFields(fields, signer.sign.secretKey) });
+
 const M1 = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
 const M2 = 'dmsg_0192aaaa-0000-7000-8000-000000000002';
 
@@ -144,9 +146,14 @@ describe('tombstone admission through the feed', () => {
 		};
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peerId.userHash);
-		collections.dialog.keys.rows.set(`${dialogHash}|${author.userHash}`, {
-			dialog_hash: dialogHash, sender_hash: author.userHash, peer_hash: peerId.userHash, deleted_flag: false });
 		senderKey = DialogCrypto.deriveSenderMsgKey(author.sign.secretKey, author.kem.secretKey, bytesToHex(author.contactSk), peerId.userHash);
+		const ownWrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, peerId.kem.publicKey);
+		collections.dialog.keys.rows.set(`${dialogHash}|${author.userHash}`, signedKeyRow(author, {
+			dialog_hash: dialogHash, sender_hash: author.userHash, peer_hash: peerId.userHash,
+			peer_kem_wrap_key_b64: ownWrapped.peerKemWrapKeyB64,
+			peer_wrapped_msg_key_b64: ownWrapped.peerWrappedMsgKeyB64,
+			deleted_flag: false, owner_timestamp: 1_700_000_000,
+		}));
 
 		// The peer's own sending key, published to us the way the protocol
 		// does it: wrapped to our ML-KEM public key in the peer's dialog_keys
@@ -154,12 +161,12 @@ describe('tombstone admission through the feed', () => {
 		// nothing downstream — including receipts — ever happens.
 		peerSenderKey = DialogCrypto.deriveSenderMsgKey(peerId.sign.secretKey, peerId.kem.secretKey, bytesToHex(peerId.contactSk), author.userHash);
 		const wrapped = await DialogCrypto.wrapSenderMsgKey(peerSenderKey, author.kem.publicKey);
-		collections.dialog.keys.rows.set(`${dialogHash}|${peerId.userHash}`, {
+		collections.dialog.keys.rows.set(`${dialogHash}|${peerId.userHash}`, signedKeyRow(peerId, {
 			dialog_hash: dialogHash, sender_hash: peerId.userHash, peer_hash: author.userHash,
 			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64,
 			peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
-			deleted_flag: false,
-		});
+			deleted_flag: false, owner_timestamp: 1_700_000_000,
+		}));
 		HOLDER.mutations.length = 0;
 	});
 

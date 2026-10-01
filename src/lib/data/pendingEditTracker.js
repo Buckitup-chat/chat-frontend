@@ -1,9 +1,16 @@
 let nextClaimToken = 0;
 
-export function claimPendingEdit(map, messageId, text) {
+export function claimPendingEdit(map, messageId, text, baseSignHash = null) {
 	const token = ++nextClaimToken;
-	map.set(messageId, { text, status: 'syncing', token, targetSignHash: null, targetOwnerTimestamp: null });
+	map.set(messageId, { text, status: 'syncing', token, targetSignHash: null, targetOwnerTimestamp: null, baseSignHash });
 	return token;
+}
+
+export function awaitPendingEditUnlock(map, messageId, token) {
+	const current = map.get(messageId);
+	if (!current || current.token !== token) return false;
+	map.set(messageId, { ...current, status: 'awaiting_unlock' });
+	return true;
 }
 export function submitPendingEdit(map, messageId, token, targetSignHash, targetOwnerTimestamp) {
 	const current = map.get(messageId);
@@ -34,6 +41,14 @@ export function reconcilePendingEditsWithVerifiedRows(map, verifiedRevisions) {
 
 	const cleared = [];
 	for (const [messageId, entry] of map) {
+		if (entry.status === 'awaiting_unlock') {
+			const verified = verifiedSignHashByMessageId.get(messageId);
+			if (verified && entry.baseSignHash && verified !== entry.baseSignHash) {
+				map.delete(messageId);
+				cleared.push(messageId);
+			}
+			continue;
+		}
 		if (entry.status !== 'awaiting_echo' || !entry.targetSignHash) continue;
 		if (verifiedSignHashByMessageId.get(messageId) === entry.targetSignHash) {
 			map.delete(messageId);
