@@ -51,8 +51,6 @@ export const getVerifiedSignPkey = async (userHash: string): Promise<string | nu
 	return verdict.card.signPkeyB64;
 };
 
-export const getCardRejection = (userHash: string): string | null => rejected.get(userHash) ?? null;
-
 /** Test seam; the positive cache is safe to keep across accounts. */
 export const resetCardRegistry = () => {
 	verified.clear();

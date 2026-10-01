@@ -15,7 +15,8 @@
 // that can never be admitted — terminal, they are not left waiting forever;
 // `invalid` rows are kept with their reason so the UI can surface rather than
 // silently drop them.
-import { verifyMessageRow, presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
+import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
+import { verifyRowWithKey } from '@/lib/data/rowVerification';
 import { validateRefs, revisionKey, type RevisionRef } from '@/lib/pq/dialogDag';
 import type { DialogMessageRow, DialogMessageVersionRow } from '@/lib/data/types';
 
@@ -36,8 +37,10 @@ export interface GateDeps {
 	 * Decrypted refs map for a row. `no_key` — the sender's msg key is not
 	 * derivable yet (not an error). `error` — key present but the blob does
 	 * not decrypt, which a signed row can only reach through a sender bug.
+	 * `via` is what the caller passed to admit, handed through unchanged (e.g.
+	 * the collections a scan reads through).
 	 */
-	decryptRefs(row: MessageLike): Promise<Record<string, string> | 'no_key' | 'error'>;
+	decryptRefs(row: MessageLike, via?: unknown): Promise<Record<string, string> | 'no_key' | 'error'>;
 	/** Waiting-queue cap; oldest entries are dropped past it. Default 500. */
 	maxPending?: number;
 	maxAwaitingCard?: number;
@@ -177,7 +180,7 @@ export function createDialogGate(deps: GateDeps) {
 
 	const inFlight = new Map<string, Promise<GateVerdict>>();
 
-	const admit = async (row: MessageLike): Promise<GateVerdict> => {
+	const admit = async (row: MessageLike, via?: unknown): Promise<GateVerdict> => {
 		const key = keyOf(row);
 		const fingerprint = presentedRowFingerprint(row as unknown as Record<string, unknown>);
 		const prior = admitted.get(key)?.get(fingerprint);
@@ -187,7 +190,7 @@ export function createDialogGate(deps: GateDeps) {
 		const inflightAttempt = inFlight.get(pKey);
 		if (inflightAttempt) return inflightAttempt;
 
-		const attempt = admitOnce(row, key);
+		const attempt = admitOnce(row, key, via);
 		inFlight.set(pKey, attempt);
 		try {
 			return await attempt;
@@ -196,7 +199,7 @@ export function createDialogGate(deps: GateDeps) {
 		}
 	};
 
-	const admitOnce = async (row: MessageLike, key: string): Promise<GateVerdict> => {
+	const admitOnce = async (row: MessageLike, key: string, via?: unknown): Promise<GateVerdict> => {
 		const signPkey = await deps.resolveSignPkey(row.sender_hash);
 		if (!signPkey) {
 			// The author's card is itself a replicated row that may simply not
@@ -213,10 +216,10 @@ export function createDialogGate(deps: GateDeps) {
 			return { status: 'waiting', missing: [], missingCard: row.sender_hash };
 		}
 
-		const sig = verifyMessageRow(row, signPkey);
-		if (sig.status === 'invalid') return finishInvalid(row, sig.reason);
+		const sig = verifyRowWithKey('dialog_messages', row as unknown as Record<string, unknown>, signPkey);
+		if (sig.status !== 'verified') return finishInvalid(row, sig.reason);
 
-		const refs = await deps.decryptRefs(row);
+		const refs = await deps.decryptRefs(row, via);
 		if (refs === 'error') return finishInvalid(row, 'refs_decrypt_failed');
 		if (refs === 'no_key') {
 			// Signature holds but the causal map is unreadable without the

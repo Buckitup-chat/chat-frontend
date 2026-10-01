@@ -9,7 +9,7 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
 import { encodeContent } from '@/lib/pq/content';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
-import { _setReadCacheStorageForTests, _resetTouchedForTests } from '@/lib/data/readCache';
+import { _resetTouchedForTests } from '@/lib/data/readCache';
 import { setDialogCacheRow, clearDialogCacheDb } from './helpers/mainDialogCache';
 import type { SignableValue } from '@/lib/pq/signature';
 import type { UserCardRow } from '@/lib/data/types';
@@ -57,17 +57,6 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	},
 }));
 
-const makeStorage = () => {
-	const map = new Map();
-	return {
-		async get(k: string) { return map.get(k) ?? null; },
-		async set(k: string, v: string) { map.set(k, v); },
-		async delete(k: string) { map.delete(k); },
-		async keys() { return [...map.keys()]; },
-		async clear() { map.clear(); },
-	};
-};
-
 const workingCardsCollection = () => ({
 	rows: new Map([[me.userHash, me.card], [peer.userHash, peer.card]]),
 	async preload() {},
@@ -86,12 +75,17 @@ beforeEach(async () => {
 	setActivePinia(createPinia());
 	resetCardRegistry();
 	await clearDialogCacheDb();
-	_setReadCacheStorageForTests(makeStorage());
 	_resetTouchedForTests();
 
 	senderKey = DialogCrypto.deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, bytesToHex(peer.contactSk), me.userHash);
 	const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, me.kem.publicKey);
 	keysRowKey = `${DIALOG_HASH}|${peer.userHash}`;
+	const keyFields = {
+		dialog_hash: DIALOG_HASH, sender_hash: peer.userHash, peer_hash: me.userHash,
+		peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+		deleted_flag: false, owner_timestamp: 999,
+	};
+	const keyRow = { ...keyFields, sign_b64: signFields(keyFields, peer.sign.secretKey) };
 
 	collections = {
 		cards: workingCardsCollection(),
@@ -99,9 +93,7 @@ beforeEach(async () => {
 			keys: {
 				async preload() {},
 				get: (k: string) => (k === keysRowKey
-					? { dialog_hash: DIALOG_HASH, sender_hash: peer.userHash, peer_hash: me.userHash,
-						peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
-						deleted_flag: false, owner_timestamp: 999 }
+					? keyRow
 					: undefined),
 				get toArray() { return []; },
 				subscribeChanges() { return { unsubscribe() {} }; },

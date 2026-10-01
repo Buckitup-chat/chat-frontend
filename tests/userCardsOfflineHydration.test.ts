@@ -10,7 +10,7 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { signFields, toBase64 } from '@/lib/pq/signature';
-import { writeAsMain } from './helpers/mainUserCache';
+import { writeCachedCards } from './helpers/userCardsDiskCache';
 import type { VueWrapper } from '@vue/test-utils';
 import type { UserCardRow } from '@/lib/data/types';
 import type { userPQStore } from '@/store/userPQ.store';
@@ -143,10 +143,9 @@ const boot = async (initialSteps: string[], cached: UserCardRow[] = []) => {
 	vi.stubGlobal('fetch', server.fetch);
 	vi.resetModules();
 	const readCache = await import('@/lib/data/readCache');
-	readCache._setReadCacheStorageForTests(memoryStore());
 	(await import('@/lib/data/outbox'))._setStorageForTests(memoryStore());
 	(await import('@/lib/data/intents'))._setIntentStorageForTests(memoryStore());
-	await writeAsMain(cached);
+	await writeCachedCards(cached);
 	const collections = await import('@/lib/data/collections');
 	const { userPQStore } = await import('@/store/userPQ.store');
 	setActivePinia(createPinia());
@@ -200,7 +199,7 @@ describe('user_cards offline reload: ShapeStream onError → ready → resolved 
 
 	it('tampered, deleted and this-session-touched cached cards are neither listed nor resolvable', async () => {
 		const deletedCarol = makeCard(3, 'Carol', { deleted_flag: true });
-		await writeAsMain([ALICE, { ...BOB, name: 'Mallory' } , deletedCarol, DAVE]);
+		await writeCachedCards([ALICE, { ...BOB, name: 'Mallory' } , deletedCarol, DAVE]);
 		const { store, readCache } = await boot(['http400', 'hold']);
 		readCache.markTouched('user_cards', DAVE.user_hash);
 
@@ -245,7 +244,7 @@ describe('user_cards offline reload: network error (never reaches onError, prelo
 
 describe('warm live rows outrank the cache', () => {
 	it('a row the collection already holds wins over its stale cached copy', async () => {
-		await writeAsMain([makeCard(1, 'Alice (stale)'), BOB]);
+		await writeCachedCards([makeCard(1, 'Alice (stale)'), BOB]);
 		await boot([]);
 		const { userCardsWithCache } = await import('@/lib/data/userCardsLink');
 

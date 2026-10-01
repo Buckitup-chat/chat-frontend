@@ -1,23 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ref, effectScope, type EffectScope } from 'vue';
 import { useCollectionRows } from '@/lib/data/useCollection';
-import { setCachedRow, markTouched, _setReadCacheStorageForTests, _resetTouchedForTests } from '@/lib/data/readCache';
+import { markTouched, _resetTouchedForTests } from '@/lib/data/readCache';
 import { memoryDialogCacheStore } from './helpers/mainDialogCache';
 import { _setDialogCacheStoreForTests } from '@/lib/data/dialogCache';
 
 let dialogCache: ReturnType<typeof memoryDialogCacheStore>;
 const setDialogCacheRow = (table: string, _key: string, row: Record<string, unknown>) => dialogCache.seed(table, row);
-
-const makeStorage = () => {
-	const map = new Map<string, string>();
-	return {
-		async get(k: string) { return map.get(k) ?? null; },
-		async set(k: string, v: string) { map.set(k, v); },
-		async delete(k: string) { map.delete(k); },
-		async keys() { return [...map.keys()]; },
-		async clear() { map.clear(); },
-	};
-};
 
 const flushAsync = async () => {
 	for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -48,7 +37,6 @@ const withScope = <T>(fn: () => T): T => {
 beforeEach(async () => {
 	dialogCache = memoryDialogCacheStore();
 	_setDialogCacheStoreForTests(dialogCache as never);
-	_setReadCacheStorageForTests(makeStorage());
 	_resetTouchedForTests();
 });
 
@@ -181,7 +169,7 @@ describe('useCollectionRows: IndexedDB read-cache fallback', () => {
 	});
 
 	it('without the readCache option, behaves exactly as before (no fallback, e.g. user_cards)', async () => {
-		await setCachedRow('user_cards', 'u1', { user_hash: 'u1' });
+		await setDialogCacheRow('dialog_messages', 'a', { message_id: 'a', dialog_hash: 'd1' });
 		const coll = makeFlakyCollection({ value: true });
 
 		const result = withScope(() => useCollectionRows(ref(coll)));

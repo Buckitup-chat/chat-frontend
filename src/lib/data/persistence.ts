@@ -86,9 +86,3 @@ export async function initPersistence(): Promise<boolean> {
 export function getPersistence(): PersistedCollectionPersistence | null {
 	return persistence;
 }
-
-/** Test helper. */
-export function _setPersistenceForTests(p: PersistedCollectionPersistence | null): void {
-	persistence = p;
-	initStarted = p !== null;
-}

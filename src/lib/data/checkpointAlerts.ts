@@ -63,7 +63,7 @@ export const savePointer = async (
 ): Promise<void> => {
 	if (!userHash || !dialogHash) return;
 	try {
-		await kvSet(key(userHash, dialogHash), { ...pointer, sem: CHECKPOINT_SEMANTICS });
+		await kvSet(key(userHash, dialogHash), { ...pointer, sem: CHECKPOINT_SEMANTICS }, userHash);
 		// The sweep only visits indexed dialogs, so a pointer that carries a
 		// checkpoint must register its dialog or no alert will ever fire there.
 		if (pointer.checkpoint) await rememberPointerDialog(userHash, dialogHash);
@@ -81,18 +81,13 @@ export interface AlertRow {
 }
 
 /**
- * The dialog's view as stored, without consulting the receive gate.
- *
- * A checkpoint can only be signed when every row is admitted, so at signing
- * time the raw and verified views are the same set; afterwards the raw view is
- * the stabler of the two, since it does not flicker while author cards sync.
- * A row that later fails verification still counts as a change — something
- * happened in that dialog worth looking at.
+ * The dialog's view over the rows given. Callers pass only revisions the
+ * dialog gate admitted — the same set a checkpoint is signed over — so an
+ * invalid, waiting or blocked row neither moves the view nor raises an alert.
  */
-// Hostile keys die here, not inside the hasher: this path runs on raw
-// replicated rows (see below), and buildViewTree throws on non-ASCII keys
-// by design. The server's Ecto type makes such an id unreplicable; the
-// filter is the client-side half of that belt.
+// Hostile keys die here, not inside the hasher: buildViewTree throws on
+// non-ASCII keys by design. The server's Ecto type makes such an id
+// unreplicable; the filter is the client-side half of that belt.
 export const rawViewState = (
 	rows: AlertRow[],
 	excludeMessageId?: string,
@@ -164,7 +159,7 @@ export const rememberPointerDialog = (userHash: string, dialogHash: string): Pro
 		if (dialogs === null) return;
 		if (dialogs.has(dialogHash)) return;
 		dialogs.add(dialogHash);
-		await kvSet(indexKey(userHash), [...dialogs]);
+		await kvSet(indexKey(userHash), [...dialogs], userHash);
 	});
 	// The chain absorbs failures so one bad write cannot wedge the next;
 	// the caller gets THIS task (with its own failure surfaced as a warn),

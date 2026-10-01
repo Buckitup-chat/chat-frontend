@@ -10,11 +10,11 @@ import { electricCollectionOptions } from '@tanstack/electric-db-collection';
 import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persistence';
 import { getPersistence } from './persistence';
 import { alwaysActiveVisibility } from './visibility';
-import { mirrorInto } from './readCache';
 import { mirrorDialogTable } from './dialogCache';
 import { userCardsFetch, reportUserCardsStreamError, userCardsShapeLink } from './userCardsLink';
 import { mirrorUserCards } from './userCardsCache';
 import { createShapeLink, registerShapeLink, type ShapeLink } from './shapeLink';
+import { AccountMismatchError } from './keyCustody';
 import type {
 	UserCardRow,
 	UserStorageRow,
@@ -122,18 +122,24 @@ export function getUserCardsCollection() {
 let userStorage: ReturnType<typeof buildUserStorage> | null = null;
 let userStorageOwner: string | null = null;
 
-const buildUserStorage = (userHash: string) =>
-	createCollection(
+const buildUserStorage = (userHash: string) => {
+	const link = createShapeLink();
+	const coll = createCollection(
 		persisted(electricCollectionOptions<UserStorageRow>({
 			id: `us-${userHash.slice(0, 24)}`,
 			shapeOptions: {
 				url: electricUrl('/shapes'),
 				params: { table: 'user_storage', where: `user_hash = '${assertUserHash(userHash)}'` },
 				...shapeDefaults,
+				fetchClient: link.fetchClient,
+				onError: link.onError,
 			},
 			getKey: (r) => `${r.user_hash}|${r.uuid}`,
 		}))
 	);
+	registerShapeLink(coll, link);
+	return coll;
+};
 
 /**
  * Storage collection for the signed-in account.
@@ -142,26 +148,23 @@ const buildUserStorage = (userHash: string) =>
  * user_storage, and falling back to an unfiltered shape would quietly restore
  * the network-wide sync this replaced.
  */
-let userStorageUnmirror: (() => void) | null = null;
-
 export function getUserStorageCollection(userHash?: string) {
 	const owner = userHash ?? userStorageOwner;
 	if (!owner) {
 		throw new Error('user_storage collection requires a user_hash; is anyone signed in?');
 	}
-	if (!userStorage || userStorageOwner !== owner) {
-		userStorageUnmirror?.();
+	if (userStorage && userStorageOwner !== owner) {
+		throw new AccountMismatchError(`user_storage is open for another account; refusing ${owner}`);
+	}
+	if (!userStorage) {
 		userStorage = buildUserStorage(owner);
 		userStorageOwner = owner;
-		userStorageUnmirror = mirrorInto(userStorage, 'user_storage');
 	}
 	return userStorage;
 }
 
 /** Drops the per-account collection on logout. */
 export function resetUserStorageCollection() {
-	userStorageUnmirror?.();
-	userStorageUnmirror = null;
 	userStorage = null;
 	userStorageOwner = null;
 }
@@ -311,13 +314,6 @@ export async function withDialogCollections<T>(
  * actually in. */
 export function isDialogWarm(dialogHash: string): boolean {
 	return dialogRegistry.has(dialogHash);
-}
-
-/** Drop a dialog's collections immediately (e.g. after deleting a dialog). */
-export function releaseDialogCollections(dialogHash: string): void {
-	dialogRegistry.delete(dialogHash);
-	dialogUnmirror.get(dialogHash)?.();
-	dialogUnmirror.delete(dialogHash);
 }
 
 /** Test/inspection helper. */
