@@ -1,5 +1,5 @@
 <template>
-	<div v-if="entries.length || blockedIssues.length" class="quarantine-banner">
+	<div v-if="entries.length || corruptRecords.length || blockedIssues.length" class="quarantine-banner">
 		<div v-for="entry in entries" :key="entry.id" class="quarantine-banner-row">
 			<span class="quarantine-banner-text">
 				{{ labelFor(entry) }} could not be delivered — {{ entry.lastError || 'rejected by the server' }}
@@ -7,11 +7,18 @@
 			<button type="button" class="quarantine-banner-action" @click="retry(entry.id)">Retry</button>
 			<button type="button" class="quarantine-banner-action quarantine-banner-discard" @click="discard(entry.id)">Discard</button>
 		</div>
+		<div v-for="record in corruptRecords" :key="`corrupt:${record.key}`" class="quarantine-banner-row">
+			<span class="quarantine-banner-text">
+				A queued change could not be read from this device's storage — {{ record.message }}
+			</span>
+			<button type="button" class="quarantine-banner-action quarantine-banner-discard" @click="discardCorrupt(record.key)">Discard</button>
+		</div>
 		<div v-for="issue in blockedIssues" :key="issue.entry.id" class="quarantine-banner-row quarantine-banner-row--blocked">
 			<span class="quarantine-banner-text">
 				{{ blockedText(issue) }}
 				<template v-if="blockerLastError(issue.blockers)">: {{ blockerLastError(issue.blockers) }}</template>
 			</span>
+			<button v-if="issue.discovery" type="button" class="quarantine-banner-action" @click="retry(issue.entry.id)">Retry</button>
 			<button type="button" class="quarantine-banner-action quarantine-banner-discard" @click="discard(issue.entry.id)">Discard</button>
 		</div>
 	</div>
@@ -21,7 +28,7 @@
 
 import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
-import { quarantinedEntries, requeueEntry, discardEntry, blockedDependentIssues } from '@/lib/data/outbox';
+import { accountOutboxSnapshot, requeueEntry, discardEntry, discardCorruptOutboxRecord } from '@/lib/data/outbox';
 
 const POLL_MS = 10_000;
 
@@ -44,30 +51,46 @@ const labelFor = (entry) => {
 const blockerReason = (blockers) => {
 	const quarantinedCount = blockers.filter((b) => b.status === 'quarantined').length;
 	const discardedCount = blockers.filter((b) => b.status === 'discarded').length;
+	const corruptCount = blockers.filter((b) => b.status === 'corrupt').length;
+	const unavailableCount = blockers.filter((b) => b.status === 'unavailable').length;
 	const unknownCount = blockers.filter((b) => b.status === 'unknown').length;
 	const parts = [];
 	if (quarantinedCount) parts.push(quarantinedCount === 1 ? 'a failed prerequisite' : `${quarantinedCount} failed prerequisites`);
 	if (discardedCount) parts.push(discardedCount === 1 ? 'a discarded prerequisite' : `${discardedCount} discarded prerequisites`);
+	if (corruptCount) parts.push(corruptCount === 1 ? 'an unreadable prerequisite' : `${corruptCount} unreadable prerequisites`);
+	if (unavailableCount) parts.push(unavailableCount === 1 ? 'a prerequisite storage cannot read right now' : `${unavailableCount} prerequisites storage cannot read right now`);
 	if (unknownCount) parts.push(unknownCount === 1 ? 'an unresolvable prerequisite' : `${unknownCount} unresolvable prerequisites`);
 	return parts.join(' and ');
 };
 
 const blockedText = (issue) => {
 	const label = labelFor(issue.entry);
+	if (issue.discovery) return `${label} is on hold — ${issue.discovery.message}`;
 	const quarantinedCount = issue.blockers.filter((b) => b.status === 'quarantined').length;
 	const discardedCount = issue.blockers.filter((b) => b.status === 'discarded').length;
+	const corruptCount = issue.blockers.filter((b) => b.status === 'corrupt').length;
+	const unavailableCount = issue.blockers.filter((b) => b.status === 'unavailable').length;
 	const unknownCount = issue.blockers.filter((b) => b.status === 'unknown').length;
+	const onlyOneKind = [quarantinedCount, discardedCount, corruptCount, unavailableCount, unknownCount].filter(Boolean).length === 1;
 
-	if (quarantinedCount && !discardedCount && !unknownCount) {
+	if (quarantinedCount && onlyOneKind) {
 		const subject = quarantinedCount === 1 ? 'a failed prerequisite' : `${quarantinedCount} failed prerequisites`;
 		const verb = quarantinedCount === 1 ? 'is' : 'are';
 		return `${label} is waiting on ${subject} — it will be sent once ${verb === 'is' ? 'it is' : 'they are'} successfully retried`;
 	}
-	if (discardedCount && !quarantinedCount && !unknownCount) {
+	if (discardedCount && onlyOneKind) {
 		const subject = discardedCount === 1 ? 'a discarded prerequisite' : `${discardedCount} discarded prerequisites`;
 		return `${label} will not be sent unless you take a separate, explicit action on ${subject}`;
 	}
-	if (unknownCount && !quarantinedCount && !discardedCount) {
+	if (corruptCount && onlyOneKind) {
+		const subject = corruptCount === 1 ? 'a prerequisite that could not be read from storage' : `${corruptCount} prerequisites that could not be read from storage`;
+		return `${label} is blocked by ${subject} — it will not be sent`;
+	}
+	if (unavailableCount && onlyOneKind) {
+		const subject = unavailableCount === 1 ? 'a prerequisite that storage cannot read right now' : `${unavailableCount} prerequisites that storage cannot read right now`;
+		return `${label} is waiting on ${subject} — it will be checked again`;
+	}
+	if (unknownCount && onlyOneKind) {
 		const subject = unknownCount === 1 ? 'a prerequisite that could not be found' : `${unknownCount} prerequisites that could not be found`;
 		return `${label} is blocked by ${subject} — this needs investigation, not a simple Retry`;
 	}
@@ -81,6 +104,7 @@ const blockerLastError = (blockers) => {
 
 const $userPQ = userPQStore();
 const entries = ref([]);
+const corruptRecords = ref([]);
 const blockedIssues = ref([]);
 
 let refreshGeneration = 0;
@@ -89,13 +113,14 @@ let unmounted = false;
 const refresh = async () => {
 	const generation = ++refreshGeneration;
 	const userHash = $userPQ.currentUserHash;
-	const [quarantined, blocked] = userHash
-		? await Promise.all([quarantinedEntries(userHash), blockedDependentIssues(userHash)])
-		: [[], []];
+	const { quarantined, corrupt, blocked } = userHash
+		? await accountOutboxSnapshot(userHash)
+		: { quarantined: [], corrupt: [], blocked: [] };
 
 	if (unmounted || generation !== refreshGeneration || $userPQ.currentUserHash !== userHash) return;
 
 	entries.value = quarantined;
+	corruptRecords.value = corrupt;
 	blockedIssues.value = blocked;
 };
 
@@ -106,6 +131,12 @@ const retry = async (id) => {
 
 const discard = async (id) => {
 	await discardEntry(id);
+	await refresh();
+};
+
+const discardCorrupt = async (key) => {
+	const userHash = $userPQ.currentUserHash;
+	if (userHash) await discardCorruptOutboxRecord(userHash, key);
 	await refresh();
 };
 

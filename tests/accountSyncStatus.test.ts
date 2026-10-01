@@ -5,7 +5,7 @@ import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import {
 	_setStorageForTests, enqueue, recordFailure, markServerAccepted, markReconciled, resolveEntry,
-	requeueEntry, discardEntry,
+	requeueEntry, discardEntry, discardCorruptOutboxRecord,
 } from '@/lib/data/outbox';
 import { accountSyncState, useAccountSyncStatus } from '@/composables/useAccountSyncStatus';
 import { _setIntentStorageForTests, enqueueIntent, updateIntent, resolveIntent } from '@/lib/data/intents';
@@ -43,7 +43,7 @@ const memoryStore = () => ({
 	async clear() { this._map.clear(); },
 });
 
-const message = { type: 'insert', syncMetadata: { relation: 'dialog_messages' } };
+const message = { type: 'insert', modified: { message_id: 'm1' }, syncMetadata: { relation: 'dialog_messages' } };
 
 const mountList = () => {
 	setActivePinia(createPinia());
@@ -107,6 +107,19 @@ describe('global sync status', () => {
 		const w = mountList();
 		await enqueue([message], OTHER);
 		await vi.waitFor(() => expect(statusText(w)).toBe('Synced'));
+	});
+
+	it('a corrupt stored record is Needs attention until it is explicitly discarded', async () => {
+		const w = mountList();
+		const id = await enqueue([message], ME) as string;
+		const entry = JSON.parse(await currentStore.get(id) as string);
+		await currentStore.set(id, JSON.stringify({ ...entry, mutations: [null] }));
+		await enqueue([message], ME);
+
+		await vi.waitFor(() => expect(statusText(w)).toBe('Needs attention'));
+
+		await discardCorruptOutboxRecord(ME, id);
+		await vi.waitFor(() => expect(statusText(w)).toBe('Syncing')); // the second write is still pending
 	});
 
 	it('a quarantined write is Needs attention, never the green Synced', async () => {

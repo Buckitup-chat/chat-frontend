@@ -23,6 +23,10 @@ vi.mock('@/lib/data/outbox', () => ({
 	requeueEntry: (...args) => requeueEntry(...args),
 	discardEntry: (...args) => discardEntry(...args),
 	blockedDependentIssues: (...args) => blockedDependentIssues(...args),
+	accountOutboxSnapshot: async (...args) => ({
+		quarantined: await quarantinedEntries(...args), corrupt: [], blocked: await blockedDependentIssues(...args),
+	}),
+	discardCorruptOutboxRecord: async () => false,
 }));
 
 const userPQState = reactive({ currentUserHash: MY_HASH });
@@ -217,5 +221,23 @@ describe('QuarantinedWritesBanner (§F-L10)', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it('a write held by a failed dependency discovery shows its reason with Retry and Discard', async () => {
+		blockedIssues = [{
+			entry: { id: 'held1', relation: 'dialog_messages' },
+			blockers: [],
+			discovery: { reason: 'storage_unavailable', message: 'a queued write it may depend on could not be read from storage' },
+		}];
+		const w = mount(QuarantinedWritesBanner);
+		await flushPromises();
+
+		const row = w.find('.quarantine-banner-row--blocked');
+		expect(row.text()).toContain('A message is on hold — a queued write it may depend on could not be read from storage');
+		const actions = row.findAll('.quarantine-banner-action');
+		expect(actions.map((a) => a.text())).toEqual(['Retry', 'Discard']);
+
+		await actions[0].trigger('click');
+		expect(requeueEntry).toHaveBeenCalledWith('held1');
 	});
 });
