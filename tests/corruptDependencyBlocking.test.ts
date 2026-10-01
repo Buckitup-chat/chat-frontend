@@ -59,7 +59,7 @@ describe('a corrupt/missing/foreign dependency blocks its dependent, never resol
 		const aId = await enqueue(mutation('A'), MY_HASH) as string;
 		const bId = await enqueue(mutation('B'), MY_HASH, { dependsOn: [aId] }) as string;
 		backing.map.set(aId, 'not json');
-		await readyEntries(MY_HASH); // triggers the corrupt cleanup
+		await readyEntries(MY_HASH); // detects and quarantines A
 
 		_setStorageForTests({ ...backing });
 
@@ -125,18 +125,18 @@ describe('a corrupt/missing/foreign dependency blocks its dependent, never resol
 		expect((await blockedEntries(MY_HASH)).map((e) => e.id)).toContain(bId);
 	});
 
-	it('7. an unresolvable blocker is surfaced in the diagnostic read model, without a fabricated relation or error', async () => {
+	it('7. a corrupt blocker is surfaced in the diagnostic read model with its safe diagnosis, without a fabricated relation', async () => {
 		const aId = await enqueue(mutation('A'), MY_HASH) as string;
 		const bId = await enqueue(mutation('B'), MY_HASH, { dependsOn: [aId] }) as string;
 		backing.map.set(aId, 'not json');
-		await readyEntries(MY_HASH); // triggers the corrupt cleanup
+		await readyEntries(MY_HASH); // detects and quarantines A
 
 		const issues = await blockedDependentIssues(MY_HASH);
 		const issue = issues.find((i) => i.entry.id === bId);
 
 		expect(issue).toBeTruthy();
 		expect(issue!.blockers).toHaveLength(1);
-		expect(issue!.blockers[0]).toEqual({ id: aId, relation: 'unknown', status: 'unknown', lastError: null });
+		expect(issue!.blockers[0]).toEqual({ id: aId, relation: 'unknown', status: 'corrupt', lastError: 'stored value is not valid JSON' });
 	});
 
 	it('8. an unrelated, independent C keeps dispatching while B stays blocked on an unresolvable A', async () => {
