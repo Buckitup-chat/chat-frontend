@@ -68,9 +68,12 @@ try {
 	const [a, b] = await handshake(alice, bob);
 	check('two phones confirm each other over a real WebRTC channel, no STUN', a?.kind === 'confirmed' && b?.kind === 'confirmed', `${a?.kind}/${b?.kind} ${a?.reason ?? ''}${b?.reason ?? ''}`);
 	check('both show the same six digits', !!a?.code && a?.code === b?.code, `${a?.code} / ${b?.code}`);
+	const opens = await Promise.all([alice, bob].map((p) => p.$$eval('#log li', (lis) => lis.filter((li) => li.textContent.endsWith('channel open')).length)));
+	check('each phone opened one channel, and confirmed over it once', opens.every((n) => n === 1), opens.join(' / '));
 
-	// Mallory met Alice before and holds her public card; she shows Alice's identity to Bob.
-	const aliceCard = await alice.evaluate(() => JSON.parse(localStorage.getItem('pq2.identity')).card);
+	// Mallory met Alice before and holds her public card (as Bob's page now
+	// does); she shows Alice's identity to Bob.
+	const aliceCard = await bob.evaluate(() => JSON.parse(localStorage.getItem('pq2.lastPeerCard')));
 	const mallory = await phone({ 'pq2.settings': JSON.stringify({ mode: 'impostor' }), 'pq2.lastPeerCard': JSON.stringify(aliceCard) });
 	await bob.evaluate(() => document.getElementById('restart').click());
 	await bob.waitForFunction(() => window.__pq2.stage() === 'A');

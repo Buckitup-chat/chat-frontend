@@ -21,7 +21,6 @@ export const TRANSCRIPT_TAG = 'buckitup/handshake/v2\n';
 export const PQ_TAG = 'buckitup/handshake/v2/pq\n';
 export const SAS_SALT = 'buckitup/handshake/v2';
 
-export const USER_HASH_LENGTH = 130; // 'u_' + 128 hex
 export const CONTACT_PKEY_BYTES = 33; // compressed secp256k1
 export const NONCE_BYTES = 16;
 export const SIG_BYTES = 64; // compact r‖s
@@ -61,25 +60,19 @@ export const encode = (m: Message): string => {
 	}
 };
 
-const isUserHash = (s: string) => s.length === USER_HASH_LENGTH && /^u_[0-9a-f]{128}$/.test(s);
+const isUserHash = (s: string) => /^u_[0-9a-f]{128}$/.test(s);
 
-const fixed = (s: string, bytes: number): Uint8Array | null => {
+/** The bytes of an unpadded base64url field; the decoder alone would also take `+`, `/`, `=` and spaces. */
+const decoded = (s: string, min: number, max: number): Uint8Array | null => {
 	try {
 		const out = base64urlDecode(s);
-		return out.length === bytes ? out : null;
+		return out.length >= min && out.length <= max && b64(out) === s ? out : null;
 	} catch {
 		return null;
 	}
 };
-
-const variable = (s: string, max: number): Uint8Array | null => {
-	try {
-		const out = base64urlDecode(s);
-		return out.length > 0 && out.length <= max ? out : null;
-	} catch {
-		return null;
-	}
-};
+const fixed = (s: string, bytes: number) => decoded(s, bytes, bytes);
+const variable = (s: string, max: number) => decoded(s, 1, max);
 
 /** A code this protocol can act on, or null: another protocol, a wrong field count or length. */
 export const parse = (text: string): Message | null => {
@@ -193,9 +186,10 @@ export type ConfirmVerdict =
 	| { ok: false; reason: string };
 
 /**
- * The peer is confirmed when its card is valid, is the identity the codes
- * showed, certifies the contact key the optical proof used, and its identity
- * key signed M.
+ * The peer is confirmed when its card is the identity the codes showed, is
+ * valid and certifies the contact key the optical proof used, and its
+ * identity key signed M. A confirmation verifies the card once; only a
+ * refusal verifies it again, to name the reason.
  */
 export const checkConfirm = (
 	raw: string,
@@ -212,11 +206,13 @@ export const checkConfirm = (
 		return { ok: false, reason: 'not a PQ2_CONFIRM message' };
 	}
 	const card = msg.card;
-	const verdict = verifyUserCard(card);
-	if (verdict.status !== 'verified') return { ok: false, reason: `card does not verify (${verdict.reason})` };
 	if (card.user_hash !== bound.userHash) return { ok: false, reason: 'card is another identity than the codes showed' };
 	if (!cardVouchesForContactKey(card, toBase64(bound.contactPkey))) {
-		return { ok: false, reason: 'card does not certify the contact key the codes showed' };
+		const verdict = verifyUserCard(card);
+		return {
+			ok: false,
+			reason: verdict.status === 'verified' ? 'card does not certify the contact key the codes showed' : `card does not verify (${verdict.reason})`,
+		};
 	}
 	let sig: Uint8Array;
 	try {

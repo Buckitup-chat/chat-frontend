@@ -1,56 +1,56 @@
 // Channel adapters for the engine: QWBP over WebRTC in the browser, and a
 // fake network for the tests.
-import { QWBPConnection, decode } from 'qwbp';
-import { randomBytes, bytesToHex } from '@noble/hashes/utils';
+import { MIN_PACKET_SIZE, QWBPConnection, decode } from 'qwbp';
+import { concatBytes, randomBytes } from '@noble/hashes/utils';
+import { equalBytes } from '@noble/post-quantum/utils.js';
 import type { ChannelAdapter, ChannelLink } from './engine';
-
-/** ICE servers for the "STUN on" setting: reach across networks, at the price of asking a third party. */
-export const PUBLIC_STUN: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
 
 const linkOf = (channel: RTCDataChannel): ChannelLink => ({
 	send: (text) => channel.send(text),
 	onMessage: (handler) => {
 		channel.onmessage = (event) => handler(String(event.data));
 	},
-	close: () => channel.close(),
 });
+
+const candidatesOf = (payload: Uint8Array) =>
+	decode(payload).candidates.map((c) => `${c.type}/${c.ip}`).join(', ');
 
 export class QwbpChannel implements ChannelAdapter {
 	private readonly conn: QWBPConnection;
-	private ready: Promise<void> | null = null;
-	private own: Uint8Array | null = null;
+	private own: Promise<Uint8Array> | null = null;
 
-	constructor(iceServers: RTCIceServer[], private readonly log: (line: string) => void = () => {}) {
-		// An empty list means host candidates only: the phones must share a network.
-		this.conn = new QWBPConnection({ iceServers, timeout: 60_000 });
+	constructor(iceServers: RTCIceServer[], private readonly log: (line: string) => void) {
+		this.conn = new QWBPConnection({
+			// An empty list means host candidates only: the phones must share a network.
+			iceServers,
+			// The engine's deadlines end every session long before, and close the connection.
+			timeout: 60 * 60_000,
+			onError: (e) => log(`channel: ${e.message}`),
+		});
 	}
 
-	private init(): Promise<void> {
-		this.ready ??= this.conn.initialize();
-		return this.ready;
-	}
-
-	async payload(): Promise<Uint8Array> {
-		await this.init();
-		if (!this.own) {
-			this.own = this.conn.getQRPayload();
-			const { candidates } = decode(this.own);
-			this.log(`own payload ${this.own.length} B, candidates: ${candidates.map((c) => `${c.type}/${c.ip}`).join(', ') || 'none'}`);
-		}
+	payload(): Promise<Uint8Array> {
+		this.own ??= this.conn.initialize().then(() => {
+			const payload = this.conn.getQRPayload();
+			// Without a single address the payload is not even a QWBP packet, and nothing could reach this phone.
+			if (payload.length < MIN_PACKET_SIZE) throw new Error('this phone has no network address to offer (airplane mode?)');
+			this.log(`own payload ${payload.length} B, candidates: ${candidatesOf(payload)}`);
+			return payload;
+		});
 		return this.own;
 	}
 
 	async feed(peerPayload: Uint8Array): Promise<void> {
-		await this.init();
-		const { candidates } = decode(peerPayload);
-		this.log(`peer candidates: ${candidates.map((c) => `${c.type}/${c.ip}`).join(', ') || 'none'}`);
+		await this.payload();
+		this.log(`peer candidates: ${candidatesOf(peerPayload)}`);
 		await this.conn.processScannedPayload(peerPayload);
 	}
 
 	onOpen(handler: (link: ChannelLink) => void): void {
+		// QWBP calls back with open channels only. The answerer is also handed
+		// the 'init' channel, which served only to start the gathering.
 		this.conn.onDataChannel((channel) => {
-			if (channel.readyState === 'open') handler(linkOf(channel));
-			else channel.addEventListener('open', () => handler(linkOf(channel)), { once: true });
+			if (channel.label === 'qwbp') handler(linkOf(channel));
 		});
 	}
 
@@ -66,68 +66,71 @@ export class QwbpChannel implements ChannelAdapter {
 // ---------- the fake network (tests) ----------
 
 /**
- * Channels that join once each has been fed the other's payload, as QWBP
- * does — or never, when `reachable` is false (phones on different networks).
- * A payload is the channel's fingerprint (32 bytes) plus 8 bytes of noise.
+ * Channels that behave like QWBP's where the engine can tell: a payload only
+ * once the connection is set up (never, for a phone with no address), one
+ * peer per connection, and a channel that opens a network turn after both
+ * sides have been fed each other's payload — or never, when `reachable` is
+ * false (phones on different networks). A message sent before the other side
+ * listens is lost. A payload is the fingerprint (32 bytes) plus 8 bytes of noise.
  */
 export class FakeNetwork {
 	reachable = true;
-	private readonly channels = new Map<string, FakeChannel>();
+	/** How long a message takes over an open channel. */
+	latencyMs = 0;
+	readonly channels: FakeChannel[] = [];
 
-	channel = (): FakeChannel => {
-		const ch = new FakeChannel(this);
-		this.channels.set(bytesToHex(ch.fingerprint), ch);
+	channel = ({ address = true } = {}): FakeChannel => {
+		const ch = new FakeChannel(this, address);
+		this.channels.push(ch);
 		return ch;
 	};
 
-	fedEachOther(a: FakeChannel): void {
-		const b = a.peerFingerprint && this.channels.get(bytesToHex(a.peerFingerprint));
-		if (!b || !this.reachable || !b.peerFingerprint || bytesToHex(b.peerFingerprint) !== bytesToHex(a.fingerprint)) return;
-		const [la, lb] = FakeChannel.pipe();
-		queueMicrotask(() => {
+	fed(a: FakeChannel): void {
+		const b = this.channels.find((c) => a.peerFingerprint && equalBytes(c.fingerprint, a.peerFingerprint));
+		if (!b?.peerFingerprint || !this.reachable || !equalBytes(b.peerFingerprint, a.fingerprint)) return;
+		const [la, lb] = this.pipe();
+		setTimeout(() => {
 			a.opened(la);
 			b.opened(lb);
+		}, 0);
+	}
+
+	private pipe(): [ChannelLink, ChannelLink] {
+		const handlers: [((t: string) => void) | null, ((t: string) => void) | null] = [null, null];
+		const end = (me: 0 | 1): ChannelLink => ({
+			send: (text) => setTimeout(() => handlers[me === 0 ? 1 : 0]?.(text), this.latencyMs),
+			onMessage: (h) => {
+				handlers[me] = h;
+			},
 		});
+		return [end(0), end(1)];
 	}
 }
 
 export class FakeChannel implements ChannelAdapter {
 	readonly fingerprint = randomBytes(32);
 	peerFingerprint: Uint8Array | null = null;
+	closed = false;
 	private handler: ((link: ChannelLink) => void) | null = null;
-	private closed = false;
+	private readonly own: Promise<Uint8Array>;
 
-	constructor(private readonly net: FakeNetwork) {}
-
-	static pipe(): [ChannelLink, ChannelLink] {
-		const handlers: [((t: string) => void) | null, ((t: string) => void) | null] = [null, null];
-		const queued: [string[], string[]] = [[], []];
-		const deliver = (to: 0 | 1, text: string) => {
-			const h = handlers[to];
-			if (h) setTimeout(() => h(text), 0);
-			else queued[to].push(text);
-		};
-		const end = (me: 0 | 1): ChannelLink => ({
-			send: (text) => deliver(me === 0 ? 1 : 0, text),
-			onMessage: (h) => {
-				handlers[me] = h;
-				for (const text of queued[me].splice(0)) setTimeout(() => h(text), 0);
-			},
-			close: () => {},
-		});
-		return [end(0), end(1)];
+	constructor(private readonly net: FakeNetwork, address: boolean) {
+		this.own = address
+			? Promise.resolve(concatBytes(this.fingerprint, randomBytes(8)))
+			: Promise.reject(new Error('this phone has no network address to offer'));
+		this.own.catch(() => {});
 	}
 
-	async payload(): Promise<Uint8Array> {
-		const out = new Uint8Array(40);
-		out.set(this.fingerprint);
-		out.set(randomBytes(8), 32);
-		return out;
+	payload(): Promise<Uint8Array> {
+		return this.own;
 	}
 
 	async feed(peerPayload: Uint8Array): Promise<void> {
+		await this.own;
+		if (this.closed) throw new Error('Cannot process payload in state: closed');
+		if (this.peerFingerprint) throw new Error('Peer already scanned');
 		this.peerFingerprint = peerPayload.slice(0, 32);
-		this.net.fedEachOther(this);
+		this.net.fed(this);
 	}
 
 	onOpen(handler: (link: ChannelLink) => void): void {

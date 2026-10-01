@@ -4,28 +4,41 @@
 import './style.css';
 import QRCode from 'qrcode';
 import QrScanner from 'qr-scanner';
+import { DEFAULT_ICE_SERVERS } from 'qwbp';
+import escapeHtml from '@/utils/escapeHtml';
 import { HandshakeEngine, type Outcome, type Stage, type Timings } from './engine';
-import { PUBLIC_STUN, QwbpChannel } from './channel';
-import { createIdentity, deserialize, loadOrCreate, serialize, type Identity } from './identity';
+import { QwbpChannel } from './channel';
+import { createIdentity, type Identity } from './identity';
 import type { UserCardRow } from '@/lib/data/types';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const params = new URLSearchParams(location.search);
-const withCamera = !params.has('nocamera');
+const withCamera = !new URLSearchParams(location.search).has('nocamera');
 
 interface Settings {
+	name: string;
 	ice: 'none' | 'stun';
 	camera: 'user' | 'environment';
 	mode: 'honest' | 'impostor';
 }
+// Only settings and the public card of the last confirmed peer are stored.
+// The page is served from an origin other pages share, so the identity and
+// its secret keys live in the page only: a reload makes a new one.
 const SETTINGS_KEY = 'pq2.settings';
-const IDENTITY_KEY = 'pq2.identity';
 const LAST_PEER_KEY = 'pq2.lastPeerCard';
-const STAND_IN_KEY = 'pq2.standIn';
 
-const settings: Settings = { ice: 'none', camera: 'user', mode: 'honest', ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') };
+const stored = <T>(key: string): T | null => {
+	try {
+		return JSON.parse(localStorage.getItem(key) ?? 'null');
+	} catch {
+		return null;
+	}
+};
+
 const randomName = () => `Phone ${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
-let identity: Identity = loadOrCreate(localStorage, IDENTITY_KEY, randomName);
+const settings: Settings = { name: randomName(), ice: 'none', camera: 'user', mode: 'honest', ...stored<Partial<Settings>>(SETTINGS_KEY) };
+const saveSettings = () => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+saveSettings(); // the phone keeps its name across reloads
+let identity: Identity = createIdentity(settings.name);
 
 let engine: HandshakeEngine | null = null;
 let scanner: QrScanner | null = null;
@@ -33,7 +46,7 @@ let currentCode = '';
 let lastOutcome: Outcome | null = null;
 let sessionStart = 0;
 let lastScan = { text: '', at: 0 };
-let wakeLock: { release(): Promise<void> } | null = null;
+let wakeLock: WakeLockSentinel | null = null;
 
 // ---------- the parts of the page ----------
 
@@ -65,7 +78,7 @@ const show = async (code: string, stage: Stage) => {
 const renderWho = () => {
 	const mode = settings.mode === 'impostor' ? ' · IMPOSTOR' : '';
 	const ice = settings.ice === 'stun' ? 'STUN on' : 'STUN off';
-	$('who').textContent = `${identity.name} · ${identity.userHash.slice(0, 12)}… · ${ice}${mode}`;
+	$('who').textContent = `${identity.card.name} · ${identity.userHash.slice(0, 12)}… · ${ice}${mode}`;
 };
 
 const renderResult = (outcome: Outcome, timings: Timings) => {
@@ -92,9 +105,16 @@ const renderResult = (outcome: Outcome, timings: Timings) => {
 	$('timingsBox').hidden = false;
 };
 
-const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const clearResult = () => {
+	const box = $('result');
+	box.hidden = true;
+	box.className = '';
+	box.replaceChildren();
+	$('timingsBox').hidden = true;
+	delete $('qrWrap').dataset.outcome;
+};
 
-// ---------- camera ----------
+// ---------- camera and screen ----------
 
 const startCamera = async () => {
 	const video = $<HTMLVideoElement>('video');
@@ -134,29 +154,42 @@ const onScan = (text: string) => {
 	void engine?.read(text);
 };
 
+const keepScreenOn = async () => {
+	try {
+		wakeLock ??= (await navigator.wakeLock?.request('screen')) ?? null;
+	} catch {
+		/* not supported, or the page is hidden */
+	}
+};
+const letScreenSleep = () => {
+	void wakeLock?.release();
+	wakeLock = null;
+};
+document.addEventListener('visibilitychange', () => {
+	// A hidden page loses its lock; a session still running takes it again.
+	if (document.visibilityState === 'visible' && engine && !lastOutcome) {
+		wakeLock = null;
+		void keepScreenOn();
+	}
+});
+
 // ---------- a session ----------
 
 /** Impostor mode shows the last identity this phone confirmed — as someone who met the victim before — or a stand-in. */
 const impostorClaim = (): { userHash: string; card: UserCardRow } => {
-	const met = localStorage.getItem(LAST_PEER_KEY);
-	if (met) {
-		const card = JSON.parse(met) as UserCardRow;
-		if (card.user_hash !== identity.userHash) return { userHash: card.user_hash, card };
-	}
-	const standIn = loadOrCreate(localStorage, STAND_IN_KEY, () => 'Someone else');
-	return { userHash: standIn.userHash, card: standIn.card };
+	const met = stored<UserCardRow>(LAST_PEER_KEY);
+	const card = met && met.user_hash !== identity.userHash ? met : createIdentity('Someone else').card;
+	return { userHash: card.user_hash, card };
 };
 
 const startSession = async () => {
 	engine?.stop();
 	lastOutcome = null;
-	$('result').hidden = true;
-	$('timingsBox').hidden = true;
-	delete $('qrWrap').dataset.outcome;
+	clearResult();
 	$('log').innerHTML = '';
 	sessionStart = Date.now();
 	renderWho();
-	const iceServers = settings.ice === 'stun' ? PUBLIC_STUN : [];
+	const iceServers = settings.ice === 'stun' ? DEFAULT_ICE_SERVERS : [];
 	engine = new HandshakeEngine({
 		identity,
 		channel: () => new QwbpChannel(iceServers, log),
@@ -167,6 +200,7 @@ const startSession = async () => {
 		onDone: (outcome, timings) => {
 			lastOutcome = outcome;
 			stopCamera();
+			letScreenSleep();
 			renderResult(outcome, timings);
 			navigator.vibrate?.(outcome.kind === 'confirmed' ? [200, 80, 200] : [500]);
 			if (outcome.kind === 'confirmed' && settings.mode === 'honest') localStorage.setItem(LAST_PEER_KEY, JSON.stringify(outcome.card));
@@ -177,30 +211,16 @@ const startSession = async () => {
 	await keepScreenOn();
 };
 
-const keepScreenOn = async () => {
-	try {
-		wakeLock ??= await (navigator as Navigator & { wakeLock?: { request(t: 'screen'): Promise<{ release(): Promise<void> }> } }).wakeLock?.request('screen') ?? null;
-	} catch {
-		/* not supported, or the page is hidden */
-	}
-};
-document.addEventListener('visibilitychange', () => {
-	if (document.visibilityState === 'visible') {
-		wakeLock = null;
-		void keepScreenOn();
-	}
-});
-
 // ---------- settings ----------
 
 const fillSettings = () => {
-	$<HTMLInputElement>('name').value = identity.name;
+	$<HTMLInputElement>('name').value = settings.name;
 	$<HTMLSelectElement>('ice').value = settings.ice;
 	$<HTMLSelectElement>('camera').value = settings.camera;
 	$<HTMLSelectElement>('mode').value = settings.mode;
-	const met = localStorage.getItem(LAST_PEER_KEY);
+	const met = stored<UserCardRow>(LAST_PEER_KEY);
 	$('impostorHint').textContent = met
-		? `Impostor mode shows ${(JSON.parse(met) as UserCardRow).name}'s identity (the last one this phone confirmed) with this phone's own key, and sends that card. The other phone must end "not confirmed".`
+		? `Impostor mode shows ${met.name}'s identity (the last one this phone confirmed) with this phone's own key, and sends that card. The other phone must end "not confirmed".`
 		: 'Impostor mode shows another identity with this phone\'s own key. Confirm someone first to impersonate them; until then a stand-in identity is used.';
 };
 
@@ -213,23 +233,20 @@ $('applySettings').addEventListener('click', () => {
 	settings.ice = $<HTMLSelectElement>('ice').value as Settings['ice'];
 	settings.camera = $<HTMLSelectElement>('camera').value as Settings['camera'];
 	settings.mode = $<HTMLSelectElement>('mode').value as Settings['mode'];
-	localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 	const name = $<HTMLInputElement>('name').value.trim();
-	if (name && name !== identity.name) replaceIdentity(name);
+	if (name && name !== settings.name) {
+		settings.name = name;
+		identity = createIdentity(name); // the name is in the signed card
+	}
+	saveSettings();
 	$('settings').hidden = true;
 	void startSession();
 });
 
 $('newIdentity').addEventListener('click', () => {
-	replaceIdentity($<HTMLInputElement>('name').value.trim() || randomName());
-	fillSettings();
+	identity = createIdentity(settings.name);
 	void startSession();
 });
-
-const replaceIdentity = (name: string) => {
-	identity = createIdentity(name);
-	localStorage.setItem(IDENTITY_KEY, serialize(identity));
-};
 
 // ---------- buttons ----------
 
@@ -254,8 +271,6 @@ Object.assign(window, {
 		read: (text: string) => engine?.read(text),
 		outcome: () => lastOutcome,
 		stage: () => engine?.currentStage,
-		userHash: () => identity.userHash,
-		useIdentity: (raw: string) => { identity = deserialize(raw); localStorage.setItem(IDENTITY_KEY, raw); },
 	},
 });
 

@@ -1,8 +1,10 @@
 // The PQ2 state machine (docs/task-handshake-pq2.md §5), without DOM or
 // camera. The page feeds it the codes the camera reads and shows the codes it
 // asks to show; the channel is an adapter — QWBP over WebRTC in the browser,
-// a fake network in the tests.
+// a fake network in the tests. One engine runs one session: once it has
+// finished or been stopped, it shows, sends, logs and reports nothing more.
 import { bytesToHex } from '@noble/hashes/utils';
+import { equalBytes } from '@noble/post-quantum/utils.js';
 import type { UserCardRow } from '@/lib/data/types';
 import type { Identity } from './identity';
 import {
@@ -13,11 +15,10 @@ import {
 export interface ChannelLink {
 	send(text: string): void;
 	onMessage(handler: (text: string) => void): void;
-	close(): void;
 }
 
 export interface ChannelAdapter {
-	/** This side's bootstrap payload; sets the connection up on first call. */
+	/** This side's bootstrap payload; the first call sets the connection up. Rejects when nothing could reach this side. */
 	payload(): Promise<Uint8Array>;
 	/** The peer's payload, as read from its code. */
 	feed(peerPayload: Uint8Array): Promise<void>;
@@ -42,6 +43,7 @@ export interface EngineOptions {
 	channel: () => ChannelAdapter;
 	/** Impersonation test: show this user_hash with our own contact key, and send this card. */
 	claim?: { userHash: string; card: UserCardRow };
+	/** For reading the codes, up to both payloads known. */
 	sessionMs?: number;
 	/** From both payloads known to the channel being open. */
 	channelMs?: number;
@@ -54,24 +56,31 @@ export interface EngineOptions {
 	onDone(outcome: Outcome, timings: Timings): void;
 }
 
-const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+/** Our confirmation may still be on its way when the peer's arrives: the connection closes this much later. */
+const CLOSE_AFTER_CHANNEL_MS = 3_000;
+
 const short = (hash: string) => `${hash.slice(0, 10)}…`;
+const partyOf = (m: Party): Party => ({ userHash: m.userHash, contactPkey: m.contactPkey, nonce: m.nonce });
 
 export class HandshakeEngine {
 	private readonly o: Required<Omit<EngineOptions, 'claim' | 'onReadingDone'>> & Pick<EngineOptions, 'claim' | 'onReadingDone'>;
 	private stage: Stage = 'idle';
+	private ended = false;
 	private me!: Party;
 	private peer: Party | null = null;
 	private T: Uint8Array | null = null;
 	private mySig: Uint8Array | null = null;
 	private conn: ChannelAdapter | null = null;
+	private ownPayload!: Promise<Uint8Array>;
 	private myPayload: Uint8Array | null = null;
 	private peerPayload: Uint8Array | null = null;
-	private code: string | null = null;
+	/** Once both payloads are known: what the channel must carry, and the six digits. */
+	private confirmation: { M: Uint8Array; message: string; code: string } | null = null;
+	private link: ChannelLink | null = null;
 	private busy = false;
 	private started = 0;
 	private timings: Timings = {};
-	private timers: ReturnType<typeof setTimeout>[] = [];
+	private deadline: ReturnType<typeof setTimeout> | undefined;
 	private ignoredOwn = false;
 
 	constructor(options: EngineOptions) {
@@ -83,41 +92,36 @@ export class HandshakeEngine {
 	}
 
 	start(): void {
-		this.stop();
+		if (this.stage !== 'idle' || this.ended) throw new Error('An engine runs one session');
+		this.started = Date.now();
 		this.me = {
 			userHash: this.o.claim?.userHash ?? this.o.identity.userHash,
 			contactPkey: this.o.identity.contactPkey,
 			nonce: newNonce(),
 		};
-		this.peer = null;
-		this.T = null;
-		this.mySig = null;
-		this.conn = null;
-		this.myPayload = null;
-		this.peerPayload = null;
-		this.code = null;
-		this.busy = false;
-		this.ignoredOwn = false;
-		this.timings = {};
-		this.started = Date.now();
-		this.after(this.o.sessionMs, () => this.finish({ kind: 'expired', reason: `no handshake within ${this.o.sessionMs / 1000} s` }));
+		// The connection gathers its addresses while the codes are read, so C
+		// shows as soon as the peer is verified; gathering can take seconds.
+		this.conn = this.o.channel();
+		this.conn.onOpen((link) => this.channelOpen(link));
+		this.ownPayload = this.conn.payload();
+		this.ownPayload.catch(() => {}); // reported when C or D needs it
+		this.setDeadline(this.o.sessionMs, () => ({ kind: 'expired', reason: `no handshake within ${this.o.sessionMs / 1000} s` }));
 		this.log(`session started as ${short(this.me.userHash)}${this.o.claim ? ' (impersonating)' : ''}`);
 		this.show({ kind: 'A', ...this.me }, 'A');
 	}
 
+	/** Ends the session with no outcome. */
 	stop(): void {
-		for (const t of this.timers) clearTimeout(t);
-		this.timers = [];
+		this.ended = true;
+		clearTimeout(this.deadline);
 		this.conn?.close();
-		this.stage = 'idle';
 	}
 
 	/** A code the camera read. Codes read while the previous one is still being handled are dropped; the camera reads them again. */
 	async read(text: string): Promise<void> {
-		if (this.stage === 'idle' || this.stage === 'done' || this.busy) return;
+		if (this.stage === 'idle' || this.ended || this.busy) return;
 		const m = parse(text);
-		if (!m) return;
-		if (!this.acceptsFrom(m)) return;
+		if (!m || !this.acceptsFrom(m)) return;
 		this.busy = true;
 		try {
 			await this.handle(m);
@@ -135,119 +139,153 @@ export class HandshakeEngine {
 			this.ignoredOwn = true;
 			return false;
 		}
-		if (this.peer && (m.userHash !== this.peer.userHash || !same(m.contactPkey, this.peer.contactPkey) || !same(m.nonce, this.peer.nonce))) {
+		if (this.peer && (m.userHash !== this.peer.userHash || !equalBytes(m.contactPkey, this.peer.contactPkey) || !equalBytes(m.nonce, this.peer.nonce))) {
 			this.log(`ignored ${m.kind} from another session (${short(m.userHash)})`);
 			return false;
 		}
 		return true;
 	}
 
+	// Every await is followed by a check of `ended`: the session may have
+	// finished or been stopped meanwhile.
 	private async handle(m: Message): Promise<void> {
 		if (m.kind === 'A' && this.stage === 'A') {
 			this.bind(m);
-			this.mySig = await signOptical(this.T!, this.o.identity.contactSkey);
+			const sig = await this.signature();
+			if (this.ended) return;
 			this.mark('read A');
-			this.show({ kind: 'B', ...this.me, sig: this.mySig }, 'B');
-			return;
-		}
-		if (m.kind === 'B' && (this.stage === 'A' || this.stage === 'B')) {
-			if (!this.peer) this.bind(m);
-			if (!verifyOptical(m.sig, this.T!, this.peer!.contactPkey)) {
+			this.show({ kind: 'B', ...this.me, sig }, 'B');
+		} else if (m.kind === 'B' && (this.stage === 'A' || this.stage === 'B')) {
+			// Bound only once its signature verifies: a stale B, or one meant for
+			// another phone, must not take the session.
+			const peer = this.peer ?? partyOf(m);
+			if (!verifyOptical(m.sig, this.T ?? transcript(this.me, peer), peer.contactPkey)) {
 				this.log('B carries a signature that does not verify — staying');
 				return;
 			}
-			this.mark('optically verified');
-			this.log(`${short(this.peer!.userHash)} holds the key it showed (optical proof ok)`);
-			this.mySig ??= await signOptical(this.T!, this.o.identity.contactSkey);
-			this.conn = this.openChannel();
-			this.myPayload = await this.conn.payload();
-			this.show({ kind: 'C', sig: this.mySig, qwbp: this.myPayload }, 'C');
-			return;
-		}
-		if (m.kind === 'C' && (this.stage === 'B' || this.stage === 'C')) {
+			if (!this.peer) this.bind(peer);
+			this.opticallyVerified();
+			const [sig, payload] = await Promise.all([this.signature(), this.payload()]);
+			if (this.ended || !payload) return;
+			this.show({ kind: 'C', sig, qwbp: payload }, 'C');
+		} else if (m.kind === 'C' && (this.stage === 'B' || this.stage === 'C') && !this.peerPayload) {
 			if (!verifyOptical(m.sig, this.T!, this.peer!.contactPkey)) {
 				this.log('C carries a signature that does not verify — staying');
 				return;
 			}
-			this.peerPayload = m.qwbp;
 			if (this.stage === 'B') {
-				this.mark('optically verified');
-				this.log(`${short(this.peer!.userHash)} holds the key it showed (optical proof ok)`);
-				this.conn = this.openChannel();
-				this.myPayload = await this.conn.payload();
-				await this.conn.feed(this.peerPayload);
-				this.show({ kind: 'D', qwbp: this.myPayload }, 'D');
+				this.opticallyVerified();
+				const payload = await this.payload();
+				if (!payload || !(await this.feed(m.qwbp))) return;
+				this.show({ kind: 'D', qwbp: payload }, 'D');
 			} else {
 				// Both showed C: both hold both payloads, and QWBP picks the roles.
+				if (!(await this.feed(m.qwbp))) return;
 				this.log('both sides showed C at once — no D needed');
-				await this.conn!.feed(this.peerPayload);
 			}
 			this.payloadsKnown();
-			return;
-		}
-		if (m.kind === 'D' && this.stage === 'C') {
-			this.peerPayload = m.qwbp;
-			await this.conn!.feed(this.peerPayload);
-			this.payloadsKnown();
+		} else if (m.kind === 'D' && this.stage === 'C' && !this.peerPayload) {
+			if (await this.feed(m.qwbp)) this.payloadsKnown();
 		}
 	}
 
-	private bind(m: { userHash: string; contactPkey: Uint8Array; nonce: Uint8Array }): void {
-		this.peer = { userHash: m.userHash, contactPkey: m.contactPkey, nonce: m.nonce };
+	private bind(peer: Party): void {
+		this.peer = partyOf(peer);
 		this.T = transcript(this.me, this.peer);
-		this.log(`bound to ${short(m.userHash)}`);
+		this.log(`bound to ${short(peer.userHash)}`);
 	}
 
-	private openChannel(): ChannelAdapter {
-		const conn = this.o.channel();
-		conn.onOpen((link) => this.channelOpen(link));
-		return conn;
+	private async signature(): Promise<Uint8Array> {
+		this.mySig ??= await signOptical(this.T!, this.o.identity.contactSkey);
+		return this.mySig;
 	}
 
+	private opticallyVerified(): void {
+		this.mark('optically verified');
+		this.log(`${short(this.peer!.userHash)} holds the key it showed (optical proof ok)`);
+	}
+
+	/** Own payload, or null when the session is over — it ends here when the connection could not be set up. */
+	private async payload(): Promise<Uint8Array | null> {
+		try {
+			this.myPayload = await this.ownPayload;
+		} catch (e) {
+			const reason = `no channel: ${(e as Error).message}`;
+			this.log(reason);
+			this.finish({ kind: 'verified', peerHash: this.peer!.userHash, code: null, reason });
+		}
+		return this.ended ? null : this.myPayload;
+	}
+
+	/** Hands the peer's payload to the connection; false when the session ended meanwhile. */
+	private async feed(peerPayload: Uint8Array): Promise<boolean> {
+		await this.conn!.feed(peerPayload);
+		if (this.ended) return false;
+		this.peerPayload = peerPayload;
+		return true;
+	}
+
+	/** Both payloads fix M and the six digits: M is signed now, while the channel opens. */
 	private payloadsKnown(): void {
 		this.mark('payloads exchanged');
 		this.o.onReadingDone?.();
-		this.log('both bootstrap payloads known — waiting for the channel');
-		this.after(this.o.channelMs, () => {
-			if (this.stage === 'done') return;
-			this.finish({
-				kind: 'verified',
-				peerHash: this.peer!.userHash,
-				code: null,
-				reason: `no channel within ${this.o.channelMs / 1000} s — the phones may not reach each other (same Wi-Fi? try "STUN on")`,
-			});
-		});
+		const peer = this.peer!;
+		const fps = {
+			[this.me.userHash]: this.conn!.fingerprintOf(this.myPayload!),
+			[peer.userHash]: this.conn!.fingerprintOf(this.peerPayload!),
+		};
+		const M = pqMessage(this.T!, this.me.userHash, peer.userHash, fps);
+		const card = this.o.claim?.card ?? this.o.identity.card;
+		this.confirmation = {
+			M,
+			message: confirmMessage(card, signPq(M, this.o.identity.signSkey)),
+			code: comparisonCode(this.T!, this.me.userHash, peer.userHash, fps),
+		};
+		const fp = (hash: string) => `${bytesToHex(fps[hash]).slice(0, 8)}…`;
+		this.log(`both bootstrap payloads known (fingerprints ${fp(this.me.userHash)} / ${fp(peer.userHash)}) — waiting for the channel`);
+		if (this.link) {
+			this.sendConfirmation();
+			return;
+		}
+		const { code } = this.confirmation;
+		this.setDeadline(this.o.channelMs, () => ({
+			kind: 'verified',
+			peerHash: peer.userHash,
+			code,
+			reason: `no channel within ${this.o.channelMs / 1000} s — the phones may not reach each other (same Wi-Fi? try "STUN on")`,
+		}));
 	}
 
 	private channelOpen(link: ChannelLink): void {
-		if (this.stage === 'done' || !this.peer || !this.myPayload || !this.peerPayload) return;
+		if (this.ended || this.link) return;
+		this.link = link;
 		this.mark('channel open');
-		const fps = {
-			[this.me.userHash]: this.conn!.fingerprintOf(this.myPayload),
-			[this.peer.userHash]: this.conn!.fingerprintOf(this.peerPayload),
-		};
-		const M = pqMessage(this.T!, this.me.userHash, this.peer.userHash, fps);
-		this.code = comparisonCode(this.T!, this.me.userHash, this.peer.userHash, fps);
-		this.log(`channel open (fingerprints ${bytesToHex(fps[this.me.userHash]).slice(0, 8)}… / ${bytesToHex(fps[this.peer.userHash]).slice(0, 8)}…)`);
+		this.log('channel open');
+		if (this.confirmation) this.sendConfirmation();
+	}
 
-		link.onMessage((raw) => {
-			if (this.stage === 'done') return;
-			const verdict = checkConfirm(raw, this.peer!, M);
+	/** The channel is open and M is signed: send ours, and wait for theirs. */
+	private sendConfirmation(): void {
+		const { M, message, code } = this.confirmation!;
+		const peer = this.peer!;
+		this.link!.onMessage((raw) => {
+			if (this.ended) return;
+			const verdict = checkConfirm(raw, peer, M);
 			if (verdict.ok) {
 				this.log(`confirmed: ${verdict.card.name} — card valid, key certified, post-quantum signature ok`);
-				this.finish({ kind: 'confirmed', peerName: verdict.card.name, peerHash: this.peer!.userHash, code: this.code!, card: verdict.card });
+				this.finish({ kind: 'confirmed', peerName: verdict.card.name, peerHash: peer.userHash, code, card: verdict.card });
 			} else {
 				this.log(`not confirmed: ${verdict.reason}`);
-				this.finish({ kind: 'verified', peerHash: this.peer!.userHash, code: this.code, reason: verdict.reason });
+				this.finish({ kind: 'verified', peerHash: peer.userHash, code, reason: verdict.reason });
 			}
-			setTimeout(() => link.close(), 3_000);
 		});
-		const card = this.o.claim?.card ?? this.o.identity.card;
-		link.send(confirmMessage(card, signPq(M, this.o.identity.signSkey)));
-		this.after(this.o.confirmMs, () => {
-			if (this.stage === 'done') return;
-			this.finish({ kind: 'verified', peerHash: this.peer!.userHash, code: this.code, reason: 'the channel opened, but no confirmation came over it' });
-		});
+		this.setDeadline(this.o.confirmMs, () => ({
+			kind: 'verified',
+			peerHash: peer.userHash,
+			code,
+			reason: 'the channel opened, but no confirmation came over it',
+		}));
+		this.link!.send(message);
 	}
 
 	private show(m: Message, stage: Stage): void {
@@ -256,11 +294,14 @@ export class HandshakeEngine {
 	}
 
 	private finish(outcome: Outcome): void {
-		if (this.stage === 'done') return;
+		if (this.ended) return;
 		this.stage = 'done';
 		this.mark('done');
-		for (const t of this.timers) clearTimeout(t);
-		this.timers = [];
+		this.ended = true;
+		clearTimeout(this.deadline);
+		const conn = this.conn!;
+		if (this.link) setTimeout(() => conn.close(), CLOSE_AFTER_CHANNEL_MS);
+		else conn.close();
 		this.o.onDone(outcome, { ...this.timings });
 	}
 
@@ -268,11 +309,13 @@ export class HandshakeEngine {
 		this.timings[milestone] ??= Date.now() - this.started;
 	}
 
-	private after(ms: number, fn: () => void): void {
-		this.timers.push(setTimeout(fn, ms));
+	/** One deadline at a time: reading the codes, then the channel opening, then the confirmation. */
+	private setDeadline(ms: number, outcome: () => Outcome): void {
+		clearTimeout(this.deadline);
+		this.deadline = setTimeout(() => this.finish(outcome()), ms);
 	}
 
 	private log(line: string): void {
-		this.o.onLog(line);
+		if (!this.ended) this.o.onLog(line);
 	}
 }

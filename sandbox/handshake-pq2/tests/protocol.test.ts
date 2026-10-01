@@ -46,6 +46,16 @@ describe('messages', () => {
 		expect(parse(encode({ kind: 'C', sig: fill(63, 1), qwbp: fill(70, 1) }))).toBeNull();
 		expect(parse('https://example.com')).toBeNull();
 	});
+
+	it('refuses a field in anything but unpadded base64url', () => {
+		const a = encode({ kind: 'A', ...partyA, nonce: fill(16, 0xfb) });
+		const cut = a.lastIndexOf(':') + 1;
+		const [head, nonce] = [a.slice(0, cut), a.slice(cut)];
+		expect(nonce).toMatch(/-/);
+		for (const variant of [nonce.replaceAll('-', '+'), `${nonce}==`, ` ${nonce}`]) {
+			expect(parse(head + variant), variant).toBeNull();
+		}
+	});
 });
 
 describe('the transcript', () => {

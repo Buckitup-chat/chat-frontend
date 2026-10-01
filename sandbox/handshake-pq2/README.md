@@ -4,9 +4,11 @@ A standalone page that runs the optical handshake v2
 (`docs/task-handshake-pq2.md`) between two phones: QR codes through the
 front cameras, a transcript signature, a WebRTC channel bootstrapped by QWBP,
 a post-quantum confirmation over it, and the six digits both screens show.
-It is not the app: no account, no server, no contacts. Each phone makes its
-own test identity (ML-DSA-87 identity key, secp256k1 contact key, a
-self-signed card in the app's format) and keeps it in the browser.
+It is not the app: no account, no server, no contacts. Each phone makes a
+test identity when the page loads (ML-DSA-87 identity key, secp256k1
+contact key, a self-signed card made by the app's own code). Its keys stay
+in the page: a reload makes a new identity under the same name. The browser
+keeps only the settings and the card of the last phone confirmed.
 
 The protocol and the card check use the app's own crypto layer
 (`src/lib/pq`: card verification, signatures, HKDF), so a confirmation here
@@ -32,12 +34,17 @@ at the end.
 | # | Setup | Expected |
 |---|---|---|
 | 1 | Both on the same Wi-Fi, STUN off (default) | Both: ✅ Confirmed, the other phone's name, the **same six digits**, in about 2–4 s |
-| 2 | Both on mobile data, STUN off | Both: 🟡 "Key verified in person, not confirmed — no channel within 15 s" |
+| 2 | Both on mobile data, STUN off | Both: 🟡 "Key verified in person, not confirmed — no channel within 15 s", and the same six digits |
 | 3 | Both on mobile data, ⚙︎ → Channel: STUN on | Often ✅ (depends on the carriers' NAT); otherwise as in 2 |
-| 4 | Phone A confirms phone B (test 1). Then on a third phone, or on A after "New identity": ⚙︎ → Mode: Impostor. Phone C now shows B's identity with its own key | The honest phone: 🟡 "card does not certify the contact key the codes showed". Never ✅ |
-| 5 | Point a phone at a mirror | Nothing happens: its own code is ignored (see the log) |
-| 6 | Start a session and wait 90 s without scanning | ⌛ Session expired |
-| 7 | Laptop and phone: ⚙︎ → Camera: Back on the phone, or "Paste a code" / "Copy my code" to pass codes by hand | Same as 1, slower |
+| 4 | One phone in airplane mode | That phone: 🟡 "no channel: …" (it has no address to offer). The other: ⌛ Session expired after 90 s |
+| 5 | After test 1, reload phone B: it gets a new identity. On phone A: ⚙︎ → Mode: Impostor. A now shows B's old identity with A's own key, and sends B's old card | B: 🟡 "card does not certify the contact key the codes showed". Never ✅ |
+| 6 | Point a phone at a mirror | Nothing happens: its own code is ignored (see the log) |
+| 7 | Start a session and wait 90 s without scanning | ⌛ Session expired |
+| 8 | Laptop and phone: ⚙︎ → Camera: Back on the phone, or "Paste a code" / "Copy my code" to pass codes by hand | Same as 1, slower |
+
+In test 5, a phone that has confirmed nobody impersonates a stand-in
+identity instead. Without the reload, B would see its own identity and
+ignore the code.
 
 What to report: the result on each phone, whether the six digits matched,
 the "Timings" list, and — on failures — the log (long-press to copy, or a
@@ -52,6 +59,9 @@ other at all.
   so changing ICE servers means new codes, i.e. a new session.
 - No multi-frame codes: with no network path between the phones, the result
   is "verified in person, not confirmed", by design.
+- The QWBP connection is set up when the session starts, not after the
+  optical check (§5 step 3), so C shows without waiting for the address
+  gathering. Nothing of it is shown before C.
 
 ## Develop
 
