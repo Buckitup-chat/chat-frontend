@@ -120,17 +120,13 @@ import { web3Store } from '@/store/web3.store';
 
 import { userPQStore } from '@/store/userPQ.store';
 
-import { userStore } from '@/store/user.store';
-
-import { useLoader } from '@/composables/useLoader';
 
 
-import { computed, inject, ref, onMounted, nextTick } from 'vue';
+import { inject, ref, onMounted, nextTick } from 'vue';
 // import Account_Item from '@/components/Account_Item.vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 
 const $mitt = inject('$mitt');
-const $loader = useLoader();
 const $web3 = web3Store();
 // const $user = userStore();
 const $userPQ = userPQStore();

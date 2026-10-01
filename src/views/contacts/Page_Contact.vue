@@ -77,11 +77,9 @@
 import { userPQStore } from '@/store/userPQ.store';
 
 
-import { ref, onMounted, watch, inject, computed, nextTick } from 'vue';
+import { onMounted, inject, computed } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
-import errorMessage from '@/utils/errorMessage';
-import dayjs from 'dayjs';
 
 const $userPQ = userPQStore();
 const $swal = inject('$swal');
@@ -89,7 +87,6 @@ const $route = inject('$route');
 const $router = inject('$router');
 const $swalModal = inject('$swalModal');
 const $mitt = inject('$mitt');
-const $enigma = inject('$enigma');
 
 onMounted(async () => {
 	if (!contact.value) {

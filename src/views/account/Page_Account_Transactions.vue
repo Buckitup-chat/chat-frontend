@@ -47,13 +47,12 @@ import { userStore } from '@/store/user.store';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import Transactions from './Transactions.vue';
 import Offline_Reminder from '../../components/Offline_Reminder.vue';
-import { ref, onMounted, watch, inject, computed, onUnmounted } from 'vue';
+import { ref, onMounted, watch, inject, onUnmounted } from 'vue';
 import axios from 'axios';
 
 const $user = userStore();
 const $userPQ = userPQStore();
 
-const $mitt = inject('$mitt');
 const $web3 = web3Store();
 const $socket = inject('$socket');
 

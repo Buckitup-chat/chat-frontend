@@ -146,7 +146,7 @@
 
 <script>
 import axios from 'axios';
-import { generateKeypair, convertPrivateKeyToHex, base64ToArray, arrayToBase64, signDigest } from '@/libs/enigma.js';
+import { generateKeypair, convertPrivateKeyToHex, base64ToArray, signDigest } from '@/libs/enigma.js';
 
 export default {
   name: 'StorageApiClient',
@@ -442,7 +442,7 @@ export default {
         const url = `/storage-api/put?pub_key=${this.publicKeyHex}&token_key=${operationTokenKey}&signature=${operationSignature}`;
         
         // Send the request with proper headers
-        const response = await axios.post(url, payload, {
+        await axios.post(url, payload, {
           headers: {
             'Content-Type': 'application/json'
           }

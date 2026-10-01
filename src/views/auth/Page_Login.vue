@@ -230,11 +230,10 @@ const sharesRestoreAvailable = isModalAvailable('account_restore_shares');
 
 import { userStore } from '@/store/user.store';
 
-import { useLoader } from '@/composables/useLoader';
 
 
 import Account_Selector from '@/components/Account_Selector.vue';
-import { inject, ref, onMounted, onUnmounted, computed, nextTick } from 'vue';
+import { inject, ref, onMounted, onUnmounted } from 'vue';
 import * as $enigma from '@/libs/enigma';
 
 const $mitt = inject('$mitt');

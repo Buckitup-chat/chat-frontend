@@ -10,21 +10,11 @@
 </style>
 
 <script setup>
-import { ref, onMounted, watch, inject, computed } from 'vue';
+import { ref, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 
-const $user = inject('$user');
-const $web3 = inject('$web3');
-const $swal = inject('$swal');
 const $route = useRoute();
-const $loader = inject('$loader');
-
-// Optionally use existing computations
-const contact = computed(() => {
-    if (!$user || !$user.contacts) return null;
-    return $user.contacts.find((e) => e.address === $route.params.address);
-});
 
 // Mock room info
 const roomName = computed(() => {

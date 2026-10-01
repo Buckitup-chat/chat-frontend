@@ -21,7 +21,7 @@
 </style>
 
 <script setup>
-const { title, content, html } = defineProps({
+const { title, content } = defineProps({
 	title: { type: String, required: true },
 	content: { type: String, required: true },
 });

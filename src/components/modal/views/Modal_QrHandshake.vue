@@ -144,7 +144,7 @@ const $mitt = inject('$mitt');
 const $router = inject('$router');
 const $swal = inject('$swal');
 const $loader = useLoader();
-const { isOpen: $menuOpened, close: closeMenu } = useMenu();
+const { close: closeMenu } = useMenu();
 
 const scannerEngineRef = ref(null);
 

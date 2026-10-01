@@ -17,7 +17,7 @@
 </style>
 
 <script setup>
-import { ref, defineAsyncComponent, onMounted, inject, shallowRef, computed } from 'vue';
+import { ref, defineAsyncComponent, onMounted, inject, shallowRef } from 'vue';
 import { Modal } from 'bootstrap';
 
 const modalSizes = ['modal-sm', 'modal-lg', 'modal-xl'];

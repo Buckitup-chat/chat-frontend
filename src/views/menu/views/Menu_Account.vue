@@ -77,7 +77,7 @@ import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 import { inject } from 'vue';
 import { useInstallPrompt } from '@/composables/useInstallPrompt';
 
-const { isOpen: $menuOpened, close: closeMenu } = useMenu();
+const { close: closeMenu } = useMenu();
 const $swal = inject('$swal');
 const { canPrompt, needsManualInstall, install } = useInstallPrompt();
 

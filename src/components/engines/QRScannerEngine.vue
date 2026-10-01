@@ -13,9 +13,10 @@
 
 <script setup>
 import { userPQStore } from '@/store/userPQ.store';
+import { verifiedCards } from '@/lib/data/userCardsLink';
 
 
-import { ref, reactive, inject, onMounted, onBeforeUnmount } from 'vue';
+import { ref, reactive, onMounted, onBeforeUnmount } from 'vue';
 import QRCode from 'qrcode';
 import QrScanner from 'qr-scanner';
 import { randomBytes } from '@noble/post-quantum/utils.js';
@@ -216,7 +217,7 @@ const setupDataChannelListener = () => {
 					// We received the card. Add to allNetworkUsers
 					const card = msg.card;
 					const exists = $userPQ.allNetworkUsers.some(u => u.user_hash === card.user_hash);
-					if (!exists) {
+					if (!exists && verifiedCards([card]).length) {
 						$userPQ.allNetworkUsers.push(card);
 					}
 					finishHandshake();

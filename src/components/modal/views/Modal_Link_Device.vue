@@ -173,11 +173,16 @@ const finish = async () => {
 			return;
 		}
 
-		await $userPQ.importBackup({ identity: backup.identity, keys: backup.keys });
+		const result = await $userPQ.importBackup({ identity: backup.identity, keys: backup.keys });
 		send(signCommand(session.value, { kind: 'done' }));
 		teardown();
 		$mitt.emit('account::created');
 		$mitt.emit('modal::close');
+		if (result.status === 'card-deferred') {
+			// Restored, but not signed in: its card is published at the next sign-in.
+			$swal.fire({ icon: 'info', title: 'Device linked', text: 'Its profile card could not be published right now. Sign in to the account to publish it.' });
+			return;
+		}
 		$router.replace({ name: 'account_info' });
 		$swal.fire({ icon: 'success', title: 'Device linked', timer: 4000 });
 	} catch (e) {

@@ -156,7 +156,6 @@ import { useBreakpoint } from '@/composables/useBreakpoint';
 
 import { useMenu } from '@/composables/useMenu';
 
-import { inject } from 'vue';
 
 const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
 const { blockClass } = defineProps({
