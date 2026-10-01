@@ -248,7 +248,7 @@ async function upsertStorageEditLive(
 	if (result.kind === 'already-claimed') {
 		return { row: projected, sync: Promise.resolve({ status: 'syncing' as const }) };
 	}
-	if (result.kind === 'base-unavailable') {
+	if (result.kind === 'base-unavailable' || result.kind === 'awaiting-unlock') {
 		assertSessionUnchanged(token, 'upsertStorageEditLive:beforeAwaitingRecoveryBaseUnavailable');
 		await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'awaiting-recovery', syncError: result.message } satisfies LocalStorageEntry, userHash);
 		return { row: projected, sync: Promise.resolve({ status: 'awaiting-recovery' as const, error: result.message }) };

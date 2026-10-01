@@ -1,4 +1,5 @@
 import { getUserStorageCollection } from './collections';
+import { settled } from './shapeLink';
 import type { UserStorageRow } from './types';
 
 /**
@@ -27,4 +28,12 @@ export async function getServerState(userHash: string, uuid: string): Promise<Se
 	if (!row) return { state: 'absent' };
 	// Tombstones included on purpose: the row exists, so a write is an update
 	return { state: 'found', row };
+}
+
+export async function getLiveServerState(userHash: string, uuid: string): Promise<ServerLookup> {
+	const coll = getUserStorageCollection(userHash);
+	const shape = await settled(coll as unknown as Parameters<typeof settled>[0]);
+	if (shape.state !== 'live') return { state: 'unavailable', error: shape.error };
+	const row = coll.get(entityKeyFor(userHash, uuid)) as UserStorageRow | undefined;
+	return row ? { state: 'found', row } : { state: 'absent' };
 }

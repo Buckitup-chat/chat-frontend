@@ -8,6 +8,7 @@ let vaults;
 let rawStore;
 let refuseTombstones; // the server rejecting deletions, as it may any write
 let onRowWritten;     // hook run after each write; a test switches accounts from it
+let cards = new Map();
 
 const makeVault = (id) => {
 	const data = new Map();
@@ -29,7 +30,7 @@ vi.mock('@lo-fi/local-vault/adapter/idb', () => ({}));
 vi.mock('@lo-fi/local-data-lock', () => ({ removeLocalAccount: async () => {} }));
 vi.mock('@/lib/data/collections', () => ({
 	resetUserStorageCollection: () => {},
-	getUserCardsCollection: () => ({ async preload() {}, get: () => undefined, get toArray() { return []; } }),
+	getUserCardsCollection: () => ({ async preload() {}, get: (k) => cards.get(k), get toArray() { return [...cards.values()]; } }),
 }));
 const kv = new Map();
 vi.mock('@/lib/data/localStore', () => ({
@@ -38,8 +39,18 @@ vi.mock('@/lib/data/localStore', () => ({
 	kvDelete: async (k) => { kv.delete(k); },
 }));
 vi.mock('@/lib/data/ingest', () => ({
-	sendMutationsAndAwaitShape: async () => ({ outboxId: 'test-outbox-id', phase: 'accepted', result: { ok: true }, acceptance: Promise.resolve({ kind: 'accepted' }) }),
+	DurabilityError: class DurabilityError extends Error {},
+	IngestError: class IngestError extends Error {},
+	sendMutationsAndAwaitShape: async (mutations) => {
+		for (const m of mutations) {
+			const row = m.modified ?? m.changes;
+			if (m.syncMetadata?.relation === 'user_cards') cards.set(row.user_hash, row);
+		}
+		return { outboxId: 'test-outbox-id', phase: 'accepted', result: { ok: true }, acceptance: Promise.resolve({ kind: 'accepted' }) };
+	},
+	deliverStoredWrite: async () => ({ kind: 'accepted' }),
 	drainPendingWrites: async () => {},
+	resumePendingWrites: () => {},
 	stopDrainLoop: () => {},
 }));
 vi.mock('@/lib/data/userStorage', () => ({
@@ -68,6 +79,27 @@ async function landJsonPatch({ uuid, jsonPatch }) {
 }
 
 const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
+const { _setIntentStorageForTests } = await import('@/lib/data/intents');
+const { _setStorageForTests: setOutboxStorage } = await import('@/lib/data/outbox');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
+
+const memoryStore = () => {
+	const map = new Map();
+	return {
+		async get(k) { return map.get(k) ?? null; },
+		async set(k, v) { map.set(k, v); },
+		async delete(k) { map.delete(k); },
+		async keys() { return [...map.keys()]; },
+		async clear() { map.clear(); },
+	};
+};
+
+beforeEach(() => {
+	cards = new Map();
+	_setIntentStorageForTests(memoryStore());
+	setOutboxStorage(memoryStore());
+	_setAcceptedSnapshotStorageForTests(memoryStore());
+});
 
 const login = async () => {
 	const em = new EncryptionManagerPQ();

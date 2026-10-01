@@ -43,9 +43,12 @@ describe('user_storage shape scope', () => {
 		expect(() => getUserStorageCollection('not-a-hash')).toThrow(/Invalid user_hash/);
 	});
 
-	it('rebuilds for a different account and drops the old scope on reset', async () => {
+	it('rebuilds for a different account only after a reset, and drops the old scope on reset', async () => {
 		const { getUserStorageCollection, resetUserStorageCollection } = await import('@/lib/data/collections');
+		const { AccountMismatchError } = await import('@/lib/data/keyCustody');
 		getUserStorageCollection(MINE);
+		expect(() => getUserStorageCollection(OTHER)).toThrow(AccountMismatchError);
+		resetUserStorageCollection();
 		getUserStorageCollection(OTHER);
 		const wheres = captured
 			.filter((o) => o.shapeOptions?.params?.table === 'user_storage')

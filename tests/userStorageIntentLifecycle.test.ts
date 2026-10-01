@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { makeTestIdentity, signedStorageRow } from './helpers/signedFixtures';
 
-const USER = 'u_' + 'a'.repeat(128);
+const ME = makeTestIdentity(14, 'me');
+const USER = ME.userHash;
 const OTHER_HASH = 'u_' + 'b'.repeat(128);
 const SLOT = '85da8ea0-5bc8-856e-83e7-db7b542a1a58';
 const signSkey = new Uint8Array(32).fill(7);
@@ -22,8 +24,10 @@ const collectionFor = (userHash: string) => {
 	}
 	return c;
 };
+const cards = new Map<string, unknown>([[USER, ME.card]]);
 vi.mock('@/lib/data/collections', () => ({
 	getUserStorageCollection: (userHash: string) => collectionFor(userHash),
+	getUserCardsCollection: () => ({ preload: async () => {}, get: (k: string) => cards.get(k) }),
 }));
 
 let signCallCount = 0;
@@ -145,7 +149,7 @@ describe('recovery resumes the exact durable intent after a key/base becomes ava
 
 		expect(api.createStorageMutation).toHaveBeenCalledTimes(1);
 		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('insert');
-		expect(sent).toHaveLength(1);
+		await vi.waitFor(() => expect(sent).toHaveLength(1));
 		expect((await intentsOf(USER)).entries).toHaveLength(0);
 
 		await recoverIntents(USER, signSkey, { materializeStorage: materializeStorageIntent });
@@ -161,16 +165,14 @@ describe('recovery resumes the exact durable intent after a key/base becomes ava
 		);
 		expect(id).toBeTruthy();
 
-		collectionFor(USER).rows.set(`${USER}|${SLOT}`, {
-			user_hash: USER, uuid: SLOT, value_b64: 'other-device', deleted_flag: false,
-			parent_sign_hash: null, sign_hash: 'uss_' + 'e'.repeat(128), owner_timestamp: 500, sign_b64: 'sig',
-		});
+		const otherDevice = signedStorageRow(ME, { uuid: SLOT, value_b64: 'other-device', owner_timestamp: 500 });
+		collectionFor(USER).rows.set(`${USER}|${SLOT}`, otherDevice);
 
 		await recoverIntents(USER, signSkey, { materializeStorage: materializeStorageIntent });
 
 		const call = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0];
 		expect(call?.at(-1)).toBe('update');
-		expect(call?.[9]).toBe('uss_' + 'e'.repeat(128));
+		expect(call?.[9]).toBe(otherDevice.sign_hash);
 	});
 
 	it('does not touch a durable intent belonging to a different account', async () => {
@@ -183,7 +185,7 @@ describe('recovery resumes the exact durable intent after a key/base becomes ava
 
 		await recoverIntents(USER, signSkey, { materializeStorage: materializeStorageIntent });
 
-		expect(sent).toHaveLength(1);
+		await vi.waitFor(() => expect(sent).toHaveLength(1));
 		expect((await intentsOf(OTHER_HASH)).entries).toHaveLength(1);
 	});
 

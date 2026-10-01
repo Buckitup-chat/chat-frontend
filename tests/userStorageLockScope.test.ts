@@ -33,6 +33,7 @@ vi.mock('@/api/client', () => ({
 			return {
 				type: mutationType,
 				[mutationType === 'insert' ? 'modified' : 'changes']: row,
+				...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
 				syncMetadata: { relation: 'user_storage' },
 			};
 		}),
