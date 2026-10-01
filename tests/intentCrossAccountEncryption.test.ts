@@ -74,7 +74,9 @@ describe('enqueueIntent: pinned encryption survives an account switch mid-write 
 		const secondId = await enqueueIntent({ text: 'second, claims to be A but ambient is B' }, A, 'dialog_messages');
 
 		expect(secondId).toBeNull();
-		expect(raw.map.size).toBe(1); // only the first (genuinely-under-A) write exists
+		const keys = [...raw.map.keys()];
+		expect(keys.filter((k) => !k.startsWith('owner|'))).toHaveLength(1); // only the first (genuinely-under-A) write exists
+		expect(keys.filter((k) => k.startsWith('owner|'))).toEqual([`owner|${firstId}`]); // and only its owner record
 	});
 
 	it('A can read its own durable intent back after a logout/relogin (key re-derived, same result)', async () => {

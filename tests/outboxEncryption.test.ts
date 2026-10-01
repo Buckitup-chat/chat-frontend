@@ -39,6 +39,8 @@ const mutation = () => ({
 
 let raw: ReturnType<typeof makeRaw>;
 
+const entryKeys = () => [...raw.map.keys()].filter((k) => !k.startsWith('owner|') && !k.startsWith('quarantine|'));
+
 /** Install the encrypted queue for one account over the shared raw store. */
 const useAccount = async (seed: number) => {
 	const key = await deriveLocalStorageKey(new Uint8Array(32).fill(seed));
@@ -82,7 +84,7 @@ describe('encrypted outbox', () => {
 	it('never deletes or returns another account\'s entries', async () => {
 		await useAccount(2);
 		await enqueue([mutation()], USER_B);
-		expect(raw.map.size).toBe(1);
+		expect(entryKeys().length).toBe(1);
 
 		await useAccount(1);
 		await enqueue([mutation()], USER_A);
@@ -92,7 +94,7 @@ describe('encrypted outbox', () => {
 		expect(mine[0].userHash).toBe(USER_A);
 
 		// B's record is untouched, and still B's when B comes back.
-		expect(raw.map.size).toBe(2);
+		expect(entryKeys().length).toBe(2);
 		await useAccount(2);
 		const theirs = await pendingEntries(USER_B);
 		expect(theirs).toHaveLength(1);
@@ -109,16 +111,17 @@ describe('encrypted outbox', () => {
 
 		expect(sent).toHaveLength(0);
 		expect(result.sent).toBe(0);
-		expect(raw.map.size).toBe(1);
+		expect(entryKeys().length).toBe(1);
 	});
 
-	it('deletes a record that decrypts but is not a valid entry', async () => {
+	it('retains a record that decrypts but is not a valid entry, instead of deleting it', async () => {
 		await useAccount(1);
 		const key = await deriveLocalStorageKey(new Uint8Array(32).fill(1));
 		await createSecureStore(raw, { getKey: async () => key }).set('bad', 'not json');
+		const ciphertext = raw.map.get('bad');
 
 		expect(await pendingEntries(USER_A)).toHaveLength(0);
-		expect(raw.map.has('bad')).toBe(false);
+		expect(raw.map.get('bad')).toBe(ciphertext);
 	});
 });
 
@@ -192,7 +195,7 @@ describe('migration of pre-encryption entries', () => {
 		const second = await drainOutbox(USER_A, async (m) => { sent.push(m); });
 		expect(second.sent).toBe(0);
 		expect(sent).toHaveLength(1);
-		expect(raw.map.size).toBe(1);
+		expect(entryKeys().length).toBe(1);
 		expect(await pendingEntries(USER_A)).toHaveLength(0);
 	});
 });

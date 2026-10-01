@@ -79,14 +79,17 @@ let store: StringStore = createSecureStore(backing, {
  * migrate from.
  */
 let migrateLegacy = true;
+let unencryptedForTests = false;
 export function _setStoreForTests(replacement: StringStore): void {
 	store = replacement;
 	migrateLegacy = false;
+	unencryptedForTests = true; // owner-pinned writes land in it too, as they would sealed
 }
 
 export function _setRawStoreForTests(adapter: StringStore): void {
 	backing = adapter;
 	migrateLegacy = false;
+	unencryptedForTests = false;
 	store = createSecureStore(backing, {
 		getKey: ambientGetKey,
 		hashKeys: true,
@@ -95,7 +98,7 @@ export function _setRawStoreForTests(adapter: StringStore): void {
 }
 
 function pinnedStore(ownerHash?: string): StringStore {
-	if (!ownerHash) return store;
+	if (!ownerHash || unencryptedForTests) return store;
 	return createSecureStore(backing, {
 		getKey: async () => (await import('./localCrypto')).getLocalStorageKeyFor(ownerHash),
 		hashKeys: true,

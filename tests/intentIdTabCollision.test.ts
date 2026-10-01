@@ -36,7 +36,8 @@ describe('intents.ts: durable ids do not collide across tabs (§F-L09)', () => {
 		expect(id2).not.toBeNull();
 		expect(id1).not.toBe(id2);
 
-		expect(sharedMap.size).toBe(2);
+		expect([...sharedMap.keys()].filter((k) => !k.startsWith('owner|'))).toHaveLength(2);
+		expect([...sharedMap.keys()].filter((k) => k.startsWith('owner|')).sort()).toEqual([`owner|${id1}`, `owner|${id2}`].sort());
 		const entry1 = JSON.parse(sharedMap.get(id1!)!);
 		const entry2 = JSON.parse(sharedMap.get(id2!)!);
 		expect(entry1.intent.row.text).toBe('from tab 1');

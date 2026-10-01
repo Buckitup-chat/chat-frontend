@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { dispatchMutations } from '@/lib/data/coordinator';
+import { reconcileAccepted } from '@/lib/data/coordinator';
 import { startLeaderElection, stopLeaderElection, _setStorageForTests } from '@/lib/data/outbox';
 import {
 	getAccepted, getAllAcceptedForRelation, recordAccepted,
@@ -38,6 +38,8 @@ const makeStorage = () => {
 	};
 };
 
+const reconcileAsSender = (mutations: unknown[]) => reconcileAccepted(mutations, { txids: [1], results: [] }).catch(() => {});
+
 const message = (id: string, senderHash: string) => ([{
 	type: 'insert',
 	modified: { message_id: id, sender_hash: senderHash, content_b64: 'x' },
@@ -53,7 +55,7 @@ afterEach(() => {
 	stopLeaderElection();
 });
 
-describe('dispatchMutations: accepted-snapshot recording only ever persists under its own row-owner\'s currently-unlocked account (§F-L05)', () => {
+describe('post-acceptance reconciliation: accepted-snapshot recording only ever persists under its own row-owner\'s currently-unlocked account (§F-L05)', () => {
 	beforeEach(() => {
 		const map = new Map<string, string>();
 		_setRawAcceptedSnapshotStorageForTests({
@@ -72,7 +74,7 @@ describe('dispatchMutations: accepted-snapshot recording only ever persists unde
 	it('does not record a late-arriving send whose owner is not unlocked at all (e.g. logged out before it settled)', async () => {
 		ambientUserHash = null;
 
-		await dispatchMutations(message('dmsg_1', A), async () => ({ txids: [1], results: [] }));
+		await reconcileAsSender(message('dmsg_1', A));
 
 		expect(await getAccepted('dialog_messages', 'dmsg_1', A)).toBeNull();
 	});
@@ -80,7 +82,7 @@ describe('dispatchMutations: accepted-snapshot recording only ever persists unde
 	it('does not record a send belonging to a DIFFERENT account than the one now unlocked', async () => {
 		ambientUserHash = B;
 
-		await dispatchMutations(message('dmsg_2', A), async () => ({ txids: [1], results: [] }));
+		await reconcileAsSender(message('dmsg_2', A));
 
 		expect(await getAccepted('dialog_messages', 'dmsg_2', A)).toBeNull();
 	});
@@ -88,7 +90,7 @@ describe('dispatchMutations: accepted-snapshot recording only ever persists unde
 	it('still records normally when the owner matches the currently-unlocked account', async () => {
 		ambientUserHash = A;
 
-		await dispatchMutations(message('dmsg_3', A), async () => ({ txids: [1], results: [] }));
+		await reconcileAsSender(message('dmsg_3', A));
 
 		expect(await getAccepted('dialog_messages', 'dmsg_3', A)).not.toBeNull();
 	});

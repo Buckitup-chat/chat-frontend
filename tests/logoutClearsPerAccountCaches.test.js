@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { _setReadCacheStorageForTests, _resetTouchedForTests, setCachedRow, getCachedRow, markTouched, isTouched } from '@/lib/data/readCache';
+import { _resetTouchedForTests, markTouched, isTouched } from '@/lib/data/readCache';
+import { _setDialogCacheStoreForTests, readDialogRows } from '@/lib/data/dialogCache';
+import { memoryDialogCacheStore } from './helpers/mainDialogCache';
 import { _setAcceptedSnapshotStorageForTests, recordAccepted, getAccepted } from '@/lib/data/acceptedSnapshot';
+import { _setIntentStorageForTests } from '@/lib/data/intents';
 
 let vaults;
 let rawStore;
+let dialogCache;
 
 const makeVault = (id) => {
 	const data = new Map();
@@ -57,12 +61,17 @@ const freshManager = () => {
 };
 
 const ACCOUNT = 'u_' + 'a'.repeat(128);
+const DIALOG = 'di_' + '1'.repeat(128);
 const signedInManager = async () => {
 	const vault = makeVault('vault-a');
 	await vault.set('sign_skey', new Uint8Array(32).fill(1));
 	await vault.set('crypt_skey', new Uint8Array(32).fill(2));
 	vaults.set('vault-a', vault);
 	await rawStore.set('pq-vaults-registry', [{ user_hash: ACCOUNT, vaultId: 'vault-a', name: 'A' }]);
+	await recordAccepted('user_cards', ACCOUNT, {
+		user_hash: ACCOUNT, sign_pkey: 'c2lnbg==', contact_pkey: 'Y29udGFjdA==', contact_cert: 'Y2VydA==',
+		crypt_pkey: 'Y3J5cHQ=', crypt_cert: 'Y2VydA==', name: 'A', deleted_flag: false, owner_timestamp: 1, sign_b64: 'c2ln',
+	}, ACCOUNT);
 	const em = freshManager();
 	await em.login(ACCOUNT);
 	return em;
@@ -76,48 +85,43 @@ beforeEach(() => {
 		async set(k, v) { store.set(k, v); },
 		async remove(k) { store.delete(k); },
 	};
-	_setReadCacheStorageForTests(makeStorage());
+	dialogCache = memoryDialogCacheStore();
+	_setDialogCacheStoreForTests(dialogCache);
 	_resetTouchedForTests();
 	_setAcceptedSnapshotStorageForTests(makeStorage());
+	_setIntentStorageForTests(makeStorage());
 });
 
 describe('EncryptionManagerPQ.logout(): per-account disk caches (§8.4)', () => {
 	it('logging out the active account wipes its account-scoped read-cache but leaves the durable accepted-snapshot base intact', async () => {
 		await recordAccepted('dialog_messages', 'dmsg_1', { message_id: 'dmsg_1', owner_timestamp: 1 });
-		await setCachedRow('dialog_messages', 'dmsg_1', { message_id: 'dmsg_1', dialog_hash: 'di_' + '1'.repeat(128) });
-		await setCachedRow('user_storage', 'slot_1', { user_hash: 'u_' + '1'.repeat(128), uuid: 'slot_1' });
 
 		const em = await signedInManager();
+		await dialogCache.seed('dialog_messages', { message_id: 'dmsg_1', dialog_hash: DIALOG });
 		await em.logout();
 
 		expect(await getAccepted('dialog_messages', 'dmsg_1')).not.toBeNull();
-		expect(await getCachedRow('dialog_messages', 'dmsg_1')).toBeNull();
-		expect(await getCachedRow('user_storage', 'slot_1')).toBeNull();
+		expect(await readDialogRows('dialog_messages', DIALOG)).toEqual([]);
 	});
 
 	it('keeps the public user_cards directory: same rows for every account, and the offline users list after a reload', async () => {
-		const card = { user_hash: 'u_' + '1'.repeat(128) };
-		await setCachedRow('user_cards', card.user_hash, card);
 		markTouched('user_cards', 'u_' + '2'.repeat(128));
 		markTouched('dialog_messages', 'dmsg_2');
 
 		const em = await signedInManager();
 		await em.logout();
 
-		expect(await getCachedRow('user_cards', card.user_hash)).toEqual(card);
 		expect(isTouched('user_cards', 'u_' + '2'.repeat(128))).toBe(true);
 		expect(isTouched('dialog_messages', 'dmsg_2')).toBe(false);
 	});
 
 	it('a logout with no active account (cold reload → sign-in) erases nothing', async () => {
-		await setCachedRow('dialog_messages', 'dmsg_1', { message_id: 'dmsg_1', dialog_hash: 'di_' + '1'.repeat(128) });
-		await setCachedRow('user_storage', 'slot_1', { user_hash: 'u_' + '1'.repeat(128), uuid: 'slot_1' });
+		await dialogCache.seed('dialog_messages', { message_id: 'dmsg_1', dialog_hash: DIALOG });
 
 		const em = freshManager();
 		expect(em.isAuth).toBeFalsy();
 		await em.logout();
 
-		expect(await getCachedRow('dialog_messages', 'dmsg_1')).not.toBeNull();
-		expect(await getCachedRow('user_storage', 'slot_1')).not.toBeNull();
+		expect(await readDialogRows('dialog_messages', DIALOG)).toHaveLength(1);
 	});
 });
