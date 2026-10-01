@@ -42,7 +42,6 @@ vi.mock('@/api/client', () => ({
 }));
 
 const { sendMutationsAndAwaitShape, sendMutationsWithRetry } = await import('@/lib/data/ingest');
-const { dispatchMutations, AlreadyDispatchingError } = await import('@/lib/data/coordinator');
 const {
 	enqueue, drainOutbox, pendingEntries, quarantinedEntries,
 	tryClaimOutboxEntry, releaseOutboxEntry,
@@ -50,6 +49,7 @@ const {
 	_setStorageForTests, _setLeaderForTests, _clearInFlightForTests,
 } = await import('@/lib/data/outbox');
 const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
+const { _setOwnObservedTailsStorageForTests, recordOwnObservedTails } = await import('@/lib/data/ownObservedTails');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -90,6 +90,7 @@ beforeEach(() => {
 	storage = makeStorage();
 	_setStorageForTests(storage);
 	_setAcceptedSnapshotStorageForTests(makeStorage());
+	_setOwnObservedTailsStorageForTests(makeStorage());
 	_setLeaderForTests(true);
 	startLeaderElection(MY_HASH, () => {});
 	_clearInFlightForTests();
@@ -104,7 +105,7 @@ afterEach(() => {
 
 describe('live send owns the entry first', () => {
 	it('a concurrently woken drain does not send it again', async () => {
-		const handlePromise = sendMutationsAndAwaitShape(message('m1', 'hello'), SKEY, { retries: 0 });
+		const handlePromise = sendMutationsAndAwaitShape(message('m1', 'hello'), SKEY);
 		await vi.waitFor(() => expect(callCount).toBe(1));
 
 		const drainResult = await drainOutbox(MY_HASH, drainSend);
@@ -120,22 +121,21 @@ describe('live send owns the entry first', () => {
 });
 
 describe('drain owns the entry first', () => {
-	it('the live path falls back to the queued/observed semantic instead of a duplicate send or a thrown surprise', async () => {
+	it('the live caller gets the outcome of the attempt the drain is already making — no duplicate send, no thrown surprise', async () => {
 		let drainPromise: ReturnType<typeof drainOutbox> | null = null;
 
 		const handlePromise = sendMutationsAndAwaitShape(message('m2', 'hello'), SKEY, {
-			retries: 0,
 			onDurable: async () => {
 				drainPromise = drainOutbox(MY_HASH, drainSend);
 				await vi.waitFor(() => expect(callCount).toBe(1));
 			},
 		});
+		await vi.waitFor(() => expect(gates).toHaveLength(1));
+		gates[0].resolve();
 
 		const handle = await handlePromise;
-		expect(handle.phase).toBe('queued');
+		expect(handle.phase).toBe('accepted');
 		expect(callCount).toBe(1);
-
-		gates[0].resolve();
 		await drainPromise!;
 		await expect(handle.acceptance).resolves.toEqual({ kind: 'accepted' });
 	});
@@ -144,8 +144,9 @@ describe('drain owns the entry first', () => {
 describe('ownership releases on failure', () => {
 	it('a transient live-dispatch failure releases the claim; the entry can be claimed and sent again next time', async () => {
 		mode = 'fail-transient';
-		await expect(sendMutationsAndAwaitShape(message('m3', 'x'), SKEY, { retries: 0 })).rejects.toThrow();
-		expect(callCount).toBe(1);
+		await expect(sendMutationsAndAwaitShape(message('m3', 'x'), SKEY)).rejects.toThrow();
+		const failedCalls = callCount;
+		expect(failedCalls).toBeGreaterThanOrEqual(1);
 
 		const [entry] = await pendingEntries(MY_HASH);
 		await forceEntryDue(entry.id);
@@ -153,12 +154,12 @@ describe('ownership releases on failure', () => {
 		const result = await drainOutbox(MY_HASH, drainSend);
 
 		expect(result.sent).toBe(1);
-		expect(callCount).toBe(2);
+		expect(callCount).toBe(failedCalls + 1);
 	});
 
 	it('a permanent live-dispatch rejection releases the claim; the entry is quarantined, not stuck claimed', async () => {
 		mode = 'fail-permanent';
-		await expect(sendMutationsAndAwaitShape(message('m3b', 'x'), SKEY, { retries: 0 })).rejects.toThrow();
+		await expect(sendMutationsAndAwaitShape(message('m3b', 'x'), SKEY)).rejects.toThrow();
 
 		const [entry] = await quarantinedEntries(MY_HASH);
 		expect(entry).toBeTruthy();
@@ -167,45 +168,18 @@ describe('ownership releases on failure', () => {
 	});
 });
 
-describe('dispatchMutations: the claim/release mechanism itself', () => {
-	it('releases the claim even when send throws before any normal completion handling', async () => {
-		const id = 'unit-test-entry-throw';
-		const boom = new Error('boom');
-		await expect(dispatchMutations([], async () => { throw boom; }, id)).rejects.toThrow('boom');
-		expect(tryClaimOutboxEntry(id)).toBe(true);
-		releaseOutboxEntry(id);
-	});
-
-	it('throws AlreadyDispatchingError, without calling send, when the id is already claimed', async () => {
-		const id = 'unit-test-entry-claimed';
-		expect(tryClaimOutboxEntry(id)).toBe(true);
-		const sendSpy = vi.fn();
-		await expect(dispatchMutations([], sendSpy, id)).rejects.toBeInstanceOf(AlreadyDispatchingError);
-		expect(sendSpy).not.toHaveBeenCalled();
-		releaseOutboxEntry(id);
-	});
-
-	it('never claims (and never blocks) when outboxId is null — best-effort durability has nothing to own', async () => {
-		const sendSpy = vi.fn(async () => ({ txids: [], results: [] }));
-		await expect(dispatchMutations([], sendSpy, null)).resolves.toEqual({ txids: [], results: [] });
-		expect(sendSpy).toHaveBeenCalledTimes(1);
-	});
-});
-
 describe('ownership is per-entry, not global', () => {
-	it('a live send for A and a drained send for independent B overlap', async () => {
+	it('a live send for A and a queued replay of independent B overlap in the one pool', async () => {
 		await enqueue(message('B', 'b-text'), MY_HASH);
+		await recordOwnObservedTails('A', {}, MY_HASH);
 
-		const handleA = sendMutationsAndAwaitShape(message('A', 'a-text'), SKEY, { retries: 0 });
-		await vi.waitFor(() => expect(callCount).toBe(1));
-
-		const drainPromise = drainOutbox(MY_HASH, drainSend);
+		const handleA = sendMutationsAndAwaitShape(message('A', 'a-text'), SKEY);
 		await vi.waitFor(() => expect(callCount).toBe(2));
 
 		gates[0].resolve();
 		gates[1].resolve();
-		await handleA;
-		await drainPromise;
+		expect((await handleA).phase).toBe('accepted');
+		await vi.waitFor(async () => expect(await pendingEntries(MY_HASH)).toHaveLength(0));
 	});
 });
 

@@ -11,7 +11,7 @@
 //
 // Two fresh accounts hold a conversation: keys are wrapped and unwrapped for
 // real, messages travel through the real production write path — the
-// coordinator's dispatchMutations, its durable outbox, exact SERVER_ACCEPTED
+// account's sender over its durable outbox, exact SERVER_ACCEPTED
 // classification and accepted-snapshot reconciliation, over the real
 // /ingest_each endpoint (src/lib/data/ingest.ts's sendMutationsAndAwaitShape,
 // the same entry point dialogs.store.js's sendMessage funnels every live send

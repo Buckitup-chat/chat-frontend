@@ -56,13 +56,10 @@ function makeControllableLeaseStore() {
 }
 
 type OutboxModule = typeof import('@/lib/data/outbox');
-type CoordinatorModule = typeof import('@/lib/data/coordinator');
-
-async function freshTabInstance(): Promise<{ outbox: OutboxModule; coordinator: CoordinatorModule }> {
+async function freshTabInstance(): Promise<{ outbox: OutboxModule }> {
 	vi.resetModules();
 	const outbox = await import('@/lib/data/outbox');
-	const coordinator = await import('@/lib/data/coordinator');
-	return { outbox, coordinator };
+	return { outbox };
 }
 
 const message = (tag: string, userHash = MY_HASH) => ([{
@@ -86,16 +83,14 @@ describe('outbox.ts fallback leadership: atomic claim/release closes the concurr
 	let leaseStore: ReturnType<typeof makeControllableLeaseStore>;
 	let tabA: OutboxModule;
 	let tabB: OutboxModule;
-	let coordA: CoordinatorModule;
-	let coordB: CoordinatorModule;
 
 	beforeEach(async () => {
 		leaseStore = makeControllableLeaseStore();
 		const sharedEntryStorage = makeEntryStorage();
-		({ outbox: tabA, coordinator: coordA } = await freshTabInstance());
+		({ outbox: tabA } = await freshTabInstance());
 		tabA._setAtomicLeaseStoreForTests(leaseStore.store);
 		tabA._setStorageForTests(sharedEntryStorage);
-		({ outbox: tabB, coordinator: coordB } = await freshTabInstance());
+		({ outbox: tabB } = await freshTabInstance());
 		tabB._setAtomicLeaseStoreForTests(leaseStore.store);
 		tabB._setStorageForTests(sharedEntryStorage);
 	});
@@ -129,15 +124,13 @@ describe('outbox.ts fallback leadership: atomic claim/release closes the concurr
 		const sendA = async (m: unknown[]) => { sentA.push(m); return { txids: [], results: [] }; };
 		const sendB = async (m: unknown[]) => { sentB.push(m); return { txids: [], results: [] }; };
 
-		const [resultA, resultB] = await Promise.allSettled([
-			coordA.dispatchMutations(message('a'), sendA, idA),
-			coordB.dispatchMutations(message('b'), sendB, idB),
+		const [resultA, resultB] = await Promise.all([
+			tabA.drainOutbox(MY_HASH, sendA, undefined, undefined, undefined, idA!),
+			tabB.drainOutbox(MY_HASH, sendB, undefined, undefined, undefined, idB!),
 		]);
 
 		expect(sentA.length + sentB.length).toBe(1);
-		const outcomes = [resultA, resultB];
-		expect(outcomes.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-		expect(outcomes.filter((r) => r.status === 'rejected')).toHaveLength(1);
+		expect([resultA.sent, resultB.sent].sort()).toEqual([0, 1]);
 	});
 
 	it('3. a send outlasting one TTL window is kept renewed — a follower never starts parallel transport', async () => {
@@ -211,7 +204,8 @@ describe('outbox.ts fallback leadership: atomic claim/release closes the concurr
 		const drainResult = await tabA.drainOutbox(MY_HASH, sendSpy);
 		expect(drainResult.wasLeader).toBe(false);
 
-		await expect(coordA.dispatchMutations(message('unavailable'), sendSpy, outboxId)).rejects.toThrow();
+		const liveResult = await tabA.drainOutbox(MY_HASH, sendSpy, undefined, undefined, undefined, outboxId!);
+		expect(liveResult.sent).toBe(0);
 
 		expect(sendSpy).not.toHaveBeenCalled();
 	});
@@ -352,14 +346,14 @@ describe('outbox.ts fallback leadership: atomic claim/release closes the concurr
 		expect(takeover).toEqual({ acquired: true, result: 'ok' });
 	});
 
-	it('12. durable dispatchMutations begun after logout (no active session): transport is never called, even though the entry is durably enqueued and ready (§ determinism gap 2)', async () => {
+	it('12. a live send begun after logout (no active session): transport is never called, even though the entry is durably enqueued and ready (§ determinism gap 2)', async () => {
 		tabA._setActiveSessionForTests(MY_HASH);
 		const outboxId = await tabA.enqueue(message('post-logout'), MY_HASH);
 		tabA.stopLeaderElection();
 
 		const sendSpy = vi.fn(async () => ({ txids: [], results: [] }));
-		await expect(coordA.dispatchMutations(message('post-logout'), sendSpy, outboxId))
-			.rejects.toThrow(coordA.AlreadyDispatchingError);
+		const result = await tabA.drainOutbox(MY_HASH, sendSpy, undefined, undefined, undefined, outboxId!);
+		expect(result.sent).toBe(0);
 		expect(sendSpy).not.toHaveBeenCalled();
 	});
 
@@ -457,18 +451,19 @@ describe('IndexedDB claim(): committed only on tx.oncomplete, never on put.onsuc
 		};
 	}
 
-	it('aborts the live-send path: dispatchMutations\'s own claim aborts after put.onsuccess — it rejects, and transport is never called', async () => {
+	it('aborts the live-send path: the targeted send\'s own claim aborts after put.onsuccess — it sends nothing, and transport is never called', async () => {
 		globalThis.indexedDB = new IDBFactory();
 		armAbortOnNextReadwriteTransactionPut();
 
-		const { outbox, coordinator } = await freshTabInstance();
+		const { outbox } = await freshTabInstance();
 		outbox._setStorageForTests(makeEntryStorage());
 		outbox._setActiveSessionForTests(MY_HASH);
 
 		const outboxId = await outbox.enqueue(message('aborted-live'), MY_HASH);
 		const sendSpy = vi.fn(async () => ({ txids: [], results: [] }));
 
-		await expect(coordinator.dispatchMutations(message('aborted-live'), sendSpy, outboxId)).rejects.toThrow();
+		const result = await outbox.drainOutbox(MY_HASH, sendSpy, undefined, undefined, undefined, outboxId!);
+		expect(result.sent).toBe(0);
 		expect(sendSpy).not.toHaveBeenCalled();
 	});
 
@@ -537,9 +532,9 @@ describe('Web Locks: the transport gate is genuinely operation-scoped, not a lea
 		(globalThis as any).navigator = { locks };
 
 		const sharedEntryStorage = makeEntryStorage();
-		const { outbox: tabA, coordinator: coordA } = await freshTabInstance();
+		const { outbox: tabA } = await freshTabInstance();
 		tabA._setStorageForTests(sharedEntryStorage);
-		const { outbox: tabB, coordinator: coordB } = await freshTabInstance();
+		const { outbox: tabB } = await freshTabInstance();
 		tabB._setStorageForTests(sharedEntryStorage);
 
 		tabA.startLeaderElection(MY_HASH, () => {});
@@ -553,15 +548,15 @@ describe('Web Locks: the transport gate is genuinely operation-scoped, not a lea
 		const sendA = async (m: unknown[]) => { sentA.push(m); return { txids: [], results: [] }; };
 		const sendB = async (m: unknown[]) => { sentB.push(m); return { txids: [], results: [] }; };
 
-		const [resultA, resultB] = await Promise.allSettled([
-			coordA.dispatchMutations(message('a'), sendA, idA),
-			coordB.dispatchMutations(message('b'), sendB, idB),
+		const [resultA, resultB] = await Promise.all([
+			tabA.drainOutbox(MY_HASH, sendA, undefined, undefined, undefined, idA!),
+			tabB.drainOutbox(MY_HASH, sendB, undefined, undefined, undefined, idB!),
 		]);
 
 		expect(sentA.length + sentB.length).toBe(1);
-		const outcomes = [resultA, resultB];
-		expect(outcomes.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-		expect(outcomes.filter((r) => r.status === 'rejected')).toHaveLength(1);
+		expect([resultA.sent, resultB.sent].sort()).toEqual([0, 1]);
+		tabA.stopLeaderElection();
+		tabB.stopLeaderElection();
 	});
 
 	it('HTTP already returned success, but markServerAccepted\'s durable write is still in flight: the lock stays held, so a second tab cannot replay or re-send the same entry (§ determinism 3)', async () => {
@@ -570,32 +565,40 @@ describe('Web Locks: the transport gate is genuinely operation-scoped, not a lea
 		(globalThis as any).navigator = { locks };
 
 		const sharedStorage = makeDelayableEntryStorage();
-		const { outbox: tabA, coordinator: coordA } = await freshTabInstance();
+		const { outbox: tabA } = await freshTabInstance();
 		tabA._setStorageForTests(sharedStorage);
-		tabA._setActiveSessionForTests(MY_HASH);
 		const { outbox: tabB } = await freshTabInstance();
 		tabB._setStorageForTests(sharedStorage);
-		tabB._setActiveSessionForTests(MY_HASH);
+		tabA.startLeaderElection(MY_HASH, () => {});
+		await vi.waitFor(() => expect(tabA.isLeader()).toBe(true));
 
 		const outboxId = await tabA.enqueue(message('slow-accept'), MY_HASH);
 		const sendSpy = vi.fn(async () => ({ txids: [], results: [] }));
 
 		const releaseAccept = sharedStorage.armDelayOnNextSet();
-		const dispatchPromise = coordA.dispatchMutations(message('slow-accept'), sendSpy, outboxId);
+		const dispatchPromise = tabA.drainOutbox(MY_HASH, sendSpy, undefined, undefined, undefined, outboxId!);
 
 		await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
 
+		tabA.stopLeaderElection();
+		await new Promise((r) => setTimeout(r, 0));
+		tabB.startLeaderElection(MY_HASH, () => {});
+		await vi.waitFor(() => expect(tabB.isLeader()).toBe(true));
+
 		const sentB: unknown[][] = [];
-		const resultB = await tabB.drainOutbox(MY_HASH, async (m) => { sentB.push(m as unknown[]); return {}; });
-		expect(resultB.wasLeader).toBe(false);
+		let drainedB = false;
+		const drainB = tabB.drainOutbox(MY_HASH, async (m) => { sentB.push(m as unknown[]); return {}; }).finally(() => { drainedB = true; });
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		expect(drainedB).toBe(false);
 		expect(sentB).toHaveLength(0);
 
 		releaseAccept();
 		await dispatchPromise;
 
-		const resultBAfter = await tabB.drainOutbox(MY_HASH, async (m) => { sentB.push(m as unknown[]); return {}; });
+		const resultBAfter = await drainB;
 		expect(resultBAfter.wasLeader).toBe(true);
 		expect(sentB).toHaveLength(0);
 		expect(sendSpy).toHaveBeenCalledTimes(1);
+		tabB.stopLeaderElection();
 	});
 });

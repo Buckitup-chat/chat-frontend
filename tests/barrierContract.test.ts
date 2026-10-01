@@ -23,6 +23,7 @@ vi.mock('@/lib/data/barrier', () => ({
 }));
 
 const { sendMutationsAndAwaitShape } = await import('@/lib/data/ingest');
+const { reconcileAccepted } = await import('@/lib/data/coordinator');
 const { _setStorageForTests, _setLeaderForTests } = await import('@/lib/data/outbox');
 
 const MY = 'u_' + 'a'.repeat(128);
@@ -50,14 +51,15 @@ afterEach(() => {
 
 describe('contract-driven barrier', () => {
 	it('an accepted-level write does not wait for the shape', async () => {
-		await sendMutationsAndAwaitShape(mutation('dialog_message_receipts', 'insert'), SKEY, { retries: 0 });
+		await sendMutationsAndAwaitShape(mutation('dialog_message_receipts', 'insert'), SKEY);
 		expect(awaitShapeVisibility).not.toHaveBeenCalled();
 	});
 
 	it('an unknown relation falls back to awaiting — weaker guarantees are opt-in', async () => {
-		// an unknown relation also has no owner mapping — durable enqueue is
-		// impossible, which is its own guarantee; best-effort isolates the barrier
-		await sendMutationsAndAwaitShape(mutation('future_relation', 'insert'), SKEY, { retries: 0, durability: 'best-effort' });
+		// An unknown relation has no owner mapping, so it can never be stored for
+		// sending; the contract itself is applied where every accepted write is
+		// reconciled.
+		await reconcileAccepted(mutation('future_relation', 'insert'), { txids: [1], results: [] });
 		expect(awaitShapeVisibility).toHaveBeenCalledTimes(1);
 	});
 });

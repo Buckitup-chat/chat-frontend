@@ -25,32 +25,6 @@ const timedFetch = (url, init = {}) =>
   fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 
 export const api = {
-  ingest: (mutations) => {
-    return timedFetch(`${ELECTRIC_API_URL}/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mutations }),
-    });
-  },
-
-  ingestWithAuth: async (mutations, signSkey) => {
-    const challengeResp = await api.getChallenge();
-    const challengeSig = ml_dsa87.sign(new TextEncoder().encode(challengeResp.challenge), signSkey);
-    const signature = encodeBase64(challengeSig);
-
-    return timedFetch(`${ELECTRIC_API_URL}/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        auth: {
-          challenge_id: challengeResp.challenge_id,
-          signature,
-        },
-        mutations,
-      }),
-    });
-  },
-
   ingestWithAuthEach: async (mutations, signSkey) => {
     const challengeResp = await api.getChallenge();
     const challengeSig = ml_dsa87.sign(new TextEncoder().encode(challengeResp.challenge), signSkey);

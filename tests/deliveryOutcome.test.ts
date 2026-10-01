@@ -51,7 +51,8 @@ const message = (text: string, userHash = MY_HASH) => ([{
 
 const editMessage = (messageId: string, text: string) => ([{
 	type: 'update',
-	modified: { message_id: messageId, sender_hash: MY_HASH, content_b64: text, dialog_hash: 'dh1', parent_sign_hash: null, owner_timestamp: 1 },
+	original: {},
+	changes: { message_id: messageId, sender_hash: MY_HASH, content_b64: text, dialog_hash: 'dh1', parent_sign_hash: null, owner_timestamp: 1 },
 	syncMetadata: { relation: 'dialog_messages' },
 }]);
 
@@ -73,7 +74,7 @@ describe('DeliveryHandle: leader with no dependency', () => {
 		_setLeaderForTests(true);
 		startLeaderElection(MY_HASH, () => {});
 
-		const handle = await sendMutationsAndAwaitShape(message('leader-direct'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('leader-direct'), SKEY);
 
 		expect(handle.phase).toBe('accepted');
 		expect(sent).toHaveLength(1);
@@ -87,7 +88,7 @@ describe('DeliveryHandle: follower', () => {
 		_setLeaderForTests(false);
 		startLeaderElection(MY_HASH, () => {});
 
-		const handle = await sendMutationsAndAwaitShape(message('follower'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('follower'), SKEY);
 		expect(handle.phase).toBe('queued');
 		expect(handle.result).toBeUndefined();
 		expect(sent).toHaveLength(0);
@@ -111,15 +112,15 @@ describe('DeliveryHandle: dependency', () => {
 		startLeaderElection(MY_HASH, () => {});
 		const aId = await enqueue(editMessage('msg_dep', 'a'), MY_HASH);
 
-		const bHandle = await sendMutationsAndAwaitShape(editMessage('msg_dep', 'b'), SKEY, { retries: 0 });
+		const bHandle = await sendMutationsAndAwaitShape(editMessage('msg_dep', 'b'), SKEY);
 		expect(bHandle.phase).toBe('queued'); // durably queued, not yet known — B never jumps its own recorded dependency
 		expect(sent).toHaveLength(0);
 
 		await expect(bHandle.acceptance).resolves.toEqual({ kind: 'accepted' });
 
 		expect(sent).toHaveLength(2); // A (the prerequisite), then B — never B first
-		expect((sent[0][0] as { modified: { content_b64: string } }).modified.content_b64).toBe('a');
-		expect((sent[1][0] as { modified: { content_b64: string } }).modified.content_b64).toBe('b');
+		expect((sent[0][0] as { changes: { content_b64: string } }).changes.content_b64).toBe('a');
+		expect((sent[1][0] as { changes: { content_b64: string } }).changes.content_b64).toBe('b');
 		void aId;
 	});
 });
@@ -130,7 +131,7 @@ describe('DeliveryHandle: a quarantined or discarded prerequisite', () => {
 		const aId = await enqueue(editMessage('msg_dep2', 'a'), MY_HASH);
 		await recordFailure(aId, new IngestError('rejected', { permanent: true }));
 
-		const bHandle = await sendMutationsAndAwaitShape(editMessage('msg_dep2', 'b'), SKEY, { retries: 0 });
+		const bHandle = await sendMutationsAndAwaitShape(editMessage('msg_dep2', 'b'), SKEY);
 		expect(bHandle.phase).toBe('queued');
 
 		drainPendingWrites(MY_HASH, SKEY);
@@ -145,7 +146,7 @@ describe('DeliveryHandle: a quarantined or discarded prerequisite', () => {
 		const aId = await enqueue(editMessage('msg_dep3', 'a'), MY_HASH);
 		await recordFailure(aId, new IngestError('rejected', { permanent: true }));
 
-		const bHandle = await sendMutationsAndAwaitShape(editMessage('msg_dep3', 'b'), SKEY, { retries: 0 });
+		const bHandle = await sendMutationsAndAwaitShape(editMessage('msg_dep3', 'b'), SKEY);
 		expect(bHandle.phase).toBe('queued');
 
 		await discardEntry(aId as string);
@@ -161,7 +162,7 @@ describe('DeliveryHandle: a quarantined or discarded prerequisite', () => {
 describe('DeliveryHandle: permanent rejection of the entry itself', () => {
 	it('5. acceptance settles a typed failure, the entry is quarantined, and the caller never sees a fake success', async () => {
 		_setLeaderForTests(false); // queued — the eventual (permanent) verdict is decided later, by a drain
-		const handle = await sendMutationsAndAwaitShape(message('permanent-b'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('permanent-b'), SKEY);
 		expect(handle.phase).toBe('queued');
 
 		await recordFailure(handle.outboxId, new IngestError('validation_failed', { permanent: true }));
@@ -174,7 +175,7 @@ describe('DeliveryHandle: permanent rejection of the entry itself', () => {
 describe('DeliveryHandle: explicit Discard', () => {
 	it('6. acceptance settles a non-accepted terminal outcome — never success', async () => {
 		_setLeaderForTests(false);
-		const handle = await sendMutationsAndAwaitShape(message('discard-b'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('discard-b'), SKEY);
 		expect(handle.phase).toBe('queued');
 
 		await discardEntry(handle.outboxId as string);
@@ -204,6 +205,7 @@ describe('awaitEntryOutcome: races and durability', () => {
 
 			const raw = JSON.parse(backing.map.get(id as string) as string);
 			raw.status = 'quarantined';
+			raw.quarantinedAt = Date.now();
 			raw.lastError = 'missed-event';
 			backing.map.set(id as string, JSON.stringify(raw));
 
@@ -238,7 +240,7 @@ describe('awaitEntryOutcome: races and durability', () => {
 		_setLeaderForTests(false);
 		startLeaderElection(MY_HASH, () => {});
 
-		const handle = await sendMutationsAndAwaitShape(message('reload-boundary'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('reload-boundary'), SKEY);
 		expect(handle.phase).toBe('queued');
 		_setStorageForTests({ ...backing });
 		const freshWaiter = awaitEntryOutcome(handle.outboxId as string, MY_HASH);

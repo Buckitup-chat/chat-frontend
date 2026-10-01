@@ -71,6 +71,7 @@ describe('file manifest commit goes through the durable mutation lifecycle (§4.
 		const bytes = new TextEncoder().encode('hello file');
 
 		const uploaded = uploadFile({ bytes, uploaderHash: UPLOADER_HASH, signSkey: SKEY, fileId, encSecretB64 });
+		uploaded.catch(() => {});
 
 		let pending: Awaited<ReturnType<typeof pendingEntries>> = [];
 		for (let i = 0; i < 200 && pending.length === 0; i++) {

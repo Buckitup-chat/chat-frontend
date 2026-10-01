@@ -19,6 +19,9 @@ import {
 	recordFailure,
 	ensureDrainLoop,
 	stopDrainLoop,
+	dependencyBlockFor,
+	_drainLoopSettledForTests,
+	type OutboxEntry,
 } from '@/lib/data/outbox';
 
 afterEach(() => {
@@ -38,7 +41,7 @@ const makeStorage = () => {
 	};
 };
 
-const mutation = (tag: string) => [{ syncMetadata: { relation: 'dialog_messages' }, modified: { content_b64: tag } }];
+const mutation = (tag: string) => [{ type: 'insert', syncMetadata: { relation: 'dialog_messages' }, modified: { content_b64: tag } }];
 const permanentError = () => new IngestError('validation_failed', { permanent: true, status: 422 });
 
 describe('T-QUEUE-05: permanent rejection quarantines', () => {
@@ -150,5 +153,62 @@ describe('T-QUEUE-04: the retry carries its own timer', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe('ensureDrainLoop: one loop carries network release and discovery recovery', () => {
+	const tagOf = (m: unknown[]) => (m[0] as { modified: { content_b64: string } }).modified.content_b64;
+
+	beforeEach(async () => {
+		_setStorageForTests(makeStorage());
+		await _clearOutboxForTests();
+		_setLeaderForTests(true);
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	const firstPass = async () => {
+		await vi.advanceTimersByTimeAsync(1_000);
+		stopDrainLoop();
+		await _drainLoopSettledForTests();
+	};
+
+	it('releaseNetworkBackoffs frees only what waited for a connection; a server-error backoff keeps its schedule', async () => {
+		const netId = await enqueue(mutation('net'), MY) as string;
+		const serverId = await enqueue(mutation('server'), MY) as string;
+		await recordFailure(netId, new IngestError('Failed to fetch', { network: true }));
+		await recordFailure(serverId, new IngestError('503', { status: 503 }));
+		const serverAttemptAt = (await pendingEntries(MY)).find((e) => e.id === serverId)!.nextAttemptAt!;
+
+		const sent: string[] = [];
+		ensureDrainLoop(MY, async (m) => { sent.push(tagOf(m)); }, { releaseNetworkBackoffs: true });
+		await firstPass();
+
+		expect(sent).toEqual(['net']);
+		const pending = await pendingEntries(MY);
+		expect(pending.map((e) => e.id)).toEqual([serverId]);
+		expect(pending[0].nextAttemptAt).toBe(serverAttemptAt);
+	});
+
+	it('the rediscover hook reaches the drain, and the recovered entry is sent in that same pass', async () => {
+		const block = dependencyBlockFor(new Error('disk read error'), { kind: 'discovery', observedKeys: [] });
+		const blockedId = await enqueue(mutation('blocked'), MY, { discoveryBlocked: block }) as string;
+
+		const rediscovered: string[] = [];
+		const sent: string[] = [];
+		ensureDrainLoop(MY, async (m) => { sent.push(tagOf(m)); }, {
+			rediscover: async (entry: OutboxEntry) => {
+				rediscovered.push(entry.id);
+				return { kind: 'found', dependsOn: [] };
+			},
+		});
+		await firstPass();
+
+		expect(rediscovered).toEqual([blockedId]);
+		expect(sent).toEqual(['blocked']);
+		expect(await pendingEntries(MY)).toEqual([]);
 	});
 });

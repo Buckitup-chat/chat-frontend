@@ -58,39 +58,86 @@ interface UpToDateAwaitable {
 const isUpToDate = (message: unknown): boolean =>
 	isControlMessage(message as never) && (message as { headers: { control?: string } }).headers.control === 'up-to-date';
 
-async function awaitUpToDate(coll: UpToDateAwaitable): Promise<void> {
-	const awaitMatch = coll.utils?.awaitMatch;
-	if (!awaitMatch) return new Promise<void>(() => {});
-	for (;;) {
-		try {
-			await awaitMatch(isUpToDate, MAX_TIMER_MS);
-			return;
-		} catch (e) {
-			const name = (e as Error)?.name;
-			if (name !== 'TimeoutWaitingForMatchError' && name !== 'StreamAbortedError') {
-				console.warn('[shapeLink] cannot observe up-to-date; live stays unconfirmed:', e);
-				return new Promise<void>(() => {});
-			}
-		}
-	}
+interface Lifecycle {
+	generation: number;
+	live: boolean;
+	failed: boolean;
+	watching: boolean;
+	listeners: Set<() => void>;
 }
 
-const liveByCollection = new WeakMap<object, Promise<void>>();
-const confirmedLive = new WeakSet<object>();
+const lifecycles = new WeakMap<object, Lifecycle>();
 const linkByCollection = new WeakMap<object, ShapeLink>();
 
-export function whenLive(coll: UpToDateAwaitable & object): Promise<void> {
-	let live = liveByCollection.get(coll);
-	if (!live) {
-		live = awaitUpToDate(coll).then(() => { confirmedLive.add(coll); });
-		liveByCollection.set(coll, live);
+function lifecycleOf(coll: UpToDateAwaitable & object): Lifecycle {
+	let state = lifecycles.get(coll);
+	if (!state) {
+		state = { generation: 0, live: false, failed: false, watching: false, listeners: new Set() };
+		lifecycles.set(coll, state);
+		watchForLive(coll, state);
 	}
-	return live;
+	return state;
+}
+
+function notify(state: Lifecycle): void {
+	for (const listener of [...state.listeners]) listener();
+}
+
+function markFailed(coll: UpToDateAwaitable & object, state: Lifecycle): void {
+	state.generation += 1;
+	state.live = false;
+	state.failed = true;
+	watchForLive(coll, state);
+	notify(state);
+}
+
+function watchForLive(coll: UpToDateAwaitable & object, state: Lifecycle): void {
+	const awaitMatch = coll.utils?.awaitMatch;
+	if (state.watching || !awaitMatch) return;
+	state.watching = true;
+	void (async () => {
+		for (;;) {
+			let arrivedIn = -1;
+			try {
+				await awaitMatch((message) => {
+					if (!isUpToDate(message)) return false;
+					arrivedIn = state.generation;
+					return true;
+				}, MAX_TIMER_MS);
+			} catch (e) {
+				const name = (e as Error)?.name;
+				if (name === 'TimeoutWaitingForMatchError' || name === 'StreamAbortedError') continue;
+				console.warn('[shapeLink] cannot observe up-to-date; live stays unconfirmed:', e);
+				state.watching = false;
+				return;
+			}
+			if (arrivedIn !== state.generation) continue;
+			state.watching = false;
+			state.live = true;
+			state.failed = false;
+			notify(state);
+			return;
+		}
+	})();
+}
+
+export function whenLive(coll: UpToDateAwaitable & object): Promise<void> {
+	const state = lifecycleOf(coll);
+	if (state.live) return Promise.resolve();
+	return new Promise((resolve) => {
+		const listener = () => {
+			if (!state.live) return;
+			state.listeners.delete(listener);
+			resolve();
+		};
+		state.listeners.add(listener);
+	});
 }
 
 export function registerShapeLink(coll: UpToDateAwaitable & object, link: ShapeLink): void {
 	linkByCollection.set(coll, link);
-	void whenLive(coll);
+	const state = lifecycleOf(coll);
+	link.onStreamError(() => markFailed(coll, state));
 }
 
 export function shapeLinkOf(coll: object | null | undefined): ShapeLink | null {
@@ -114,17 +161,20 @@ export async function settled(
 		}
 	}
 	const streamFailed = { state: 'failed' as const, error: new Error('shape stream failed and live is not confirmed') };
-	if (confirmedLive.has(coll)) return { state: 'live' };
-	if (link.hasFailed()) return streamFailed;
+	const state = lifecycleOf(coll);
+	if (state.live) return { state: 'live' };
+	if (state.failed) return streamFailed;
 	void coll.preload().catch(() => {});
 	return new Promise((resolve) => {
-		const stop = link.onStreamError(() => {
-			stop();
-			resolve(streamFailed);
-		});
-		void whenLive(coll).then(() => {
-			stop();
-			resolve({ state: 'live' });
-		});
+		const listener = () => {
+			if (!state.live && !state.failed) return;
+			state.listeners.delete(listener);
+			resolve(state.live ? { state: 'live' } : streamFailed);
+		};
+		state.listeners.add(listener);
 	});
+}
+
+export function isLiveNow(coll: UpToDateAwaitable & object): boolean {
+	return !!shapeLinkOf(coll) && lifecycleOf(coll).live;
 }

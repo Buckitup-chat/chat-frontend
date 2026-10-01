@@ -38,8 +38,9 @@ vi.mock('@/api/client', () => ({
 
 const { sendMutationsAndAwaitShape, drainPendingWrites } = await import('@/lib/data/ingest');
 const {
-	dependenciesFor, reconcileAccepted,
+	reconcileAccepted,
 } = await import('@/lib/data/coordinator');
+const { foundDependencies } = await import('./helpers/dependencies');
 const {
 	enqueue, discardEntry, requeueEntry, awaitEntryOutcome, drainOutbox,
 	quarantinedEntries, pendingEntries, pendingReconciliation, readyEntries, blockedDependentIssues,
@@ -47,6 +48,7 @@ const {
 	stopDrainLoop, _setStorageForTests, _setLeaderForTests,
 } = await import('@/lib/data/outbox');
 const { getAccepted, _setAcceptedSnapshotStorageForTests, _setRawAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
+const { _setOwnObservedTailsStorageForTests } = await import('@/lib/data/ownObservedTails');
 
 const makeMemoryStore = () => {
 	const map = new Map<string, string>();
@@ -101,7 +103,8 @@ const message = (text: string, userHash = MY_HASH) => ([{
 
 const editMessage = (messageId: string, text: string, userHash = MY_HASH) => ([{
 	type: 'update',
-	modified: {
+	original: {},
+	changes: {
 		message_id: messageId, sender_hash: userHash, dialog_hash: 'dh1',
 		content_b64: text, parent_sign_hash: null, owner_timestamp: 2,
 	},
@@ -138,7 +141,7 @@ describe('L17-10 A: accepted snapshot (local reconciliation) failure never repea
 		const failing = { value: true };
 		_setAcceptedSnapshotStorageForTests(makeToggleFailStore(failing));
 
-		const handle = await sendMutationsAndAwaitShape(message('acc-fail'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('acc-fail'), SKEY);
 
 		expect(handle.phase).toBe('accepted');
 		expect(sent).toHaveLength(1);
@@ -169,7 +172,7 @@ describe('L17-10 B: reload after the durable server-accepted phase resumes recon
 		const backing = makeMemoryStore();
 		_setStorageForTests(backing);
 
-		const handle = await sendMutationsAndAwaitShape(message('reload-b'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('reload-b'), SKEY);
 		expect(handle.phase).toBe('accepted');
 		expect(sent).toHaveLength(1);
 		expect((await pendingReconciliation(MY_HASH)).map((e) => e.id)).toContain(handle.outboxId);
@@ -194,7 +197,7 @@ describe('L17-10 C: a terminal-marker write failure alone never re-arms transpor
 		let failMarker = true;
 		_setStorageForTests(makeSelectiveFailStore((parsed) => failMarker && parsed.status === 'accepted'));
 
-		const handle = await sendMutationsAndAwaitShape(message('marker-fail'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('marker-fail'), SKEY);
 
 		expect(handle.phase).toBe('accepted');
 		expect(sent).toHaveLength(1);
@@ -220,11 +223,11 @@ describe('L17-10 D: dependency behavior distinguishes server-accepted from fully
 		let failMarker = true;
 		_setStorageForTests(makeSelectiveFailStore((parsed) => failMarker && parsed.status === 'accepted'));
 
-		const keysHandle = await sendMutationsAndAwaitShape(dialogKeyRow('dh1'), SKEY, { retries: 0 });
+		const keysHandle = await sendMutationsAndAwaitShape(dialogKeyRow('dh1'), SKEY);
 		expect(keysHandle.phase).toBe('accepted');
 		expect((await pendingReconciliation(MY_HASH)).map((e) => e.id)).toContain(keysHandle.outboxId);
 
-		const deps = await dependenciesFor(message('needs-key'), MY_HASH);
+		const deps = await foundDependencies(message('needs-key'), MY_HASH);
 		expect(deps).toContain(keysHandle.outboxId);
 
 		const depId = await enqueue(message('needs-key'), MY_HASH, { dependsOn: deps });
@@ -242,11 +245,11 @@ describe('L17-10 D: dependency behavior distinguishes server-accepted from fully
 		let failMarker = true;
 		_setStorageForTests(makeSelectiveFailStore((parsed) => failMarker && parsed.status === 'accepted'));
 
-		const handle = await sendMutationsAndAwaitShape(message('chain-a'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('chain-a'), SKEY);
 		expect(handle.phase).toBe('accepted');
 		expect((await pendingReconciliation(MY_HASH)).map((e) => e.id)).toContain(handle.outboxId);
 
-		const deps = await dependenciesFor(editMessage('dmsg_chain-a', 'v2'), MY_HASH);
+		const deps = await foundDependencies(editMessage('dmsg_chain-a', 'v2'), MY_HASH);
 		expect(deps).toContain(handle.outboxId);
 		const editId = await enqueue(editMessage('dmsg_chain-a', 'v2'), MY_HASH, { dependsOn: deps });
 		expect((await readyEntries(MY_HASH)).map((e) => e.id)).toContain(editId);
@@ -259,13 +262,20 @@ describe('L17-10 D: dependency behavior distinguishes server-accepted from fully
 		startLeaderElection(MY_HASH, () => {});
 		const failing = { value: true };
 		_setAcceptedSnapshotStorageForTests(makeToggleFailStore(failing));
+		const tails = makeMemoryStore();
+		const tailsReads: string[] = [];
+		const realTailsGet = tails.get.bind(tails);
+		tails.get = async (k: string) => { tailsReads.push(k); return realTailsGet(k); };
+		_setOwnObservedTailsStorageForTests(tails);
 
-		await sendMutationsAndAwaitShape(message('stuck'), SKEY, { retries: 0 });
+		const stuck = await sendMutationsAndAwaitShape(message('stuck'), SKEY);
 		expect(sent).toHaveLength(1);
+		expect((await pendingReconciliation(MY_HASH)).map((e) => e.id)).toEqual([stuck.outboxId]);
 
-		const other = await sendMutationsAndAwaitShape(message('independent'), SKEY, { retries: 0 });
+		const other = await sendMutationsAndAwaitShape(message('independent'), SKEY);
 		expect(other.phase).toBe('accepted');
-		expect(sent).toHaveLength(2);
+		expect(tailsReads).not.toContain('dmsg_independent');
+		expect(sent.map((m) => (m[0] as { modified: { message_id: string } }).modified.message_id)).toEqual(['dmsg_stuck', 'dmsg_independent']);
 
 		failing.value = false;
 	});
@@ -277,8 +287,8 @@ describe('L17-10 D: dependency behavior distinguishes server-accepted from fully
 		const backing = makeSelectiveFailStore((parsed) => failMarker && parsed.status === 'accepted');
 		_setStorageForTests(backing);
 
-		const keysHandle = await sendMutationsAndAwaitShape(dialogKeyRow('dh1'), SKEY, { retries: 0 });
-		const deps = await dependenciesFor(message('after-reload'), MY_HASH);
+		const keysHandle = await sendMutationsAndAwaitShape(dialogKeyRow('dh1'), SKEY);
+		const deps = await foundDependencies(message('after-reload'), MY_HASH);
 		const depId = await enqueue(message('after-reload'), MY_HASH, { dependsOn: deps });
 		expect((await readyEntries(MY_HASH)).map((e) => e.id)).toContain(depId);
 
@@ -295,7 +305,7 @@ describe('L17-10 D: dependency behavior distinguishes server-accepted from fully
 		const failing = { value: true };
 		_setAcceptedSnapshotStorageForTests(makeToggleFailStore(failing));
 
-		const handle = await sendMutationsAndAwaitShape(message('no-discard'), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('no-discard'), SKEY);
 		const id = handle.outboxId as string;
 
 		await discardEntry(id);
@@ -314,7 +324,7 @@ describe('L17-10 D: dependency behavior distinguishes server-accepted from fully
 		const failing = { value: true };
 		_setAcceptedSnapshotStorageForTests(makeToggleFailStore(failing));
 
-		await sendMutationsAndAwaitShape(message('not-a-rejection'), SKEY, { retries: 0 });
+		await sendMutationsAndAwaitShape(message('not-a-rejection'), SKEY);
 
 		expect(await quarantinedEntries(MY_HASH)).toHaveLength(0);
 		expect(await blockedDependentIssues(MY_HASH)).toEqual([]);
@@ -331,7 +341,7 @@ describe('L17-10 E: account/session fencing on reconciliation', () => {
 		const failing = { value: true };
 		_setRawAcceptedSnapshotStorageForTests(makeToggleFailStore(failing));
 
-		const handle = await sendMutationsAndAwaitShape(message('fenced', MY_HASH), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(message('fenced', MY_HASH), SKEY);
 		expect((await pendingReconciliation(MY_HASH)).map((e) => e.id)).toContain(handle.outboxId);
 
 		startLeaderElection(OTHER_HASH, () => {});
@@ -434,7 +444,7 @@ describe('L17-10 F: the unavoidable first-write failure is left honestly open', 
 			return false;
 		}));
 
-		await expect(sendMutationsAndAwaitShape(message('first-write-fail'), SKEY, { retries: 0 })).rejects.toThrow();
+		await expect(sendMutationsAndAwaitShape(message('first-write-fail'), SKEY)).rejects.toThrow();
 		expect(sent).toHaveLength(1);
 
 		expect(await pendingReconciliation(MY_HASH)).toHaveLength(0);
@@ -442,9 +452,19 @@ describe('L17-10 F: the unavoidable first-write failure is left honestly open', 
 		const entry = pending.find((e) => e.relation === 'dialog_messages');
 		expect(entry).toBeTruthy();
 		const outboxId = entry!.id;
+		expect(entry!.nextAttemptAt).toBeGreaterThan(Date.now());
 
 		drainPendingWrites(MY_HASH, SKEY);
-		await vi.waitFor(() => expect(sent).toHaveLength(2));
-		await expect(awaitEntryOutcome(outboxId, MY_HASH)).resolves.toEqual({ kind: 'accepted' });
+		await new Promise<void>((resolve) => queueMicrotask(resolve));
+		expect(sent).toHaveLength(1);
+
+		const clock = vi.spyOn(Date, 'now').mockReturnValue(entry!.nextAttemptAt! + 1);
+		try {
+			drainPendingWrites(MY_HASH, SKEY);
+			await vi.waitFor(() => expect(sent).toHaveLength(2));
+			await expect(awaitEntryOutcome(outboxId, MY_HASH)).resolves.toEqual({ kind: 'accepted' });
+		} finally {
+			clock.mockRestore();
+		}
 	});
 });

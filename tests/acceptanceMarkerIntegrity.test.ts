@@ -35,7 +35,7 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-describe('a corrupt record scanned and cleaned up is never read as accepted', () => {
+describe('a corrupt record, scanned and quarantined, is never read as accepted', () => {
 	it('waiter stays unsettled through the fail-safe recheck, never resolves as accepted', async () => {
 		vi.useFakeTimers();
 		const backing = makeStorage();
@@ -50,7 +50,7 @@ describe('a corrupt record scanned and cleaned up is never read as accepted', ()
 		backing.map.set(id as string, 'not json');
 
 		await pendingEntries(MY_HASH);
-		expect(backing.map.has(id as string)).toBe(false); // now genuinely "missing"
+		expect(backing.map.get(id as string)).toBe('not json'); // retained as evidence, not deleted
 
 		await vi.advanceTimersByTimeAsync(20_000);
 
