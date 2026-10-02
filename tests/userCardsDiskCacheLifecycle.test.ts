@@ -10,7 +10,7 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { signFields, toBase64 } from '@/lib/pq/signature';
-import { writeAsMain, mainStoreKeys, unpad } from './helpers/mainUserCache';
+import { cachedCardKeys, unpad } from './helpers/userCardsDiskCache';
 import type { UserCardRow } from '@/lib/data/types';
 import type { userPQStore } from '@/store/userPQ.store';
 import type { getUserCardsCollection } from '@/lib/data/collections';
@@ -133,6 +133,14 @@ const startApp = async () => {
 	vi.resetModules();
 	const collections = await import('@/lib/data/collections');
 	const { userPQStore } = await import('@/store/userPQ.store');
+	const accepted = new Map([[`user_cards:${ME}`, JSON.stringify(ALICE)]]);
+	(await import('@/lib/data/acceptedSnapshot'))._setAcceptedSnapshotStorageForTests({
+		async get(k: string) { return accepted.get(k) ?? null; },
+		async set(k: string, v: string) { accepted.set(k, v); },
+		async delete(k: string) { accepted.delete(k); },
+		async keys() { return [...accepted.keys()]; },
+		async clear() { accepted.clear(); },
+	});
 	setActivePinia(createPinia());
 	const store = userPQStore();
 	app = { store, coll: () => collections.getUserCardsCollection() };
@@ -156,52 +164,7 @@ afterEach(async () => {
 	globalThis.indexedDB = new IDBFactory();
 });
 
-describe('legacy compatibility: user-synced-cache written by main', () => {
-	it('main\'s cached cards show offline after switching to this branch, then live replaces them', async () => {
-		await writeAsMain([ALICE, BOB]);
-		network.mode = 'offline';
-
-		const store = await startApp();
-		await signIn(store);
-		await until(() => store.allNetworkUsers.length > 0);
-
-		expect(names(store)).toEqual(['Alice', 'Bob']);
-		expect(store.userCardsFallback).toBe(true);
-
-		const request = network.nextRequest();
-		network.mode = 'online';
-		network.cards = [ALICE, CAROL];
-		await request;
-		await until(() => !store.userCardsFallback);
-		expect(names(store)).toEqual(['Alice', 'Carol']);
-		expect(store.getUserByHash(BOB.user_hash)).toBeUndefined();
-	}, 30_000);
-
-	it('a tampered or deleted card in main\'s store is not shown and not resolvable', async () => {
-		await writeAsMain([ALICE, { ...BOB, name: 'Mallory' }, makeCard(3, 'Carol', { deleted_flag: true })]);
-		network.mode = 'offline';
-
-		const store = await startApp();
-		await signIn(store);
-		await until(() => store.allNetworkUsers.length > 0);
-
-		expect(names(store)).toEqual(['Alice']);
-		expect(store.getUserByHash(BOB.user_hash)).toBeUndefined();
-		expect(store.getUserByHash(CAROL.user_hash)).toBeUndefined();
-	}, 30_000);
-
-	it('the cache is shown at startup, before the network answers at all', async () => {
-		await writeAsMain([ALICE, BOB]);
-		network.mode = 'hanging';
-
-		const store = await startApp();
-		await until(() => store.allNetworkUsers.length > 0);
-
-		expect(names(store)).toEqual(['Alice', 'Bob']);
-	}, 30_000);
-});
-
-describe('online session → reload → offline sign-in, through main\'s store', () => {
+describe('online session → reload → offline sign-in, through the user_cards disk cache', () => {
 	it('live cards are mirrored into user-synced-cache/user_cards, survive sign-in and a reload, and show offline', async () => {
 		network.mode = 'online';
 		network.cards = [ALICE, BOB];
@@ -210,7 +173,7 @@ describe('online session → reload → offline sign-in, through main\'s store',
 		await until(() => !store.userCardsFallback && store.allNetworkUsers.length === 2);
 		await written;
 		await signIn(store);
-		expect(await mainStoreKeys()).toEqual([ALICE.user_hash, BOB.user_hash].sort());
+		expect(await cachedCardKeys()).toEqual([ALICE.user_hash, BOB.user_hash].sort());
 
 		await reload();
 		network.mode = 'offline';

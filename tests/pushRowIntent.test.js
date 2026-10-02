@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { intentsOf, _setIntentStorageForTests, _clearIntentsForTests } from '@/lib/data/intents';
+import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
+import { makeTestIdentity } from './helpers/signedFixtures';
 
 const makeCollection = (rows = {}) => ({
 	rows: new Map(Object.entries(rows)),
@@ -9,8 +11,10 @@ const makeCollection = (rows = {}) => ({
 	get(key) { return this.rows.get(key); },
 });
 
-const MY_HASH = 'u_' + '1'.repeat(128);
-const PEER_HASH = 'u_' + '2'.repeat(128);
+const ME = makeTestIdentity(1, 'me');
+const PEER = makeTestIdentity(2, 'peer');
+const MY_HASH = ME.userHash;
+const PEER_HASH = PEER.userHash;
 const DIALOG_HASH = 'di_' + '3'.repeat(128);
 
 let collections;
@@ -65,7 +69,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 				if (failVaultFromCall !== null && vaultCallCount >= failVaultFromCall) {
 					throw new Error('Vault not loaded');
 				}
-				return { sign_skey: 'AAAA', crypt_skey: 'BBBB', evm_skey: 'cc' };
+				return ME.vault;
 			},
 		}),
 	},
@@ -86,7 +90,7 @@ beforeEach(async () => {
 	stopLeaderElection();
 	startLeaderElection(MY_HASH, () => {});
 	collections = {
-		cards: makeCollection({ [PEER_HASH]: { user_hash: PEER_HASH, crypt_pkey: 'peerkey' } }),
+		cards: makeCollection({ [MY_HASH]: ME.card, [PEER_HASH]: PEER.card }),
 		dialog: { keys: makeCollection(), messages: makeCollection(), reactions: makeCollection(), receipts: makeCollection() },
 	};
 	sent = [];
@@ -104,6 +108,14 @@ beforeEach(async () => {
 		async clear() { map.clear(); },
 	});
 	await _clearIntentsForTests();
+	const accepted = new Map();
+	_setAcceptedSnapshotStorageForTests({
+		async get(k) { return accepted.get(k) ?? null; },
+		async set(k, v) { accepted.set(k, v); },
+		async delete(k) { accepted.delete(k); },
+		async keys() { return [...accepted.keys()]; },
+		async clear() { accepted.clear(); },
+	});
 });
 
 describe('pushRow durables an intent before signing (§3.1)', () => {

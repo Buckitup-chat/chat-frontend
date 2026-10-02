@@ -28,7 +28,7 @@ vi.mock('@/api/client', () => ({
 			[mutationType === 'insert' ? 'modified' : 'changes']: {
 				user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
 				owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
-				sign_hash: null, sign_b64: 'sig',
+				sign_hash: `uss_${String(ownerTimestamp).padStart(128, '0')}`, sign_b64: 'sig',
 			},
 			syncMetadata: { relation: 'user_storage' },
 		}),

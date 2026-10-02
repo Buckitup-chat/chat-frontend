@@ -67,14 +67,12 @@ import { web3Store } from '@/store/web3.store';
 import { userPQStore } from '@/store/userPQ.store';
 
 
-import { ref, onMounted, watch, inject, computed, nextTick, onUnmounted } from 'vue';
+import { ref, onMounted, inject, computed, onUnmounted } from 'vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
-import dayjs from 'dayjs';
 
 const $userPQ = userPQStore();
 const $web3 = web3Store();
 const $mitt = inject('$mitt');
-const $enigma = inject('$enigma');
 const search = ref();
 
 const { selected, excluded, metaRequired } = defineProps({

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { _setStorageForTests as setOutboxStorage, _setLeaderForTests, currentSessionUserHash } from '@/lib/data/outbox';
+import { _setStorageForTests as setOutboxStorage, _setLeaderForTests, currentSessionUserHash, SessionFencedError, pendingReconciliation, pendingEntries } from '@/lib/data/outbox';
 import { getAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
+import { _setIntentStorageForTests } from '@/lib/data/intents';
 
 const makeMemoryStore = () => {
 	const map = new Map<string, string>();
@@ -95,6 +96,7 @@ beforeEach(() => {
 		async remove(k) { store.delete(k); },
 	};
 	setOutboxStorage(makeMemoryStore());
+	_setIntentStorageForTests(makeMemoryStore());
 	_setAcceptedSnapshotStorageForTests(makeMemoryStore());
 	ingestImpl = acceptEverything;
 	_setLeaderForTests(true);
@@ -195,14 +197,14 @@ describe('pre-login user_cards acceptance is recorded through the real coordinat
 		const acceptedBBefore = await getAccepted('user_cards', hashB);
 		expect(acceptedBBefore!.name).toBe('Bob');
 
+		await expect(createA).rejects.toBeInstanceOf(SessionFencedError);
 		resolveA!();
-		await createA;
 		const hashA = (await emA.getLocalUserCards()).find((c: { name: string; user_hash: string }) => c.name === 'Alice')!.user_hash;
+		await vi.waitFor(async () => expect((await pendingReconciliation(hashA)).length + (await pendingEntries(hashA)).length).toBeGreaterThan(0));
 
-		const acceptedA = await getAccepted('user_cards', hashA);
 		const acceptedBAfter = await getAccepted('user_cards', hashB);
-		expect(acceptedA!.name).toBe('Alice');
 		expect(acceptedBAfter!.name).toBe('Bob');
 		expect(acceptedBAfter).toEqual(acceptedBBefore);
+		expect(currentSessionUserHash()).toBe(hashB); // A's abort left B's session alone
 	});
 });

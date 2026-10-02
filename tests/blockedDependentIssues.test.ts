@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { dependenciesFor } from '@/lib/data/coordinator';
+import { foundDependencies } from './helpers/dependencies';
 import {
 	enqueue, recordFailure, discardEntry, blockedDependentIssues,
 	_setStorageForTests,
@@ -23,7 +23,8 @@ const makeStorage = () => {
 
 const editMessage = (messageId: string, userHash = MY_HASH) => ([{
 	type: 'update',
-	modified: {
+	original: {},
+	changes: {
 		message_id: messageId, sender_hash: userHash, dialog_hash: 'dh1',
 		content_b64: 'x', parent_sign_hash: null, owner_timestamp: 1,
 	},
@@ -38,7 +39,7 @@ describe('blockedDependentIssues: UI-safe blocked-reason read layer', () => {
 	it('1. B depends on a quarantined A: returns B with blocker A status quarantined and its reason', async () => {
 		const aId = await enqueue(editMessage('msg_X'), MY_HASH);
 		await recordFailure(aId, new IngestError('rejected by peer', { permanent: true }));
-		const bDeps = await dependenciesFor(editMessage('msg_X'), MY_HASH);
+		const bDeps = await foundDependencies(editMessage('msg_X'), MY_HASH);
 		const bId = await enqueue(editMessage('msg_X'), MY_HASH, { dependsOn: bDeps });
 
 		const issues = await blockedDependentIssues(MY_HASH);
@@ -53,7 +54,7 @@ describe('blockedDependentIssues: UI-safe blocked-reason read layer', () => {
 	it('2. B depends on a discarded A: returns B with a terminal blocker A status discarded', async () => {
 		const aId = await enqueue(editMessage('msg_X'), MY_HASH);
 		await recordFailure(aId, new IngestError('rejected', { permanent: true }));
-		const bDeps = await dependenciesFor(editMessage('msg_X'), MY_HASH);
+		const bDeps = await foundDependencies(editMessage('msg_X'), MY_HASH);
 		const bId = await enqueue(editMessage('msg_X'), MY_HASH, { dependsOn: bDeps });
 
 		await discardEntry(aId as string);

@@ -136,17 +136,20 @@ describe('the retry schedule is durable state, not loop memory', () => {
 		}
 	});
 
-	it('an explicit trigger (login/online) resets schedules', async () => {
+	it('a trigger never clears a server backoff; a known connection ends only a network backoff', async () => {
 		vi.useFakeTimers();
 		try {
-			const a = await enqueue(mutation('dialog_messages', 'x'), MY);
-			await recordFailure(a, new Error('offline'));
+			const server = await enqueue(mutation('dialog_messages', 'server'), MY);
+			await recordFailure(server, new IngestError('503', { permanent: false }));
+			const network = await enqueue(mutation('dialog_messages', 'network'), MY);
+			await recordFailure(network, new IngestError('no answer', { network: true }));
 			expect((await readyEntries(MY)).length).toBe(0);
 
 			const sent: unknown[][] = [];
-			ensureDrainLoop(MY, async (m) => { sent.push(m); }, { resetSchedules: true });
+			ensureDrainLoop(MY, async (m) => { sent.push(m); }, { releaseNetworkBackoffs: true });
 			await vi.advanceTimersByTimeAsync(0);
-			expect(sent).toHaveLength(1); // due immediately, no 5s hostage
+			expect(sent.map((m) => (m[0] as { modified: { content_b64: string } }).modified.content_b64)).toEqual(['network']);
+			expect(JSON.parse(storage.map.get(server!)!).nextAttemptAt).toBeGreaterThan(Date.now());
 		} finally {
 			stopDrainLoop();
 			vi.useRealTimers();

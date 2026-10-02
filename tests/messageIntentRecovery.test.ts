@@ -4,14 +4,17 @@ import {
 	startLeaderElection, stopLeaderElection, currentSessionToken, SessionFencedError,
 	enqueue as outboxEnqueue, _setStorageForTests as _setOutboxStorageForTests,
 } from '@/lib/data/outbox';
+import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
 
 let sendImpl: (mutations: unknown[]) => Promise<unknown>;
 const sentMutations: Array<{ relation: string; row: Record<string, unknown>; type: string }> = [];
 
 const DIALOG_HASH = 'di_' + '1'.repeat(128);
-const MY_HASH = 'u_' + 'a'.repeat(128);
+const ME = makeTestIdentity(1, 'me');
+const PEER = makeTestIdentity(3, 'peer');
+const MY_HASH = ME.userHash;
 const OTHER_HASH = 'u_' + 'b'.repeat(128);
-const PEER_HASH = 'u_' + 'c'.repeat(128);
+const PEER_HASH = PEER.userHash;
 const SKEY = new Uint8Array(32).fill(9);
 
 const decodeRefs = (refsMapB64: string) => JSON.parse(refsMapB64.replace(/^enc\(/, '').replace(/\)$/, ''));
@@ -36,7 +39,10 @@ vi.mock('@/api/client', () => ({
 	api: {
 		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => {
 			signCount++;
-			return { type, relation, row, changes: { ...row, sign_hash: `sig_${signCount}` }, syncMetadata: { relation } };
+			const signed = { ...row, sign_hash: `sig_${signCount}` };
+			return type === 'insert'
+				? { type, relation, row, modified: signed, syncMetadata: { relation } }
+				: { type, relation, row, original: {}, changes: signed, syncMetadata: { relation } };
 		},
 	},
 }));
@@ -67,7 +73,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 		getInstance: () => ({
 			exportVaultKeys: async () => {
 				if (vaultLocked) throw new Error('vault is locked');
-				return { sign_skey: 'AAAA', crypt_skey: 'BBBB', evm_skey: 'cc' };
+				return ME.vault;
 			},
 		}),
 	},
@@ -124,10 +130,10 @@ beforeEach(async () => {
 	startLeaderElection(MY_HASH, () => {});
 	sendImpl = async () => ({ txids: [1] });
 	collections = {
-		cards: makeCollection({ [PEER_HASH]: { user_hash: PEER_HASH, crypt_pkey: 'peer-pkey' } }),
+		cards: makeCollection({ [MY_HASH]: ME.card, [PEER_HASH]: PEER.card }),
 		dialog: {
 			keys: makeCollection({
-				[`${DIALOG_HASH}|${MY_HASH}`]: { dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false },
+				[`${DIALOG_HASH}|${MY_HASH}`]: signedDialogKeyRow(ME, { dialog_hash: DIALOG_HASH, peer_hash: PEER_HASH }),
 			}),
 		},
 	};
@@ -212,7 +218,9 @@ describe('recoverIntents: locked vault at recovery time (§5)', () => {
 		expect(sentMutations).toHaveLength(0);
 		expect(signCount).toBe(0);
 		const stillLocked = await getIntent(id!);
-		expect(stillLocked).toEqual(beforeUnlock);
+		const { awaiting, ...unchanged } = stillLocked as typeof stillLocked & { awaiting?: unknown };
+		expect(unchanged).toEqual(beforeUnlock);
+		expect(awaiting).toMatchObject({ phase: 'AWAITING_UNLOCK' });
 
 		vaultLocked = false;
 		await recoverIntents(MY_HASH, SKEY, { materializeMessage: materializeMessageIntent });
@@ -327,10 +335,11 @@ describe('materializeMessageIntent: builds the row from the captured payload alo
 
 		const readyRow = await materializeMessageIntent(payload, currentSessionToken()!);
 
-		expect(readyRow.relation).toBe('dialog_messages');
-		expect(readyRow.row.sender_hash).toBe(MY_HASH);
-		expect(readyRow.row.message_id).toBe('dmsg_isolated');
-		expect(readyRow.row.owner_timestamp).toBe(42);
+		expect(readyRow).not.toBeNull();
+		expect(readyRow!.relation).toBe('dialog_messages');
+		expect(readyRow!.row.sender_hash).toBe(MY_HASH);
+		expect(readyRow!.row.message_id).toBe('dmsg_isolated');
+		expect(readyRow!.row.owner_timestamp).toBe(42);
 	});
 
 	it('refuses internally when the token\'s account does not match payload.ownerHash — never trusts the caller alone', async () => {

@@ -120,27 +120,27 @@ afterEach(() => {
 });
 
 describe('one tab under the real send lock', () => {
-	it('sends a write issued while another is in flight right after it, not a poll interval later', async () => {
-		void sendMutationsAndAwaitShape([await compose('A')], SKEY, { retries: 0 });
+	it('sends an independent write issued while another is in flight alongside it, not a poll interval later', async () => {
+		void sendMutationsAndAwaitShape([await compose('A')], SKEY).catch(() => {});
 		await vi.advanceTimersByTimeAsync(50);
-		const b = await sendMutationsAndAwaitShape([await compose('B')], SKEY, { retries: 0 });
-		expect(b.phase).toBe('queued');
+		let phaseB: string | null = null;
+		void sendMutationsAndAwaitShape([await compose('B')], SKEY).then((h) => { phaseB = h.phase; }, () => {});
 
 		await vi.advanceTimersByTimeAsync(3_000);
 		expect(at('A')).toBeDefined();
-		expect(at('B')).toBeLessThan(2 * ROUND_TRIP_MS + 500);
+		expect(at('B')).toBeLessThan(2 * ROUND_TRIP_MS);
+		expect(phaseB).toBe('accepted');
 	});
 
-	it('retries a missing connection once inside a live send that is already in the outbox, then leaves it to the outbox', async () => {
+	it('a missing connection: the sender attempts the live write once and leaves the retry to the outbox schedule', async () => {
 		online = false;
 		let outcome = 'pending';
 		void sendMutationsAndAwaitShape([await compose('A')], SKEY).then(() => { outcome = 'sent'; }, () => { outcome = 'failed'; });
-		await vi.advanceTimersByTimeAsync(2 * ROUND_TRIP_MS + 1_300);
-		// One quick retry covers a lost response; after that the outbox owns
-		// the retry, and the lock is free for the next write instead of held
-		// through seconds of in-process retries.
+		await vi.advanceTimersByTimeAsync(ROUND_TRIP_MS + 200);
+		// No in-process retries of a live write: the lock is free for the next
+		// write, and the outbox schedule owns the retry.
 		expect(outcome).toBe('failed');
-		expect(attempts).toBe(2);
+		expect(attempts).toBe(1);
 		expect((await pendingEntries(MY_HASH)).map((e) => e.lastErrorNetwork)).toEqual([true]);
 	});
 });
@@ -172,7 +172,7 @@ describe('after a lost connection', () => {
 		online = true;
 		drainPendingWrites(MY_HASH, SKEY);
 		// A delivered receipt goes out live in the same instant.
-		void sendMutationsAndAwaitShape([await compose('R')], SKEY, { retries: 0 }).catch(() => {});
+		void sendMutationsAndAwaitShape([await compose('R')], SKEY).catch(() => {});
 		await vi.advanceTimersByTimeAsync(10_000);
 
 		expect(at('A')).toBeLessThan(40_000 + 3_000);
@@ -191,7 +191,7 @@ describe('after a lost connection', () => {
 		const now = Date.now() - t0;
 		// A write in another dialog is answered: the connection is proven.
 		const other = { ...message('X'), modified: { ...message('X').modified, dialog_hash: 'di_y' } };
-		const answered = sendMutationsAndAwaitShape([other], SKEY, { retries: 0 });
+		const answered = sendMutationsAndAwaitShape([other], SKEY);
 		await vi.advanceTimersByTimeAsync(3_000);
 		await answered;
 
@@ -209,7 +209,7 @@ describe('what a message does not cite, it does not wait for (ADR §7.2)', () =>
 		await vi.advanceTimersByTimeAsync(3_000);
 		online = true;
 		// B observed the same tails as A (a fork): it does not cite A.
-		const b = sendMutationsAndAwaitShape([await compose('B')], SKEY, { retries: 0 });
+		const b = sendMutationsAndAwaitShape([await compose('B')], SKEY);
 		await vi.advanceTimersByTimeAsync(ROUND_TRIP_MS + 100);
 		expect((await b).phase).toBe('accepted');
 		expect(at('B')).toBeDefined();

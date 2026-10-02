@@ -16,7 +16,7 @@ import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
 import { _setIntentStorageForTests } from '@/lib/data/intents';
 import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
-import { _setReadCacheStorageForTests, _resetTouchedForTests } from '@/lib/data/readCache';
+import { _resetTouchedForTests } from '@/lib/data/readCache';
 import { setDialogCacheRow, clearDialogCacheDb } from './helpers/mainDialogCache';
 import type { SignableValue } from '@/lib/pq/signature';
 import type { UserCardRow } from '@/lib/data/types';
@@ -110,7 +110,6 @@ describe('IndexedDB read-cache fallback: real dialog gate through Page_Chat.vue 
 		_setAcceptedSnapshotStorageForTests(makeMemStringStore());
 		_setOwnObservedTailsStorageForTests(makeMemStringStore());
 		await clearDialogCacheDb();
-	_setReadCacheStorageForTests(makeMemStringStore());
 		_resetTouchedForTests();
 
 		me = makeIdentity(30);
@@ -133,11 +132,12 @@ describe('IndexedDB read-cache fallback: real dialog gate through Page_Chat.vue 
 		senderKey = DialogCrypto.deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, bytesToHex(peer.contactSk), me.userHash);
 
 		const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, me.kem.publicKey);
-		await setDialogCacheRow('dialog_keys', `${dialogHash}|${peer.userHash}`, {
+		const keyFields = {
 			dialog_hash: dialogHash, sender_hash: peer.userHash, peer_hash: me.userHash,
 			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
 			deleted_flag: false, owner_timestamp: 999,
-		});
+		};
+		await setDialogCacheRow('dialog_keys', `${dialogHash}|${peer.userHash}`, { ...keyFields, sign_b64: signFields(keyFields as never, peer.sign.secretKey) });
 	});
 
 	afterEach(() => {

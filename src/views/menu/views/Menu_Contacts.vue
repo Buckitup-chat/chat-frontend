@@ -11,7 +11,7 @@ import { userStore } from '@/store/user.store';
 import { useMenu } from '@/composables/useMenu';
 
 import Contacts_List from '@/views/contacts/Contacts_List.vue';
-import { ref, inject, watch, onMounted, computed } from 'vue';
+import { ref, inject, watch, onMounted } from 'vue';
 
 const $route = inject('$route');
 const $router = inject('$router');
@@ -28,10 +28,6 @@ const select = (address) => {
 
 onMounted(async () => {
 	if ($menuOpened.value && $route.params.address) checkSelection();
-});
-
-const hasContacts = computed(() => {
-	return $user.contacts.filter((contact) => !contact.hidden).length > 0;
 });
 
 watch(

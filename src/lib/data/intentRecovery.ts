@@ -1,7 +1,12 @@
 import { api } from '@/api/client';
+import { decodeHexOrBase64 } from '@/libs/enigma';
 import { sendMutationsAndAwaitShape, DurabilityError, type DeliveryHandle } from './ingest';
-import { intentsOf, resolveIntent, getIntent, updateIntent, enqueueIntent, type IntentEntry } from './intents';
-import { currentSessionToken, sameSessionToken, findEntryBySourceIntentId, awaitEntryOutcome, type SessionToken } from './outbox';
+import { intentsOf, resolveIntent, getIntent, updateIntent, enqueueIntent, markIntentAwaitingUnlock, resumeIntentAfterUnlock, type IntentEntry } from './intents';
+import { VaultLockedError, resolveSigningKey, type SigningKeySource } from './keyCustody';
+import {
+	currentSessionToken, sameSessionToken, findEntryBySourceIntentId, awaitEntryOutcome, heldStateOf, STATE_UNCONFIRMED_MESSAGE,
+	SessionFencedError, type SessionToken,
+} from './outbox';
 import {
 	withStorageSlotLock, signAndDispatchDurably, BaseUnavailableError,
 	isReconcilableStorageConflict, MAX_CONFLICT_RECONCILE_ATTEMPTS, RECONCILE_RETRY_DELAY_MS,
@@ -21,6 +26,7 @@ export interface ReadyRowIntent {
 	relation: string;
 	row: Record<string, unknown>;
 	mutationType?: string;
+	purpose?: string;
 }
 
 export interface MessageIntentPayload {
@@ -35,7 +41,54 @@ export interface MessageIntentPayload {
 	observedTails: Record<string, string>;
 }
 
-export type StoredIntentPayload = ReadyRowIntent | MessageIntentPayload | StorageIntentPayload;
+export interface MessageRevisionIntentPayload {
+	kind: 'edit' | 'delete';
+	relation: 'dialog_messages';
+	peerHash: string;
+	dialogHash: string;
+	messageId: string;
+	ownerHash: string;
+	parts?: ContentPart[];
+	observedTails: Record<string, string>;
+}
+
+export interface ReactionIntentPayload {
+	kind: 'reaction';
+	relation: 'dialog_message_reactions';
+	peerHash: string;
+	dialogHash: string;
+	messageId: string;
+	messageSignHash: string;
+	emoji: string;
+	desiredActive: boolean;
+	ownerHash: string;
+}
+
+export interface ReceiptIntentPayload {
+	kind: 'receipt';
+	relation: 'dialog_message_receipts';
+	peerHash: string;
+	dialogHash: string;
+	ownerHash: string;
+	row: Record<string, unknown>;
+}
+
+export type DialogIntentPayload = MessageIntentPayload | MessageRevisionIntentPayload | ReactionIntentPayload | ReceiptIntentPayload;
+export const DIALOG_INTENT_KINDS = new Set(['message', 'checkpoint', 'edit', 'delete', 'reaction', 'receipt']);
+
+export const isUnsignedDialogIntent = (intent: unknown): intent is DialogIntentPayload => {
+	const i = intent as { kind?: unknown; signingClaimToken?: unknown; signedMutation?: unknown; resolved?: unknown } | null;
+	return !!i && DIALOG_INTENT_KINDS.has(String(i.kind)) && !i.signingClaimToken && !i.signedMutation && i.resolved !== true;
+};
+
+export class IntentChangedError extends Error {
+	constructor(intentId: string) {
+		super(`intent ${intentId} changed while it was being built — built again from what is stored`);
+		this.name = 'IntentChangedError';
+	}
+}
+
+export type StoredIntentPayload = ReadyRowIntent | DialogIntentPayload | StorageIntentPayload;
 
 type OnSigned = (mutation: { changes?: Record<string, unknown> }) => void;
 interface SignAndDispatchOptions {
@@ -43,11 +96,29 @@ interface SignAndDispatchOptions {
 	token?: SessionToken;
 	onDurable?: (outboxId: string) => void | Promise<void>;
 	excludeFromDependencies?: string[];
+	bootstrap?: boolean;
+	onLinked?: () => void;
+	builtFrom?: unknown;
 }
+export async function withIntentSigningLock<T>(intentId: string, fn: () => Promise<T>): Promise<T> {
+	return withIntentLock(intentId, () => fn());
+}
+const intentQueues = new Map<string, Promise<void>>();
 async function withIntentLock<T>(intentId: string, fn: (locked: boolean) => Promise<T>): Promise<T> {
-	const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
-	if (!locks?.request) return fn(false);
-	return locks.request(`buckitup-intent-sign:${intentId}`, () => fn(true));
+	const previous = intentQueues.get(intentId) ?? Promise.resolve();
+	let release!: () => void;
+	const done = new Promise<void>((resolve) => { release = resolve; });
+	const turn = previous.then(() => done);
+	intentQueues.set(intentId, turn);
+	await previous;
+	try {
+		const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+		if (!locks?.request) return await fn(false);
+		return await locks.request(`buckitup-intent-sign:${intentId}`, () => fn(true));
+	} finally {
+		release();
+		if (intentQueues.get(intentId) === turn) intentQueues.delete(intentId);
+	}
 }
 
 function buildSignedMutation(intent: ReadyRowIntent, signSkey: Uint8Array): SignedMutationRecord {
@@ -67,21 +138,37 @@ function buildSignedMutation(intent: ReadyRowIntent, signSkey: Uint8Array): Sign
 			intent.mutationType ?? 'insert'
 		);
 	}
+	if (intent.relation === 'user_cards') {
+		const row = intent.row as {
+			user_hash: string; name: string; owner_timestamp: number;
+			sign_pkey: string; contact_pkey: string; contact_cert: string; crypt_pkey: string; crypt_cert: string;
+		};
+		const createUserCard = api.createUserCard as (...args: unknown[]) => { mutation: SignedMutationRecord };
+		return createUserCard(row.name, {
+			user_hash: row.user_hash,
+			sign_pkey: decodeHexOrBase64(row.sign_pkey),
+			contact_pkey: decodeHexOrBase64(row.contact_pkey),
+			contact_cert: decodeHexOrBase64(row.contact_cert),
+			crypt_pkey: decodeHexOrBase64(row.crypt_pkey),
+			crypt_cert: decodeHexOrBase64(row.crypt_cert),
+			sign_skey: signSkey,
+		}, intent.mutationType ?? 'insert', row.owner_timestamp).mutation;
+	}
 	return api.createGenericMutation(intent.relation, intent.row, signSkey, intent.mutationType ?? 'insert') as SignedMutationRecord;
 }
 
 const pendingSignAndDispatch = new Map<string, Promise<DeliveryHandle>>();
-const handleForOutboxId = (outboxId: string | null, userHash: string): DeliveryHandle => {
+const handleForOutboxId = async (outboxId: string | null, userHash: string): Promise<DeliveryHandle> => {
 	if (!outboxId) {
 		throw new Error(
 			'signAndDispatchIntent: this intent is marked resolved but carries no durable outbox linkage — cannot positively confirm its outcome'
 		);
 	}
-	return {
-		outboxId,
-		phase: 'queued',
-		acceptance: awaitEntryOutcome(outboxId, userHash),
-	};
+	const state = await heldStateOf(outboxId, userHash);
+	const handle: DeliveryHandle = { outboxId, phase: 'queued', acceptance: awaitEntryOutcome(outboxId, userHash) };
+	if (state.kind === 'held') handle.held = { reason: state.reason, message: state.message };
+	if (state.kind === 'unconfirmed') handle.held = { reason: 'state_unconfirmed', message: STATE_UNCONFIRMED_MESSAGE };
+	return handle;
 };
 
 export async function signAndDispatchIntent(
@@ -143,6 +230,9 @@ async function signAndDispatchIntentUnguarded(
 		}
 		mutation = claimed;
 	} else {
+		if (opts.builtFrom !== undefined && JSON.stringify(stored) !== JSON.stringify(opts.builtFrom)) {
+			throw new IntentChangedError(intentId);
+		}
 		if (!locked) {
 			const claimToken = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 			const claimedOk = await updateIntent(intentId, { ...intent, signingClaimToken: claimToken });
@@ -156,6 +246,9 @@ async function signAndDispatchIntentUnguarded(
 				);
 			}
 		}
+		if (opts.token && !sameSessionToken(opts.token, currentSessionToken())) {
+			throw new SessionFencedError(`signAndDispatchIntent: the session changed before intent ${intentId} was signed`);
+		}
 		mutation = buildSignedMutation(intent, signSkey);
 		if (!opts.token || sameSessionToken(opts.token, currentSessionToken())) {
 			opts.onSigned?.(mutation as { changes?: Record<string, unknown> });
@@ -168,24 +261,32 @@ async function signAndDispatchIntentUnguarded(
 
 	try {
 		const result = await sendMutationsAndAwaitShape([mutation], signSkey, {
+			targeted: opts.bootstrap,
 			sourceIntentId: intentId,
 			excludeFromDependencies: opts.excludeFromDependencies,
 			onDurable: async (outboxId) => {
-				await opts.onDurable?.(outboxId);
-				const confirmed = await updateIntent(intentId, {
-					...intent, signedMutation: mutation, dispatchConfirmed: true, outboxId,
-				}).catch((e) => {
-					console.warn('[intents] durable dispatch-confirmed write threw:', intentId, e);
-					return false;
-				});
-				if (!confirmed) {
-					console.warn(
-						'[intents] could not durably mark dispatch as confirmed — recovery will find it via the outbox\'s own sourceIntentId link instead:',
-						intentId
-					);
-					return;
+				if (opts.token && !sameSessionToken(opts.token, currentSessionToken())) {
+					throw new SessionFencedError(`signAndDispatchIntent: the session changed before intent ${intentId} was linked to its outbox entry`);
 				}
-				await resolveIntent(intentId, { outcome: 'durably-dispatched', ref: outboxId });
+				await opts.onDurable?.(outboxId);
+				try {
+					const confirmed = await updateIntent(intentId, {
+						...intent, signedMutation: mutation, dispatchConfirmed: true, outboxId,
+					}).catch((e) => {
+						console.warn('[intents] durable dispatch-confirmed write threw:', intentId, e);
+						return false;
+					});
+					if (!confirmed) {
+						console.warn(
+							'[intents] could not durably mark dispatch as confirmed — recovery will find it via the outbox\'s own sourceIntentId link instead:',
+							intentId
+						);
+						return;
+					}
+					await resolveIntent(intentId, { outcome: 'durably-dispatched', ref: outboxId });
+				} finally {
+					opts.onLinked?.();
+				}
 			},
 		});
 		await resolveIntent(intentId, { outcome: 'durably-dispatched', ref: result.outboxId });
@@ -211,6 +312,8 @@ export type StorageMaterializer = (payload: StorageIntentPayload, token: Session
 export type StorageDispatchResult =
 	| { kind: 'already-claimed' }
 	| { kind: 'base-unavailable'; message: string }
+	/** The account's keys are locked: nothing was built or signed; the intent waits for the unlock. */
+	| { kind: 'awaiting-unlock'; message: string }
 	| { kind: 'dispatched'; dispatchPromise: Promise<DeliveryHandle> };
 
 export async function materializeSignEnqueueStorageIntent(
@@ -225,6 +328,7 @@ export async function materializeSignEnqueueStorageIntent(
 	const lockResult = await withStorageSlotLock(userHash, uuid, async (): Promise<
 		| { kind: 'already-claimed' }
 		| { kind: 'base-unavailable'; message: string }
+		| { kind: 'awaiting-unlock'; message: string }
 		| { kind: 'dispatching'; payload: StorageIntentPayload; dispatchPromise: Promise<DeliveryHandle> }
 	> => {
 		const current = await getIntent<Record<string, unknown>>(intentId);
@@ -238,11 +342,12 @@ export async function materializeSignEnqueueStorageIntent(
 			readyRow = await materialize(payload, token, excludeFromDependencies);
 		} catch (e) {
 			if (e instanceof BaseUnavailableError) return { kind: 'base-unavailable', message: e.message };
+			if (e instanceof VaultLockedError) return { kind: 'awaiting-unlock', message: e.message };
 			throw e;
 		}
 
-		const { durable, dispatchPromise } = signAndDispatchDurably((onDurable) =>
-			signAndDispatchIntent(intentId, readyRow, signSkey, { token, onDurable, excludeFromDependencies })
+		const { durable, dispatchPromise } = signAndDispatchDurably((onLinked) =>
+			signAndDispatchIntent(intentId, readyRow, signSkey, { token, onLinked, excludeFromDependencies })
 		);
 		await durable;
 		return { kind: 'dispatching', payload, dispatchPromise };
@@ -267,17 +372,29 @@ export async function materializeSignEnqueueStorageIntent(
 		const retryResult = await materializeSignEnqueueStorageIntent(userHash, uuid, nextIntentId, signSkey, token, materialize, nextExclude);
 		if (retryResult.kind === 'dispatched') return retryResult.dispatchPromise;
 		if (retryResult.kind === 'base-unavailable') throw new BaseUnavailableError(retryResult.message);
+		if (retryResult.kind === 'awaiting-unlock') throw new VaultLockedError(retryResult.message);
 		throw e;
 	});
 
 	return { kind: 'dispatched', dispatchPromise: reconciledDispatch };
 }
 
+const warnUndelivered = (intentId: string, e: unknown) =>
+	console.warn('[intents] recovered intent is stored; its delivery is the outbox\'s now:', intentId, e);
+
+async function handOverDurably(intentId: string, readyRow: ReadyRowIntent, signSkey: Uint8Array, token: SessionToken, builtFrom?: unknown): Promise<void> {
+	const { durable, dispatchPromise } = signAndDispatchDurably((onLinked) =>
+		signAndDispatchIntent(intentId, readyRow, signSkey, { token, onLinked, builtFrom })
+	);
+	void dispatchPromise.catch((e) => warnUndelivered(intentId, e));
+	await durable;
+}
+
 export async function recoverIntents(
 	userHash: string,
-	signSkey: Uint8Array,
+	signingKey: SigningKeySource,
 	opts: {
-		materializeMessage?: (payload: MessageIntentPayload, token: SessionToken) => Promise<ReadyRowIntent>;
+		materializeMessage?: (payload: DialogIntentPayload, token: SessionToken) => Promise<ReadyRowIntent | null>;
 		materializeStorage?: (payload: StorageIntentPayload, token: SessionToken) => Promise<ReadyRowIntent>;
 	} = {}
 ): Promise<void> {
@@ -300,24 +417,58 @@ export async function recoverIntents(
 		console.warn('[intents] recovery scan failed — storage itself is unreadable, nothing was recovered this pass:', e);
 		return;
 	}
+	const awaitUnlock = async (entry: IntentEntry, e: unknown) => {
+		if (!(await withIntentLock(entry.id, () => markIntentAwaitingUnlock(entry.id, userHash)))) {
+			console.warn('[intents] could not record an intent as awaiting unlock; it stays as it was:', entry.id, e);
+		}
+	};
 	for (const entry of entries) {
 		if (!sameSessionToken(token, currentSessionToken())) {
 			console.warn('[intents] recovery aborted mid-scan — active session changed');
 			return;
 		}
 		try {
+			let signSkey: Uint8Array;
+			try {
+				signSkey = await resolveSigningKey(signingKey);
+			} catch (e) {
+				if (e instanceof VaultLockedError) {
+					await awaitUnlock(entry, e);
+					continue;
+				}
+				throw e;
+			}
+			if (!sameSessionToken(token, currentSessionToken())) {
+				console.warn('[intents] recovery aborted — active session changed', entry.id);
+				return;
+			}
+			if (!(await withIntentLock(entry.id, () => resumeIntentAfterUnlock(entry.id, userHash)))) continue;
+
 			const stored = entry.intent as StoredIntentPayload;
-			if (stored.kind === 'message' || stored.kind === 'checkpoint') {
+			if (DIALOG_INTENT_KINDS.has(String(stored.kind))) {
 				if (!opts.materializeMessage) {
 					console.warn('[intents] no message materializer registered, will retry later:', entry.id);
 					continue;
 				}
-				const readyRow = await opts.materializeMessage(stored, token);
+				let readyRow: ReadyRowIntent | null;
+				try {
+					readyRow = await opts.materializeMessage(stored as DialogIntentPayload, token);
+				} catch (e) {
+					if (e instanceof VaultLockedError) {
+						await awaitUnlock(entry, e);
+						continue;
+					}
+					throw e;
+				}
 				if (!sameSessionToken(token, currentSessionToken())) {
 					console.warn('[intents] recovery aborted after materialization — active session changed', entry.id);
 					return;
 				}
-				await signAndDispatchIntent(entry.id, readyRow, signSkey, { token });
+				if (readyRow === null) {
+					await resolveIntent(entry.id, { outcome: 'noop' });
+					continue;
+				}
+				await handOverDurably(entry.id, readyRow, signSkey, token, isUnsignedDialogIntent(stored) ? stored : undefined);
 			} else if (stored.kind === 'storage') {
 				if (!opts.materializeStorage) {
 					console.warn('[intents] no storage materializer registered, will retry later:', entry.id);
@@ -326,12 +477,13 @@ export async function recoverIntents(
 				const result = await materializeSignEnqueueStorageIntent(
 					stored.userHash, stored.uuid, entry.id, signSkey, token, opts.materializeStorage
 				);
-				if (result.kind === 'dispatched') await result.dispatchPromise;
+				if (result.kind === 'dispatched') void result.dispatchPromise.catch((e) => warnUndelivered(entry.id, e));
+				else if (result.kind === 'awaiting-unlock') await awaitUnlock(entry, result.message);
 				else if (result.kind === 'base-unavailable') {
 					console.warn('[intents] storage base unavailable during recovery, will retry later:', entry.id, result.message);
 				}
 			} else {
-				await signAndDispatchIntent(entry.id, stored as ReadyRowIntent, signSkey);
+				await handOverDurably(entry.id, stored as ReadyRowIntent, signSkey, token);
 			}
 		} catch (e) {
 			console.warn('[intents] recovery failed for one intent, will retry later:', entry.id, e);

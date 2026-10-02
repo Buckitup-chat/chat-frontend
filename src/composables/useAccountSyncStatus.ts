@@ -1,5 +1,5 @@
 import { ref, computed, watch, onScopeDispose, type ComputedRef } from 'vue';
-import { pendingEntries, quarantinedEntries, onOutboxChange } from '@/lib/data/outbox';
+import { accountOutboxSnapshot, onOutboxChange } from '@/lib/data/outbox';
 import { intentsOf, onIntentChange } from '@/lib/data/intents';
 
 export type AccountSyncState = 'offline' | 'syncing' | 'needs_attention' | 'synced';
@@ -8,12 +8,13 @@ export interface AccountQueueCounts {
 	intents: number;
 	unfinished: number;
 	quarantined: number;
+	discoveryBlocked?: number;
 }
 
 export const accountSyncState = (online: boolean, counts: AccountQueueCounts | null): AccountSyncState => {
 	if (!online) return 'offline';
 	if (!counts) return 'syncing';
-	if (counts.quarantined > 0) return 'needs_attention';
+	if (counts.quarantined > 0 || (counts.discoveryBlocked ?? 0) > 0) return 'needs_attention';
 	return counts.intents > 0 || counts.unfinished > 0 ? 'syncing' : 'synced';
 };
 
@@ -35,8 +36,13 @@ export function useAccountSyncStatus(
 		let next: AccountQueueCounts | null;
 		try {
 			const intents = (await intentsOf(hash)).entries.length;
-			const [pending, quarantined] = await Promise.all([pendingEntries(hash), quarantinedEntries(hash)]);
-			next = { intents, unfinished: pending.filter((e) => !e.reconciledAt).length, quarantined: quarantined.length };
+			const { pending, quarantined, corrupt, blocked } = await accountOutboxSnapshot(hash);
+			next = {
+				intents,
+				unfinished: pending.filter((e) => !e.reconciledAt).length,
+				quarantined: quarantined.length + corrupt.length,
+				discoveryBlocked: blocked.filter((issue) => issue.discovery).length,
+			};
 		} catch {
 			next = null;
 		}

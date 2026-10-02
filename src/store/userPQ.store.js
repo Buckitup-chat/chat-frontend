@@ -4,7 +4,7 @@ import { ref, shallowRef, computed, watch, onScopeDispose } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { preloadWithRetry } from '@/lib/data/attach';
-import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache } from '@/lib/data/userCardsLink';
+import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verifiedCards } from '@/lib/data/userCardsLink';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
@@ -92,7 +92,7 @@ export const userPQStore = defineStore('userPQ', () => {
     initNetworkUsers();
   };
 
-  const readCards = (rows) => rows
+  const readCards = (rows) => verifiedCards(rows)
     .filter((r) => !r.deleted_flag)
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
@@ -473,11 +473,12 @@ export const userPQStore = defineStore('userPQ', () => {
     }
     const { identity, keys } = backupData;
     if (!identity?.name) identity.name = 'Imported Account';
-    await em.value.importVaultKeys(keys, identity);
+    const result = await em.value.importVaultKeys(keys, identity);
     // importVaultKeys signs in at the manager level only; the store's side of
     // a session is the same as after login, or the import lands on the login
     // page with no contacts.
-    afterSignIn(identity);
+    if (result.status === 'active') afterSignIn(identity);
+    return result;
   };
 
   watch(isAuthenticated, (authenticated) => {

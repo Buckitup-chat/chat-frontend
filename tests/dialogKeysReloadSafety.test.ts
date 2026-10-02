@@ -1,14 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
 import { pinActiveSession } from '@/lib/data/sessionGuard';
+import { makeTestIdentity } from './helpers/signedFixtures';
 
-const MY_HASH = 'u_' + 'a'.repeat(128);
-const PEER_HASH = 'u_' + 'b'.repeat(128);
+const ME = makeTestIdentity(1, 'me');
+const PEER = makeTestIdentity(2, 'peer');
+const MY_HASH = ME.userHash;
+const PEER_HASH = PEER.userHash;
 const DIALOG_HASH = 'di_' + '1'.repeat(128);
 
 const keysCollection = { rows: new Map<string, unknown>(), async preload() {}, get: (k: string) => keysCollection.rows.get(k) };
 const cardsCollection = {
-	rows: new Map<string, unknown>([[PEER_HASH, { user_hash: PEER_HASH, crypt_pkey: 'peer-pkey' }]]),
+	rows: new Map<string, unknown>([[PEER_HASH, PEER.card]]),
 	async preload() {},
 	get: (k: string) => cardsCollection.rows.get(k),
 };
@@ -34,7 +37,7 @@ vi.mock('@/libs/DialogCrypto', () => ({
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
 		getInstance: () => ({
-			exportVaultKeys: async () => ({ sign_skey: 'AAAA', crypt_skey: 'BBBB', evm_skey: 'cc' }),
+			exportVaultKeys: async () => ME.vault,
 		}),
 	},
 }));

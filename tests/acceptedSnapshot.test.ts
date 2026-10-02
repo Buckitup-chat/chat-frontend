@@ -128,33 +128,33 @@ describe('acceptedSnapshot: recorded by the coordinator on every accepted send (
 	});
 
 	it('records a dialog_messages row as soon as it is accepted', async () => {
-		const { dispatchMutations } = await import('@/lib/data/coordinator');
+		const { reconcileAccepted } = await import('@/lib/data/coordinator');
 		const mutations = [{
 			type: 'insert',
 			modified: { message_id: 'dmsg_x', dialog_hash: 'dh1', sender_hash: MY_HASH, sign_hash: 'dms_x', owner_timestamp: 500 },
 			syncMetadata: { relation: 'dialog_messages' },
 		}];
-		await dispatchMutations(mutations, async () => ({ txids: [], results: [] }));
+		await reconcileAccepted(mutations, { txids: [], results: [] });
 
 		expect(await getAccepted('dialog_messages', 'dmsg_x')).toMatchObject({ sign_hash: 'dms_x', owner_timestamp: 500 });
 	});
 
 	it('records an accepted receipt under its receipt_hash, exactly as signed', async () => {
-		const { dispatchMutations } = await import('@/lib/data/coordinator');
+		const { reconcileAccepted } = await import('@/lib/data/coordinator');
 		const row = { receipt_hash: 'rcpt_1', peer_hash: MY_HASH, type: 'delivered', owner_timestamp: 1, sign_b64: 'c2ln' };
 		const mutations = [{ type: 'insert', modified: row, syncMetadata: { relation: 'dialog_message_receipts' } }];
-		await dispatchMutations(mutations, async () => ({ txids: [], results: [] }));
+		await reconcileAccepted(mutations, { txids: [], results: [] });
 		expect(await getAccepted('dialog_message_receipts', 'rcpt_1', MY_HASH)).toEqual(row);
 	});
 
 	it('never records a relation with no entity-identity field', async () => {
-		const { dispatchMutations } = await import('@/lib/data/coordinator');
+		const { reconcileAccepted } = await import('@/lib/data/coordinator');
 		const mutations = [{
 			type: 'insert',
 			modified: { some_id: 'x_1', peer_hash: MY_HASH, owner_timestamp: 1 },
 			syncMetadata: { relation: 'unidentified_relation' },
 		}];
-		await dispatchMutations(mutations, async () => ({ txids: [], results: [] }));
+		await reconcileAccepted(mutations, { txids: [], results: [] });
 		expect(await getAccepted('unidentified_relation', 'x_1')).toBeNull();
 	});
 });

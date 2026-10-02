@@ -2,7 +2,6 @@ import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { sha3_256, sha3_512 } from '@noble/hashes/sha3';
 import { hmac } from '@noble/hashes/hmac';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
-import { randomBytes } from '@noble/post-quantum/utils.js';
 
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 

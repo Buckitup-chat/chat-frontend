@@ -14,7 +14,8 @@ import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { _setStoreForTests } from '@/lib/data/localStore';
 import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
 import { _setIntentStorageForTests } from '@/lib/data/intents';
-import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
+import { _setStorageForTests as setOutboxStorage } from '@/lib/data/outbox';
+import { _setAcceptedSnapshotStorageForTests, recordAccepted } from '@/lib/data/acceptedSnapshot';
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
 import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import type { MockInstance } from 'vitest';
@@ -126,6 +127,7 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 		resetCardRegistry();
 		_setStoreForTests(makeMemStringStore());
 		_setIntentStorageForTests(makeMemStringStore());
+		setOutboxStorage(makeMemStringStore());
 		_setAcceptedSnapshotStorageForTests(makeMemStringStore());
 		_setProjectionStorageForTests((() => { const m = new Map(); return { get: async (k) => m.get(k) ?? null, set: async (k, v) => { m.set(k, v); }, delete: async (k) => { m.delete(k); }, keys: async () => [...m.keys()], clear: async () => { m.clear(); } }; })());
 		_setOwnObservedTailsStorageForTests(makeMemStringStore());
@@ -144,10 +146,14 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 		startLeaderElection(me.userHash, () => {});
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash)!;
-		collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, {
-			dialog_hash: dialogHash, sender_hash: me.userHash, peer_hash: peer.userHash, deleted_flag: false,
-		});
 		senderKey = DialogCrypto.deriveSenderMsgKey(me.sign.secretKey, me.kem.secretKey, bytesToHex(me.contactSk), peer.userHash);
+		const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, peer.kem.publicKey);
+		const keyFields = {
+			dialog_hash: dialogHash, sender_hash: me.userHash, peer_hash: peer.userHash,
+			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+			deleted_flag: false, owner_timestamp: 1_700_000_000,
+		};
+		collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, { ...keyFields, sign_b64: signFields(keyFields as never, me.sign.secretKey) });
 		admitSpy = vi.spyOn(store, 'admitMessageRow');
 	});
 
@@ -330,6 +336,8 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 		const messageId = nextMessageId();
 		const optId = store.addOptimisticMessageWithId(dialogHash, messageId, 'still typed, not deleted yet', 1_700_000_100 as never);
 		store.updateOptimisticStatus(optId, 'synced');
+		const accepted = await signedRow(messageId, 'still typed, not deleted yet', {}, { owner_timestamp: 1_700_000_100 });
+		await recordAccepted('dialog_messages', messageId, accepted, me.userHash);
 
 		const wrapper = mountChat();
 		try {

@@ -45,6 +45,7 @@ const {
 	pendingEntries, pendingReconciliation, readyEntries, awaitEntryOutcome, drainOutbox,
 	startLeaderElection, stopLeaderElection, stopDrainLoop, currentSessionUserHash,
 	_setStorageForTests, _setLeaderForTests,
+	SessionFencedError,
 } = await import('@/lib/data/outbox');
 const { getAccepted, _setRawAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
@@ -90,7 +91,7 @@ describe('acceptance arriving after the owner logged out mid-request', () => {
 		ambientUserHash = A;
 
 		const started = new Promise<void>((resolve) => { requestStarted = resolve; });
-		const handlePromise = sendMutationsAndAwaitShape(message('logout-race', A), SKEY_A, { retries: 0 });
+		const handlePromise = sendMutationsAndAwaitShape(message('logout-race', A), SKEY_A);
 
 		await started;
 		const inFlight = await pendingEntries(A);
@@ -104,8 +105,8 @@ describe('acceptance arriving after the owner logged out mid-request', () => {
 		expect(currentSessionUserHash()).toBeNull();
 
 		releaseHttp!();
-		const handle = await handlePromise;
-		expect(handle.phase).toBe('accepted');
+		await expect(handlePromise).rejects.toBeInstanceOf(SessionFencedError);
+		await vi.waitFor(async () => expect((await pendingReconciliation(A)).map((e) => e.id)).toContain(outboxId));
 		expect(sent).toHaveLength(1);
 
 		const stuckAfterLogout = await pendingReconciliation(A);

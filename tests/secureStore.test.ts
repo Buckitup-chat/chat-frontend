@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { createSecureStore, deriveLocalStorageKey, type StringStore } from '../src/lib/data/secureStore';
+import { createSecureStore, deriveLocalStorageKey, DecryptFailedError, type StringStore } from '../src/lib/data/secureStore';
+import { VaultLockedError, AccountMismatchError } from '../src/lib/data/keyCustody';
 
 // Plain in-memory store standing in for IndexedDB.
 const makeMemoryStore = (): StringStore & { raw: Map<string, string> } => {
@@ -128,5 +129,44 @@ describe('createSecureStore with hashKeys', () => {
 		expect(inner.raw.size).toBe(2);
 		expect(await store.get('us|u_aaa|profile')).toBe('a');
 		expect(await store.get('us|u_bbb|profile')).toBe('b');
+	});
+});
+
+describe('createSecureStore: which failures are a damaged record', () => {
+	for (const [name, custody] of [
+		['VaultLockedError', () => new VaultLockedError('vault closed')],
+		['AccountMismatchError', () => new AccountMismatchError('another account is open')],
+	] as const) {
+		it(`passes a ${name} from getKey through unchanged, never as DecryptFailedError`, async () => {
+			const key = await keyFrom(1);
+			await createSecureStore(inner, { getKey: async () => key }).set('id-1', 'secret');
+			const failing = createSecureStore(inner, { getKey: async () => { throw custody(); } });
+			const hashed = createSecureStore(inner, { getKey: async () => { throw custody(); }, hashKeys: true });
+
+			for (const attempt of [failing.get('id-1'), failing.set('id-2', 'x'), hashed.get('id-1')]) {
+				const error = await attempt.catch((e: unknown) => e);
+				expect(error).toBeInstanceOf(custody().constructor);
+				expect(error).not.toBeInstanceOf(DecryptFailedError);
+			}
+		});
+	}
+
+	it('a record under another account key is DecryptFailedError', async () => {
+		await createSecureStore(inner, { getKey: async () => keyFrom(1) }).set('id-1', 'secret');
+		const theirs = await keyFrom(2);
+
+		await expect(createSecureStore(inner, { getKey: async () => theirs }).get('id-1')).rejects.toBeInstanceOf(DecryptFailedError);
+	});
+
+	it('tampered ciphertext and a malformed envelope are DecryptFailedError', async () => {
+		const key = await keyFrom(1);
+		const store = createSecureStore(inner, { getKey: async () => key });
+		await store.set('id-1', 'secret');
+		const stored = inner.raw.get('id-1')!;
+		inner.raw.set('id-1', stored.slice(0, -4) + (stored.at(-4) === 'A' ? 'B' : 'A') + stored.slice(-3));
+		inner.raw.set('id-2', '%%% not base64 %%%');
+
+		await expect(store.get('id-1')).rejects.toBeInstanceOf(DecryptFailedError);
+		await expect(store.get('id-2')).rejects.toBeInstanceOf(DecryptFailedError);
 	});
 });

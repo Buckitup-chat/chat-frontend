@@ -1,29 +1,14 @@
-import { contractFor, OWNER_FIELD } from './writeContracts';
+import { contractFor, entityKeyOf, OWNER_FIELD } from './writeContracts';
 import { awaitShapeVisibility, collectionForRelation, scopeForRelation } from './barrier';
-import { markUnconfirmed, clearUnconfirmed, assertFreshBase } from './staleBase';
+import { markUnconfirmed, clearUnconfirmed, isUnconfirmed } from './staleBase';
 import { recordAccepted } from './acceptedSnapshot';
-import { entityKeyFor as userStorageEntityKey } from './userStorageBase';
 import { getOwnObservedTails } from './ownObservedTails';
 import {
-	pendingEntries, quarantinedEntries,
-	markServerAccepted, markReconciled, resolveEntry,
-	tryClaimOutboxEntry, releaseOutboxEntry, transitiveDependencyClosure, withAcquiredLeadership, type OutboxEntry,
+	dependencyCandidates, dependencyBlockFor, DependencyDiscoveryError, scopeConfirmationGeneration, recordScopeConfirmed,
+	type DependencyDiscoveryBlock, type DiscoveryOutcome,
+	transitiveDependencyClosure, type OutboxEntry,
 } from './outbox';
 import type { SendResult } from './ingest';
-
-export class AlreadyDispatchingError extends Error {
-	constructor(public readonly outboxId: string) {
-		super(`dispatchMutations: outbox entry ${outboxId} is already being dispatched by another path`);
-		this.name = 'AlreadyDispatchingError';
-	}
-}
-
-const ENTITY_KEY_FIELD: Record<string, string> = {
-	dialog_messages: 'message_id',
-	dialog_message_reactions: 'reaction_hash',
-	dialog_message_receipts: 'receipt_hash',
-	user_cards: 'user_hash',
-};
 
 interface MutationShape {
 	type?: string;
@@ -48,58 +33,90 @@ const DIALOG_RELATIONS = [
 ];
 
 const chainKeyFor = (relation: string, row: Record<string, unknown> | null): string => {
-	if (relation === 'user_storage') {
-		const userHash = row?.user_hash;
-		const uuid = row?.uuid;
-		if (typeof userHash === 'string' && typeof uuid === 'string') return `user_storage:${userHash}|${uuid}`;
-	} else {
-		const entityField = ENTITY_KEY_FIELD[relation];
-		const entityKey = entityField ? row?.[entityField] : undefined;
-		if (typeof entityKey === 'string' && entityKey) return `${relation}:${entityKey}`;
-	}
-	return scopeForRelation(relation, row);
+	const entityKey = relation === 'dialog_keys' ? null : entityKeyOf(relation, row);
+	return entityKey ? `${relation}:${entityKey}` : scopeForRelation(relation, row);
 };
 
-export async function dependenciesFor(mutations: unknown[], userHash: string, excludeIds?: string[]): Promise<string[]> {
+export interface DependencyDiscoveryOptions {
+	observedKeys?: string[];
+	freshnessChecked?: boolean;
+	admission?: NonNullable<DependencyDiscoveryBlock['admission']>;
+}
+
+const admissionConfirmed = async (admission: NonNullable<DependencyDiscoveryBlock['admission']>): Promise<boolean> => {
+	if (admission.generation === null || isUnconfirmed(admission.scope)) return false;
+	try {
+		return (await scopeConfirmationGeneration(admission.scope)) > admission.generation;
+	} catch {
+		return false;
+	}
+};
+
+export async function discoverDependencies(
+	mutations: unknown[],
+	userHash: string,
+	excludeIds?: string[],
+	opts: DependencyDiscoveryOptions = {},
+): Promise<DiscoveryOutcome> {
 	const first = mutations[0] as MutationShape | undefined;
 	const relation = first?.syncMetadata?.relation;
-	if (!relation) return [];
+	if (!relation) return { kind: 'found', dependsOn: [] };
 	const row = rowOf(first);
-	const all0 = [...(await pendingEntries(userHash)), ...(await quarantinedEntries(userHash))];
-	const exclude = transitiveDependencyClosure(all0, excludeIds ?? []);
-	const all = all0.filter((e) => !exclude.has(e.id));
+
+	const chained = contractFor(relation, first?.type).dependencyClass === 'chained';
+	const cardOwner = relation !== 'user_cards' ? ownerOf(relation, row) : '';
+	const dialogHash = relation !== 'dialog_keys' && DIALOG_RELATIONS.includes(relation) && typeof row?.dialog_hash === 'string'
+		? row.dialog_hash
+		: '';
+	if (!chained && !cardOwner && !dialogHash) return { kind: 'found', dependsOn: [] };
+
+	let admission: DependencyDiscoveryBlock['admission'];
+	if (opts.admission) {
+		if (!(await admissionConfirmed(opts.admission))) admission = opts.admission;
+	} else if (chained && !opts.freshnessChecked) {
+		const scope = scopeForRelation(relation, row);
+		if (isUnconfirmed(scope)) {
+			admission = { scope, generation: await scopeConfirmationGeneration(scope).catch(() => null) };
+		}
+	}
+	const kind = opts.admission || admission ? 'admission' : 'discovery';
+
+	let candidates: { entries: OutboxEntry[]; observedKeys: string[] };
+	try {
+		candidates = await dependencyCandidates(userHash, opts.observedKeys);
+	} catch (e) {
+		const observedKeys = opts.observedKeys ?? (e instanceof DependencyDiscoveryError ? e.observedKeys : null);
+		return { kind: 'blocked', block: dependencyBlockFor(e, { kind, observedKeys, admission: admission ?? opts.admission }) };
+	}
+	if (admission) {
+		return { kind: 'blocked', block: dependencyBlockFor(null, { kind, observedKeys: opts.observedKeys ?? candidates.observedKeys, admission }) };
+	}
+
+	const exclude = transitiveDependencyClosure(candidates.entries, excludeIds ?? []);
+	const all = candidates.entries.filter((e) => !exclude.has(e.id));
 	const deps = new Set<string>();
 
 	const rowOfEntry = (e: OutboxEntry): Record<string, unknown> | null => rowOf(e.mutations[0] as MutationShape | undefined);
 
-	if (contractFor(relation, first?.type).dependencyClass === 'chained') {
+	if (chained) {
 		const chainKey = chainKeyFor(relation, row);
-
-		assertFreshBase(scopeForRelation(relation, row));
-
 		for (const e of all) {
 			if (chainKeyFor(e.relation, rowOfEntry(e)) === chainKey) deps.add(e.id);
 		}
 	}
 
-	if (relation !== 'user_cards') {
-		const owner = ownerOf(relation, row);
-		if (owner) {
-			for (const e of all) {
-				const entryType = (e.mutations[0] as MutationShape | undefined)?.type;
-				if (e.relation === 'user_cards' && entryType === 'insert' && ownerOf('user_cards', rowOfEntry(e)) === owner) {
-					deps.add(e.id);
-				}
+	if (cardOwner) {
+		for (const e of all) {
+			const entryType = (e.mutations[0] as MutationShape | undefined)?.type;
+			if (e.relation === 'user_cards' && entryType === 'insert' && ownerOf('user_cards', rowOfEntry(e)) === cardOwner) {
+				deps.add(e.id);
 			}
 		}
 	}
 
-	if (relation !== 'dialog_keys' && DIALOG_RELATIONS.includes(relation)) {
-		const dialogHash = row?.dialog_hash;
-		if (typeof dialogHash === 'string' && dialogHash) {
-			for (const e of all) {
-				if (e.relation === 'dialog_keys' && rowOfEntry(e)?.dialog_hash === dialogHash) deps.add(e.id);
-			}
+	if (dialogHash) {
+		for (const e of all) {
+			if (e.relation === 'dialog_keys' && rowOfEntry(e)?.dialog_hash === dialogHash) deps.add(e.id);
 		}
 	}
 
@@ -108,12 +125,25 @@ export async function dependenciesFor(mutations: unknown[], userHash: string, ex
 	// message whose parent has not arrived. So the revisions it cites go
 	// first; a queued message it does not cite stays independent (ADR §7.2).
 	// The cited set is the one recorded when the message was composed — the
-	// same map refs_map_b64 encrypts.
+	// same map refs_map_b64 encrypts. Every composed message records it, so a
+	// record that cannot be read while a queued message of the dialog could be
+	// cited leaves the list unproven: blocked, never "cites nothing".
 	if (relation === 'dialog_messages' && first?.type === 'insert' && typeof row?.message_id === 'string') {
-		const cited = await getOwnObservedTails(row.message_id);
-		if (cited) {
-			for (const e of all) {
-				if (e.relation !== 'dialog_messages') continue;
+		const citable = all.filter((e) => e.relation === 'dialog_messages' && e.status !== 'server_accepted_pending_reconcile'
+			&& rowOfEntry(e)?.dialog_hash === dialogHash);
+		if (citable.length > 0) {
+			let cited: Record<string, string> | null = null;
+			let readFailure: unknown = new DependencyDiscoveryError('discovery_error');
+			try {
+				cited = await getOwnObservedTails(row.message_id);
+			} catch (e) {
+				readFailure = e;
+			}
+			if (!cited) {
+				const observedKeys = opts.observedKeys ?? candidates.observedKeys;
+				return { kind: 'blocked', block: dependencyBlockFor(readFailure, { kind, observedKeys, admission: opts.admission }) };
+			}
+			for (const e of citable) {
 				const entryRow = rowOfEntry(e);
 				const id = entryRow?.message_id;
 				if (typeof id === 'string' && Object.hasOwn(cited, id) && cited[id] === entryRow?.sign_hash) deps.add(e.id);
@@ -121,7 +151,17 @@ export async function dependenciesFor(mutations: unknown[], userHash: string, ex
 		}
 	}
 
-	return [...deps];
+	return { kind: 'found', dependsOn: [...deps] };
+}
+
+export async function confirmScope(scope: string): Promise<void> {
+	try {
+		await recordScopeConfirmed(scope);
+	} catch (e) {
+		console.warn('[coordinator] scope confirmation could not be recorded durably; the scope stays unconfirmed:', scope, e);
+		return;
+	}
+	clearUnconfirmed(scope);
 }
 
 export async function reconcileAccepted(
@@ -135,16 +175,8 @@ export async function reconcileAccepted(
 	if (!relation) return;
 	const row = first?.modified ?? first?.changes ?? null;
 
-	const entityKey = relation === 'user_storage'
-		? (typeof row?.user_hash === 'string' && typeof row?.uuid === 'string'
-			? userStorageEntityKey(row.user_hash as string, row.uuid as string)
-			: undefined)
-		: relation === 'dialog_keys'
-			? (typeof row?.dialog_hash === 'string' && typeof row?.sender_hash === 'string'
-				? `${row.dialog_hash}|${row.sender_hash}`
-				: undefined)
-			: (ENTITY_KEY_FIELD[relation] ? row?.[ENTITY_KEY_FIELD[relation]] : undefined);
-	if (opts.recordAcceptedSnapshot !== false && row && typeof entityKey === 'string' && entityKey) {
+	const entityKey = entityKeyOf(relation, row);
+	if (opts.recordAcceptedSnapshot !== false && row && entityKey) {
 		const owner = ownerOf(relation, row);
 		if (owner) {
 			await recordAccepted(relation, entityKey, row, owner);
@@ -156,52 +188,8 @@ export async function reconcileAccepted(
 		if (contract.confirmation === 'visible') {
 			const visible = await awaitShapeVisibility(collectionForRelation(relation, row), sendResult.txids, relation);
 			const scope = scopeForRelation(relation, row);
-			if (visible) clearUnconfirmed(scope);
+			if (visible) await confirmScope(scope);
 			else markUnconfirmed(scope);
 		}
-	}
-}
-
-export async function dispatchMutations(
-	mutations: unknown[],
-	send: (mutations: unknown[]) => Promise<SendResult>,
-	outboxId: string | null = null,
-	opts: { recordAcceptedSnapshot?: boolean } = {},
-): Promise<SendResult> {
-	if (!tryClaimOutboxEntry(outboxId)) {
-		throw new AlreadyDispatchingError(outboxId!);
-	}
-	try {
-		const finishAfterSend = async (sendResult: SendResult): Promise<void> => {
-			await markServerAccepted(outboxId);
-			try {
-				await reconcileAccepted(mutations, sendResult, opts);
-				await markReconciled(outboxId);
-				await resolveEntry(outboxId);
-			} catch (e) {
-				console.warn('[coordinator] local reconciliation pending after server acceptance (L17-10):', e);
-			}
-		};
-
-		let result: SendResult;
-		if (outboxId !== null) {
-			const first = mutations[0] as MutationShape | undefined;
-			const owner = ownerOf(first?.syncMetadata?.relation, rowOf(first));
-			const outcome = await withAcquiredLeadership(owner, async () => {
-				const sendResult = await send(mutations);
-				await finishAfterSend(sendResult);
-				return sendResult;
-			});
-			if (!outcome.acquired) {
-				throw new AlreadyDispatchingError(outboxId);
-			}
-			result = outcome.result;
-		} else {
-			result = await send(mutations);
-			await finishAfterSend(result);
-		}
-		return result;
-	} finally {
-		releaseOutboxEntry(outboxId);
 	}
 }

@@ -1,9 +1,9 @@
-import { IndexedDBAdapter } from '@tanstack/offline-transactions';
+import { IndexedDbStore } from './indexedDbStore';
 import { createSecureStore, type StringStore } from './secureStore';
 
 const DB_NAME = 'buckitup-own-observed-tails';
 
-const rawIndexedDb = new IndexedDBAdapter(DB_NAME);
+const rawIndexedDb = new IndexedDbStore(DB_NAME);
 let rawStorage: StringStore = rawIndexedDb;
 let storage: StringStore = createSecureStore(rawStorage, {
 	getKey: async () => (await import('./localCrypto')).getLocalStorageKey(),
@@ -50,8 +50,4 @@ export async function getOwnObservedTails(messageId: string): Promise<Record<str
 	} catch {
 		return null;
 	}
-}
-
-export async function clearOwnObservedTails(): Promise<void> {
-	await storage.clear().catch(() => { });
 }

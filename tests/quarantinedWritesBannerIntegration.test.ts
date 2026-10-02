@@ -4,7 +4,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { setActivePinia, createPinia } from 'pinia';
 import { reactive } from 'vue';
 import {
-	enqueue, recordFailure, discardEntry, drainOutbox, blockedDependentIssues, _setStorageForTests,
+	enqueue, recordFailure, discardEntry, drainOutbox, blockedDependentIssues, corruptOutboxRecords, _setStorageForTests,
 } from '@/lib/data/outbox';
 import { IngestError } from '@/lib/data/ingest';
 
@@ -24,7 +24,8 @@ const makeStorage = () => {
 
 const editMessage = (messageId: string) => ([{
 	type: 'update',
-	modified: {
+	original: {},
+	changes: {
 		message_id: messageId, sender_hash: MY_HASH, dialog_hash: 'dh1',
 		content_b64: 'x', parent_sign_hash: null, owner_timestamp: 1,
 	},
@@ -38,10 +39,13 @@ vi.mock('@/store/userPQ.store', () => ({
 
 const QuarantinedWritesBanner = (await import('@/components/QuarantinedWritesBanner.vue')).default;
 
+let storage: ReturnType<typeof makeStorage>;
+
 beforeEach(() => {
 	setActivePinia(createPinia());
 	userPQState.currentUserHash = MY_HASH;
-	_setStorageForTests(makeStorage());
+	storage = makeStorage();
+	_setStorageForTests(storage);
 });
 
 describe('QuarantinedWritesBanner integration: real outbox.ts, real terminal markers (U7/L17-09)', () => {
@@ -150,5 +154,31 @@ describe('QuarantinedWritesBanner integration: real outbox.ts, real terminal mar
 		await flushPromises();
 
 		expect(w.find('.quarantine-banner').exists()).toBe(false);
+	});
+
+	it('7. a corrupt record and its blocked dependent are shown; Discard removes only the corrupt record, and nothing is sent', async () => {
+		const aId = await enqueue(editMessage('msg_A'), MY_HASH) as string;
+		await enqueue(editMessage('msg_A'), MY_HASH, { dependsOn: [aId] });
+		const entry = JSON.parse(storage.map.get(aId) as string);
+		entry.createdAt = 'yesterday';
+		storage.map.set(aId, JSON.stringify(entry));
+
+		const w = mount(QuarantinedWritesBanner);
+		await vi.waitFor(() => expect(w.find('.quarantine-banner').exists()).toBe(true));
+
+		const corruptRow = w.find('.quarantine-banner-row:not(.quarantine-banner-row--blocked)');
+		expect(corruptRow.text()).toContain('could not be read from this device\'s storage');
+		expect(corruptRow.text()).toContain('createdAt is not a number');
+		expect(corruptRow.findAll('.quarantine-banner-action')).toHaveLength(1);
+		expect(w.find('.quarantine-banner-row--blocked').text()).toContain('could not be read from storage');
+
+		await corruptRow.find('.quarantine-banner-discard').trigger('click');
+		await vi.waitFor(() => expect(w.find('.quarantine-banner-row--blocked').text()).toContain('discarded prerequisite'));
+
+		expect(w.findAll('.quarantine-banner-row:not(.quarantine-banner-row--blocked)')).toHaveLength(0);
+		expect(await corruptOutboxRecords(MY_HASH)).toEqual([]);
+		const sent: unknown[][] = [];
+		await drainOutbox(MY_HASH, async (m) => { sent.push(m as unknown[]); });
+		expect(sent).toHaveLength(0);
 	});
 });

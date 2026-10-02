@@ -2,24 +2,26 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { getDialogCollections, withDialogCollections } from '@/lib/data/collections';
-import { OWNER_FIELD, IngestError, DurabilityError } from '@/lib/data/ingest';
-import { enqueueIntent, updateIntent, getIntent, intentsOf, resolveIntent, onIntentChange } from '@/lib/data/intents';
+import { IngestError, DurabilityError } from '@/lib/data/ingest';
+import { enqueueIntent, updateIntent, getIntent, intentsOf, resolveIntent, onIntentChange, markIntentAwaitingUnlock } from '@/lib/data/intents';
 import { saveProjection, updateProjection, removeProjection, projectionsOf } from '@/lib/data/messageProjections';
-import { signAndDispatchIntent } from '@/lib/data/intentRecovery';
+import { signAndDispatchIntent, isUnsignedDialogIntent, IntentChangedError, withIntentSigningLock } from '@/lib/data/intentRecovery';
 import {
-    materializeMessageIntent, ensureOwnDialogKeyPublished, ownSenderMsgKey,
-    pinActiveSession, assertSessionUnchanged, SessionFencedError, VaultLockedError,
+    materializeMessageIntent, ensureOwnDialogKeyPublished, ownSenderMsgKey, trustedRowBase,
+    pinActiveSession, assertSessionUnchanged, SessionFencedError,
 } from '@/lib/data/messageIntent';
+import { VaultLockedError } from '@/lib/data/keyCustody';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
-import { getAccepted, getAllAcceptedForRelation, freshestOf } from '@/lib/data/acceptedSnapshot';
+import { getAccepted, getAllAcceptedForRelation } from '@/lib/data/acceptedSnapshot';
 import { recordOwnObservedTails, getOwnObservedTails, discardOwnObservedTails } from '@/lib/data/ownObservedTails';
 import { quarantinedEntries, discardEntry, currentSessionToken, sameSessionToken, pendingEntries, awaitServerAccepted, onOutboxChange } from '@/lib/data/outbox';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
-import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
-import { encodeContent, decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError } from '@/lib/pq/content';
+import { verifyReplicatedRow } from '@/lib/data/rowVerification';
+import { projectionReplacement } from '@/lib/data/operationLifecycle';
+import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError } from '@/lib/pq/content';
 import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
@@ -31,7 +33,6 @@ import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { mergeLiveWithCached } from '@/lib/data/readCache';
 import { readDialogRow, readDialogRows } from '@/lib/data/dialogCache';
 import { settled } from '@/lib/data/shapeLink';
-import { api } from '@/api/client';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
@@ -52,11 +53,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
     const optimisticItems = ref(new Map()); // id -> { type, dialogHash, status, ... }
     let optimisticCounter = 0;
 
-    // --- direct write path (TanStack migration, PR C) ---
-    // One logical write = one signed mutation posted straight to /ingest_each.
-    // The shape stream returns the server-confirmed row, which drops the
-    // optimistic UI entry. The legacy PGlite push queue is no longer involved
-    // for dialog tables.
+    // --- dialog writes ---
+    // Every write is a durable intent, signed once into an immutable snapshot
+    // and sent by the account's sender (intentRecovery → outbox).
 
     const getSignSkeyBytes = async () => {
         const em = EncryptionManagerPQ.getInstance();
@@ -64,20 +63,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return safeBase64Decode(keys.sign_skey, 'sign_skey');
     };
 
-    // Every dialog write is followed by a shape barrier: the next operation
-    // (an edit basing on the tip, a second message needing the key row, a
-    // reaction toggle) reads the collection as its base, and an HTTP 200 only
-    // proves the Postgres commit — not that Electric delivered it.
-    const pushRow = async (relation, row, mutationType = 'insert') => {
-        const owner = row[OWNER_FIELD[relation]] ?? '';
-        const readyRow = { kind: 'ready-row', relation, row, mutationType };
-        const intentId = await enqueueIntent(readyRow, owner, relation);
-        if (intentId === null) {
-            throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
-        }
-        const signSkey = await getSignSkeyBytes();
-        return signAndDispatchIntent(intentId, readyRow, signSkey);
-    };
 
     // --- causal refs (refs_map) ---
     // Decrypted refs of a specific revision never change; cache by
@@ -89,7 +74,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // failure as {} used to be permanent: the cache key is the immutable
     // revision, while messages DO recover on key arrival, so the two states
     // diverged forever and every later send shipped inflated tails.
-    const decryptRefsOf = async (row) => {
+    const decryptRefsOf = async (row, colls = null) => {
         const cacheKey = `${row.message_id}|${row.sign_hash}`;
         if (decryptedRefsCache.has(cacheKey)) return decryptedRefsCache.get(cacheKey);
 
@@ -99,7 +84,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             return {};
         }
 
-        const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+        const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash, colls);
         if (!key) return null;
 
         try {
@@ -125,10 +110,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // The gate distinguishes "no key yet" (normal right after joining) from
     // "key present but the blob will not decrypt" (only reachable through a
     // sender bug, since the signature covers the ciphertext).
-    const decryptRefsVerdict = async (row) => {
-        const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+    const decryptRefsVerdict = async (row, colls = null) => {
+        const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash, colls);
         if (!key) return 'no_key';
-        const refs = await decryptRefsOf(row);
+        const refs = await decryptRefsOf(row, colls);
         return refs === null ? 'error' : refs;
     };
 
@@ -144,8 +129,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return gate;
     };
 
-    /** Gate verdict for a replicated message row. See dialogGate for shapes. */
-    const admitMessageRow = (row) => gateFor(row.dialog_hash).admit(row);
+    /**
+     * Gate verdict for a replicated message row. See dialogGate for shapes.
+     * `colls`: the dialog collections to read keys through (a transient scan
+     * bundle); otherwise the registered ones.
+     */
+    const admitMessageRow = (row, colls = null) => gateFor(row.dialog_hash).admit(row, colls);
 
     // Reactions and receipts are signed rows too (invariants/02): a forged
     // reaction under a peer's name is the same attack as a forged message.
@@ -153,39 +142,24 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // a fresh check, an unchanged row does not re-run ML-DSA on every render.
     const sideRowVerdicts = new Map();
 
-    const admitSideRow = async (row, authorField, pkField) => {
+    const admitSideRow = async (row, relation, pkField) => {
         const cacheKey = `${row[pkField]}|${row.owner_timestamp}`;
         const cached = sideRowVerdicts.get(cacheKey);
         if (cached !== undefined) return cached;
 
-        const authorHash = row[authorField];
-        const signPkey = await getVerifiedSignPkey(authorHash);
-        if (!signPkey) return false; // card not here yet — retried, not cached
+        const verification = await verifyReplicatedRow(relation, row, getVerifiedSignPkey);
+        if (verification.status === 'unavailable') return false; // card not here yet — retried, not cached
 
-        const ok = verifySideRow(row, signPkey).status === 'ok';
+        const ok = verification.status === 'verified';
         sideRowVerdicts.set(cacheKey, ok);
         return ok;
     };
 
     /** True only for a reaction whose signature verifies against its reactor. */
-    const admitReactionRow = (row) => admitSideRow(row, 'reactor_hash', 'reaction_hash');
+    const admitReactionRow = (row) => admitSideRow(row, 'dialog_message_reactions', 'reaction_hash');
 
     /** True only for a receipt whose signature verifies against its peer. */
-    const admitReceiptRow = (row) => admitSideRow(row, 'peer_hash', 'receipt_hash');
-
-    const getVerifiedMessageBase = async (dialogHash, messageId) => {
-        const msgColl = getDialogCollections(dialogHash).messages;
-        await msgColl.preload();
-        const shapeRow = msgColl.get(messageId) || null;
-        const verifiedShapeRow = shapeRow && (await admitMessageRow(shapeRow)).status === 'verified' ? shapeRow : null;
-        return freshestOf(verifiedShapeRow, await getAccepted('dialog_messages', messageId, $userPQ.currentUserHash));
-    };
-
-    const getVerifiedReactionBase = async (dialogHash, reactionHash) => {
-        const shapeRow = getDialogCollections(dialogHash).reactions.get(reactionHash) || null;
-        const verifiedShapeRow = shapeRow && (await admitReactionRow(shapeRow)) ? shapeRow : null;
-        return freshestOf(verifiedShapeRow, await getAccepted('dialog_message_reactions', reactionHash, $userPQ.currentUserHash));
-    };
+    const admitReceiptRow = (row) => admitSideRow(row, 'dialog_message_receipts', 'receipt_hash');
 
     /** True when the gate has admitted ANY presentation for this (message_id,
      * sign_hash) reference — a DAG-reference / "does a revision with this
@@ -217,34 +191,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
         ownSentMessageIds.set(dialogHash, set);
     };
 
-    // The refs_map tails for an outgoing message, edit or delete. Every signed
-    // revision is a candidate, including tombstones; accepted own writes are
-    // included while their shape rows are still catching up.
-    const computeObservedTails = async (dialogHash) => {
-        const colls = getDialogCollections(dialogHash);
-        await colls.messages.preload().catch(() => {});
-        const loaded = colls.messages.toArray.filter((r) => r.sign_hash);
-
-        const ownIds = ownSentMessageIds.get(dialogHash);
-        const extra = [];
-        if (ownIds?.size) {
-            const knownIds = new Set(loaded.map((r) => r.message_id));
-            for (const id of [...ownIds]) {
-                if (knownIds.has(id)) { ownIds.delete(id); continue; }
-                const accepted = await getAccepted('dialog_messages', id, $userPQ.currentUserHash);
-                if (accepted?.sign_hash) extra.push(accepted);
-            }
-        }
-
-        const withRefs = await Promise.all(
-            [...loaded, ...extra].map(async (r) => ({
-                message_id: r.message_id,
-                sign_hash: r.sign_hash,
-                refs: await decryptRefsOf(r),
-            }))
-        );
-        return computeTails(withRefs);
-    };
 
     const verifiedRefsOf = async (row, ownerHash) => {
         if (!row.refs_map_b64) return {};
@@ -324,9 +270,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // reaction_hash. Reconciliation matches server rows (including tombstones)
     // by hash — an un-react confirms as a tombstone, which carries no emoji,
     // so matching by emoji alone could never confirm removals.
-    const addOptimisticReaction = (dialogHash, messageId, emoji, reactionHash, desiredActive) => {
+    // One optimistic item per reaction (dialog|message|emoji): the latest toggle
+    // replaces it. Its reaction_hash needs the key, so it is filled in at signing.
+    const addOptimisticReaction = (dialogHash, messageId, emoji, logicalKey, desiredActive) => {
         for (const [staleId, item] of optimisticItems.value) {
-            if (item.type === 'reaction' && item.reactionHash === reactionHash) {
+            if (item.type === 'reaction' && item.logicalKey === logicalKey) {
                 optimisticItems.value.delete(staleId);
             }
         }
@@ -337,7 +285,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
             dialogHash,
             messageId,
             emoji,
-            reactionHash,
+            logicalKey,
+            reactionHash: null,
             desiredActive,
             status: 'sending',
         });
@@ -471,20 +420,43 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return hydrateProjections(owner);
     };
 
-    const retireProjections = (dialogHash, verifiedRevisions, finalIds = new Set()) => {
+    const retireProjections = async (dialogHash, canonicalRows) => {
+        const owner = $userPQ.currentUserHash;
+        if (!owner) return;
         const candidates = new Map(sessionProjections);
         for (const item of optimisticItems.value.values()) {
-            if (item.type === 'message') candidates.set(item.id, { dialogHash: item.dialogHash, signHash: item.signHash ?? candidates.get(item.id)?.signHash ?? null });
+            if (item.type === 'message') candidates.set(item.id, { dialogHash: item.dialogHash });
         }
         for (const [id, p] of candidates) {
             if (p.dialogHash !== dialogHash) continue;
-            const exact = !!p.signHash && verifiedRevisions.get(id) === p.signHash;
-            if (!exact && !finalIds.has(id)) continue;
+            const row = canonicalRows.get(id);
+            if (!row) continue;
+            const decision = await projectionReplacement('dialog_messages', id, owner, row, getVerifiedSignPkey)
+                .catch((e) => {
+                    console.warn('[dialogs] projection kept — its lifecycle could not be read:', id, e?.message ?? e);
+                    return { replace: false };
+                });
+            if (!decision.replace || $userPQ.currentUserHash !== owner) continue;
             optimisticItems.value.delete(id);
             if (!sessionProjections.has(id)) continue;
             sessionProjections.delete(id);
             removeProjection(id).catch((e) =>
                 console.error('[dialogs] retired projection not removed from disk (retired again after the next reload):', id, e));
+        }
+    };
+
+    const retireReactionProjections = async (ids, rowOfReaction) => {
+        const owner = $userPQ.currentUserHash;
+        if (!owner) return;
+        for (const id of ids) {
+            const item = optimisticItems.value.get(id);
+            if (item?.type !== 'reaction') continue;
+            const decision = await projectionReplacement(
+                'dialog_message_reactions', item.reactionHash, owner, rowOfReaction(item.reactionHash), getVerifiedSignPkey
+            ).catch(() => ({ replace: false }));
+            if (decision.replace && $userPQ.currentUserHash === owner && optimisticItems.value.get(id) === item) {
+                optimisticItems.value.delete(id);
+            }
         }
     };
 
@@ -498,7 +470,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
             .catch((e) => console.warn('[dialogs] projection status refresh failed:', e))
             .finally(() => { projectionRefresh = null; });
     };
-    onOutboxChange(scheduleProjectionRefresh);
+    const acceptanceRevision = ref(0);
+    onOutboxChange((changedOwner) => {
+        if (changedOwner === $userPQ.currentUserHash) acceptanceRevision.value++;
+        scheduleProjectionRefresh(changedOwner);
+    });
     onIntentChange(scheduleProjectionRefresh);
 
     const removeOptimisticItem = (id) => {
@@ -527,6 +503,21 @@ export const useDialogsStore = defineStore('dialogs', () => {
         }
     };
 
+    const discardReactionLifecycle = async (item) => {
+        const owner = $userPQ.currentUserHash;
+        if (owner) {
+            for (const entry of (await intentsOf(owner)).entries) {
+                const intent = entry.intent;
+                if (intent?.kind !== 'reaction' || `${intent.dialogHash}|${intent.messageId}|${intent.emoji}` !== item.logicalKey) continue;
+                await withIntentSigningLock(entry.id, async () => {
+                    const fresh = await getIntent(entry.id);
+                    if (fresh && isUnsignedDialogIntent(fresh.intent)) await resolveIntent(entry.id, { outcome: 'discarded' });
+                });
+            }
+        }
+        if (item.reactionHash) await discardQuarantinedFor('dialog_message_reactions', 'reaction_hash', item.reactionHash);
+    };
+
     const discardFailedItem = (id) => {
         const item = optimisticItems.value.get(id);
         removeOptimisticItem(id);
@@ -534,7 +525,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const cleanup = item.type === 'message'
             ? discardMessageLifecycle(id)
             : item.type === 'reaction'
-                ? discardQuarantinedFor('dialog_message_reactions', 'reaction_hash', item.reactionHash)
+                ? discardReactionLifecycle(item)
                 : null;
         cleanup?.catch((e) => console.warn('[dialogs] could not discard quarantined entry for', id, e));
     };
@@ -620,7 +611,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 }
             }
             const keyRow = liveRow ?? (preloadFailed ? await readDialogRow('dialog_keys', rowKey) : null);
-            if (!keyRow || keyRow.deleted_flag) return null;
+            if (!keyRow || keyRow.dialog_hash !== dialogHash || keyRow.sender_hash !== authorHash) return null;
+            if ((await verifyReplicatedRow('dialog_keys', keyRow, getVerifiedSignPkey)).status !== 'verified') return null;
+            if (keyRow.deleted_flag) return null;
 
             // Is it our own key?
             if (authorHash === $userPQ.currentUserHash) {
@@ -636,7 +629,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 return senderMsgKey;
             }
 
-            // It's a peer's key, we need to decap and unwrap
+            // It's a peer's key, we need to decap and unwrap — only one wrapped for us
+            if (keyRow.peer_hash !== $userPQ.currentUserHash) return null;
             const em = EncryptionManagerPQ.getInstance();
             const keys = await em.exportVaultKeys();
             const cryptSkey = safeBase64Decode(keys.crypt_skey, 'crypt_skey');
@@ -780,183 +774,136 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return payload.messageId;
     };
 
-    const editIntents = new Map();
-    const editQueues = new Map();
-    const editClaimLocks = new Map();
+    const writeChains = new Map();
+    const chainRuns = new Map();
+    const captureLocks = new Map();
+    const signedOf = new Map();
 
-    const runEditWrite = async (messageId, ctx) => {
-        const intent = editIntents.get(messageId);
-        if (!intent || intent.written) return null;
-        intent.written = true;
+    const serialized = (locks, key, fn) => {
+        const run = (locks.get(key) ?? Promise.resolve()).then(fn, fn);
+        const settledRun = run.then(() => undefined, () => undefined);
+        locks.set(key, settledRun);
+        settledRun.then(() => { if (locks.get(key) === settledRun) locks.delete(key); });
+        return run;
+    };
 
-        try {
-            const msgColl = getDialogCollections(ctx.dialogHash).messages;
-            await msgColl.preload().catch(() => {});
-            const shapeRow = msgColl.get(messageId) || null;
-            const verifiedShapeRow = shapeRow && (await admitMessageRow(shapeRow)).status === 'verified' ? shapeRow : null;
-            const freshBase = freshestOf(verifiedShapeRow, await getAccepted('dialog_messages', messageId, ctx.senderHash));
-            const parentSignHash = freshBase ? freshBase.sign_hash : intent.parentSignHash;
-            const ownerTimestamp = freshBase ? nextOwnerTimestamp(freshBase.owner_timestamp) : intent.ownerTimestamp;
-            const row = {
-                message_id: messageId,
-                dialog_hash: ctx.dialogHash,
-                sender_hash: ctx.senderHash,
-                content_b64: intent.contentB64,
-                deleted_flag: false,
-                refs_map_b64: intent.refsMapB64,
-                parent_sign_hash: parentSignHash,
-                owner_timestamp: ownerTimestamp,
-            };
-            if (parentSignHash !== intent.parentSignHash || ownerTimestamp !== intent.ownerTimestamp) {
-                const persisted = await updateIntent(intent.intentId, { kind: 'ready-row', relation: 'dialog_messages', mutationType: 'update', row });
-                if (!persisted) console.warn('[dialogs] could not persist the refreshed base for', messageId);
-            }
+    const lastIntentOf = async (owner, belongs) => {
+        const { entries } = await intentsOf(owner);
+        return entries.filter((e) => belongs(e.intent)).at(-1) ?? null;
+    };
 
-            const signSkey = await getSignSkeyBytes();
-            let dispatchedSignHash = null;
-            const handle = await signAndDispatchIntent(intent.intentId, {
-                kind: 'ready-row',
-                relation: 'dialog_messages',
-                mutationType: 'update',
-                row,
-            }, signSkey, {
-                onSigned: (mutation) => { dispatchedSignHash = mutation.changes?.sign_hash ?? null; },
-            });
-            await handle.acceptance;
-            return { signHash: dispatchedSignHash, ownerTimestamp: row.owner_timestamp };
-        } catch (e) {
-            if (!e?.permanent && editIntents.get(messageId) === intent) {
-                intent.written = false;
-            }
-            throw e;
-        } finally {
-            if (editIntents.get(messageId) === intent && intent.written) {
-                editIntents.delete(messageId);
+    /**
+     * Folds `change` into a stored intent nobody has started signing, under
+     * the intent's signing lock. 'signed' when it is past that point.
+     */
+    const updateUnsignedIntent = (intentId, change) => withIntentSigningLock(intentId, async () => {
+        const fresh = await getIntent(intentId);
+        if (!fresh || !isUnsignedDialogIntent(fresh.intent)) return 'signed';
+        return (await updateIntent(intentId, change(fresh.intent))) ? 'updated' : 'failed';
+    });
+
+    /** Builds, signs and hands over one stored dialog intent; null when there was nothing to write. */
+    const dispatchDialogIntent = async (intentId, token, onSigned) => {
+        for (let attempt = 0; ; attempt++) {
+            assertSessionUnchanged(token, 'dispatchDialogIntent:start');
+            const entry = await getIntent(intentId);
+            if (!entry) throw new Error(`intent ${intentId} not found — nothing to sign or replay`);
+            const stored = entry.intent;
+            const unsigned = isUnsignedDialogIntent(stored);
+            try {
+                const readyRow = unsigned ? await materializeMessageIntent(stored, token) : stored;
+                if (readyRow === null) {
+                    await resolveIntent(intentId, { outcome: 'noop' });
+                    return null;
+                }
+                const signSkey = await getSignSkeyBytes().catch((e) => { throw new VaultLockedError(String(e?.message ?? e)); });
+                return await signAndDispatchIntent(intentId, readyRow, signSkey, { token, onSigned, builtFrom: unsigned ? stored : undefined });
+            } catch (e) {
+                if (e instanceof IntentChangedError && attempt < 5) continue; // a later action changed it: build that
+                // Under the intent's lock: a toggle folded in meanwhile is not overwritten.
+                if (e instanceof VaultLockedError) {
+                    await withIntentSigningLock(intentId, () => markIntentAwaitingUnlock(intentId, token.userHash)).catch(() => false);
+                }
+                throw e;
             }
         }
     };
 
+    /** Runs an intent's dispatch in its chain, once; resolves after its acceptance. */
+    const runOnChain = (chainKey, intentId, token, onSigned) => {
+        const running = chainRuns.get(intentId);
+        if (running) return running;
+        const run = serialized(writeChains, chainKey, async () => {
+            const handle = await dispatchDialogIntent(intentId, token, (mutation) => {
+                const row = mutation?.changes ?? mutation?.modified;
+                signedOf.set(intentId, { signHash: row?.sign_hash ?? null, ownerTimestamp: row?.owner_timestamp ?? null });
+                onSigned?.(row);
+            });
+            if (handle) await handle.acceptance;
+            return handle;
+        });
+        chainRuns.set(intentId, run);
+        const forget = () => { if (chainRuns.get(intentId) === run) chainRuns.delete(intentId); };
+        run.then(forget, forget);
+        return run;
+    };
+
+    // The action is stored: a locked vault only defers it to the unlock, whose
+    // recovery finishes it — not a failure, and nothing to do again.
+    const awaitsUnlock = (run) => run.then(() => false, (e) => {
+        if (e instanceof VaultLockedError) return true;
+        throw e;
+    });
+
+    const messageChainOf = (messageId) => (intent) =>
+        ((intent?.kind === 'edit' || intent?.kind === 'delete') && intent.messageId === messageId)
+        || (intent?.kind === 'ready-row' && intent.relation === 'dialog_messages' && intent.row?.message_id === messageId);
+
+    /** This account's own message, as far as it is known here without any key. */
+    const ownMessageBase = async (dialogHash, messageId, myHash, token, step) => {
+        const current = await trustedRowBase('dialog_messages', messageId, myHash, dialogHash);
+        assertSessionUnchanged(token, `${step}:afterBase`);
+        if (!current) throw new Error('Message not found');
+        if (current.sender_hash !== myHash) throw new Error(`Cannot ${step === 'editMessage' ? 'edit' : 'delete'}: not owner`);
+        return current;
+    };
+
     /**
-     * Edit a message (owner only)
+     * Edit a message (owner only). Stored first — the new content and the
+     * refs observed now; an edit not yet signed takes a newer one's content.
      */
     const editMessage = async (peerHash, messageId, newText) => {
-        const dialogHash = await initDialogKeys(peerHash);
-        const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
+        const myHash = $userPQ.currentUserHash;
+        const token = pinActiveSession(myHash, 'editMessage:start');
+        const dialogHash = getDialogHash(peerHash);
+        await ownMessageBase(dialogHash, messageId, myHash, token, 'editMessage');
+        const parts = typeof newText === 'string' ? [{ kind: 'text', text: newText }] : newText;
+        const chainKey = `msg:${messageId}`;
 
-        // A version chain is built from the tip — whichever is fresher of the
-        // gate-verified shape row and this account's own accepted-snapshot
-        // (§4.5/§R3): our last accepted write may not be visible in the shape
-        const current = await getVerifiedMessageBase(dialogHash, messageId);
-        if (!current) throw new Error('Message not found');
-        if (current.sender_hash !== $userPQ.currentUserHash) {
-            throw new Error('Cannot edit: not owner');
-        }
-
-        const newParts = typeof newText === 'string' ? [{ kind: 'text', text: newText }] : newText;
-        const contentB64 = await DialogCrypto.encryptContent(myKey, encodeContent(newParts));
-        // Refs are recomputed at edit time — the tails may have changed since
-        // the original authoring; the old refs stay archived with the old
-        // revision in dialog_messages_versions (spec: §Behavior on edit)
-        const refsMap = await computeObservedTails(dialogHash);
-        const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
-
-        // §3.1 + §3.12: claiming "is there already a coalescable intent for
-        // this message" and durably enqueuing/updating it must be one atomic
-        // step — both edits in a concurrent burst reach this point only after
-        // several independent awaits (key derivation, encryption, tails), so
-        // without a lock here two calls could both read editIntents.get() as
-        // empty and both enqueue a fresh durable intent; whichever loses the
-        // final editIntents.set() becomes an ORPHAN that nothing ever
-        // resolves, and recovery (§3.6) would sign and send it separately
-        // after a reload — a phantom edit nobody coalesced away.
-        //
-        // This lock covers ONLY the durable claim decision, not dispatch:
-        // runEditWrite starts running (and flips written=true) the moment it
-        // is queued, lock or no lock, so holding the lock across queueing too
-        // would let the first call's own dispatch start and claim written=true
-        // before the SECOND call's claim even begins — permanently defeating
-        // coalescing (every burst would degrade to "second one is unrelated").
-        // Releasing the lock right after the durable decision gives a truly
-        // concurrent sibling a chance to claim before that happens.
-        const claim = editClaimLocks.get(messageId) ?? Promise.resolve();
-        const claimed = claim.then(async () => {
-            const existingIntent = editIntents.get(messageId);
-            const parentSignHash = existingIntent ? existingIntent.parentSignHash : current.sign_hash;
-            const ownerTimestamp = existingIntent
-                ? existingIntent.ownerTimestamp
-                : nextOwnerTimestamp(current.owner_timestamp);
-
-            const storedRow = {
-                message_id: messageId,
-                dialog_hash: dialogHash,
-                sender_hash: $userPQ.currentUserHash,
-                content_b64: contentB64,
-                deleted_flag: false,
-                refs_map_b64: refsMapB64,
-                parent_sign_hash: parentSignHash,
-                owner_timestamp: ownerTimestamp,
-            };
-
-            if (existingIntent && !existingIntent.written) {
-                // Coalesce: update the durable intent in place. No queue
-                // registration here — the dispatch already queued by
-                // whichever call created this intent will read this content
-                // when it runs.
-                const persisted = await updateIntent(existingIntent.intentId, { kind: 'ready-row', relation: 'dialog_messages', mutationType: 'update', row: storedRow });
-                if (!persisted) {
-                    throw new Error('This edit could not be stored for sending. Nothing was sent — try again.');
-                }
-                editIntents.set(messageId, { ...existingIntent, contentB64, refsMapB64, parentSignHash, ownerTimestamp });
-                return { fresh: false };
+        const intentId = await serialized(captureLocks, chainKey, async () => {
+            const observedTails = await captureObservedTails(dialogHash, myHash);
+            assertSessionUnchanged(token, 'editMessage:beforeCommit');
+            const last = await lastIntentOf(myHash, messageChainOf(messageId));
+            if (last?.intent?.kind === 'edit' && isUnsignedDialogIntent(last.intent)) {
+                // The pending edit keeps its own refs; only its content is the newer one.
+                const outcome = await updateUnsignedIntent(last.id, (intent) => ({ ...intent, parts }));
+                if (outcome === 'updated') return last.id;
+                if (outcome === 'failed') throw new Error('This edit could not be stored for sending. Nothing was sent — try again.');
             }
-
-            // Fresh: durably enqueue. This call owns the one dispatch this
-            // burst gets — but does not queue it yet (see below, outside the
-            // lock).
-            const intentId = await enqueueIntent(
-                { kind: 'ready-row', relation: 'dialog_messages', mutationType: 'update', row: storedRow },
-                $userPQ.currentUserHash,
+            const id = await enqueueIntent(
+                { kind: 'edit', relation: 'dialog_messages', peerHash, dialogHash, messageId, ownerHash: myHash, parts, observedTails },
+                myHash,
                 'dialog_messages'
             );
-            if (intentId === null) {
-                throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
-            }
-            editIntents.set(messageId, { intentId, contentB64, refsMapB64, parentSignHash, ownerTimestamp, written: false });
-            return { fresh: true };
+            if (id === null) throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
+            return id;
         });
-        editClaimLocks.set(messageId, claimed.then(() => undefined, () => undefined));
-        const { fresh } = await claimed;
 
-        // An edit is an HTTP `update`: the server replaces the tip and
-        // archives the previous revision in dialog_messages_versions.
-        // Chained onto whatever is still running for this message (e.g. an
-        // earlier, already-in-flight write this one did not coalesce into)
-        // — never two writes for the same message at once, even unrelated
-        // ones. A coalescing call does not queue anything of its own; it
-        // just waits on whatever is already there.
-        const ctx = { dialogHash, senderHash: $userPQ.currentUserHash };
-        let dispatchedWrite = editQueues.get(messageId);
-        // "fresh" claims queue their own write. A coalescing claim normally
-        // rides the live one — but after a transient failure the intent
-        // survives while the write is gone, and waiting on nothing would
-        // silently drop the newer text (the durable outbox would then replay
-        // the OLD revision). No live write ⇒ dispatch here too.
-        if (fresh || !dispatchedWrite) {
-            const previousWrite = dispatchedWrite ?? Promise.resolve();
-            const nextWrite = previousWrite.then(
-                () => runEditWrite(messageId, ctx),
-                () => runEditWrite(messageId, ctx)
-            );
-            const settledWrite = nextWrite.then(() => undefined, () => undefined);
-            editQueues.set(messageId, nextWrite);
-            settledWrite.then(() => {
-                if (editQueues.get(messageId) === nextWrite) editQueues.delete(messageId);
-            });
-            dispatchedWrite = nextWrite;
+        if (await awaitsUnlock(runOnChain(chainKey, intentId, token))) {
+            return { messageId, status: 'awaiting_unlock', signHash: null, ownerTimestamp: null };
         }
-
-        const dispatched = (await dispatchedWrite) ?? {};
-        return { messageId, signHash: dispatched.signHash ?? null, ownerTimestamp: dispatched.ownerTimestamp ?? null };
+        const signed = signedOf.get(intentId);
+        return { messageId, status: 'dispatched', signHash: signed?.signHash ?? null, ownerTimestamp: signed?.ownerTimestamp ?? null };
     };
 
     // ---------- file transport (§1.5, §2.1–2.3) ----------
@@ -1025,41 +972,29 @@ export const useDialogsStore = defineStore('dialogs', () => {
         downloadFile({ fileId: filePart.fileId, encSecretB64: filePart.encSecretB64, onProgress, signal });
 
     /**
-     * Deletes own message (§3.2): a new signed revision with deleted_flag and
-     * empty content — the empty plaintext IS the tombstone (07: an empty
-     * content_b64 is only valid alongside deleted_flag). The previous
-     * revision is archived server-side like any edit; refs are recomputed at
-     * deletion time per pq_dialogs §dialog_messages.
+     * Deletes own message (§3.2): a new revision with deleted_flag and no
+     * content. Stored first with the refs observed now; built in the
+     * message's chain, so after an edit still on its way it is that edit's
+     * successor, never a sibling of the same parent.
      */
     const deleteMessage = async (peerHash, messageId) => {
-        const dialogHash = await initDialogKeys(peerHash);
-        // A tombstone is a new version of the message: same chain, same rule
-        // as an edit (§4.5/§R3 — freshest of gate-verified shape row and own
-        // accepted-snapshot).
-        const myKey = await getSenderMsgKey(dialogHash, $userPQ.currentUserHash);
-
-        const current = await getVerifiedMessageBase(dialogHash, messageId);
-        if (!current) throw new Error('Message not found');
-        if (current.sender_hash !== $userPQ.currentUserHash) {
-            throw new Error('Cannot delete: not owner');
-        }
-
-        const refsMap = await computeObservedTails(dialogHash);
-        const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(refsMap));
-
-        await pushRow('dialog_messages', {
-            message_id: messageId,
-            dialog_hash: dialogHash,
-            sender_hash: $userPQ.currentUserHash,
-            // null, not '': Ecto casts an empty string to nil, so the server
-            // signs "null" where '' was signed — verified live, '' gets 422
-            // invalid_signature while null is accepted.
-            content_b64: null,
-            deleted_flag: true,
-            refs_map_b64: refsMapB64,
-            parent_sign_hash: current.sign_hash,
-            owner_timestamp: nextOwnerTimestamp(current.owner_timestamp),
-        }, 'update');
+        const myHash = $userPQ.currentUserHash;
+        const token = pinActiveSession(myHash, 'deleteMessage:start');
+        const dialogHash = getDialogHash(peerHash);
+        await ownMessageBase(dialogHash, messageId, myHash, token, 'deleteMessage');
+        const chainKey = `msg:${messageId}`;
+        const intentId = await serialized(captureLocks, chainKey, async () => {
+            const observedTails = await captureObservedTails(dialogHash, myHash);
+            assertSessionUnchanged(token, 'deleteMessage:beforeCommit');
+            const id = await enqueueIntent(
+                { kind: 'delete', relation: 'dialog_messages', peerHash, dialogHash, messageId, ownerHash: myHash, observedTails },
+                myHash,
+                'dialog_messages'
+            );
+            if (id === null) throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
+            return id;
+        });
+        return { messageId, status: (await awaitsUnlock(runOnChain(chainKey, intentId, token))) ? 'awaiting_unlock' : 'dispatched' };
     };
 
     /**
@@ -1121,8 +1056,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
         const out = [];
         for (const row of rows) {
-            const signPkey = await getVerifiedSignPkey(row.sender_hash);
-            const verified = !!signPkey && verifyMessageRow(row, signPkey).status === 'ok';
+            const verified = (await verifyReplicatedRow('dialog_messages_versions', row, getVerifiedSignPkey)).status === 'verified';
             let text = '';
             let decrypted = false;
             if (verified && row.content_b64) {
@@ -1193,9 +1127,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // previous scan had not reached yet. Checkpoints are immutable, so a known
     // one never has to be found again; `scannedTo` keeps dialogs that never had
     // one from being decrypted end to end on every visit.
-    const findLatestCheckpoint = async (dialogHash, rows, pointer, colls = null) => {
+    // `isAdmitted(row)`: whether the dialog gate admitted this exact revision.
+    // A checkpoint is read only from one; a raw, waiting, blocked or invalid
+    // row is never decrypted for it and holds the watermark like an
+    // undecrypted one, so it is looked at again once admitted.
+    const findLatestCheckpoint = async (dialogHash, rows, pointer, colls = null, isAdmitted = () => false, me = $userPQ.currentUserHash) => {
         const mine = rows
-            .filter((r) => r.sender_hash === $userPQ.currentUserHash && !r.deleted_flag && r.content_b64)
+            .filter((r) => r.sender_hash === me && !r.deleted_flag && r.content_b64)
             .map((r) => ({ row: r, order: feedOrderKey(r.message_id, r.owner_timestamp) }))
             .filter((e) => e.order > pointer.scannedTo)
             .sort((a, b) => b.order - a.order);
@@ -1207,6 +1145,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         let sawUndecrypted = false;
         let found = null;
         for (const { row } of mine) {
+            if (!isAdmitted(row)) { sawUndecrypted = true; continue; }
             const decoded = await decryptMessageRow(row, colls);
             if (!decoded.decrypted) { sawUndecrypted = true; continue; }
             const part = (decoded.parts || []).find((x) => x.kind === 'checkpoint');
@@ -1248,11 +1187,20 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // letting it fall back to getDialogCollections would re-register the
         // dialog in the LRU through the back door — the exact effect
         // withDialogCollections exists to prevent.
+        // Every await below may outlive the session: nothing is written for
+        // `me` once another account is open.
+        const stillMine = () => $userPQ.currentUserHash === me;
         const { rows, pointer } = await withDialogCollections(dialogHash, async (colls) => {
             await colls.messages.preload().catch(() => { });
+            if (!stillMine()) return { rows: [], pointer: stored };
             const loaded = colls.messages.toArray.filter((r) => r.sign_hash);
-            return { rows: loaded, pointer: await findLatestCheckpoint(dialogHash, loaded, stored, colls) };
+            const ordered = [...loaded].sort((a, b) => feedOrderKey(a.message_id, a.owner_timestamp) - feedOrderKey(b.message_id, b.owner_timestamp));
+            for (const row of ordered) await admitMessageRow(row, colls);
+            const admitted = loaded.filter((r) => isRowAdmitted(dialogHash, r));
+            const isAdmitted = (r) => isRowAdmitted(dialogHash, r);
+            return { rows: admitted, pointer: await findLatestCheckpoint(dialogHash, loaded, stored, colls, isAdmitted, me) };
         });
+        if (!stillMine()) return null;
         if (pointer.scannedTo !== stored.scannedTo || pointer.checkpoint !== stored.checkpoint) {
             await savePointer(me, dialogHash, pointer);
         } else if (pointer.checkpoint) {
@@ -1261,6 +1209,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             // only way back — the sweep never looks at unindexed dialogs.
             await rememberPointerDialog(me, dialogHash);
         }
+        if (!stillMine()) return null;
         if (!pointer.checkpoint) {
             checkpointAlerts.value.delete(peerHash);
             return null;
@@ -1272,6 +1221,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             messageId: pointer.checkpoint.messageId,
         };
         // reassign: a Map mutation is not reactive on its own
+        if (!stillMine()) return null;
         checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, alert);
         return alert;
     };
@@ -1612,8 +1562,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // sign_hash is a derived column: a row whose column lies about its
         // signature would occupy the honest revision's slot. Same rule as
         // getMessageHistory — verify before showing anything as "what it said".
-        const signPkey = await getVerifiedSignPkey(row.sender_hash);
-        if (!signPkey || verifyMessageRow(row, signPkey).status !== 'ok') {
+        if ((await verifyReplicatedRow('dialog_messages', row, getVerifiedSignPkey)).status !== 'verified') {
             return { text: 'Unverifiable revision', decrypted: false };
         }
         if (!row.content_b64) return { text: '', decrypted: true, deleted: !!row.deleted_flag };
@@ -1688,156 +1637,75 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * message revision the user is looking at — reacting to an unsynced
      * revision is an error, not a signed mutation with an empty hash.
      */
-    // Per-reaction_hash serialization with coalescing.
-    //
-    // Rapid clicks must not each derive their state from the server row: the
-    // shape has not caught up, so every click would compute the same
-    // "desiredActive" and fire duplicate inserts of one deterministic PK. The
-    // effective state is therefore server state overlaid with the latest
-    // in-flight intent, and only the FINAL intent is actually written —
-    // intermediate clicks collapse.
-    //
-    // An intent outlives its own write. Dropping it the moment the write
-    // starts left the interval between "request sent" and "shape caught up"
-    // unguarded: a click arriving there saw neither a server row nor an
-    // intent, concluded the reaction was off, and re-sent "on" — so a second
-    // click during a slow write silently repeated the first instead of
-    // undoing it. The intent is therefore cleared only once the write has
-    // settled, and `written` stops a queued duplicate from re-sending it.
-    const reactionIntents = new Map(); // reaction_hash -> { desiredActive, messageSignHash, written }
-    const reactionQueues = new Map();  // reaction_hash -> Promise
-    const reactionDispatches = new Map(); // reaction_hash -> Promise<DeliveryHandle>
-
-    const runReactionWrite = async (reactionHash, ctx) => {
-        const intent = reactionIntents.get(reactionHash);
-        if (!intent || intent.written) return reactionDispatches.get(reactionHash);
-        intent.written = true;
-
-        const { dialogHash, messageId, emoji, myKey, myHash } = ctx;
-        // Re-read after the previous write for this reaction: the row may now
-        // exist (or have moved to another revision). §4.5/§R3: prefer
-        // whichever is fresher of the gate-verified shape row and our own
-        // accepted-snapshot — the shape may not have caught up with our
-        const existing = await getVerifiedReactionBase(dialogHash, reactionHash);
-
-        const base = {
-            reaction_hash: reactionHash,
-            dialog_hash: dialogHash,
-            message_id: messageId,
-            // A reaction belongs to a specific message revision. Reacting on a
-            // newer revision moves the row to it (product decision 2026-08-11).
-            message_sign_hash: intent.messageSignHash,
-            reactor_hash: myHash,
-        };
-
-        // A retraction still needs an encrypted, non-empty type_b64: the
-        // backend's own changeset requires the field present (Ecto treats an
-        // empty binary as blank), so a literal '' is rejected 422 forever and
-        // the reaction can never be removed. Encrypt an empty emoji instead.
-        const typeB64 = await DialogCrypto.encryptContent(myKey, intent.desiredActive ? emoji : '');
-        const row = {
-            ...base,
-            type_b64: typeB64,
-            deleted_flag: !intent.desiredActive,
-            owner_timestamp: nextOwnerTimestamp(existing?.owner_timestamp ?? null),
-        };
-
-        // Existing row (even a tombstone, even on another revision) → update.
-        const dispatch = pushRow('dialog_message_reactions', row, existing ? 'update' : 'insert');
-        reactionDispatches.set(reactionHash, dispatch);
-        try {
-            const handle = await dispatch;
-            await handle.acceptance;
-            return handle;
-        } catch (e) {
-            // Transient: the write may still land, and the UI keeps showing the
-            // desired state, so the intent has to stay to keep the next click
-            // inverting from what the user sees. Permanent: fall through and
-            // drop it, back to server truth.
-            if (!e?.permanent && reactionIntents.get(reactionHash) === intent) {
-                intent.written = false;
-            }
-            throw e;
-        } finally {
-            // Only if nobody clicked again: a newer click replaced the entry,
-            // and that one still needs to be written.
-            if (reactionIntents.get(reactionHash) === intent && intent.written) {
-                reactionIntents.delete(reactionHash);
-            }
-        }
-    };
-
-    const toggleReaction = async (peerHash, { messageId, messageSignHash, emoji }) => {
+    // A toggle is stored before any key is touched, as the desired end state
+    // on the revision the user reacted to; `active` is the state the user
+    // sees. Until that intent is signed, further toggles of the same reaction
+    // flip it in place — one record, its final state, across a reload too.
+    // Once signed, the next toggle is a revision of its own, built on it.
+    const toggleReaction = async (peerHash, { messageId, messageSignHash, emoji, active }) => {
         if (!messageSignHash) {
             throw new Error('Cannot react: message revision is not synced yet');
         }
-
-        const dialogHash = await initDialogKeys(peerHash);
+        if (typeof active !== 'boolean') {
+            throw new TypeError('toggleReaction: the displayed state of the reaction (active) is required');
+        }
         const myHash = $userPQ.currentUserHash;
-        const myKey = await getSenderMsgKey(dialogHash, myHash);
+        const token = pinActiveSession(myHash, 'toggleReaction:start');
+        const dialogHash = getDialogHash(peerHash);
+        const logicalKey = `${dialogHash}|${messageId}|${emoji}`;
+        const chainKey = `rx:${logicalKey}`;
+        const isThisReaction = (intent) => intent?.kind === 'reaction'
+            && intent.dialogHash === dialogHash && intent.messageId === messageId && intent.emoji === emoji;
 
-        const reactionHash = DialogCrypto.computeReactionHash(myKey, messageId, myHash, emoji);
-
-        const existing = await getVerifiedReactionBase(dialogHash, reactionHash);
-        // Active only if the row is live AND attached to the revision being
-        // displayed: after an edit the old reaction is not shown, so clicking
-        // means "react on this revision", not "remove".
-        const serverActive = !!existing
-            && !existing.deleted_flag
-            && existing.message_sign_hash === messageSignHash;
-
-        const pending = reactionIntents.get(reactionHash);
-        const effectiveActive = pending ? pending.desiredActive : serverActive;
-        const desiredActive = !effectiveActive;
-
-        reactionIntents.set(reactionHash, { desiredActive, messageSignHash, written: false });
-
-        const optimisticId = addOptimisticReaction(dialogHash, messageId, emoji, reactionHash, desiredActive);
-
-        const previous = reactionQueues.get(reactionHash) ?? Promise.resolve();
-        const ctx = { dialogHash, messageId, emoji, myKey, myHash };
-        const next = previous.then(
-            () => runReactionWrite(reactionHash, ctx),
-            () => runReactionWrite(reactionHash, ctx)
-        );
-
-        const settled = next.then(() => undefined, () => undefined);
-        reactionQueues.set(reactionHash, settled);
-        settled.then(() => {
-            if (reactionQueues.get(reactionHash) === settled) reactionQueues.delete(reactionHash);
+        const { intentId, desiredActive } = await serialized(captureLocks, chainKey, async () => {
+            const last = await lastIntentOf(myHash, isThisReaction);
+            // Coalesced only onto the same target revision: a toggle on another
+            // revision is another action.
+            if (last && isUnsignedDialogIntent(last.intent) && last.intent.messageSignHash === messageSignHash) {
+                let desired = null;
+                const outcome = await updateUnsignedIntent(last.id, (intent) => {
+                    desired = !intent.desiredActive;
+                    return { ...intent, desiredActive: desired };
+                });
+                if (outcome === 'updated') return { intentId: last.id, desiredActive: desired };
+                if (outcome === 'failed') throw new Error('This reaction could not be stored for sending. Nothing was sent — try again.');
+            }
+            assertSessionUnchanged(token, 'toggleReaction:beforeCommit');
+            const desired = !active;
+            const id = await enqueueIntent(
+                { kind: 'reaction', relation: 'dialog_message_reactions', peerHash, dialogHash, messageId, messageSignHash, emoji, desiredActive: desired, ownerHash: myHash },
+                myHash,
+                'dialog_message_reactions'
+            );
+            if (id === null) throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
+            return { intentId: id, desiredActive: desired };
         });
 
-        next.then(
+        const optimisticId = addOptimisticReaction(dialogHash, messageId, emoji, logicalKey, desiredActive);
+        updateOptimisticStatus(optimisticId, 'syncing');
+        const run = runOnChain(chainKey, intentId, token, (row) => {
+            for (const item of optimisticItems.value.values()) {
+                if (item.type === 'reaction' && item.logicalKey === logicalKey) item.reactionHash = row?.reaction_hash ?? item.reactionHash;
+            }
+        });
+        run.then(
             (handle) => {
                 if (!handle) {
-                    console.warn('[dialogs] toggleReaction: no dispatch to track acceptance from');
-                    updateOptimisticStatus(optimisticId, 'error');
+                    removeOptimisticItem(optimisticId);
                     return;
                 }
-                if (handle.phase === 'accepted') {
-                    updateOptimisticStatus(optimisticId, 'synced');
-                    return;
-                }
-                handle.acceptance.then((outcome) => {
-                    updateOptimisticStatus(optimisticId, outcome.kind === 'accepted' ? 'synced' : 'error');
-                });
+                handle.acceptance.then((outcome) => updateOptimisticStatus(optimisticId, outcome.kind === 'accepted' ? 'synced' : 'error'));
             },
             (e) => {
-                console.error('[dialogs] toggleReaction failed:', e);
-                if (e?.permanent) {
-                    // The server will never accept this toggle — roll the
-                    // OPTIMISTIC state back so the UI stops showing an action
-                    // that did not happen. This is not the same decision as
-                    removeOptimisticItem(optimisticId);
-                } else {
-                    // Transient: the write may still land later, so keep it
-                    // visible — but as an explicit error, not as 'syncing'.
-                    updateOptimisticStatus(optimisticId, 'error');
+                if (e instanceof VaultLockedError) {
+                    updateOptimisticStatus(optimisticId, 'awaiting_unlock');
+                    return;
                 }
+                console.error('[dialogs] toggleReaction failed:', e);
+                if (e?.permanent) removeOptimisticItem(optimisticId);
+                else updateOptimisticStatus(optimisticId, 'error');
             }
         );
-
-        updateOptimisticStatus(optimisticId, 'syncing');
         return optimisticId;
     };
 
@@ -1888,7 +1756,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     const sendReceiptOnce = async (peerHash, { messageId, messageSignHash }, type, myHash, receiptHash) => {
-        const dialogHash = await initDialogKeys(peerHash);
+        const token = pinActiveSession(myHash, 'sendReceipt:start');
+        const dialogHash = getDialogHash(peerHash);
 
         const dialogColls = getDialogCollections(dialogHash);
         await dialogColls.receipts.preload().catch(() => {});
@@ -1901,21 +1770,23 @@ export const useDialogsStore = defineStore('dialogs', () => {
         if (known?.kind === 'rejected') {
             throw new Error('This receipt was rejected earlier — retry or discard it in the failed-writes banner.');
         }
-        if (known?.kind === 'intent') {
-            await signAndDispatchIntent(known.intent.id, known.intent.intent, await getSignSkeyBytes());
-            return receiptHash;
-        }
-
-        await pushRow('dialog_message_receipts', {
-            receipt_hash: receiptHash,
-            dialog_hash: dialogHash,
-            message_id: messageId,
-            peer_hash: myHash,
-            type,
-            message_sign_hash: messageSignHash,
-            owner_timestamp: nextOwnerTimestamp(null),
-        });
-
+        assertSessionUnchanged(token, 'sendReceipt:beforeCommit');
+        const intentId = known?.kind === 'intent'
+            ? known.intent.id
+            : await enqueueIntent({
+                kind: 'receipt', relation: 'dialog_message_receipts', peerHash, dialogHash, ownerHash: myHash,
+                row: {
+                    receipt_hash: receiptHash,
+                    dialog_hash: dialogHash,
+                    message_id: messageId,
+                    peer_hash: myHash,
+                    type,
+                    message_sign_hash: messageSignHash,
+                    owner_timestamp: nextOwnerTimestamp(null),
+                },
+            }, myHash, 'dialog_message_receipts');
+        if (intentId === null) throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
+        await dispatchDialogIntent(intentId, token);
         return receiptHash;
     };
 
@@ -1997,6 +1868,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         addOptimisticReaction,
         updateOptimisticStatus,
         retireProjections,
+        retireReactionProjections,
+        acceptanceRevision,
         ensureProjectionsHydrated,
         removeOptimisticItem,
         discardFailedItem,

@@ -61,7 +61,7 @@ describe('sendMutationsAndAwaitShape: non-leader tabs durably enqueue but never 
 	it('does not reach the network when this tab is not the leader', async () => {
 		_setLeaderForTests(false);
 
-		const handle = await sendMutationsAndAwaitShape([message('a')], SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape([message('a')], SKEY);
 
 		expect(sent).toHaveLength(0);
 		expect(handle.phase).toBe('queued');
@@ -74,7 +74,7 @@ describe('sendMutationsAndAwaitShape: non-leader tabs durably enqueue but never 
 	it('sends normally when this tab is the leader', async () => {
 		_setLeaderForTests(true);
 
-		await sendMutationsAndAwaitShape([message('b')], SKEY, { retries: 0 });
+		await sendMutationsAndAwaitShape([message('b')], SKEY);
 
 		expect(sent).toHaveLength(1);
 		expect(await pendingEntries(MY_HASH)).toHaveLength(0);
@@ -82,7 +82,7 @@ describe('sendMutationsAndAwaitShape: non-leader tabs durably enqueue but never 
 
 	it('the leader tab drains a non-leader tab\'s durable write once it becomes leader', async () => {
 		_setLeaderForTests(false);
-		await sendMutationsAndAwaitShape([message('c')], SKEY, { retries: 0 });
+		await sendMutationsAndAwaitShape([message('c')], SKEY);
 		expect(sent).toHaveLength(0);
 		expect(await pendingEntries(MY_HASH)).toHaveLength(1);
 
@@ -287,7 +287,7 @@ describe('no duplicate live transport from the local-wake race (§L17-08 follow-
 			if (userHash === MY_HASH) drainPendingWrites(MY_HASH, SKEY);
 		});
 		try {
-			await sendMutationsAndAwaitShape([message('no-duplicate-live')], SKEY, { retries: 0 });
+			await sendMutationsAndAwaitShape([message('no-duplicate-live')], SKEY);
 			await new Promise((r) => setTimeout(r, 100));
 
 			expect(sent).toHaveLength(1);

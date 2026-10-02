@@ -6,20 +6,10 @@
 					<div class="_icon_logo"></div>
 				</div>
 
-				<!-- <div class="_menu_btn order-1" :class="{ _active: menu === 'rooms' }" @click="navigateToRooms()">
-					<i class="_icon_rooms" :class="{ _active: menu === 'rooms' }"></i>
-					<div>Rooms</div>
-				</div> -->
-
 				<div class="_menu_btn order-1" :class="{ _active: menu === 'rooms' }" @click="$router.push('/rooms')">
 					<i class="_icon_rooms" :class="{ _active: menu === 'rooms' }"></i>
 					<div>Rooms</div>
 				</div>
-
-				<!-- <div class="_menu_btn order-1" :class="{ _active: menu === 'chats' }" @click="navigateToChats()">
-					<i class="_icon_chats"></i>
-					<div>Chats</div>
-				</div> -->
 
 				<div class="_menu_btn order-1" :class="{ _active: menu === 'chats' }" @click="$router.push('/chats')">
 					<i class="_icon_chats" :class="{ _active: menu === 'chats' }"></i>
@@ -338,14 +328,14 @@ import { useBreakpoint } from '@/composables/useBreakpoint';
 
 import { useMenu } from '@/composables/useMenu';
 
-import { ref, shallowRef, onMounted, defineAsyncComponent, inject, watch, computed } from 'vue';
+import { shallowRef, defineAsyncComponent, inject, watch, computed } from 'vue';
 
 const $router = inject('$router');
 const $route = inject('$route');
 
 const $mitt = inject('$mitt');
 const $breakpoint = useBreakpoint();
-const { isOpen: $menuOpened, close: closeMenu } = useMenu();
+const { close: closeMenu } = useMenu();
 
 const menuRegistry = {
 	contacts: {
@@ -397,16 +387,5 @@ const navigateToTrusted = () => {
 
 const navigateToElectric = () => {
 	window.location.href = '/electric';
-};
-
-const navigateToRooms = () => {
-	// TODO: REFACTOR - Use internal route: this.$router.push('/rooms')
-	// Or configure vue-router for external redirects
-	window.location.href = 'https://buckitup.xyz/rooms';
-};
-
-const navigateToChats = () => {
-	// TODO: REFACTOR - Use internal route: this.$router.push('/chats')
-	window.location.href = 'https://buckitup.xyz/chats';
 };
 </script>

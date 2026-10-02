@@ -100,7 +100,6 @@ const $router = inject('$router');
 const $mitt = inject('$mitt');
 const $em = inject('$encryptionManagerPQ');
 
-const accountInfoRef = ref(null);
 
 const draftAccount = ref(null);
 const draftAvatarBlob = ref(null);

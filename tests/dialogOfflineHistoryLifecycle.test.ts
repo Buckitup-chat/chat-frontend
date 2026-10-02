@@ -131,12 +131,6 @@ const mainKey: { [R in DialogRelation]: (r: RowOf[R]) => string } = {
 	dialog_message_reactions: (r) => r.reaction_hash,
 	dialog_message_receipts: (r) => r.receipt_hash,
 };
-const clearReadCacheDb = async () => {
-	const { IndexedDBAdapter } = await import('@tanstack/offline-transactions');
-	const adapter: { clear(): Promise<void>; db: IDBDatabase | null } = new IndexedDBAdapter('buckitup-read-cache') as never;
-	await adapter.clear();
-	adapter.db?.close();
-};
 const writeDialogCacheAsMain = (rowsByTable: Record<string, Row[]>) => new Promise<void>((resolve, reject) => {
 	const req = indexedDB.open('dialog-synced-cache', 2);
 	req.onupgradeneeded = () => {
@@ -162,7 +156,7 @@ describe('legacy compatibility: dialog history cached by main', () => {
 		const { wB } = await buildHistory();
 		const dialogHash = B.app.$dialogs.getDialogHash(A.hash) as string;
 		const m3 = [...server.table('dialog_messages').values()].find((r) => r.message_id === feedOf(wB)[2].id)!;
-		await B.app.$dialogs.toggleReaction(A.hash, { messageId: m3.message_id, messageSignHash: m3.sign_hash, emoji: '👍' });
+		await B.app.$dialogs.toggleReaction(A.hash, { messageId: m3.message_id, messageSignHash: m3.sign_hash, emoji: '👍', active: false });
 		await B.app.$dialogs.sendReadReceipt(A.hash, { messageId: m3.message_id, messageSignHash: m3.sign_hash });
 		await vi.waitFor(() => {
 			const bubble = wB.find(`[data-msg-id="${m3.message_id}"]`);
@@ -178,7 +172,6 @@ describe('legacy compatibility: dialog history cached by main', () => {
 		expect(legacy.dialog_message_receipts.some((r) => r.type === 'read')).toBe(true);
 		const forged = { ...legacy.dialog_messages[1], message_id: 'dmsg_ffffffff-0000-7000-8000-000000000000' };
 		legacy.dialog_messages = [...legacy.dialog_messages, forged];
-		await clearReadCacheDb();
 		await writeDialogCacheAsMain(legacy);
 
 		net.mode = 'offline';

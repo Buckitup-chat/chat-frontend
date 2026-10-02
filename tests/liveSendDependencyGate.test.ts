@@ -40,7 +40,11 @@ const makeStorage = () => {
 // collection wired) wait for an echo that cannot come.
 const chainedUpdate = () => ([{
 	type: 'update',
-	modified: { user_hash: MY_HASH, name: 'v2' },
+	original: {},
+	changes: {
+		user_hash: MY_HASH, name: 'v2', sign_pkey: 'c2lnbg==', contact_pkey: 'Y29udGFjdA==', contact_cert: 'Y2VydA==',
+		crypt_pkey: 'Y3J5cHQ=', crypt_cert: 'Y2VydA==', deleted_flag: false, owner_timestamp: 2, sign_b64: 'c2ln',
+	},
 	syncMetadata: { relation: 'user_cards' },
 }]);
 
@@ -60,7 +64,7 @@ describe('sendMutationsAndAwaitShape: leader still waits its turn behind an unre
 	it('does not reach the network for a chained write while an older write of the same entity is still pending', async () => {
 		await enqueue(chainedUpdate(), MY_HASH);
 
-		const handle = await sendMutationsAndAwaitShape(chainedUpdate(), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(chainedUpdate(), SKEY);
 
 		expect(sent).toHaveLength(0);
 		expect(handle.phase).toBe('queued');
@@ -71,7 +75,7 @@ describe('sendMutationsAndAwaitShape: leader still waits its turn behind an unre
 	});
 
 	it('still dispatches immediately when there is no unresolved predecessor', async () => {
-		const handle = await sendMutationsAndAwaitShape(chainedUpdate(), SKEY, { retries: 0 });
+		const handle = await sendMutationsAndAwaitShape(chainedUpdate(), SKEY);
 
 		expect(sent).toHaveLength(1);
 		expect(handle.phase).toBe('accepted');

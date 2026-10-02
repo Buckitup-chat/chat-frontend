@@ -2,10 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import * as secp from '@noble/secp256k1';
-import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
+import { signFields, deriveSignHash } from '@/lib/pq/signature';
+import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { _setOwnObservedTailsStorageForTests, _setRawOwnObservedTailsStorageForTests, getOwnObservedTails } from '@/lib/data/ownObservedTails';
 import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
@@ -30,29 +28,9 @@ const makeCollection = (rows = {}) => ({
 	},
 });
 
-const makeIdentity = (seed) => {
-	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
-	const kem = ml_kem1024.keygen(new Uint8Array(64).fill(seed));
-	const contactSk = new Uint8Array(32).fill(seed || 1);
-	const contactPk = secp.getPublicKey(contactSk, true);
-	const userHash = 'u_' + bytesToHex(sha3_512(sign.publicKey));
-	const card = {
-		user_hash: userHash,
-		sign_pkey: toBase64(sign.publicKey),
-		crypt_pkey: toBase64(kem.publicKey),
-		crypt_cert: toBase64(ml_dsa87.sign(kem.publicKey, sign.secretKey)),
-		contact_pkey: toBase64(contactPk),
-		contact_cert: toBase64(ml_dsa87.sign(contactPk, sign.secretKey)),
-		name: `user-${seed}`,
-		deleted_flag: false,
-		owner_timestamp: 1_700_000_000,
-	};
-	card.sign_b64 = signFields(card, sign.secretKey);
-	return { sign, userHash, card };
-};
-
-const myIdentity = makeIdentity(1);
-const peerIdentity = makeIdentity(2);
+const myIdentity = makeTestIdentity(1);
+const peerIdentity = makeTestIdentity(2);
+const IDENTITY_BY_HASH = { [myIdentity.userHash]: myIdentity, [peerIdentity.userHash]: peerIdentity };
 
 const MY_HASH = myIdentity.userHash;
 const PEER_HASH = peerIdentity.userHash;
@@ -61,7 +39,7 @@ const OTHER_ACCOUNT_HASH = 'u_' + 'b'.repeat(128);
 const MSG_ID = 'dmsg_' + '4'.repeat(128);
 
 const signedMessageRow = (author, fields) => {
-	const sign_b64 = signFields(fields, author.sign.secretKey);
+	const sign_b64 = signFields(fields, author.signSkey);
 	return { ...fields, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64) };
 };
 
@@ -71,6 +49,8 @@ const GENESIS_ROW = signedMessageRow(myIdentity, {
 	parent_sign_hash: null, owner_timestamp: 1000,
 });
 const SIGN_HASH = GENESIS_ROW.sign_hash;
+
+const ownKeyRow = () => signedDialogKeyRow(myIdentity, { dialog_hash: DIALOG_HASH, peer_hash: PEER_HASH });
 
 let collections;
 let sent;
@@ -97,10 +77,12 @@ const { MockDurabilityError, MockIngestError } = vi.hoisted(() => {
 	return { MockDurabilityError, MockIngestError };
 });
 
+let heldNext = null;
 vi.mock('@/lib/data/ingest', () => ({
 	sendMutationsAndAwaitShape: async (mutations, _skey, opts = {}) => {
 		// the real transport reports durable enqueue before the network wait
 		await opts.onDurable?.('test-outbox-id');
+		if (heldNext) return { outboxId: 'test-outbox-id', phase: 'queued', held: heldNext, acceptance: new Promise(() => {}) };
 		const result = await sendImpl(mutations);
 		return { outboxId: 'test-outbox-id', phase: 'accepted', result, acceptance: Promise.resolve({ kind: 'accepted' }) };
 	},
@@ -137,13 +119,11 @@ vi.mock('@/lib/data/intents', () => ({
 	intentsOf: async (userHash) => ({ entries: [...intentStore.values()].filter((e) => e.userHash === userHash), issues: [] }),
 }));
 
-const createGenericMutationSpy = vi.fn((relation, row, _skey, type) => ({
-	type,
-	relation,
-	row,
-	changes: relation === 'dialog_messages' ? { ...row, sign_hash: `fake_sign_hash(${JSON.stringify(row)})` } : undefined,
-	syncMetadata: { relation },
-}));
+const createGenericMutationSpy = vi.fn((relation, row, _skey, type) => {
+	const changes = relation === 'dialog_messages' ? { ...row, sign_hash: `fake_sign_hash(${JSON.stringify(row)})` } : undefined;
+	const carried = type === 'insert' ? { modified: changes ?? row } : { original: {}, changes: changes ?? row };
+	return { type, relation, row, changes, ...carried, syncMetadata: { relation } };
+});
 
 vi.mock('@/api/client', () => ({
 	api: {
@@ -179,9 +159,10 @@ vi.mock('@/libs/DialogCrypto', () => ({
 			peerWrappedMsgKeyB64: 'wrapped',
 		}),
 		// Deterministic per (message, reactor, emoji) — no revision in it,
-		// which is why a reaction "moves" between revisions.
+		// which is why a reaction "moves" between revisions. A prefixed hex
+		// hash, like the real one, so the served row can be signed.
 		computeReactionHash: (_k, messageId, reactor, emoji) =>
-			`dmr_${messageId}:${reactor}:${emoji}`,
+			'dmr_' + bytesToHex(sha3_512(new TextEncoder().encode(`${messageId}${reactor}${emoji}`))),
 		// Real derivation — its own behaviour is covered in dialogCrypto.test.js;
 		// keeping it real here checks the store passes the right operands.
 		computeReceiptHash: (messageId, signHash, peerHash, type) =>
@@ -217,8 +198,17 @@ const COLLECTION_FOR = {
 };
 
 const signDialogMessageRow = (row) => {
-	const sign_b64 = signFields(row, myIdentity.sign.secretKey);
+	const sign_b64 = signFields(row, myIdentity.signSkey);
 	return { ...row, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64) };
+};
+
+const servedRow = (relation, row) => {
+	if (relation === 'dialog_messages') return signDialogMessageRow(row);
+	const author = IDENTITY_BY_HASH[row.sender_hash];
+	if (relation === 'dialog_keys' && author) return signRow(author, row);
+	const reactor = IDENTITY_BY_HASH[row.reactor_hash];
+	if (relation === 'dialog_message_reactions' && reactor) return signRow(reactor, row);
+	return row;
 };
 
 const applyMutation = (m) => {
@@ -235,7 +225,7 @@ const applyMutation = (m) => {
 		throw err;
 	}
 	const merged = { ...coll.rows.get(key), ...m.row };
-	coll.rows.set(key, m.relation === 'dialog_messages' ? signDialogMessageRow(merged) : merged);
+	coll.rows.set(key, servedRow(m.relation, merged));
 };
 
 // sendMessage awaits a dynamic import() for uuid before it does anything, so
@@ -257,6 +247,7 @@ const waitFor = async (predicate, label) => {
 };
 
 beforeEach(() => {
+	heldNext = null;
 	enqueueIntentSpy.mockClear();
 	enqueueIntentCounter = 0;
 	intentStore = new Map();
@@ -360,12 +351,7 @@ describe('initDialogKeys deduplication', () => {
 
 	// A key row already on the server must never be re-inserted.
 	it('does not write when the key row already exists', async () => {
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH,
-			sender_hash: MY_HASH,
-			peer_hash: PEER_HASH,
-			deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		const store = useDialogsStore();
 
 		await store.initDialogKeys(PEER_HASH);
@@ -620,9 +606,7 @@ describe('captureMessageIntent: durable before any construction (§A)', () => {
 
 	it('the captured message id and owner timestamp are fixed once and reused exactly by dispatch', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 
 		const { intentId, payload, token } = await store.captureMessageIntent(PEER_HASH, 'hello', 'dmsg_fixed_id', 555555);
 		expect(payload.messageId).toBe('dmsg_fixed_id');
@@ -640,9 +624,7 @@ describe('captureMessageIntent: durable before any construction (§A)', () => {
 
 	it('captures scope from already gate-admitted messages without exporting vault keys, decrypting anything fresh, or touching the network (§3, §5)', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		const M2_ID = 'dmsg_' + '6'.repeat(128);
 		const M2_SIGN_HASH = 'dms_' + '7'.repeat(128);
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
@@ -665,9 +647,7 @@ describe('captureMessageIntent: durable before any construction (§A)', () => {
 
 	it('a durability failure with already-loaded messages present still makes zero vault/key/encryption/sign/network calls and zero optimistic projection', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 		enqueueIntentSpy.mockImplementationOnce(async () => null);
 
@@ -708,9 +688,7 @@ describe('captureMessageIntent: an account switch during the causal-bookkeeping 
 
 	it('a switch away from the pinned owner, in flight during the write\'s own key derivation, refuses it — captureMessageIntent throws, no intent is ever enqueued, nothing is left readable under either account', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		exportVaultKeysSpy.mockImplementationOnce(() => new Promise((resolve) => {
 			ambientUserHash = OTHER_ACCOUNT_HASH;
 			resolve({ sign_skey: 'AAAA', crypt_skey: btoa(String.fromCharCode(...new Uint8Array(32).fill(2))), evm_skey: 'cc' });
@@ -727,9 +705,7 @@ describe('captureMessageIntent: an account switch during the causal-bookkeeping 
 
 	it('with no switch, the same write succeeds and reads back correctly under the SAME account', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 
 		const { payload } = await store.captureMessageIntent(PEER_HASH, 'hello', 'dmsg_pinned_ok');
 
@@ -743,9 +719,7 @@ describe('captured causal scope is frozen at capture time, never recomputed at d
 
 	it('a message that lands after capture but before dispatch is excluded from the already-captured scope', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 		await store.admitMessageRow(GENESIS_ROW);
 
@@ -765,9 +739,7 @@ describe('captured causal scope is frozen at capture time, never recomputed at d
 describe('locked vault at dispatch time reports a distinct status, never a generic error (§4)', () => {
 	it('a vault export failure during materialization reports awaiting_unlock — the intent stays durable, nothing was sent', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 
 		const { intentId, payload, token } = await store.captureMessageIntent(PEER_HASH, 'hello');
 
@@ -787,9 +759,7 @@ describe('account/session fencing: an in-flight message/checkpoint intent belong
 
 	it('capture under account A, then switch to B before dispatch: no signing, no dispatch, an honest error status', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 
 		startLeaderElection(MY_HASH, () => {});
 		const { intentId, payload, token } = await store.captureMessageIntent(PEER_HASH, 'hello');
@@ -821,9 +791,7 @@ describe('account/session fencing: an in-flight message/checkpoint intent belong
 
 	it('a late completion from the old session honestly fails its OWN bubble — it never hangs at "sending" forever, and touches nothing else', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 
 		startLeaderElection(MY_HASH, () => {});
 		const { intentId, payload, token } = await store.captureMessageIntent(PEER_HASH, 'hello');
@@ -841,9 +809,7 @@ describe('account/session fencing: an in-flight message/checkpoint intent belong
 
 	it('still dispatches normally when the active session matches the intent owner (no false positive)', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 
 		startLeaderElection(MY_HASH, () => {});
 		const { intentId, payload, token } = await store.captureMessageIntent(PEER_HASH, 'hello');
@@ -857,9 +823,7 @@ describe('account/session fencing: an in-flight message/checkpoint intent belong
 
 	it('logout then relogin to the SAME account bumps the generation and still fences the old flow', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 
 		startLeaderElection(MY_HASH, () => {});
 		const { intentId, payload, token } = await store.captureMessageIntent(PEER_HASH, 'hello');
@@ -877,9 +841,7 @@ describe('account/session fencing: an in-flight message/checkpoint intent belong
 
 	it('a checkpoint intent is fenced the same way a plain message is', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 
 		startLeaderElection(MY_HASH, () => {});
 		const { intentId, payload, token } = await store.captureMessageIntent(
@@ -899,9 +861,7 @@ describe('account/session fencing: an in-flight message/checkpoint intent belong
 
 	it('a session switch landing exactly between the durable "accepted" handoff and the immediate onStatus callback never fires that callback for the old session', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 
 		startLeaderElection(MY_HASH, () => {});
 		const { intentId, payload, token } = await store.captureMessageIntent(PEER_HASH, 'hello');
@@ -927,30 +887,41 @@ describe('account/session fencing: an in-flight message/checkpoint intent belong
 	});
 });
 
+const displayedReactionActive = (store, emoji) => {
+	const logicalKey = `${DIALOG_HASH}|${MSG_ID}|${emoji}`;
+	const item = [...store.optimisticItems.values()].find((i) => i.type === 'reaction' && i.logicalKey === logicalKey);
+	if (item) return item.desiredActive;
+	return collections.dialog.reactions.toArray.some((row) =>
+		row.message_id === MSG_ID && row.message_sign_hash === SIGN_HASH && row.reactor_hash === MY_HASH
+		&& !row.deleted_flag && row.type_b64 === `enc(${emoji})`);
+};
+
 describe('reaction toggle coalescing', () => {
 	const toggle = (store) =>
 		store.toggleReaction(PEER_HASH, {
 			messageId: MSG_ID,
 			messageSignHash: SIGN_HASH,
 			emoji: '👍',
+			active: displayedReactionActive(store, '👍'),
 		});
 
 	// Two clicks land back on "no reaction". Reading only the server state made
 	// both clicks compute desiredActive=true, so the pair wrote the reaction on
-	// and left it on.
+	// and left it on. Both clicks see "not reacted" (the first one's optimistic
+	// item is not shown yet); the second folds into the first, still unsigned,
+	// toggle, which then ends where the reaction already is: nothing to write.
 	it('a fast double click ends with the reaction removed', async () => {
 		const store = useDialogsStore();
 
 		await Promise.all([toggle(store), toggle(store)]);
 		await flush();
 
+		expect(enqueueIntentSpy.mock.calls.filter((c) => c[0].kind === 'reaction')).toHaveLength(1);
 		const writes = sent.filter((m) => m.relation === 'dialog_message_reactions');
-		expect(writes.length).toBeGreaterThan(0);
-		expect(writes.at(-1).row.deleted_flag).toBe(true);
-		// A retraction still needs an encrypted, non-empty type_b64 — the
-		// backend rejects a literal '' as blank and the reaction can never be
-		// removed (confirmed live by the backend's own ingest test).
-		expect(writes.at(-1).row.type_b64).toBe('enc()');
+		expect(writes.filter((m) => m.row.deleted_flag === false)).toHaveLength(0);
+		expect(writes).toHaveLength(0);
+		expect([...store.optimisticItems.values()].filter((item) => item.type === 'reaction')).toHaveLength(0);
+		expect(displayedReactionActive(store, '👍')).toBe(false);
 	});
 
 	it('an odd number of clicks ends with the reaction present', async () => {
@@ -1018,6 +989,10 @@ describe('reaction toggle coalescing', () => {
 		expect(writes).toHaveLength(2);
 		expect(writes[0].row.deleted_flag).toBe(false);
 		expect(writes[1].row.deleted_flag).toBe(true);
+		// A retraction still needs an encrypted, non-empty type_b64 — the
+		// backend rejects a literal '' as blank and the reaction can never be
+		// removed (confirmed live by the backend's own ingest test).
+		expect(writes[1].row.type_b64).toBe('enc()');
 		expect(maxInFlight).toBe(1);
 	});
 
@@ -1034,7 +1009,7 @@ describe('reaction toggle coalescing', () => {
 
 describe('permanent reaction failure quarantines durably and does not auto-discard (L17-07)', () => {
 	const toggle = (store) =>
-		store.toggleReaction(PEER_HASH, { messageId: MSG_ID, messageSignHash: SIGN_HASH, emoji: '👍' });
+		store.toggleReaction(PEER_HASH, { messageId: MSG_ID, messageSignHash: SIGN_HASH, emoji: '👍', active: displayedReactionActive(store, '👍') });
 
 	const permanentlyRejectReactionWrites = () => {
 		const baseSend = sendImpl;
@@ -1142,7 +1117,8 @@ describe('discardFailedItem clears the matching quarantined outbox entry, not ju
 	it('discards a quarantined dialog_message_reactions entry matching the optimistic reaction', async () => {
 		const store = useDialogsStore();
 		const reactionHash = 'drh_' + '5'.repeat(128);
-		const optimisticId = store.addOptimisticReaction(DIALOG_HASH, MSG_ID, '👍', reactionHash, true);
+		const optimisticId = store.addOptimisticReaction(DIALOG_HASH, MSG_ID, '👍', `${DIALOG_HASH}|${MSG_ID}|👍`, true);
+		store.optimisticItems.get(optimisticId).reactionHash = reactionHash;
 		await seedQuarantinedEntry('dialog_message_reactions', { reaction_hash: reactionHash, dialog_hash: DIALOG_HASH });
 		expect(await quarantinedEntries(MY_HASH)).toHaveLength(1);
 
@@ -1222,9 +1198,7 @@ describe('deleteMessage (§3.2)', () => {
 	// content + deleted_flag, chained to the tip like any edit.
 	it('writes an update tombstone chained to the current tip', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		await store.deleteMessage(PEER_HASH, MSG_ID);
@@ -1238,9 +1212,7 @@ describe('deleteMessage (§3.2)', () => {
 
 	it('refuses to delete a peer message', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, signedMessageRow(peerIdentity, {
 			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: PEER_HASH,
 			content_b64: 'x', deleted_flag: false, refs_map_b64: null,
@@ -1270,9 +1242,7 @@ describe('own accepted snapshot as a local base (§4.5)', () => {
 
 	it('editMessage finds the message via its own accepted-snapshot when the shape has not caught up yet', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		await recordAccepted('dialog_messages', MSG_ID, {
 			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
 			content_b64: 'x', deleted_flag: false, sign_hash: ACCEPTED_SIGN_HASH, owner_timestamp: 100,
@@ -1280,15 +1250,14 @@ describe('own accepted snapshot as a local base (§4.5)', () => {
 
 		await store.editMessage(PEER_HASH, MSG_ID, 'edited');
 
-		const sent = enqueueIntentSpy.mock.calls.at(-1)?.[0]?.row;
-		expect(sent?.parent_sign_hash).toBe(ACCEPTED_SIGN_HASH);
+		const signed = createGenericMutationSpy.mock.calls.filter((c) => c[0] === 'dialog_messages').at(-1)?.[1];
+		expect(signed?.parent_sign_hash).toBe(ACCEPTED_SIGN_HASH);
+		expect(signed?.content_b64).toContain('edited');
 	});
 
 	it('prefers the accepted-snapshot over a stale shape row by owner_timestamp', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, {
 			message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
 			content_b64: 'old', deleted_flag: false, sign_hash: SIGN_HASH, owner_timestamp: 100,
@@ -1300,17 +1269,17 @@ describe('own accepted snapshot as a local base (§4.5)', () => {
 
 		await store.deleteMessage(PEER_HASH, MSG_ID);
 
-		const sent = enqueueIntentSpy.mock.calls.at(-1)?.[0]?.row;
-		expect(sent?.parent_sign_hash).toBe(ACCEPTED_SIGN_HASH);
+		const signed = createGenericMutationSpy.mock.calls.filter((c) => c[0] === 'dialog_messages').at(-1)?.[1];
+		expect(signed?.parent_sign_hash).toBe(ACCEPTED_SIGN_HASH);
+		expect(signed?.owner_timestamp).toBeGreaterThan(200);
+		expect(signed?.deleted_flag).toBe(true);
 	});
 });
 
 describe('editMessage coalescing is durable, not just in-memory (§3.1 Target lifecycle: LOCAL INTENT durable before VAULT ACCESS)', () => {
 	it('the first edit of a burst enqueues a durable intent; a coalesced sibling updates it, never a second enqueue', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		await Promise.all([
@@ -1319,16 +1288,17 @@ describe('editMessage coalescing is durable, not just in-memory (§3.1 Target li
 		]);
 
 		expect(enqueueIntentSpy).toHaveBeenCalledTimes(1);
-		expect(updateIntentSpy).toHaveBeenCalledTimes(4);
-		expect(updateIntentSpy.mock.calls[0][1].row.content_b64).toContain('edit B');
+		expect(enqueueIntentSpy.mock.calls[0][0]).toMatchObject({ kind: 'edit', parts: [{ kind: 'text', text: 'edit A' }] });
+		const coalesced = updateIntentSpy.mock.calls.find((c) => c[1].kind === 'edit');
+		expect(coalesced?.[0]).toBe('test-intent-id-1');
+		expect(coalesced?.[1].parts).toEqual([{ kind: 'text', text: 'edit B' }]);
 		expect(createGenericMutationSpy).toHaveBeenCalledTimes(1);
+		expect(createGenericMutationSpy.mock.calls[0][1].content_b64).toContain('edit B');
 	});
 
 	it('a non-overlapping later edit enqueues its own fresh durable intent, not an update of the finished one', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
@@ -1346,9 +1316,7 @@ describe('editMessage coalescing is durable, not just in-memory (§3.1 Target li
 describe('editMessage/deleteMessage refuse an unverified shape row as a base (§R3)', () => {
 	it('editMessage treats a row with a signature that does not verify as if it were absent', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, { ...GENESIS_ROW, content_b64: 'enc(tampered)' });
 
 		await expect(store.editMessage(PEER_HASH, MSG_ID, 'edit')).rejects.toThrow(/not found/i);
@@ -1356,9 +1324,7 @@ describe('editMessage/deleteMessage refuse an unverified shape row as a base (§
 
 	it('deleteMessage treats a row with a signature that does not verify as if it were absent', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, { ...GENESIS_ROW, owner_timestamp: 999999 });
 
 		await expect(store.deleteMessage(PEER_HASH, MSG_ID)).rejects.toThrow(/not found/i);
@@ -1368,9 +1334,7 @@ describe('editMessage/deleteMessage refuse an unverified shape row as a base (§
 describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B; §3.12 coalesces the race away)', () => {
 	it('two concurrent edits of the same message coalesce into a single write with the latest text', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		const [a, b] = await Promise.allSettled([
@@ -1390,9 +1354,7 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 
 	it('a coalescing edit whose durable update fails throws, rather than silently losing the newer text', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		updateIntentSpy.mockImplementationOnce(async () => false);
@@ -1411,9 +1373,7 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 
 	it('an edit that starts only after the previous one is fully dispatched is independent, not coalesced', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
@@ -1426,9 +1386,7 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 
 	it('a later, unrelated edit of the same message chains onto the CURRENT tip, not a leftover base from a completed edit', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
@@ -1452,9 +1410,7 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 
 	it('never runs two writes for one message concurrently, but a second edit mid-flight still gets its own write', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 		let NEW_SIGN_HASH;
 		let callCount = 0;
@@ -1508,9 +1464,7 @@ describe('editMessage race (§3.3 — a late ack/rejection of A must not touch B
 describe('editMessage resolves with the exact signed identity of the dispatched revision', () => {
 	it('signHash is the sign_hash of the mutation that was actually signed and dispatched', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		const result = await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
@@ -1523,9 +1477,7 @@ describe('editMessage resolves with the exact signed identity of the dispatched 
 
 	it('does not sign a second time to obtain the identity the UI reads', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		await store.editMessage(PEER_HASH, MSG_ID, 'edit A');
@@ -1535,9 +1487,7 @@ describe('editMessage resolves with the exact signed identity of the dispatched 
 
 	it('a coalesced edit resolves with the sign_hash of the content that actually got dispatched', async () => {
 		const store = useDialogsStore();
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, {
-			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false,
-		});
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
 		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
 
 		const [resultA, resultB] = await Promise.all([
@@ -1549,5 +1499,50 @@ describe('editMessage resolves with the exact signed identity of the dispatched 
 		expect(edits[0].row.content_b64).toMatch(/edit [AB]/);
 		expect(resultA.signHash).toBe(edits[0].changes.sign_hash);
 		expect(resultB.signHash).toBe(edits[0].changes.sign_hash);
+	});
+});
+
+describe('an edit or delete held for an unconfirmed base is still pending, never reported failed', () => {
+	const HELD = { reason: 'stale_base', message: 'it was built on data the server has not confirmed yet — it waits until that data is confirmed' };
+	const settledWithin = (promise, ms = 50) =>
+		Promise.race([promise.then(() => 'fulfilled', () => 'rejected'), new Promise((r) => setTimeout(() => r('pending'), ms))]);
+
+	beforeEach(() => {
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
+		collections.dialog.messages.rows.set(MSG_ID, GENESIS_ROW);
+		heldNext = HELD;
+	});
+
+	it('editMessage neither resolves as done nor rejects while its stored write is held', async () => {
+		const store = useDialogsStore();
+
+		const editing = store.editMessage(PEER_HASH, MSG_ID, 'edited while stale');
+
+		expect(await settledWithin(editing)).toBe('pending');
+		expect(sent).toEqual([]);
+		expect(collections.dialog.messages.rows.get(MSG_ID)).toEqual(GENESIS_ROW);
+		expect(enqueueIntentSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('a newer edit while the first is held waits behind it: stored as its own intent, not signed, not sent, not failed', async () => {
+		const store = useDialogsStore();
+
+		const first = store.editMessage(PEER_HASH, MSG_ID, 'first');
+		expect(await settledWithin(first)).toBe('pending');
+		const second = store.editMessage(PEER_HASH, MSG_ID, 'second');
+
+		expect(await settledWithin(second)).toBe('pending');
+		expect(enqueueIntentSpy).toHaveBeenCalledTimes(2);
+		expect(createGenericMutationSpy.mock.calls.filter((c) => c[0] === 'dialog_messages')).toHaveLength(1);
+		expect(sent).toEqual([]);
+	});
+
+	it('deleteMessage does not reject while its stored tombstone is held', async () => {
+		const store = useDialogsStore();
+
+		const deleting = store.deleteMessage(PEER_HASH, MSG_ID);
+
+		expect(await settledWithin(deleting)).not.toBe('rejected');
+		expect(sent).toEqual([]);
 	});
 });

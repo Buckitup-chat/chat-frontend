@@ -89,6 +89,10 @@ export function scopeForRelation(
  *
  * The wait is retried once with a longer budget before giving up, since the
  * common case is a slow shape rather than a lost one.
+ *
+ * A txid seen is the scope's replicated state catching up, not any row's
+ * verification: whether a row is this operation's revision and verifies is
+ * operationLifecycle's question.
  */
 export async function awaitShapeVisibility(
 	collection: AwaitableCollection | null,

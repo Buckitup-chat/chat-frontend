@@ -29,12 +29,12 @@ vi.mock('@/lib/data/barrier', () => ({
 	scopeForRelation: (relation: string) => relation,
 }));
 
-vi.mock('@/lib/data/writeContracts', () => ({
+vi.mock('@/lib/data/writeContracts', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@/lib/data/writeContracts')>()),
 	contractFor: () => ({ dependencyClass: 'chained', confirmation: 'visible' }),
-	OWNER_FIELD: { dialog_messages: 'sender_hash' },
 }));
 
-const { sendMutationsAndAwaitShape, drainPendingWrites } = await import('@/lib/data/ingest');
+const { sendMutationsAndAwaitShape, drainPendingWrites, resumePendingWrites } = await import('@/lib/data/ingest');
 const { pendingEntries, stopDrainLoop, _setStorageForTests, _setLeaderForTests } = await import('@/lib/data/outbox');
 const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
@@ -72,7 +72,7 @@ describe('sender-coordinator: one dispatch path for live-send, retry and replay'
 	it('awaits shape visibility on a background retry, not only on the first attempt', async () => {
 		vi.useFakeTimers();
 		try {
-			await sendMutationsAndAwaitShape([message('a')], SKEY, { retries: 0 }).catch(() => {});
+			await sendMutationsAndAwaitShape([message('a')], SKEY).catch(() => {});
 			expect(awaitShapeVisibility).not.toHaveBeenCalled();
 
 			online = true;
@@ -88,11 +88,11 @@ describe('sender-coordinator: one dispatch path for live-send, retry and replay'
 	});
 
 	it('awaits shape visibility when replaying after a reload', async () => {
-		await sendMutationsAndAwaitShape([message('b')], SKEY, { retries: 0 }).catch(() => {});
+		await sendMutationsAndAwaitShape([message('b')], SKEY).catch(() => {});
 		expect(awaitShapeVisibility).not.toHaveBeenCalled();
 
 		online = true;
-		drainPendingWrites(MY_HASH, SKEY);
+		resumePendingWrites(MY_HASH, SKEY);
 		await vi.waitFor(async () => expect(await pendingEntries(MY_HASH)).toHaveLength(0));
 
 		expect(sent).toHaveLength(1);

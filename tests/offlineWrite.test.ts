@@ -34,7 +34,7 @@ vi.mock('@/lib/data/barrier', () => ({
 	scopeForRelation: (relation: string) => relation,
 }));
 
-const { sendMutationsAndAwaitShape, drainPendingWrites } = await import('@/lib/data/ingest');
+const { sendMutationsAndAwaitShape, drainPendingWrites, resumePendingWrites } = await import('@/lib/data/ingest');
 const { pendingEntries, _setStorageForTests, _setLeaderForTests } = await import('@/lib/data/outbox');
 const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
 
@@ -85,7 +85,7 @@ afterEach(() => {
 describe('writing with no network', () => {
 	it('reports failure to the caller but keeps the write', async () => {
 		await expect(
-			sendMutationsAndAwaitShape([message('hello')], SKEY, { retries: 0 })
+			sendMutationsAndAwaitShape([message('hello')], SKEY)
 		).rejects.toThrow(/network error/i);
 
 		// Durability is the point: the signed mutation is on disk before the
@@ -96,13 +96,13 @@ describe('writing with no network', () => {
 	});
 
 	it('delivers the queued write once the network returns', async () => {
-		await sendMutationsAndAwaitShape([message('first')], SKEY, { retries: 0 }).catch(() => {});
-		await sendMutationsAndAwaitShape([message('second')], SKEY, { retries: 0 }).catch(() => {});
+		await sendMutationsAndAwaitShape([message('first')], SKEY).catch(() => {});
+		await sendMutationsAndAwaitShape([message('second')], SKEY).catch(() => {});
 		expect(await pendingEntries(MY_HASH)).toHaveLength(2);
 
 		online = true;
 		// The drain loop is fire-and-forget now; give its first pass a beat.
-		drainPendingWrites(MY_HASH, SKEY);
+		resumePendingWrites(MY_HASH, SKEY);
 		await vi.waitFor(async () => expect(await pendingEntries(MY_HASH)).toHaveLength(0));
 
 		// Oldest first: a message must not overtake the one typed before it.
@@ -113,7 +113,7 @@ describe('writing with no network', () => {
 	});
 
 	it('keeps the queue intact when the network is still down at drain time', async () => {
-		await sendMutationsAndAwaitShape([message('x')], SKEY, { retries: 0 }).catch(() => {});
+		await sendMutationsAndAwaitShape([message('x')], SKEY).catch(() => {});
 
 		drainPendingWrites(MY_HASH, SKEY);
 		await new Promise((r) => setTimeout(r, 50));
@@ -134,7 +134,7 @@ describe('writing with no network', () => {
 			// the queue starts empty and no loop is running
 			expect(await pendingEntries(MY_HASH)).toHaveLength(0);
 
-			await sendMutationsAndAwaitShape([message('stranded')], SKEY, { retries: 0 }).catch(() => {});
+			await sendMutationsAndAwaitShape([message('stranded')], SKEY).catch(() => {});
 			expect(await pendingEntries(MY_HASH)).toHaveLength(1);
 
 			// nobody logs in, nobody fires 'online' — only time passes
@@ -153,7 +153,7 @@ describe('writing with no network', () => {
 	it('does not queue twice when a write succeeds normally', async () => {
 		online = true;
 
-		await sendMutationsAndAwaitShape([message('direct')], SKEY, { retries: 0 });
+		await sendMutationsAndAwaitShape([message('direct')], SKEY);
 
 		expect(sent).toHaveLength(1);
 		expect(await pendingEntries(MY_HASH)).toHaveLength(0);
@@ -180,17 +180,21 @@ describe('durability is part of message acceptance', () => {
 
 	it('fails visibly before the network when the queue cannot store the write', async () => {
 		await expect(
-			sendMutationsAndAwaitShape([message('x')], SKEY, { retries: 0 })
+			sendMutationsAndAwaitShape([message('x')], SKEY)
 		).rejects.toMatchObject({ name: 'DurabilityError' });
 		expect(sent).toHaveLength(0); // nothing left the device
 	});
 
-	it('still sends when a caller explicitly opts into best-effort', async () => {
-		const result = await sendMutationsAndAwaitShape([message('x')], SKEY, {
-			retries: 0,
-			durability: 'best-effort',
-		});
-		expect(result).toBeTruthy();
-		expect(sent).toHaveLength(1);
+	it('there is no send without durability: even a write with no possible prerequisite fails visibly', async () => {
+		const cardInsert = {
+			type: 'insert',
+			modified: {
+				user_hash: MY_HASH, name: 'me', sign_pkey: 'c2lnbg==', contact_pkey: 'Y29udGFjdA==', contact_cert: 'Y2VydA==',
+				crypt_pkey: 'Y3J5cHQ=', crypt_cert: 'Y2VydA==', deleted_flag: false, owner_timestamp: 1, sign_b64: 'c2ln',
+			},
+			syncMetadata: { relation: 'user_cards' },
+		};
+		await expect(sendMutationsAndAwaitShape([cardInsert], SKEY)).rejects.toMatchObject({ name: 'DurabilityError' });
+		expect(sent).toHaveLength(0);
 	});
 });

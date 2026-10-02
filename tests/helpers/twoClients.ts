@@ -243,7 +243,6 @@ export const createCollectionsModule = async () => {
 		getDialogCollections: dialogFor,
 		withDialogCollections: async <T>(dialogHash: string, read: (colls: DialogViews) => T) => read(dialogFor(dialogHash)),
 		isDialogWarm: () => true,
-		releaseDialogCollections: () => {},
 	};
 };
 
@@ -274,6 +273,8 @@ export const newClient = (name: string): Client => ({ name, idb: new IDBFactory(
 const clients = (G.clients ??= { active: null });
 export const startApp = async (client: Client) => {
 	clients.active?.app?.wrapper?.unmount();
+	clients.active?.app?.outbox?._setLeaderForTests(false);
+	clients.active?.app?.outbox?.stopDrainLoop();
 	if (clients.active?.app?.outbox) clients.active.app.outbox.stopLeaderElection();
 	globalThis.indexedDB = client.idb;
 	vaultState.current = client.vault;
@@ -317,6 +318,8 @@ export const openChat = async (client: Client, peer: Client) => {
 export const closeChat = (client: Client) => { client.app?.wrapper?.unmount(); if (client.app) client.app.wrapper = null; };
 export const stopAll = () => {
 	clients.active?.app?.wrapper?.unmount();
+	clients.active?.app?.outbox?._setLeaderForTests(false);
+	clients.active?.app?.outbox?.stopDrainLoop();
 	clients.active?.app?.outbox?.stopLeaderElection();
 	clients.active = null;
 	vi.unstubAllGlobals();

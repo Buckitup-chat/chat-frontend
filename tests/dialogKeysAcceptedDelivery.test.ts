@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { startLeaderElection, stopLeaderElection, stopDrainLoop, _setLeaderForTests, _setStorageForTests } from '@/lib/data/outbox';
 import { pinActiveSession } from '@/lib/data/sessionGuard';
+import { makeTestIdentity } from './helpers/signedFixtures';
 import { _setAcceptedSnapshotStorageForTests, getAccepted } from '@/lib/data/acceptedSnapshot';
 import { _setIntentStorageForTests } from '@/lib/data/intents';
 
-const MY_HASH = 'u_' + 'a'.repeat(128);
-const PEER_HASH = 'u_' + 'b'.repeat(128);
+const ME = makeTestIdentity(1, 'me');
+const PEER = makeTestIdentity(2, 'peer');
+const MY_HASH = ME.userHash;
+const PEER_HASH = PEER.userHash;
 const DIALOG_HASH = 'di_' + '4'.repeat(128);
 
 const awaitTxIdSpy = vi.fn(async () => true);
@@ -16,7 +19,7 @@ const keysCollection = {
 	utils: { awaitTxId: awaitTxIdSpy },
 };
 const cardsCollection = {
-	rows: new Map<string, unknown>([[PEER_HASH, { user_hash: PEER_HASH, crypt_pkey: 'peer-pkey' }]]),
+	rows: new Map<string, unknown>([[PEER_HASH, PEER.card]]),
 	async preload() {},
 	get: (k: string) => cardsCollection.rows.get(k),
 };
@@ -38,7 +41,7 @@ vi.mock('@/libs/DialogCrypto', () => ({
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
 		getInstance: () => ({
-			exportVaultKeys: async () => ({ sign_skey: 'AAAA', crypt_skey: 'BBBB', evm_skey: 'cc' }),
+			exportVaultKeys: async () => ME.vault,
 		}),
 	},
 }));
@@ -120,8 +123,9 @@ describe('dialog_keys insert completes on SERVER_ACCEPTED, never on shape visibi
 			observedTails: {},
 		}, token);
 
-		expect(readyRow.relation).toBe('dialog_messages');
-		expect(readyRow.row.dialog_hash).toBe(DIALOG_HASH);
+		expect(readyRow).not.toBeNull();
+		expect(readyRow!.relation).toBe('dialog_messages');
+		expect(readyRow!.row.dialog_hash).toBe(DIALOG_HASH);
 		expect(sent).toEqual([{ relation: 'dialog_keys', txid: 900 }]);
 		expect(awaitTxIdSpy).not.toHaveBeenCalled();
 		expect(keysCollection.rows.size).toBe(0);

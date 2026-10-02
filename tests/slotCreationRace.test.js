@@ -28,6 +28,7 @@ vi.mock('@/lib/data/collections', () => ({
 	getUserCardsCollection: () => ({ async preload() {}, get: () => undefined, get toArray() { return []; } }),
 }));
 vi.mock('@/lib/data/ingest', () => ({
+	DurabilityError: class DurabilityError extends Error {},
 	sendMutationsAndAwaitShape: async () => ({ outboxId: 'test-outbox-id', phase: 'accepted', result: { ok: true }, acceptance: Promise.resolve({ kind: 'accepted' }) }),
 	drainPendingWrites: async () => {},
 	stopDrainLoop: () => {},
@@ -80,6 +81,26 @@ vi.mock('@/lib/data/slots', () => ({
 }));
 
 const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
+const { _setIntentStorageForTests } = await import('@/lib/data/intents');
+const { _setStorageForTests: setOutboxStorage } = await import('@/lib/data/outbox');
+const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
+
+const memoryStore = () => {
+	const map = new Map();
+	return {
+		async get(k) { return map.get(k) ?? null; },
+		async set(k, v) { map.set(k, v); },
+		async delete(k) { map.delete(k); },
+		async keys() { return [...map.keys()]; },
+		async clear() { map.clear(); },
+	};
+};
+
+beforeEach(() => {
+	_setIntentStorageForTests(memoryStore());
+	setOutboxStorage(memoryStore());
+	_setAcceptedSnapshotStorageForTests(memoryStore());
+});
 
 const login = async () => {
 	const em = new EncryptionManagerPQ();

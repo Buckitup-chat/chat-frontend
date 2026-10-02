@@ -16,7 +16,7 @@
 </template>
 
 <script setup>
-import { inject, ref } from 'vue';
+import { inject } from 'vue';
 
 const $mitt = inject('$mitt');
 

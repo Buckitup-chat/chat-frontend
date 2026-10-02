@@ -84,7 +84,6 @@ const CACHE_METADATA = ['__key', '__awaitingEcho', '__ignoreEchoSignHash'];
 const fromDisk = (record: Row): Row => {
 	const row = { ...record };
 	for (const field of CACHE_METADATA) delete row[field];
-	if (typeof row.owner_timestamp === 'bigint') row.owner_timestamp = Number(row.owner_timestamp);
 	return row;
 };
 

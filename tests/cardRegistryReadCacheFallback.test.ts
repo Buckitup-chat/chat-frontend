@@ -6,10 +6,10 @@ import * as secp from '@noble/secp256k1';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, toBase64 } from '@/lib/pq/signature';
-import { _setReadCacheStorageForTests, _resetTouchedForTests } from '@/lib/data/readCache';
-import { writeAsMain, clearMainCache } from './helpers/mainUserCache';
+import { _resetTouchedForTests } from '@/lib/data/readCache';
+import { writeCachedCards, clearCachedCards } from './helpers/userCardsDiskCache';
 
-const setCachedCard = (card: Record<string, unknown>) => writeAsMain([card]);
+const setCachedCard = (card: Record<string, unknown>) => writeCachedCards([card]);
 
 const emptyCollection = { async preload() {}, get: () => undefined };
 let preloadError: unknown = null;
@@ -43,20 +43,8 @@ const makeCard = (seed: number) => {
 	return { userHash, card, signPkeyB64: toBase64(sign.publicKey) };
 };
 
-const makeStorage = () => {
-	const map = new Map<string, string>();
-	return {
-		async get(k: string) { return map.get(k) ?? null; },
-		async set(k: string, v: string) { map.set(k, v); },
-		async delete(k: string) { map.delete(k); },
-		async keys() { return [...map.keys()]; },
-		async clear() { map.clear(); },
-	};
-};
-
 beforeEach(async () => {
-	await clearMainCache();
-	_setReadCacheStorageForTests(makeStorage());
+	await clearCachedCards();
 	_resetTouchedForTests();
 	resetCardRegistry();
 	activeCollection = emptyCollection;

@@ -84,7 +84,6 @@ vi.mock('@/lib/data/collections', () => {
 		withDialogCollections: async (_h: string, read: (collections: typeof dialog) => unknown) => read(dialog),
 		getUserStorageCollection: () => unreachable(),
 		resetUserStorageCollection: () => {},
-		releaseDialogCollections: () => {},
 	};
 });
 
@@ -112,11 +111,12 @@ const buildDialog = async () => {
 	const dialogHash = dialogHashOf(A, PEER);
 	const key = senderKeyOf(PEER, A);
 	const wrapped = await DialogCrypto.wrapSenderMsgKey(key, A.kem.publicKey);
-	const keysRow = {
+	const keyFields = {
 		dialog_hash: dialogHash, sender_hash: PEER.userHash, peer_hash: A.userHash,
 		peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
 		deleted_flag: false, owner_timestamp: 999,
 	};
+	const keysRow = { ...keyFields, sign_b64: signFields(keyFields as never, PEER.sign.secretKey) };
 
 	const original = await signedMessage(dialogHash, key, 'dmsg_' + '1'.repeat(8) + '-0000-7000-8000-000000000000', 'first version', { owner_timestamp: 1_700_000_400 });
 	const edited = await signedMessage(dialogHash, key, original.message_id, 'history from disk', {

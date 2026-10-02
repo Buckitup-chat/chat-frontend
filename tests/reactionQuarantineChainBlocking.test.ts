@@ -1,11 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { sha3_512 } from '@noble/hashes/sha3';
-import { bytesToHex } from '@noble/hashes/utils';
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import * as secp from '@noble/secp256k1';
-import { signFields, deriveSignHash, toBase64, type SignableFields } from '@/lib/pq/signature';
+import type { SignableFields } from '@/lib/pq/signature';
+import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import {
 	_setStorageForTests, _setLeaderForTests, stopDrainLoop,
@@ -13,30 +9,8 @@ import {
 	startLeaderElection, stopLeaderElection,
 } from '@/lib/data/outbox';
 
-const makeIdentity = (seed: number) => {
-	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
-	const kem = ml_kem1024.keygen(new Uint8Array(64).fill(seed));
-	const contactSk = new Uint8Array(32).fill(seed || 1);
-	const contactPk = secp.getPublicKey(contactSk, true);
-	const userHash = 'u_' + bytesToHex(sha3_512(sign.publicKey));
-	const card = {
-		user_hash: userHash,
-		sign_pkey: toBase64(sign.publicKey),
-		crypt_pkey: toBase64(kem.publicKey),
-		crypt_cert: toBase64(ml_dsa87.sign(kem.publicKey, sign.secretKey)),
-		contact_pkey: toBase64(contactPk),
-		contact_cert: toBase64(ml_dsa87.sign(contactPk, sign.secretKey)),
-		name: `user-${seed}`,
-		deleted_flag: false,
-		owner_timestamp: 1_700_000_000,
-		sign_b64: null as string | null,
-	};
-	card.sign_b64 = signFields(card, sign.secretKey);
-	return { sign, userHash, card };
-};
-
-const myIdentity = makeIdentity(1);
-const peerIdentity = makeIdentity(2);
+const myIdentity = makeTestIdentity(1);
+const peerIdentity = makeTestIdentity(2);
 const MY_HASH = myIdentity.userHash;
 const PEER_HASH = peerIdentity.userHash;
 const DIALOG_HASH = 'di_' + '3'.repeat(128);
@@ -44,10 +18,8 @@ const MSG_ID = 'dmsg_' + '4'.repeat(128);
 const EMOJI = '\u{1F44D}';
 const REACTION_HASH = `dmr_${MSG_ID}:${MY_HASH}:${EMOJI}`;
 
-const signedMessageRow = (author: typeof myIdentity, fields: SignableFields) => {
-	const sign_b64 = signFields(fields, author.sign.secretKey);
-	return { ...fields, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64) };
-};
+const signedMessageRow = (author: typeof myIdentity, fields: SignableFields) =>
+	signRow(author, fields as Record<string, unknown>, 'dms_') as SignableFields & { sign_b64: string; sign_hash: string };
 const GENESIS_ROW = signedMessageRow(myIdentity, {
 	message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
 	content_b64: 'enc(original)', deleted_flag: false, refs_map_b64: null,
@@ -86,7 +58,7 @@ vi.mock('@/lib/data/collections', () => ({
 	getDialogCollections: () => collections.dialog,
 }));
 
-type Mutation = { type: string; modified?: Record<string, unknown>; changes?: Record<string, unknown>; syncMetadata: { relation: string } };
+type Mutation = { type: string; modified?: Record<string, unknown>; original?: Record<string, unknown>; changes?: Record<string, unknown>; syncMetadata: { relation: string } };
 const rowOf = (m: Mutation) => (m.modified ?? m.changes)!;
 
 let sent: Array<{ relation: string; type: string; row: Record<string, unknown> }>;
@@ -98,7 +70,7 @@ vi.mock('@/api/client', () => ({
 		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string): Mutation =>
 			type === 'insert'
 				? { type, modified: row, syncMetadata: { relation } }
-				: { type, changes: row, syncMetadata: { relation } },
+				: { type, original: {}, changes: row, syncMetadata: { relation } },
 		ingestWithAuthEach: async (mutations: Mutation[]) => {
 			const m = mutations[0];
 			sent.push({ relation: m.syncMetadata.relation, type: m.type, row: rowOf(m) });
@@ -136,7 +108,7 @@ vi.mock('@/libs/enigma', () => ({
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
 		getInstance: () => ({
-			exportVaultKeys: async () => ({ sign_skey: 'AAAA', crypt_skey: 'BBBB', evm_skey: 'cc' }),
+			exportVaultKeys: async () => myIdentity.vault,
 		}),
 	},
 }));
@@ -173,8 +145,14 @@ const flush = async () => {
 	}
 };
 
-const liveReactionItem = (store: ReturnType<typeof useDialogsStore>) =>
-	[...store.optimisticItems.values()].find((item: { type: string }) => item.type === 'reaction');
+const logicalKeyOf = (messageId: string) => `${DIALOG_HASH}|${messageId}|${EMOJI}`;
+
+const liveReactionItem = (store: ReturnType<typeof useDialogsStore>, messageId = MSG_ID) =>
+	[...store.optimisticItems.values()].find((item: { type: string; logicalKey?: string }) =>
+		item.type === 'reaction' && item.logicalKey === logicalKeyOf(messageId));
+
+const seenActive = (store: ReturnType<typeof useDialogsStore>, messageId = MSG_ID): boolean =>
+	liveReactionItem(store, messageId)?.desiredActive ?? false;
 
 beforeEach(() => {
 	setActivePinia(createPinia());
@@ -186,7 +164,7 @@ beforeEach(() => {
 	collections = {
 		cards: makeCollection({ [MY_HASH]: myIdentity.card, [PEER_HASH]: peerIdentity.card }),
 		dialog: {
-			keys: makeCollection({ [`${DIALOG_HASH}|${MY_HASH}`]: { dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, deleted_flag: false } }),
+			keys: makeCollection({ [`${DIALOG_HASH}|${MY_HASH}`]: signedDialogKeyRow(myIdentity, { dialog_hash: DIALOG_HASH, peer_hash: PEER_HASH }) }),
 			messages: makeCollection(),
 			reactions: makeCollection(),
 			receipts: makeCollection(),
@@ -202,10 +180,17 @@ afterEach(() => {
 	stopLeaderElection();
 });
 
-const toggle = (store: ReturnType<typeof useDialogsStore>) =>
-	store.toggleReaction(PEER_HASH, { messageId: MSG_ID, messageSignHash: SIGN_HASH, emoji: EMOJI });
+const toggle = (store: ReturnType<typeof useDialogsStore>, messageId = MSG_ID) =>
+	store.toggleReaction(PEER_HASH, { messageId, messageSignHash: SIGN_HASH, emoji: EMOJI, active: seenActive(store, messageId) });
 
-describe('a permanently rejected reaction write blocks the next one honestly, via the real dependenciesFor (L17-01/R4)', () => {
+const clickB = async (s: ReturnType<typeof useDialogsStore>) => {
+	await toggle(s);
+	expect(liveReactionItem(s)!.desiredActive).toBe(false);
+	await toggle(s);
+	expect(liveReactionItem(s)!.desiredActive).toBe(true);
+};
+
+describe('a permanently rejected reaction write blocks the next one honestly, via the real dependency discovery (L17-01/R4)', () => {
 	it('1-3. A permanent rejection quarantines A and durably blocks B — never a false synced, never a hidden dispatch', async () => {
 		_setLeaderForTests(true);
 		await recordAccepted('dialog_message_reactions', REACTION_HASH, {
@@ -221,7 +206,7 @@ describe('a permanently rejected reaction write blocks the next one honestly, vi
 		await vi.waitFor(() => expect(sent).toHaveLength(1));
 		expect(sent[0].type).toBe('update'); // chained — same reaction_hash as the seeded tombstone
 
-		toggle(store()); // click B: OFF — queued behind A's still-pending HTTP call
+		await clickB(store()); // click B — queued behind A's still-pending HTTP call
 		await new Promise((r) => setTimeout(r, 20));
 		expect(sent).toHaveLength(1); // B has not reached transport yet — still behind A in reactionQueues
 
@@ -258,7 +243,7 @@ describe('a permanently rejected reaction write blocks the next one honestly, vi
 
 		toggle(store()); // click A: ON — durably queued, not yet dispatched
 		await flush();
-		toggle(store()); // click B: OFF — queued behind A's still-pending acceptance
+		await clickB(store()); // click B — queued behind A's still-pending acceptance
 		await flush();
 		expect(sent).toHaveLength(0); // still follower — nothing dispatched yet
 
@@ -293,7 +278,7 @@ describe('a permanently rejected reaction write blocks the next one honestly, vi
 
 		toggle(store());
 		await vi.waitFor(() => expect(sent).toHaveLength(1));
-		toggle(store());
+		await clickB(store());
 		await new Promise((r) => setTimeout(r, 20));
 
 		resolveHttp!(rejected([{ type: 'update', changes: sent[0].row, syncMetadata: { relation: 'dialog_message_reactions' } }]));
@@ -347,7 +332,7 @@ describe('a permanently rejected reaction write blocks the next one honestly, vi
 		await vi.waitFor(() => expect(sent).toHaveLength(1));
 		toggle(store1); // B queued behind A
 
-		await store1.toggleReaction(PEER_HASH, { messageId: OTHER_MSG, messageSignHash: SIGN_HASH, emoji: EMOJI });
+		await toggle(store1, OTHER_MSG);
 		await flush();
 
 		expect(sent.some((s) => s.row.message_id === OTHER_MSG)).toBe(true); // C dispatched, unaffected by A/B
@@ -368,7 +353,7 @@ describe('a permanently rejected reaction write blocks the next one honestly, vi
 
 		toggle(store());
 		await vi.waitFor(() => expect(sent).toHaveLength(1));
-		toggle(store());
+		await clickB(store());
 		await new Promise((r) => setTimeout(r, 20));
 		resolveHttp!(rejected([{ type: 'update', changes: sent[0].row, syncMetadata: { relation: 'dialog_message_reactions' } }]));
 		await flush();

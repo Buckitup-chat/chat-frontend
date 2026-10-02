@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { makeTestIdentity, signedStorageRow } from './helpers/signedFixtures';
 
 // In-memory stand-ins for the IndexedDB KV and the Electric collection, so the
 // module under test runs unchanged in Node.
@@ -17,8 +18,10 @@ const collection = {
 	}),
 	get: vi.fn((k: string) => collection.rows.get(k)),
 };
+const cards = new Map<string, unknown>();
 vi.mock('../src/lib/data/collections', () => ({
 	getUserStorageCollection: () => collection,
+	getUserCardsCollection: () => ({ preload: async () => {}, get: (k: string) => cards.get(k) }),
 }));
 
 // Real ingest.ts/coordinator.ts/outbox.ts run in these tests (only the HTTP
@@ -40,6 +43,7 @@ vi.mock('@/api/client', () => ({
 			return {
 				type: mutationType,
 				[mutationType === 'insert' ? 'modified' : 'changes']: row,
+				...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
 				syncMetadata: { relation: 'user_storage' },
 			};
 		}),
@@ -74,7 +78,8 @@ const makeStorage = () => {
 	};
 };
 
-const USER = 'u_' + 'ab'.repeat(64);
+const ME = makeTestIdentity(12, 'me');
+const USER = ME.userHash;
 // Slot addresses are per-account now, so any valid uuid stands in here.
 const SLOT = '85da8ea0-5bc8-856e-83e7-db7b542a1a58';
 const signSkey = new Uint8Array(32).fill(7);
@@ -105,6 +110,8 @@ beforeEach(async () => {
 	kv.clear();
 	collection.rows.clear();
 	collection.preloadError = null;
+	cards.clear();
+	cards.set(USER, ME.card);
 	sent = [];
 	signCallCount = 0;
 	vi.clearAllMocks();
@@ -123,10 +130,8 @@ afterEach(() => {
 	_setAtomicLeaseStoreForTests(null);
 });
 
-const serverRow = (ts: number, signHash = 'uss_' + 'a'.repeat(128)) => ({
-	user_hash: USER, uuid: SLOT, value_b64: 'server', deleted_flag: false,
-	parent_sign_hash: null, sign_hash: signHash, owner_timestamp: ts, sign_b64: 'sig',
-});
+const serverRow = (ts: number, extra: Record<string, unknown> = {}) =>
+	signedStorageRow(ME, { uuid: SLOT, value_b64: 'server', owner_timestamp: ts, ...extra });
 
 describe('upsertStorageRow: server base state', () => {
 	it('signs an insert only when the server is reachable and the row is absent', async () => {
@@ -136,16 +141,17 @@ describe('upsertStorageRow: server base state', () => {
 	});
 
 	it('signs an update when a server row exists', async () => {
-		collection.rows.set(`${USER}|${SLOT}`, serverRow(1000));
+		const tip = serverRow(1000);
+		collection.rows.set(`${USER}|${SLOT}`, tip);
 		await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v2', hashB64: null, signSkey });
 		const call = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0];
 		expect(call?.at(-1)).toBe('update');
-		expect(call?.[9]).toBe('uss_' + 'a'.repeat(128)); // parent_sign_hash = server tip
+		expect(call?.[9]).toBe(tip.sign_hash); // parent_sign_hash = server tip
 	});
 
 	// A tombstone still occupies the primary key — re-inserting it is rejected.
 	it('signs an update when the server row is a tombstone', async () => {
-		collection.rows.set(`${USER}|${SLOT}`, { ...serverRow(1000), deleted_flag: true });
+		collection.rows.set(`${USER}|${SLOT}`, serverRow(1000, { deleted_flag: true }));
 		await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v2', hashB64: null, signSkey });
 		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('update');
 	});

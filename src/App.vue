@@ -135,7 +135,6 @@
 </style>
 
 <script setup>
-import { web3Store } from '@/store/web3.store';
 
 import { userPQStore } from '@/store/userPQ.store';
 import { initPersistence } from '@/lib/data/persistence';
@@ -144,7 +143,6 @@ import { userStore } from '@/store/user.store';
 
 import { useBreakpoint } from '@/composables/useBreakpoint';
 
-import { useLoader } from '@/composables/useLoader';
 
 
 import { useMenu } from '@/composables/useMenu';
@@ -154,17 +152,13 @@ import QuarantinedWritesBanner from '@/components/QuarantinedWritesBanner.vue';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';
 import Swal from '@/components/swal/Swal_.vue';
-import { ref, provide, watch, onMounted, inject, computed, nextTick } from 'vue';
+import { ref, provide, watch, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
-const $socket = inject('$socket');
-const $mitt = inject('$mitt');
 const $user = userStore();
 const $userPQ = userPQStore();
 const $breakpoint = useBreakpoint();
 
-const $encryptionManager = inject('$encryptionManager');
-const $encryptionManagerPQ = inject('$encryptionManagerPQ');
 
 // const $web3 = web3Store();
 // const $swal = inject('$swal');

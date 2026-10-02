@@ -10,10 +10,14 @@
 // signature (see confirm.ts).
 import { api } from '@/api/client';
 import { mutationAppliedOnServer, type MutationLike } from './confirm';
-import { dispatchMutations, dependenciesFor, reconcileAccepted, AlreadyDispatchingError } from './coordinator';
-import { StaleBaseError } from './staleBase';
+import { discoverDependencies, reconcileAccepted } from './coordinator';
 import { OWNER_FIELD } from './writeContracts';
-import { enqueue, recordFailure, ensureDrainLoop, stopDrainLoop, isLeader, awaitEntryOutcome, hasNetworkBackoffs, type EntryOutcome } from './outbox';
+import { VaultLockedError, AccountMismatchError, resolveSigningKey, type SigningKeySource } from './keyCustody';
+import {
+	enqueue, stopDrainLoop, awaitEntryOutcome, dependencyBlockFor, wakeAccountSender, releaseNetworkBackoffs,
+	awaitDeliveryVerdict, submitEntryToSender, SessionFencedError,
+	type DependencyBlockReason, type DeliveryVerdict, type DiscoveryOutcome, type EntryOutcome, type OutboxEntry,
+} from './outbox';
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
@@ -110,6 +114,7 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 	try {
 		resp = await api.ingestWithAuthEach(mutations, signSkey);
 	} catch (e) {
+		if (e instanceof VaultLockedError || e instanceof AccountMismatchError) throw e;
 		// Only a request that got no answer — fetch failed or timed out — is a
 		// fact about connectivity; a server that answered with garbage is not.
 		const network = e instanceof TypeError || (e as Error)?.name === 'TimeoutError' || (e as Error)?.name === 'AbortError';
@@ -225,6 +230,7 @@ export async function sendMutationsWithRetry(
 			}
 
 			if (e instanceof IngestError && e.permanent) throw e;
+			if (e instanceof VaultLockedError || e instanceof AccountMismatchError) throw e;
 			if (attempt === retries) break;
 			if (e instanceof IngestError && e.network && attempt >= networkRetries) break;
 			const delay = Math.min(baseDelayMs * 2 ** attempt, maxDelayMs);
@@ -241,15 +247,6 @@ interface MutationShape {
 	syncMetadata?: { relation?: string };
 }
 
-/**
- * Send mutations AND wait until the resulting transaction is visible in the
- * collection that later writes read as their base.
- *
- * Use this for every write whose successor derives parent_sign_hash /
- * owner_timestamp / existence from the shape. Without the barrier a caller
- * can sign against a tip the server has already superseded — the HTTP 200
- * only proves the Postgres commit, not shape delivery.
- */
 // Re-exported so callers can attribute a durable intent (intents.ts, §3.1) to
 // its owner before a mutation exists to read syncMetadata.relation from.
 export { OWNER_FIELD };
@@ -277,130 +274,158 @@ export interface DeliveryHandle {
 	phase: 'accepted' | 'queued';
 	result?: SendResult;
 	acceptance: Promise<EntryOutcome>;
+	held?: { reason: DependencyBlockReason | 'state_unconfirmed'; message: string };
+}
+
+export interface LiveSendOptions {
+	onDurable?: (outboxId: string) => void | Promise<void>;
+	sourceIntentId?: string;
+	excludeFromDependencies?: string[];
+	targeted?: boolean;
 }
 
 export async function sendMutationsAndAwaitShape(
 	mutations: unknown[],
-	signSkey: Uint8Array,
-	opts: RetryOptions & {
-		durability?: 'required' | 'best-effort';
-		onDurable?: (outboxId: string) => void | Promise<void>;
-		sourceIntentId?: string;
-		excludeFromDependencies?: string[];
-		recordAcceptedSnapshot?: boolean;
-	} = {}
+	signSkey: SigningKeySource,
+	opts: LiveSendOptions = {}
 ): Promise<DeliveryHandle> {
-	// Durability first: the signed mutations hit IndexedDB before the network,
-	// so a reload or crash mid-send replays them on the next login instead of
-	// losing them. The entry is removed only after the server confirms.
 	const owner = ownerOf(mutations);
-	let dependsOn: string[];
+	let discovery: DiscoveryOutcome;
 	try {
-		dependsOn = await dependenciesFor(mutations, owner, opts.excludeFromDependencies);
+		discovery = await discoverDependencies(mutations, owner, opts.excludeFromDependencies);
 	} catch (e) {
-		if (e instanceof StaleBaseError) throw e;
-		dependsOn = [];
+		discovery = { kind: 'blocked', block: dependencyBlockFor(e, { kind: 'discovery', observedKeys: null }) };
 	}
-	const outboxId = await enqueue(mutations, owner, { dependsOn, sourceIntentId: opts.sourceIntentId });
+	const outboxId = await enqueue(mutations, owner, discovery.kind === 'blocked'
+		? { discoveryBlocked: discovery.block, sourceIntentId: opts.sourceIntentId, observeAttempt: true }
+		: { dependsOn: discovery.dependsOn, sourceIntentId: opts.sourceIntentId, observeAttempt: true });
+	// ADR §11: a write that cannot be stored fails visibly; nothing is sent.
+	if (outboxId === null) throw new DurabilityError();
+	await opts.onDurable?.(outboxId);
 
-	// ADR §11: when durable storage is unavailable, a user-visible mutation
-	// fails visibly — a best-effort network send that looks identical to
-	// success is the one state the interface must never claim. Callers that
-	// legitimately run before the vault unlocks opt out per call.
-	if (outboxId === null && (opts.durability ?? 'required') === 'required') {
-		throw new DurabilityError();
-	}
-	if (outboxId !== null) await opts.onDurable?.(outboxId);
-	if (!isLeader() || dependsOn.length > 0) {
-		armDrain(owner, signSkey);
-		return {
-			outboxId,
-			phase: 'queued',
-			acceptance: outboxId
-				? awaitEntryOutcome(outboxId, owner)
-				: Promise.resolve({ kind: 'rejected', error: 'not durably queued' } as const),
-		};
-	}
-
-	// A write already in the outbox does not wait out a missing connection
-	// here: one quick retry covers a lost response, and after that the retry
-	// is the outbox's — a longer loop in this call would hold the send lock
-	// every other write of the account is waiting for.
-	const sendOpts = outboxId !== null ? { ...opts, networkRetries: 1 } : opts;
-	let result: SendResult;
-	try {
-		result = await dispatchMutations(mutations, (m) => sendMutationsWithRetry(m, signSkey, sendOpts), outboxId, {
-			recordAcceptedSnapshot: opts.recordAcceptedSnapshot,
-		});
-	} catch (e) {
-		if (e instanceof AlreadyDispatchingError) {
-			armDrain(owner, signSkey);
-			return {
-				outboxId,
-				phase: 'queued',
-				acceptance: outboxId
-					? awaitEntryOutcome(outboxId, owner)
-					: Promise.resolve({ kind: 'rejected', error: 'not durably queued' } as const),
-			};
-		}
-		// Permanent rejections die in the outbox too; transient failures stay
-		// for the next drain. Either way the caller sees the same error as
-		// before the outbox existed.
-		await recordFailure(outboxId, e);
-		// The drain loop stops itself when the queue empties, so a live-send
-		// that fails after that point would leave a durable, retryable entry
-		// with nothing scheduled to retry it — waiting on a later login or an
-		// 'online' event that may never come. Arming the loop here is what
-		// makes "retryable" mean the client will actually try again (ADR §5).
-		armDrain(owner, signSkey);
-		throw e;
-	}
-	// The server answered, so the account is reachable: whatever waits in the
-	// outbox — queued behind this send, or backing off after a lost
-	// connection that no `online` event reported — goes now.
-	resumeQueueAfterAnswer(owner, signSkey);
-	return {
+	const submission = await submitEntryToSender(owner, outboxId, replaySend(signSkey), senderHooks, { targeted: opts.targeted });
+	const queued = (acceptance: Promise<EntryOutcome> = awaitEntryOutcome(outboxId, owner)): DeliveryHandle => ({
 		outboxId,
-		phase: 'accepted',
-		result,
-		acceptance: outboxId ? awaitEntryOutcome(outboxId, owner) : Promise.resolve({ kind: 'accepted' }),
-	};
-}
+		phase: 'queued',
+		acceptance,
+		...(submission.disposition.kind === 'queued' && submission.disposition.held ? { held: submission.disposition.held } : {}),
+	});
+	if (submission.disposition.kind === 'queued') return queued();
+	if (submission.disposition.kind === 'settled') {
+		const { outcome } = submission.disposition;
+		return outcome.kind === 'accepted'
+			? { outboxId, phase: 'accepted', acceptance: awaitEntryOutcome(outboxId, owner) }
+			: queued(Promise.resolve(outcome));
+	}
 
-/** How the outbox replays an entry: one quick retry for a server hiccup, none for a missing connection. */
-const replaySend = (signSkey: Uint8Array) => (mutations: unknown[]) =>
-	sendMutationsWithRetry(mutations, signSkey, { retries: 1, networkRetries: 0 });
-
-function armDrain(owner: string, signSkey: Uint8Array, opts: { resetSchedules?: boolean; releaseNetworkBackoffs?: boolean } = {}): void {
-	ensureDrainLoop(owner, replaySend(signSkey), { ...opts, reconcile: reconcileAccepted });
-}
-
-function resumeQueueAfterAnswer(owner: string, signSkey: Uint8Array): void {
-	if (hasNetworkBackoffs(owner)) armDrain(owner, signSkey, { releaseNetworkBackoffs: true });
+	const attempt = await submission.attempt;
+	switch (attempt.kind) {
+		case 'accepted':
+			return { outboxId, phase: 'accepted', result: attempt.result as SendResult, acceptance: awaitEntryOutcome(outboxId, owner) };
+		case 'failed':
+			throw attempt.error;
+		case 'fenced':
+			throw new SessionFencedError(`sendMutationsAndAwaitShape: the session changed before outbox entry ${outboxId} was sent`);
+		case 'settled-elsewhere':
+			return attempt.outcome.kind === 'accepted'
+				? { outboxId, phase: 'accepted', acceptance: awaitEntryOutcome(outboxId, owner) }
+				: queued(Promise.resolve(attempt.outcome));
+		case 'deferred':
+			return queued();
+		default: {
+			const unknown: never = attempt;
+			throw new Error(`sendMutationsAndAwaitShape: unknown attempt ${JSON.stringify(unknown)}`);
+		}
+	}
 }
 
 /**
- * The page came back into view: timers frozen while it was hidden may not
- * have run. Replays what is due and what only waited for a connection;
- * backoffs after a server failure stand — a visible page says nothing about
- * the server.
+ * How the sender sends an entry: one HTTP request per attempt. A failure is
+ * recorded on the entry with its next attempt time, and the outbox schedule
+ * is the only retry. A unique-key conflict is still checked against the
+ * server's row (our exact signature is success).
  */
-export function resumePendingWrites(userHash: string, signSkey: Uint8Array): void {
-	armDrain(userHash, signSkey, { releaseNetworkBackoffs: true });
+const replaySend = (signingKey: SigningKeySource) => async (mutations: unknown[]) =>
+	// The key is taken when the request is made: a locked account throws
+	// VaultLockedError here, before anything is sent.
+	sendMutationsWithRetry(mutations, await resolveSigningKey(signingKey), { retries: 0, networkRetries: 0 });
+
+const senderHooks = { reconcile: (mutations: unknown[], result?: unknown) => reconcileAccepted(mutations, result), rediscover: (entry: OutboxEntry) => rediscoverDependencies(entry) };
+
+function wakeSender(owner: string, signSkey: SigningKeySource, opts: { releaseNetworkBackoffs?: boolean } = {}): void {
+	void (async () => {
+		if (opts.releaseNetworkBackoffs) await releaseNetworkBackoffs(owner);
+		wakeAccountSender(owner, replaySend(signSkey), senderHooks);
+	})();
 }
+
+export function resumePendingWrites(userHash: string, signSkey: SigningKeySource): void {
+	wakeSender(userHash, signSkey, { releaseNetworkBackoffs: true });
+}
+
+/**
+ * Send one stored write now — the exact stored mutation, never rebuilt — by a
+ * targeted run of the account's sender, without draining the rest of the
+ * queue: a write whose acceptance something waits on before the session
+ * starts (a bootstrap card at sign-in). Its readiness (dependencies, held
+ * state, schedule) is the sender's, as for any write. A transient failure is
+ * recorded on the entry and reported as `retrying`, as is a write that is not
+ * ready now; a rejection quarantines it and is reported as `rejected`. In a
+ * tab that does not lead the account's sending, the leader tab sends it and
+ * this waits for its verdict.
+ */
+export async function deliverStoredWrite(outboxId: string, userHash: string, signSkey: SigningKeySource): Promise<DeliveryVerdict> {
+	let submission: Awaited<ReturnType<typeof submitEntryToSender>>;
+	try {
+		submission = await submitEntryToSender(userHash, outboxId, replaySend(signSkey), senderHooks, { targeted: true });
+	} catch {
+		return awaitDeliveryVerdict(outboxId, userHash); // not readable as this account's entry now: its stored verdict decides
+	}
+	const { disposition } = submission;
+	if (disposition.kind === 'settled') return disposition.outcome;
+	if (disposition.kind === 'queued') {
+		return disposition.reason === 'not-sender' ? awaitDeliveryVerdict(outboxId, userHash) : { kind: 'retrying' };
+	}
+	const attempt = await submission.attempt;
+	switch (attempt.kind) {
+		case 'accepted': return { kind: 'accepted' };
+		case 'failed':
+			return attempt.error instanceof IngestError && attempt.error.permanent
+				? { kind: 'rejected', error: attempt.error.message }
+				: { kind: 'retrying' };
+		case 'fenced': throw new SessionFencedError(`deliverStoredWrite: the session changed before outbox entry ${outboxId} was sent`);
+		case 'settled-elsewhere': return attempt.outcome;
+		case 'deferred': return awaitDeliveryVerdict(outboxId, userHash);
+		default: {
+			const unknown: never = attempt;
+			throw new Error(`deliverStoredWrite: unknown attempt ${JSON.stringify(unknown)}`);
+		}
+	}
+}
+
+export const rediscoverDependencies = async (entry: OutboxEntry): Promise<DiscoveryOutcome> => {
+	const block = entry.discoveryBlocked;
+	if (!block || block.observedKeys === null) {
+		return { kind: 'blocked', block: dependencyBlockFor(null, { kind: block?.kind ?? 'discovery', observedKeys: null }) };
+	}
+	return discoverDependencies(entry.mutations, entry.userHash, [entry.id], {
+		observedKeys: block.observedKeys,
+		...(block.kind === 'admission' ? { admission: block.admission ?? { scope: '', generation: null } } : { freshnessChecked: true }),
+	});
+};
 
 /**
  * Replay writes that never got a server confirmation — after login (keys just
  * became available) and on reconnect. The mutations were signed when created,
  * so they replay verbatim; only the auth challenge needs the live key.
  */
-export function drainPendingWrites(userHash: string, signSkey: Uint8Array): void {
-	// The loop owns pacing from here: it drains now and keeps its own timer
-	// until the queue empties, so a 503 with no connectivity change cannot
-	// strand the queue until the next login (ADR §5).
-	// login/'online'/back in view is a fresh signal: backoffs computed before
-	// it no longer describe the world — everything pending becomes due now
-	armDrain(userHash, signSkey, { resetSchedules: true });
+export function drainPendingWrites(userHash: string, signSkey: SigningKeySource): void {
+	// The loop owns pacing from here: it drains what is due now and keeps its
+	// own timer until the queue empties, so a 503 with no connectivity change
+	// cannot strand the queue until the next login (ADR §5). Login, a reload,
+	// a leader takeover or another tab's wake prove nothing about the server or
+	// the connection: every stored retry time stands.
+	wakeSender(userHash, signSkey);
 }
 
 export { stopDrainLoop };

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { DecryptFailedError } from '@/lib/data/secureStore';
 import {
 	enqueueIntent, getIntent, updateIntent, resolveIntent, intentsOf,
 	_setIntentStorageForTests, _clearIntentsForTests,
@@ -151,7 +152,7 @@ describe('intentsOf distinguishes an empty queue from a broken scan (§4)', () =
 		_setIntentStorageForTests({
 			...storage,
 			async get(k) {
-				if (k === 'unreadable-key') throw new Error('[secureStore] cannot decrypt record');
+				if (k === 'unreadable-key') throw new DecryptFailedError('[secureStore] cannot decrypt record');
 				return realGet(k);
 			},
 			async keys() {
@@ -163,6 +164,26 @@ describe('intentsOf distinguishes an empty queue from a broken scan (§4)', () =
 
 		expect(entries.map((e) => e.id)).toEqual([idGood]);
 		expect(issues).toContainEqual(expect.objectContaining({ key: 'unreadable-key', kind: 'foreign' }));
+	});
+
+	it('a per-key read failure that is not a decrypt error is reported as "unavailable" — this account\'s record may be behind it', async () => {
+		const idGood = await enqueueIntent({ text: 'still readable' }, A, 'dialog_messages');
+		const realGet = storage.get.bind(storage);
+		_setIntentStorageForTests({
+			...storage,
+			async get(k) {
+				if (k === 'unreadable-key') throw new Error('disk read error');
+				return realGet(k);
+			},
+			async keys() {
+				return [...(await storage.keys()), 'unreadable-key'];
+			},
+		});
+
+		const { entries, issues } = await intentsOf(A);
+
+		expect(entries.map((e) => e.id)).toEqual([idGood]);
+		expect(issues).toContainEqual(expect.objectContaining({ key: 'unreadable-key', kind: 'unavailable' }));
 	});
 
 	it('a corrupt record is never deleted and never silently treated as accepted/resolved', async () => {

@@ -160,7 +160,6 @@ vi.mock('@/lib/data/collections', () => ({
 	getDialogCollections: (dialogHash: string) => views.dialog(dialogHash),
 	withDialogCollections: async (dialogHash: string, read: (dialogViews: LocalDialogViews) => unknown) => read(views.dialog(dialogHash)),
 	isDialogWarm: () => true,
-	releaseDialogCollections: () => {},
 }));
 
 const ROUTE = vi.hoisted(() => ({ peer: '' }));

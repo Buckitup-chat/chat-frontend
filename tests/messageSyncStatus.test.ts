@@ -12,9 +12,12 @@ import { _setIntentStorageForTests, intentsOf } from '@/lib/data/intents';
 import { effectScope, nextTick } from 'vue';
 import { useAccountSyncStatus } from '@/composables/useAccountSyncStatus';
 import type * as Ingest from '@/lib/data/ingest';
+import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
 
-const MY_HASH = 'u_' + 'a'.repeat(128);
-const PEER_HASH = 'u_' + 'b'.repeat(128);
+const ME = makeTestIdentity(1, 'me');
+const PEER = makeTestIdentity(2, 'peer');
+const MY_HASH = ME.userHash;
+const PEER_HASH = PEER.userHash;
 const DIALOG_HASH = 'di_' + '3'.repeat(128);
 
 const memoryStore = () => ({
@@ -72,11 +75,12 @@ vi.mock('@/lib/data/ingest', async (importActual) => {
 
 vi.mock('@/api/client', () => ({
 	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => ({
-			type, relation, row,
-			changes: { ...row, sign_hash: `sign_hash(${row.message_id})` },
-			syncMetadata: { relation },
-		}),
+		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => {
+			const signed = { ...row, sign_hash: `sign_hash(${row.message_id})` };
+			return type === 'insert'
+				? { type, relation, row, modified: signed, syncMetadata: { relation } }
+				: { type, relation, row, original: {}, changes: signed, syncMetadata: { relation } };
+		},
 	},
 }));
 
@@ -91,7 +95,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 			currentUserHash: MY_HASH,
 			exportVaultKeys: async () => {
 				if (vaultLocked) throw new Error('vault is locked');
-				return { sign_skey: 'AAAA', crypt_skey: 'AAAA', evm_skey: 'cc' };
+				return ME.vault;
 			},
 		}),
 	},
@@ -120,10 +124,10 @@ beforeEach(() => {
 	_setProjectionStorageForTests((() => { const m = new Map<string, string>(); return { get: async (k: string) => m.get(k) ?? null, set: async (k: string, v: string) => { m.set(k, v); }, delete: async (k: string) => { m.delete(k); }, keys: async () => [...m.keys()], clear: async () => { m.clear(); } }; })());
 	_setOwnObservedTailsStorageForTests(memoryStore());
 	collections = {
-		cards: makeCollection({ [PEER_HASH]: { user_hash: PEER_HASH, crypt_pkey: 'AAAA' } }),
+		cards: makeCollection({ [MY_HASH]: ME.card, [PEER_HASH]: PEER.card }),
 		dialog: {
 			keys: makeCollection({
-				[`${DIALOG_HASH}|${MY_HASH}`]: { dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false },
+				[`${DIALOG_HASH}|${MY_HASH}`]: signedDialogKeyRow(ME, { dialog_hash: DIALOG_HASH, peer_hash: PEER_HASH }),
 			}),
 			messages: makeCollection(),
 			reactions: makeCollection(),

@@ -57,7 +57,7 @@ import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
 import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
-import { claimPendingEdit, submitPendingEdit, failPendingEdit, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
+import { claimPendingEdit, submitPendingEdit, failPendingEdit, awaitPendingEditUnlock, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
 import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
 import { v7 as uuidv7 } from 'uuid';
 
@@ -544,10 +544,12 @@ const aggregateReactions = (newRows) => {
         // a row still pointing at the previous revision has not yet absorbed
         // this click, even though it is live (§3.5 — see reactionReconcile.ts
         // for the echo-race invariant this dual guard proves).
-        for (const id of reconcileOptimisticReactions(
+        const confirmed = reconcileOptimisticReactions(
             $dialogs.optimisticItems.values(), rawAllReactions.value, dialogHashVal, currentSignHashOf
-        )) {
-            $dialogs.removeOptimisticItem(id);
+        );
+        if (confirmed.length) {
+            const rows = new Map((rawAllReactions.value || []).map((r) => [r.reaction_hash, r]));
+            await $dialogs.retireReactionProjections(confirmed, (hash) => rows.get(hash) ?? null);
         }
     }, 200);
 };
@@ -568,26 +570,12 @@ watch(() => rawKeys.value, () => {
 
 // Merge optimistic messages with server rows
 const displayMessages = computed(() => {
-    const dbIds = new Set((rawMessages.value || []).map(r => r.message_id));
-    const canonicalIds = new Set(
-        decryptedMessages.value.filter((m) => m._verify === 'verified' || m._deleted
-            || m._verify === 'blocked' || (m._verify === 'invalid' && m._verifyTerminal)).map((m) => m.id)
-    );
-    const verifiedRevisionOf = new Map(decryptedMessages.value
-        .filter((m) => m._verify === 'verified' && !m._deleted && m._raw?.sign_hash).map((m) => [m.id, m._raw.sign_hash]));
     const activeOptimisticIds = new Set();
     const activeOptimistic = [];
     for (const item of $dialogs.optimisticItems.values()) {
         if (item.type !== 'message' || item.dialogHash !== dialogHash.value) continue;
-        // If a verified (or tombstone) canonical entry is ready, drop the
-        // optimistic placeholder in its favor — for a verified entry, only
-        // the exact revision this placeholder signed (not any row that merely
-        // shares its message_id).
-        if (dbIds.has(item.id) && canonicalIds.has(item.id)) {
-            const verifiedRevision = verifiedRevisionOf.get(item.id);
-            // tombstone / terminal verdict: final by id; verified: exact revision only
-            if (!verifiedRevision || verifiedRevision === item.signHash) continue;
-        }
+        // A placeholder stands until retireProjections replaces it with
+        // verified canonical state; meanwhile it shadows the shape row.
         activeOptimisticIds.add(item.id);
         activeOptimistic.push({
             id: item.id,
@@ -629,12 +617,14 @@ const displayMessages = computed(() => {
 
 watch(dialogHash, (hash) => { if (hash) void $dialogs.ensureProjectionsHydrated(); }, { immediate: true });
 
-watch(() => decryptedMessages.value, (entries) => {
+watch([() => decryptedMessages.value, () => $dialogs.acceptanceRevision], ([entries]) => {
     if (!dialogHash.value) return;
-    const verified = new Map(entries.filter((m) => m._verify === 'verified' && !m._deleted && m._raw?.sign_hash).map((m) => [m.id, m._raw.sign_hash]));
-    const final = new Set(entries.filter((m) => m._deleted || m._verify === 'blocked' || (m._verify === 'invalid' && m._verifyTerminal)).map((m) => m.id));
-    if (verified.size || final.size) $dialogs.retireProjections(dialogHash.value, verified, final);
+    const canonical = new Map(entries.filter((m) => m._verify === 'verified' && m._raw?.sign_hash).map((m) => [m.id, m._raw]));
+    if (canonical.size) void $dialogs.retireProjections(dialogHash.value, canonical);
 });
+
+// An acceptance recorded after the reaction's echo: decide those reactions again.
+watch(() => $dialogs.acceptanceRevision, () => aggregateReactions(rawReactions.value || []));
 
 // Merge optimistic reactions with aggregated reactions
 const displayReactions = computed(() => {
@@ -691,9 +681,10 @@ const handleToggleReaction = async (messageId, emoji) => {
     }
 
     try {
-        // The store owns the optimistic state (deterministic reaction_hash,
-        // desired end state) — see dialogs.store toggleReaction
-        await $dialogs.toggleReaction(peerHash.value, { messageId, messageSignHash, emoji });
+        // The toggle inverts what the user sees (optimistic state included);
+        // the store keeps the desired end state durably — see toggleReaction.
+        const active = !!displayReactions.value?.[messageId]?.[emoji]?.hasMine;
+        await $dialogs.toggleReaction(peerHash.value, { messageId, messageSignHash, emoji, active });
     } catch (e) {
         console.error("Failed to toggle reaction:", e);
     }
@@ -1075,10 +1066,16 @@ const pendingEdits = ref(new Map()); // message_id -> { text, status, token, tar
 const handleEditMessage = async (messageId, newText) => {
     if (!peerHash.value || !newText.trim()) return;
     const text = newText.trim();
-    const myToken = claimPendingEdit(pendingEdits.value, messageId, text);
+    const edited = decryptedMessages.value.find((m) => m.id === messageId);
+    const myToken = claimPendingEdit(pendingEdits.value, messageId, text, edited?._raw?.sign_hash ?? null);
     pendingEdits.value = new Map(pendingEdits.value);
     try {
-        const { signHash, ownerTimestamp } = await $dialogs.editMessage(peerHash.value, messageId, text);
+        const { status, signHash, ownerTimestamp } = await $dialogs.editMessage(peerHash.value, messageId, text);
+        if (status === 'awaiting_unlock') {
+            // Stored; it goes out after the unlock. Shown as waiting, not as failed.
+            if (awaitPendingEditUnlock(pendingEdits.value, messageId, myToken)) pendingEdits.value = new Map(pendingEdits.value);
+            return;
+        }
         if (submitPendingEdit(pendingEdits.value, messageId, myToken, signHash, ownerTimestamp)) {
             pendingEdits.value = new Map(pendingEdits.value);
             reconcilePendingEdits();
@@ -1105,9 +1102,4 @@ const reconcilePendingEdits = () => {
     if (cleared.length) pendingEdits.value = new Map(pendingEdits.value);
 };
 watch(decryptedMessages, reconcilePendingEdits);
-
-const retryEdit = (messageId) => {
-    const pending = pendingEdits.value.get(messageId);
-    if (pending) handleEditMessage(messageId, pending.text);
-};
 </script>

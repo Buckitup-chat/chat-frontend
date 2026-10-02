@@ -4,13 +4,10 @@
 // author's own) and the pointer store backed by memory.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import * as secp from '@noble/secp256k1';
-import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
+import { signFields, deriveSignHash } from '@/lib/pq/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
+import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
 import { _setStoreForTests } from '@/lib/data/localStore';
 import { savePointer, loadPointer } from '@/lib/data/checkpointAlerts';
 import {
@@ -53,34 +50,6 @@ const { useDialogsStore } = await import('@/store/dialogs.store');
 const { DialogCrypto } = await import('@/libs/DialogCrypto');
 const { encodeContent } = await import('@/lib/pq/content');
 
-const makeIdentity = (seed) => {
-	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
-	const kem = ml_kem1024.keygen(new Uint8Array(64).fill(seed));
-	const contactSk = new Uint8Array(32).fill(seed);
-	const contactPk = secp.getPublicKey(contactSk, true);
-	const userHash = 'u_' + bytesToHex(sha3_512(sign.publicKey));
-	const card = {
-		user_hash: userHash,
-		sign_pkey: toBase64(sign.publicKey),
-		crypt_pkey: toBase64(kem.publicKey),
-		crypt_cert: toBase64(ml_dsa87.sign(kem.publicKey, sign.secretKey)),
-		contact_pkey: toBase64(contactPk),
-		contact_cert: toBase64(ml_dsa87.sign(contactPk, sign.secretKey)),
-		name: `u-${seed}`,
-		deleted_flag: false,
-		owner_timestamp: 1_700_000_000,
-	};
-	card.sign_b64 = signFields(card, sign.secretKey);
-	return {
-		sign, kem, contactSk, userHash, card,
-		vault: {
-			sign_skey: toBase64(sign.secretKey),
-			crypt_skey: toBase64(kem.secretKey),
-			evm_skey: bytesToHex(contactSk),
-		},
-	};
-};
-
 const M1 = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
 const M2 = 'dmsg_0192aadd-0000-7000-8000-000000000002';
 const CP = 'dmsg_0192aacc-0000-7000-8000-000000000003';
@@ -100,7 +69,7 @@ describe('checkpoint alerts', () => {
 			owner_timestamp: 1_700_000_500,
 			...tweak,
 		};
-		const sign_b64 = signFields(fields, me.sign.secretKey);
+		const sign_b64 = signFields(fields, me.signSkey);
 		return { ...fields, sign_b64, sign_hash: deriveSignHash('dms_', sign_b64) };
 	};
 
@@ -124,9 +93,8 @@ describe('checkpoint alerts', () => {
 	const seed = (...rows) => { for (const r of rows) collections.dialog.messages.rows.set(r.message_id, r); };
 
 	const keyRowId = () => `${dialogHash}|${me.userHash}`;
-	const seedKeyRow = () => collections.dialog.keys.rows.set(keyRowId(), {
-		dialog_hash: dialogHash, sender_hash: me.userHash, peer_hash: peer, deleted_flag: false,
-	});
+	const seedKeyRow = () => collections.dialog.keys.rows.set(keyRowId(),
+		signedDialogKeyRow(me, { dialog_hash: dialogHash, peer_hash: peer }));
 
 	// The sweep only visits dialogs holding a checkpoint pointer — the same
 	// registration signing a checkpoint performs.
@@ -148,10 +116,10 @@ describe('checkpoint alerts', () => {
 			async keys() { return [...mem.keys()]; },
 			async clear() { mem.clear(); },
 		});
-		me = makeIdentity(11);
+		me = makeTestIdentity(11);
 		HOLDER.user.currentUserHash = me.userHash;
 		HOLDER.vault = me.vault;
-		peer = makeIdentity(12).userHash;
+		peer = makeTestIdentity(12).userHash;
 		collections = {
 			cards: makeCollection({ [me.userHash]: me.card }),
 			dialog: { keys: makeCollection(), messages: makeCollection({}, true), versions: makeCollection(), reactions: makeCollection(), receipts: makeCollection() },
@@ -159,7 +127,7 @@ describe('checkpoint alerts', () => {
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer);
 		seedKeyRow();
-		key = DialogCrypto.deriveSenderMsgKey(me.sign.secretKey, me.kem.secretKey, bytesToHex(me.contactSk), peer);
+		key = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, bytesToHex(me.contactSk), peer);
 	});
 
 	// The full pipeline on real rows: a signed checkpoint in the feed, the

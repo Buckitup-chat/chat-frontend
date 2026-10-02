@@ -3,8 +3,10 @@
 // outbox delivers it once the connection is back. Only a refusal by the
 // server is a failed save.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { makeTestIdentity, signedStorageRow } from './helpers/signedFixtures';
 
-const USER = 'u_' + 'a'.repeat(128);
+const ME = makeTestIdentity(31, 'me');
+const USER = ME.userHash;
 const ROOT = 'root-0000-0000-0000-000000000000';
 const signSkey = new Uint8Array(32).fill(7);
 
@@ -23,6 +25,7 @@ const collection = {
 };
 vi.mock('@/lib/data/collections', () => ({
 	getUserStorageCollection: () => collection,
+	getUserCardsCollection: () => ({ preload: async () => {}, get: (k: string) => (k === ME.userHash ? ME.card : undefined) }),
 }));
 
 type Row = { uuid: string; value_b64: string; owner_timestamp: number; parent_sign_hash: string | null };
@@ -32,6 +35,7 @@ vi.mock('@/api/client', () => ({
 	api: {
 		createStorageMutation: (userHash: string, uuid: string, valueB64: string, _h: unknown, _v: unknown, ownerTimestamp: number, _sk: unknown, _d: unknown, deletedFlag: boolean, parentSignHash: string | null, _sh: unknown, _sb: unknown, mutationType: string) => ({
 			type: mutationType,
+			...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
 			[mutationType === 'insert' ? 'modified' : 'changes']: {
 				user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
 				owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
@@ -58,12 +62,15 @@ vi.mock('@/api/client', () => ({
 
 const { saveStorageJsonPatch, upsertStorageJsonPatch, getStorageRow, getStorageSyncStatus } = await import('@/lib/data/userStorage');
 const { setStorageJsonCodec } = await import('@/lib/data/storageIntent');
-const { drainPendingWrites } = await import('@/lib/data/ingest');
+const { drainPendingWrites, resumePendingWrites } = await import('@/lib/data/ingest');
 const {
 	_setStorageForTests, _setLeaderForTests, stopDrainLoop, startLeaderElection, stopLeaderElection, pendingEntries,
 } = await import('@/lib/data/outbox');
 const { _setIntentStorageForTests, _clearIntentsForTests } = await import('@/lib/data/intents');
 const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
+
+const enc = (v: Record<string, unknown>) => Buffer.from(JSON.stringify(v)).toString('base64');
+const dec = (b64: string) => JSON.parse(Buffer.from(b64, 'base64').toString());
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -72,7 +79,7 @@ const makeStorage = () => {
 
 const shown = async () => {
 	const row = await getStorageRow(USER, ROOT);
-	return row?.value_b64 ? JSON.parse(row.value_b64) : null;
+	return row?.value_b64 ? dec(row.value_b64) : null;
 };
 
 beforeEach(async () => {
@@ -86,8 +93,8 @@ beforeEach(async () => {
 	await _clearIntentsForTests();
 	_setAcceptedSnapshotStorageForTests(makeStorage());
 	setStorageJsonCodec({
-		decrypt: async (valueB64: string) => JSON.parse(valueB64),
-		encrypt: async (value: Record<string, unknown>) => ({ valueB64: JSON.stringify(value), hashB64: null }),
+		decrypt: async (valueB64: string) => dec(valueB64),
+		encrypt: async (value: Record<string, unknown>) => ({ valueB64: enc(value), hashB64: null }),
 	});
 	startLeaderElection(USER, () => {});
 	_setLeaderForTests(true);
@@ -123,9 +130,9 @@ describe('a profile edit with no connection', () => {
 		online = false;
 		await saveStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { name: 'New' }, signSkey });
 		online = true;
-		drainPendingWrites(USER, signSkey);
+		resumePendingWrites(USER, signSkey);
 		await vi.waitFor(async () => expect(await getStorageSyncStatus(USER, ROOT)).toBe('synced'));
-		expect(sent.map((r) => JSON.parse(r.value_b64))).toEqual([{ name: 'New', notes: 'n' }]);
+		expect(sent.map((r) => dec(r.value_b64))).toEqual([{ name: 'New', notes: 'n' }]);
 	});
 
 	it('on a device with no copy of its own, is merged over the version the server last accepted', async () => {
@@ -151,10 +158,9 @@ describe('a profile edit with no connection', () => {
 		await saveStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { name: 'New' }, signSkey });
 		await saveStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { notes: 'm' }, signSkey });
 		online = true;
-		collection.rows.set(`${USER}|${ROOT}`, {
-			user_hash: USER, uuid: ROOT, value_b64: JSON.stringify({ name: 'Old', notes: 'n', slots: { contacts: 's1' } }),
-			deleted_flag: false, owner_timestamp: 1, parent_sign_hash: null, sign_hash: 'uss_1', sign_b64: 'sig',
-		});
+		collection.rows.set(`${USER}|${ROOT}`, signedStorageRow(ME, {
+			uuid: ROOT, value_b64: enc({ name: 'Old', notes: 'n', slots: { contacts: 's1' } }), owner_timestamp: 1,
+		}));
 		expect(await shown()).toEqual({ name: 'Old', notes: 'n', slots: { contacts: 's1' } });
 	});
 });

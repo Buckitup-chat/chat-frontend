@@ -93,6 +93,30 @@ export const OWNER_FIELD: Record<string, string> = {
 	files: 'uploader_hash',
 };
 
+const ENTITY_KEY_FIELD: Record<string, string> = {
+	dialog_messages: 'message_id',
+	dialog_message_reactions: 'reaction_hash',
+	dialog_message_receipts: 'receipt_hash',
+	user_cards: 'user_hash',
+};
+
+export function entityKeyOf(relation: string, row: Record<string, unknown> | null | undefined): string | null {
+	if (!row) return null;
+	const text = (field: string): string | null => (typeof row[field] === 'string' && row[field] ? row[field] as string : null);
+	if (relation === 'user_storage') {
+		const userHash = text('user_hash');
+		const uuid = text('uuid');
+		return userHash && uuid ? `${userHash}|${uuid}` : null;
+	}
+	if (relation === 'dialog_keys') {
+		const dialogHash = text('dialog_hash');
+		const senderHash = text('sender_hash');
+		return dialogHash && senderHash ? `${dialogHash}|${senderHash}` : null;
+	}
+	const field = ENTITY_KEY_FIELD[relation];
+	return field ? text(field) : null;
+}
+
 /**
  * The contract for one mutation. Unknown relations get the conservative
  * fallback: treat as chained, await visibility — a new relation must opt in

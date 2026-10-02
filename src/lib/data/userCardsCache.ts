@@ -4,7 +4,6 @@ import type { UserCardRow } from './types';
 const DB_NAME = 'user-synced-cache';
 const DB_VERSION = 1;
 const STORE = 'user_cards';
-const MAIN_STORES = ['user_cards', 'user_storage'];
 const TABLE = 'user_cards';
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
@@ -18,9 +17,7 @@ function openDb(): Promise<IDBDatabase | null> {
 	dbPromise = new Promise((resolve) => {
 		const req = indexedDB.open(DB_NAME, DB_VERSION);
 		req.onupgradeneeded = () => {
-			for (const name of MAIN_STORES) {
-				if (!req.result.objectStoreNames.contains(name)) req.result.createObjectStore(name, { keyPath: '__key' });
-			}
+			if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE, { keyPath: '__key' });
 		};
 		req.onsuccess = () => resolve(req.result);
 		req.onerror = () => {
@@ -43,10 +40,7 @@ function run<T>(mode: 'readonly' | 'readwrite', fn: (store: IDBObjectStore) => I
 	});
 }
 
-const fromDisk = ({ __key: _key, ...record }: Record<string, unknown>): UserCardRow => ({
-	...record,
-	...(typeof record.owner_timestamp === 'bigint' ? { owner_timestamp: Number(record.owner_timestamp) } : {}),
-}) as unknown as UserCardRow;
+const fromDisk = ({ __key: _key, ...record }: Record<string, unknown>): UserCardRow => record as unknown as UserCardRow;
 
 export async function readCachedCards(): Promise<UserCardRow[]> {
 	try {

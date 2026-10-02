@@ -42,7 +42,7 @@
 <script setup>
 import { Modal } from 'bootstrap';
 import { modalRegistry } from './registry';
-import { ref, shallowRef, onMounted, defineAsyncComponent, inject, watch, computed } from 'vue';
+import { ref, shallowRef, onMounted, defineAsyncComponent, inject, computed } from 'vue';
 
 const $mitt = inject('$mitt');
 

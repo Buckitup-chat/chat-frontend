@@ -75,16 +75,21 @@ describe('outbox durability', () => {
 
 	it('refuses to queue beyond the cap instead of dropping old entries', async () => {
 		for (let i = 0; i < 3; i++) await enqueue([mutation('dialog_messages', `${i}`)], USER_A);
-		// Simulate a full queue without 1000 real inserts.
-		const realKeys = storage.keys.bind(storage);
-		storage.keys = async () => new Array(MAX_OUTBOX_ENTRIES).fill('x');
+		// Fill the rest of this account's share directly instead of 1000 enqueues.
+		for (let i = 3; i < MAX_OUTBOX_ENTRIES; i++) {
+			storage.map.set(`active-${i}`, JSON.stringify({
+				id: `active-${i}`, userHash: USER_A, relation: 'dialog_messages',
+				mutations: [mutation('dialog_messages', `m${i}`)], createdAt: 1, attempts: 0, lastError: null,
+			}));
+		}
+		const before = new Map(storage.map);
 
 		const id = await enqueue([mutation('dialog_messages', 'overflow')], USER_A);
 
 		expect(id).toBeNull();
-		storage.keys = realKeys;
-		// The three originals are untouched — nothing was evicted.
-		expect(await pendingEntries(USER_A)).toHaveLength(3);
+		// Every original is untouched — nothing was evicted.
+		for (const [k, v] of before) expect(storage.map.get(k)).toBe(v);
+		expect(await pendingEntries(USER_A)).toHaveLength(MAX_OUTBOX_ENTRIES);
 	});
 });
 

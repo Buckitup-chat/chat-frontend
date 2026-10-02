@@ -38,14 +38,11 @@ import { web3Store } from '@/store/web3.store';
 import { userStore } from '@/store/user.store';
 
 
-import { ref, onMounted, watch, inject, computed, onUnmounted } from 'vue';
-import axios from 'axios';
 
 const $user = userStore();
-const $mitt = inject('$mitt');
 const $web3 = web3Store();
 
-const { list, onlyLast } = defineProps({
+const { list } = defineProps({
 	list: { type: Array },
 	onlyLast: {},
 });

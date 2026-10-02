@@ -28,7 +28,6 @@ import { userPQStore } from '@/store/userPQ.store';
 
 
 import FullContentBlock from '@/components/FullContentBlock.vue';
-import { inject } from 'vue';
 
 const $userPQ = userPQStore();
 

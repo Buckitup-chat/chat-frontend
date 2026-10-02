@@ -10,6 +10,7 @@ import escapeHtml from '@/utils/escapeHtml';
 export function useRestoreAccount() {
 	const $userPQ = userPQStore();
 	const $swalModal = inject('$swalModal');
+	const $swal = inject('$swal');
 	const $mitt = inject('$mitt');
 	const $router = inject('$router');
 
@@ -29,9 +30,17 @@ export function useRestoreAccount() {
 			if (!confirmed) return false;
 		}
 
-		await $userPQ.importBackup({ identity, keys });
+		const result = await $userPQ.importBackup({ identity, keys });
 		$mitt.emit('account::created');
 		$mitt.emit('modal::close');
+		if (result.status === 'card-deferred') {
+			$swal.fire({
+				icon: 'info',
+				title: 'Account restored',
+				text: 'Its profile card could not be published right now. Sign in to the account to publish it.',
+			});
+			return true;
+		}
 		$router.replace({ name: 'account_info' });
 		return true;
 	};
