@@ -68,11 +68,23 @@ other at all.
 From the repository root (the page imports `src/lib/pq`, so it builds here):
 
 ```bash
-npx vite --config sandbox/handshake-pq2/vite.config.ts --host      # dev server; phones need https for the camera
+npx vite --config sandbox/handshake-pq2/vite.config.ts --host      # dev server
 npx vitest run --config sandbox/handshake-pq2/vite.config.ts       # protocol and engine tests
 npx vite build --config sandbox/handshake-pq2/vite.config.ts       # → dist/, committed for the link above
 node sandbox/handshake-pq2/scripts/check.mjs                        # two Chromium pages, real WebRTC, no STUN
 ```
+
+A phone gets the camera and WebCrypto only in a secure context, so to open
+the dev server from phones on the same network, serve it over HTTPS. A
+self-signed certificate does; each phone asks once to accept it:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=pq2-sandbox \
+  -addext subjectAltName=DNS:localhost,IP:127.0.0.1 -keyout /tmp/pq2-key.pem -out /tmp/pq2-cert.pem
+PQ2_CERT=/tmp/pq2-cert.pem PQ2_KEY=/tmp/pq2-key.pem npx vite --config sandbox/handshake-pq2/vite.config.ts --host
+```
+
+Then open `https://<the computer's address>:5173` on each phone.
 
 Code: `src/protocol.ts` (messages, transcript, signatures, comparison code,
 confirmation check), `src/engine.ts` (the state machine, no DOM),

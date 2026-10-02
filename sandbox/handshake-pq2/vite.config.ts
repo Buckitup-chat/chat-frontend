@@ -5,8 +5,14 @@
 //   npx vite --config sandbox/handshake-pq2/vite.config.ts            # dev server
 //   npx vite build --config sandbox/handshake-pq2/vite.config.ts      # → sandbox/handshake-pq2/dist
 //   npx vitest run --config sandbox/handshake-pq2/vite.config.ts      # tests
+//
+// PQ2_CERT and PQ2_KEY (PEM files) serve the dev server over HTTPS: a phone
+// on the network gets the camera and WebCrypto only in a secure context.
 import { defineConfig } from 'vitest/config';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, URL } from 'node:url';
+
+const { PQ2_CERT, PQ2_KEY } = process.env;
 
 export default defineConfig({
 	root: fileURLToPath(new URL('.', import.meta.url)),
@@ -19,6 +25,7 @@ export default defineConfig({
 	server: {
 		host: true,
 		fs: { allow: [fileURLToPath(new URL('../..', import.meta.url))] },
+		https: PQ2_CERT && PQ2_KEY ? { cert: readFileSync(PQ2_CERT), key: readFileSync(PQ2_KEY) } : undefined,
 	},
 	build: {
 		outDir: 'dist',
