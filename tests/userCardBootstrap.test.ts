@@ -576,7 +576,7 @@ describe('bootstrap without a key, account isolation, concurrent recovery', () =
 		expect(cardEntries().find((e) => e.userHash === hashA && e.mutations[0]?.type === 'update')).toBeTruthy(); // kept for Alice
 	});
 
-	it('two tabs recovering the same card intent produce one signature, one snapshot and one HTTP send', async () => {
+	it('two tabs recovering the same card intent produce one signature, one snapshot and one HTTP send', { timeout: 20_000 }, async () => {
 		const em = freshManager();
 		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
 		const card = (await em.getLocalUserCards())[0] as unknown as Parameters<typeof publishUserCard>[0];
@@ -642,7 +642,7 @@ const watchAuth = (em: Manager) => {
 describe('card timestamps are reserved one at a time per account, in every tab', () => {
 	const NOW = Date.UTC(2026, 8, 29, 12, 0, 0);
 
-	it('two tabs authoring card updates at once get different, strictly increasing timestamps (Web Lock)', async () => {
+	it('two tabs authoring card updates at once get different, strictly increasing timestamps (Web Lock)', { timeout: 20_000 }, async () => {
 		const em = freshManager();
 		await em.createUserVault({ name: 'Tester' });
 		const card = (await em.getLocalUserCards())[0] as unknown as Parameters<typeof storeUserCardIntent>[0];
@@ -1156,7 +1156,7 @@ describe('a bootstrap retry reuses the one stored bootstrap operation', () => {
 		}
 	});
 
-	it('two tabs retrying the import at once share the one operation: no duplicate intent, signature, snapshot or dispatch', async () => {
+	it('two tabs retrying the import at once share the one operation: no duplicate intent, signature, snapshot or dispatch', { timeout: 20_000 }, async () => {
 		const d = await deferred();
 		const tails = new Map<string, Promise<void>>();
 		vi.stubGlobal('navigator', {

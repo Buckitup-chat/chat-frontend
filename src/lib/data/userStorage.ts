@@ -37,6 +37,8 @@ import { IngestError, type DeliveryHandle } from './ingest';
 import { nextOwnerTimestamp } from './time';
 import type { UserStorageRow } from './types';
 import { readShapeOnce } from './shapeRead';
+import { verifyReplicatedRow } from './rowVerification';
+import { getVerifiedSignPkey } from './cardRegistry';
 import { wireBool } from '@/lib/pq/schema';
 
 // Slot addresses are not constants here: reads are public, so a fixed uuid
@@ -87,16 +89,20 @@ const getLocalEntry = async (userHash: string, uuid: string): Promise<LocalStora
 
 const tsOf = (row?: UserStorageRow | null): number => Number(row?.owner_timestamp || 0);
 
-/** Freshest readable row: server vs locally pending, by owner_timestamp. */
+/**
+ * Freshest readable row: this device's own copy vs the replicated row, by
+ * owner_timestamp. A replicated row counts only once verified; a tombstone
+ * that wins makes the slot empty.
+ */
 export async function getStorageRow(userHash: string, uuid: string): Promise<UserStorageRow | null> {
 	const [local, server] = await Promise.all([getLocalEntry(userHash, uuid), getServerState(userHash, uuid)]);
+	const verified = server.state === 'found'
+		&& (await verifyReplicatedRow('user_storage', server.row as unknown as Record<string, unknown>, getVerifiedSignPkey)).status === 'verified';
 
-	const localRow = local && !local.row.deleted_flag ? local.row : undefined;
-	const serverRow = server.state === 'found' && !server.row.deleted_flag ? server.row : undefined;
-
-	const candidates = [localRow, serverRow].filter((r): r is UserStorageRow => !!r);
+	const candidates = [local?.row, verified ? server.row : undefined].filter((r): r is UserStorageRow => !!r);
 	if (candidates.length === 0) return null;
-	return candidates.reduce((a, b) => (tsOf(b) > tsOf(a) ? b : a));
+	const freshest = candidates.reduce((a, b) => (tsOf(b) > tsOf(a) ? b : a));
+	return freshest.deleted_flag ? null : freshest;
 }
 
 export interface UpsertResult {
