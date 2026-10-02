@@ -141,7 +141,7 @@ describe('read path (getStorageRow): same rows, no gate', () => {
 	it('an invalid-signature row with a bigger owner_timestamp must not beat the valid local row', async () => {
 		collection.rows.set(KEY, REPLAYED);
 		const shown = await getStorageRow(USER, SLOT);
-		expect(dec(shown!.value_b64)).toEqual({ name: 'current' });
+		expect(dec(shown!.value_b64!)).toEqual({ name: 'current' });
 	});
 
 	it('a row signed by another account must not become canonical state', async () => {
@@ -164,6 +164,6 @@ describe('local projection base (freshestKnownValue): an unverified row must not
 		expect(sent).toHaveLength(0);
 		const local = kv.get(`us|${KEY}`) as { row: { value_b64: string } };
 		expect(dec(local.row.value_b64)).toEqual({ name: 'current', notes: 'x' });
-		expect(dec((await getStorageRow(USER, SLOT))!.value_b64)).toEqual({ name: 'current', notes: 'x' });
+		expect(dec((await getStorageRow(USER, SLOT))!.value_b64!)).toEqual({ name: 'current', notes: 'x' });
 	});
 });
