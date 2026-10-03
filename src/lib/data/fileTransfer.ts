@@ -26,6 +26,7 @@ import { sendMutationsAndAwaitShape } from './ingest';
 import { getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 import { readShapeOnce } from './shapeRead';
 import { wireBool } from '@/lib/pq/schema';
+import { bearerFor, openSession } from './readSession';
 
 declare const ELECTRIC_API_URL: string; // the chunk endpoints below are not shapes
 
@@ -273,7 +274,18 @@ export const downloadFile = async (opts: {
 		let encrypted = await getCachedChunk(fileId, i);
 		const fromCache = !!encrypted;
 		if (!encrypted) {
-			const r = await fetch(`${ELECTRIC_API_URL}/file_chunk/${fileId}/${i}`, { signal });
+			const fetchChunk = () => {
+				const auth = bearerFor('file_chunk');
+				return fetch(`${ELECTRIC_API_URL}/file_chunk/${fileId}/${i}`, {
+					signal,
+					headers: auth ? { Authorization: auth } : undefined,
+				});
+			};
+			let r = await fetchChunk();
+			if (r.status === 401) {
+				await openSession('file_chunk');
+				r = await fetchChunk();
+			}
 			if (!r.ok) throw new Error(`chunk ${i} unavailable: HTTP ${r.status}`);
 			encrypted = new Uint8Array(await r.arrayBuffer());
 		}

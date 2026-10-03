@@ -24,6 +24,8 @@ import { publishVault } from '@/lib/recovery/vault';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
+import { clearSessions } from '@/lib/data/readSession';
+import { resetGate } from '@/lib/data/accessGate';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
 
@@ -594,6 +596,8 @@ export class EncryptionManagerPQ extends EventTarget {
     // left; carrying either into the next login would point at its rows.
     this.#slotResolver = null;
     resetUserStorageCollection();
+    clearSessions();
+    resetGate();
 
     if (hadActiveAccount) await this.#clearAccountReadCache();
 
