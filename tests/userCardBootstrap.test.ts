@@ -55,6 +55,25 @@ vi.mock('@lo-fi/local-vault', () => ({
 }));
 vi.mock('@lo-fi/local-vault/adapter/idb', () => ({}));
 vi.mock('@lo-fi/local-data-lock', () => ({ removeLocalAccount: async () => {} }));
+vi.mock('@/lib/data/readSession', () => ({
+	bearerFor: () => '',
+	hasValidToken: () => false,
+	handleShapeAuth401: async () => false,
+	openSession: async () => null,
+	invalidateSession: () => {},
+	clearSessions: () => {},
+}));
+vi.mock('@/lib/data/accessGate', () => ({
+	markShapeBlocked: () => {},
+	markShapeUnblocked: () => {},
+	isShapeBlocked: () => false,
+	hasBlockedShapes: () => false,
+	blockedShapeNames: () => [],
+	onBlockedChange: () => () => {},
+	waitForUnblock: async () => {},
+	probeAllBlocked: () => {},
+	resetGate: () => {},
+}));
 
 let linkedCards: object | null = null;
 vi.mock('@/lib/data/collections', () => ({
