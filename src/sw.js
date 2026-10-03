@@ -44,11 +44,15 @@ self.addEventListener('message', (event) => {
 			totalSize: msg.totalSize,
 			mimeType: msg.mimeType,
 			baseUrl: msg.baseUrl,
+			token: msg.token || null,
 			cache: new Map(),
 			key: null,
 		});
 	} else if (msg.type === 'unregister') {
 		sessions.delete(msg.sessionId);
+	} else if (msg.type === 'token' && msg.sessionId) {
+		const s = sessions.get(msg.sessionId);
+		if (s) s.token = msg.token || null;
 	}
 });
 
@@ -72,15 +76,32 @@ const importKey = async (session) => {
 	return session.key;
 };
 
-const getChunk = async (session, index) => {
+const requestToken = async (session, sessionId) => {
+	const clients = await self.clients.matchAll({ type: 'window' });
+	for (const c of clients) c.postMessage({ type: 'need-token', sessionId });
+	for (let i = 0; i < 20 && !session.token; i++) {
+		await new Promise((r) => setTimeout(r, 100));
+	}
+	return session.token;
+};
+
+const fetchChunk = (session, index) => {
+	const headers = session.token ? { Authorization: `Bearer ${session.token}` } : undefined;
+	return fetch(`${session.baseUrl}/file_chunk/${session.fileId}/${index}`, { headers });
+};
+
+const getChunk = async (session, index, sessionId) => {
 	const hit = session.cache.get(index);
 	if (hit) {
-		// re-insert to refresh the LRU position
 		session.cache.delete(index);
 		session.cache.set(index, hit);
 		return hit;
 	}
-	const r = await fetch(`${session.baseUrl}/file_chunk/${session.fileId}/${index}`);
+	let r = await fetchChunk(session, index);
+	if (r.status === 401) {
+		await requestToken(session, sessionId);
+		r = await fetchChunk(session, index);
+	}
 	if (!r.ok) throw new Error(`chunk ${index}: HTTP ${r.status}`);
 	const blob = new Uint8Array(await r.arrayBuffer());
 	// nonce(12) || ciphertext || tag — GCM failing means the bytes are not
@@ -103,7 +124,7 @@ const getChunk = async (session, index) => {
  * whole span is buffered. Cancel (the browser aborts superseded range
  * requests constantly while seeking) just stops the pull loop.
  */
-const streamRange = (session, start, end) => {
+const streamRange = (session, start, end, sessionId) => {
 	let position = start;
 	return new ReadableStream({
 		async pull(controller) {
@@ -112,7 +133,7 @@ const streamRange = (session, start, end) => {
 				return;
 			}
 			const index = Math.floor(position / session.chunkSize);
-			const chunk = await getChunk(session, index);
+			const chunk = await getChunk(session, index, sessionId);
 			const offset = position - index * session.chunkSize;
 			const take = Math.min(chunk.length - offset, end - position + 1);
 			controller.enqueue(chunk.slice(offset, offset + take));
@@ -127,7 +148,8 @@ self.addEventListener('fetch', (event) => {
 	if (!match) return;
 
 	event.respondWith((async () => {
-		const session = sessions.get(match[1]) ?? await recoverSession(match[1]);
+		const sessionId = match[1];
+		const session = sessions.get(sessionId) ?? await recoverSession(sessionId);
 		if (!session) return new Response('unknown video session', { status: 404 });
 
 		try {
@@ -138,23 +160,15 @@ self.addEventListener('fetch', (event) => {
 				'Cache-Control': 'no-store',
 			};
 
-			// No Range yet: the probe request. Stream the whole file with its
-			// true length — the media stack typically aborts this once it sees
-			// Accept-Ranges and switches to ranges, and a reader that does
-			// keep pulling gets correct progressive delivery either way.
-			// (A fixed-length body shorter than Content-Length would be a
-			// truncated response, which players treat as a broken file.)
 			if (!range) {
-				return new Response(streamRange(session, 0, session.totalSize - 1), {
+				return new Response(streamRange(session, 0, session.totalSize - 1, sessionId), {
 					status: 200,
 					headers: { ...headers, 'Content-Length': String(session.totalSize) },
 				});
 			}
 
-			// Serving less than asked is legal and deliberate: without the cap
-			// an open-ended range would pull the entire file for one response.
 			const plan = planChunks(range, session.chunkSize, session.totalSize, MAX_CHUNKS_PER_RESPONSE);
-			return new Response(streamRange(session, plan.served.start, plan.served.end), {
+			return new Response(streamRange(session, plan.served.start, plan.served.end, sessionId), {
 				status: 206,
 				headers: {
 					...headers,

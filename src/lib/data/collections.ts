@@ -11,7 +11,7 @@ import { persistedCollectionOptions } from '@tanstack/browser-db-sqlite-persiste
 import { getPersistence } from './persistence';
 import { alwaysActiveVisibility } from './visibility';
 import { mirrorDialogTable } from './dialogCache';
-import { userCardsFetch, reportUserCardsStreamError, userCardsShapeLink } from './userCardsLink';
+import { userCardsFetch, userCardsShapeLink } from './userCardsLink';
 import { mirrorUserCards } from './userCardsCache';
 import { createShapeLink, registerShapeLink, type ShapeLink } from './shapeLink';
 import { AccountMismatchError } from './keyCustody';
@@ -26,6 +26,9 @@ import type {
 } from './types';
 
 import { electricUrl } from './shapeRead';
+import { FetchError } from '@electric-sql/client';
+import { bearerFor, handleShapeAuth401 } from './readSession';
+import { waitForUnblock } from './accessGate';
 
 // Electric serializes Postgres bigint (int8) as string; timestamps fit in 2^53.
 const parser = { int8: (v: string) => Number(v) };
@@ -53,6 +56,20 @@ const assertUserHash = (value: string): string => {
 };
 
 const shapeDefaults = { parser, runtimeVisibility: alwaysActiveVisibility };
+
+const gatedOnError = (link: ShapeLink) => async (error: Error) => {
+	if (error instanceof FetchError && error.status === 401) {
+		const json = error.json as { error?: string; shape?: string } | undefined;
+		if (json?.error === 'read_session_required' && json.shape) {
+			const ok = await handleShapeAuth401({ error: json.error, shape: json.shape });
+			if (ok) return {};
+			await waitForUnblock(json.shape);
+			return {};
+		}
+	}
+	link.report();
+	return {};
+};
 
 // Wrap an Electric collection config with the shared SQLite persistence when
 // it is available (initPersistence() ran and OPFS exists). Electric stores its
@@ -95,11 +112,9 @@ const buildUserCards = () =>
 				url: electricUrl('/shapes'),
 				params: { table: 'user_cards' },
 				...shapeDefaults,
+				headers: { Authorization: () => bearerFor('user_cards') },
 				fetchClient: userCardsFetch,
-				onError: () => {
-					reportUserCardsStreamError();
-					return {};
-				},
+				onError: gatedOnError(userCardsShapeLink),
 			},
 			getKey: (r) => r.user_hash,
 		}))
@@ -131,8 +146,9 @@ const buildUserStorage = (userHash: string) => {
 				url: electricUrl('/shapes'),
 				params: { table: 'user_storage', where: `user_hash = '${assertUserHash(userHash)}'` },
 				...shapeDefaults,
+				headers: { Authorization: () => bearerFor('user_storage') },
 				fetchClient: link.fetchClient,
-				onError: link.onError,
+				onError: gatedOnError(link),
 			},
 			getKey: (r) => `${r.user_hash}|${r.uuid}`,
 		}))
@@ -183,8 +199,9 @@ const dialogShape = (table: string, dialogHash: string, link: ShapeLink) => ({
 	url: electricUrl('/shapes'),
 	params: { table, where: `dialog_hash = '${assertDialogHash(dialogHash)}'` },
 	...shapeDefaults,
+	headers: { Authorization: () => bearerFor(table) },
 	fetchClient: link.fetchClient,
-	onError: link.onError,
+	onError: gatedOnError(link),
 });
 
 const buildDialogCollections = (dialogHash: string) => {
