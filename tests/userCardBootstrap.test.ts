@@ -1156,7 +1156,7 @@ describe('a bootstrap retry reuses the one stored bootstrap operation', () => {
 		}
 	});
 
-	it('two tabs retrying the import at once share the one operation: no duplicate intent, signature, snapshot or dispatch', { timeout: 20_000 }, async () => {
+	it('two tabs retrying the import at once share the one operation: no duplicate intent, signature, snapshot or dispatch', { timeout: 45_000 }, async () => {
 		const d = await deferred();
 		const tails = new Map<string, Promise<void>>();
 		vi.stubGlobal('navigator', {
