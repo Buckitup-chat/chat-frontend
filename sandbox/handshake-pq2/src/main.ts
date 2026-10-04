@@ -46,6 +46,8 @@ let currentCode = '';
 let lastOutcome: Outcome | null = null;
 let sessionStart = 0;
 let lastScan = { text: '', at: 0 };
+/** Codes the camera read this session, so the log names each one once. */
+let scanned = new Set<string>();
 let wakeLock: WakeLockSentinel | null = null;
 
 // ---------- the parts of the page ----------
@@ -151,6 +153,10 @@ const onScan = (text: string) => {
 	const now = Date.now();
 	if (text === lastScan.text && now - lastScan.at < 400) return;
 	lastScan = { text, at: now };
+	if (!scanned.has(text)) {
+		scanned.add(text);
+		log(`camera read ${text.startsWith('PQ2:') ? text.slice(4, 5) : 'a code that is not PQ2'} (${text.length} characters)`);
+	}
 	void engine?.read(text);
 };
 
@@ -185,6 +191,7 @@ const impostorClaim = (): { userHash: string; card: UserCardRow } => {
 const startSession = async () => {
 	engine?.stop();
 	lastOutcome = null;
+	scanned = new Set();
 	clearResult();
 	$('log').innerHTML = '';
 	sessionStart = Date.now();

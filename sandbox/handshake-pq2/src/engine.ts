@@ -82,6 +82,7 @@ export class HandshakeEngine {
 	private timings: Timings = {};
 	private deadline: ReturnType<typeof setTimeout> | undefined;
 	private ignoredOwn = false;
+	private readonly idle = new Set<string>();
 
 	constructor(options: EngineOptions) {
 		this.o = { sessionMs: 90_000, channelMs: 15_000, confirmMs: 10_000, ...options };
@@ -186,6 +187,10 @@ export class HandshakeEngine {
 			this.payloadsKnown();
 		} else if (m.kind === 'D' && this.stage === 'C' && !this.peerPayload) {
 			if (await this.feed(m.qwbp)) this.payloadsKnown();
+		} else if (!this.idle.has(`${m.kind}${this.stage}`)) {
+			// The camera keeps reading a code after its step is done; said once.
+			this.idle.add(`${m.kind}${this.stage}`);
+			this.log(`${m.kind} read at stage ${this.stage}: nothing to do`);
 		}
 	}
 
