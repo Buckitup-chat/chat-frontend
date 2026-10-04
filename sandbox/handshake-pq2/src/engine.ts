@@ -1,12 +1,18 @@
 // The PQ2 state machine (docs/task-handshake-pq2.md §5), without DOM or
 // camera. The page feeds it the codes the camera reads and shows the codes it
 // asks to show; the channel is an adapter — QWBP over WebRTC in the browser,
-// a fake network in the tests. One engine runs one session: once it has
-// finished or been stopped, it shows, sends, logs and reports nothing more.
+// a fake network in the tests — or, in the animated-QR mode (frames.ts), the
+// cameras themselves. One engine runs one session: once it has finished or
+// been stopped, it shows, sends, logs and reports nothing more.
 import { bytesToHex } from '@noble/hashes/utils';
 import { equalBytes } from '@noble/post-quantum/utils.js';
+import { toBytes } from '@/lib/pq/signature';
 import type { UserCardRow } from '@/lib/data/types';
 import type { Identity } from './identity';
+import {
+	checkProof, decodeProof, encodeFrame, encodeProof, fromBase45, nameBytesOf, parseFrame, proofMessage, senderTag,
+	sessionCode, split, toBase45, type Frame,
+} from './frames';
 import {
 	checkConfirm, comparisonCode, confirmMessage, encode, newNonce, parse, pqMessage, signOptical, signPq,
 	transcript, verifyOptical, type Message, type Party,
@@ -27,10 +33,10 @@ export interface ChannelAdapter {
 	close(): void;
 }
 
-export type Stage = 'idle' | 'A' | 'B' | 'C' | 'D' | 'done';
+export type Stage = 'idle' | 'A' | 'B' | 'C' | 'D' | 'F' | 'done';
 
 export type Outcome =
-	| { kind: 'confirmed'; peerName: string; peerHash: string; code: string; card: UserCardRow }
+	| { kind: 'confirmed'; peerName: string; peerHash: string; code: string; card?: UserCardRow }
 	| { kind: 'verified'; peerHash: string; code: string | null; reason: string }
 	| { kind: 'expired'; reason: string };
 
@@ -38,9 +44,24 @@ export interface Timings {
 	[milestone: string]: number;
 }
 
+/** Animated-QR progress: frames of ours the peer reports holding, and frames of the peer's we hold. */
+export interface FramesProgress {
+	sent: number;
+	peerHas: number;
+	received: number;
+	/** The peer's frame count, once a frame of it was read. */
+	total: number | null;
+}
+
 export interface EngineOptions {
 	identity: Identity;
-	channel: () => ChannelAdapter;
+	/** The network channel; not used in the animated-QR mode. */
+	channel?: () => ChannelAdapter;
+	/** Animated-QR mode: the proof goes through the cameras as a loop of frames, and no network is used. */
+	frames?: { dataChars: number; fps: number };
+	/** Animated-QR mode: from the first frame shown to both sides holding everything. */
+	framesMs?: number;
+	onProgress?(progress: FramesProgress): void;
 	/** Impersonation test: show this user_hash with our own contact key, and send this card. */
 	claim?: { userHash: string; card: UserCardRow };
 	/** For reading the codes, up to both payloads known. */
@@ -58,12 +79,17 @@ export interface EngineOptions {
 
 /** Our confirmation may still be on its way when the peer's arrives: the connection closes this much later. */
 const CLOSE_AFTER_CHANNEL_MS = 3_000;
+/**
+ * Animated-QR mode: how long a device that holds the peer's whole proof keeps
+ * showing its own frames for a peer that has not yet reported holding them.
+ */
+const LINGER_MS = 20_000;
 
 const short = (hash: string) => `${hash.slice(0, 10)}…`;
 const partyOf = (m: Party): Party => ({ userHash: m.userHash, contactPkey: m.contactPkey, nonce: m.nonce });
 
 export class HandshakeEngine {
-	private readonly o: Required<Omit<EngineOptions, 'claim' | 'onReadingDone'>> & Pick<EngineOptions, 'claim' | 'onReadingDone'>;
+	private readonly o: EngineOptions & Required<Pick<EngineOptions, 'sessionMs' | 'channelMs' | 'confirmMs' | 'framesMs'>>;
 	private stage: Stage = 'idle';
 	private ended = false;
 	private me!: Party;
@@ -83,9 +109,17 @@ export class HandshakeEngine {
 	private deadline: ReturnType<typeof setTimeout> | undefined;
 	private ignoredOwn = false;
 	private readonly idle = new Set<string>();
+	// Animated-QR mode.
+	private ownFrames: string[] | null = null;
+	private frameAt = 0;
+	private frameTimer: ReturnType<typeof setInterval> | undefined;
+	private peerFrames: Array<string | null> | null = null;
+	private received = 0;
+	private peerHas = 0;
+	private framesResult: Outcome | null = null;
 
 	constructor(options: EngineOptions) {
-		this.o = { sessionMs: 90_000, channelMs: 15_000, confirmMs: 10_000, ...options };
+		this.o = { sessionMs: 90_000, channelMs: 15_000, confirmMs: 10_000, framesMs: 120_000, ...options };
 	}
 
 	get currentStage(): Stage {
@@ -100,12 +134,14 @@ export class HandshakeEngine {
 			contactPkey: this.o.identity.contactPkey,
 			nonce: newNonce(),
 		};
-		// The connection gathers its addresses while the codes are read, so C
-		// shows as soon as the peer is verified; gathering can take seconds.
-		this.conn = this.o.channel();
-		this.conn.onOpen((link) => this.channelOpen(link));
-		this.ownPayload = this.conn.payload();
-		this.ownPayload.catch(() => {}); // reported when C or D needs it
+		if (!this.o.frames) {
+			// The connection gathers its addresses while the codes are read, so C
+			// shows as soon as the peer is verified; gathering can take seconds.
+			this.conn = this.o.channel!();
+			this.conn.onOpen((link) => this.channelOpen(link));
+			this.ownPayload = this.conn.payload();
+			this.ownPayload.catch(() => {}); // reported when C or D needs it
+		}
 		this.setDeadline(this.o.sessionMs, () => ({ kind: 'expired', reason: `no handshake within ${this.o.sessionMs / 1000} s` }));
 		this.log(`session started as ${short(this.me.userHash)}${this.o.claim ? ' (impersonating)' : ''}`);
 		this.show({ kind: 'A', ...this.me }, 'A');
@@ -115,19 +151,22 @@ export class HandshakeEngine {
 	stop(): void {
 		this.ended = true;
 		clearTimeout(this.deadline);
+		clearInterval(this.frameTimer);
 		this.conn?.close();
 	}
 
 	/** A code the camera read. Codes read while the previous one is still being handled are dropped; the camera reads them again. */
 	async read(text: string): Promise<void> {
 		if (this.stage === 'idle' || this.ended || this.busy) return;
-		const m = parse(text);
-		if (!m || !this.acceptsFrom(m)) return;
+		const frame = this.o.frames ? parseFrame(text) : null;
+		const m = frame ? null : parse(text);
+		if (!frame && (!m || !this.acceptsFrom(m))) return;
 		this.busy = true;
 		try {
-			await this.handle(m);
+			if (frame) await this.onFrame(frame);
+			else await this.handle(m!);
 		} catch (e) {
-			this.log(`error handling ${m.kind}: ${(e as Error).message}`);
+			this.log(`error handling ${frame ? 'a frame' : m!.kind}: ${(e as Error).message}`);
 		} finally {
 			this.busy = false;
 		}
@@ -166,6 +205,10 @@ export class HandshakeEngine {
 			}
 			if (!this.peer) this.bind(peer);
 			this.opticallyVerified();
+			if (this.o.frames) {
+				await this.startFrames();
+				return;
+			}
 			const [sig, payload] = await Promise.all([this.signature(), this.payload()]);
 			if (this.ended || !payload) return;
 			this.show({ kind: 'C', sig, qwbp: payload }, 'C');
@@ -304,10 +347,109 @@ export class HandshakeEngine {
 		this.mark('done');
 		this.ended = true;
 		clearTimeout(this.deadline);
-		const conn = this.conn!;
-		if (this.link) setTimeout(() => conn.close(), CLOSE_AFTER_CHANNEL_MS);
-		else conn.close();
+		clearInterval(this.frameTimer);
+		const conn = this.conn;
+		if (conn && this.link) setTimeout(() => conn.close(), CLOSE_AFTER_CHANNEL_MS);
+		else conn?.close();
 		this.o.onDone(outcome, { ...this.timings });
+	}
+
+	// ---------- animated-QR mode ----------
+
+	/** Sign the proof and loop it as frames; from here the camera reads the peer's frames. */
+	private async startFrames(): Promise<void> {
+		if (this.ownFrames) return;
+		const card = this.o.claim?.card ?? this.o.identity.card;
+		const nameBytes = nameBytesOf(card.name);
+		const T = this.T!;
+		const bytes = encodeProof({
+			opticalSig: await this.signature(),
+			signPkey: toBytes(card.sign_pkey!),
+			pqSig: signPq(proofMessage(T, nameBytes), this.o.identity.signSkey),
+			nameBytes,
+		});
+		if (this.ended) return;
+		this.ownFrames = split(toBase45(bytes), this.o.frames!.dataChars);
+		this.stage = 'F';
+		this.mark('frames started');
+		this.log(`sending the proof (${bytes.length} bytes) as ${this.ownFrames.length} frames`);
+		const peerHash = this.peer!.userHash;
+		this.setDeadline(this.o.framesMs, () => ({
+			kind: 'verified',
+			peerHash,
+			code: sessionCode(T),
+			reason: `the frames did not get across within ${this.o.framesMs / 1000} s`,
+		}));
+		this.frameTimer = setInterval(() => this.showFrame(), 1000 / this.o.frames!.fps);
+		this.showFrame();
+	}
+
+	private showFrame(): void {
+		const frames = this.ownFrames!;
+		const index = this.frameAt++ % frames.length;
+		this.o.onShow(
+			encodeFrame({ sender: senderTag(this.me.nonce), index, total: frames.length, received: this.received, data: frames[index] }),
+			'F',
+		);
+	}
+
+	private async onFrame(f: Frame): Promise<void> {
+		if (f.sender === senderTag(this.me.nonce)) return; // our own, in a reflection
+		if (!this.peer || f.sender !== senderTag(this.peer.nonce)) {
+			this.noteOnce(`ignored frames of another session (${f.sender})`);
+			return;
+		}
+		// The peer sends frames once it verified our B: ours go out too. Its own
+		// optical signature comes inside its proof.
+		if (this.stage === 'B') await this.startFrames();
+		if (this.ended || this.stage !== 'F') return;
+		this.peerHas = Math.max(this.peerHas, Math.min(f.received, this.ownFrames!.length));
+		this.peerFrames ??= new Array(f.total).fill(null);
+		if (f.total !== this.peerFrames.length) {
+			this.noteOnce('frames disagree on their count');
+			return;
+		}
+		if (this.peerFrames[f.index] === null) {
+			this.peerFrames[f.index] = f.data;
+			this.received++;
+			if (this.received === f.total) {
+				this.assemble();
+				// Our frames carry the full count from now on, starting with the one
+				// on screen, which stays there when the session ends: the peer
+				// finishes on reading it.
+				this.showFrame();
+			}
+		}
+		this.o.onProgress?.({ sent: this.ownFrames!.length, peerHas: this.peerHas, received: this.received, total: f.total });
+		if (this.framesResult && this.peerHas === this.ownFrames!.length) {
+			this.mark('peer holds every frame');
+			this.finish(this.framesResult);
+		}
+	}
+
+	/** The peer's whole proof is in: check it, and keep our frames up until the peer has all of them too. */
+	private assemble(): void {
+		this.mark('frames received');
+		const peer = this.peer!;
+		const code = sessionCode(this.T!);
+		const bytes = fromBase45(this.peerFrames!.join(''));
+		const proof = bytes && decodeProof(bytes);
+		const verdict = proof ? checkProof(proof, peer, this.T!) : { ok: false as const, reason: 'the frames do not make a proof' };
+		if (verdict.ok) {
+			this.log(`confirmed: ${verdict.name} — identity key matches, optical and post-quantum signatures ok`);
+			this.framesResult = { kind: 'confirmed', peerName: verdict.name, peerHash: peer.userHash, code };
+		} else {
+			this.log(`not confirmed: ${verdict.reason}`);
+			this.framesResult = { kind: 'verified', peerHash: peer.userHash, code, reason: verdict.reason };
+		}
+		const result = this.framesResult;
+		this.setDeadline(LINGER_MS, () => result);
+	}
+
+	private noteOnce(line: string): void {
+		if (this.idle.has(line)) return;
+		this.idle.add(line);
+		this.log(line);
 	}
 
 	private mark(milestone: string): void {

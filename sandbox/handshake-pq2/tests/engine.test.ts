@@ -6,6 +6,7 @@ import { HandshakeEngine, type EngineOptions, type Outcome, type Stage } from '.
 import { FakeNetwork } from '../src/channel';
 import { createIdentity, type Identity } from '../src/identity';
 import { encode, parse, signOptical, transcript } from '../src/protocol';
+import { FRAME_DATA_CHARS } from '../src/frames';
 
 interface Side {
 	engine: HandshakeEngine;
@@ -205,5 +206,56 @@ describe('the end of a session', () => {
 		expect(a.log).toHaveLength(logged);
 		expect(a.outcome).toBeNull();
 		expect(net.channels[0].closed).toBe(true);
+	});
+});
+
+describe('animated QR, no network', () => {
+	const frames = { frames: { dataChars: FRAME_DATA_CHARS.large, fps: 200 } };
+
+	/** Each side reads whatever frame the other shows at the moment, until both are done. */
+	const exchange = async (a: Side, b: Side, ms = 15_000) => {
+		const until = Date.now() + ms;
+		while (Date.now() < until && !(a.outcome && b.outcome)) {
+			await a.engine.read(b.code);
+			await b.engine.read(a.code);
+			await new Promise((r) => setTimeout(r, 2));
+		}
+	};
+
+	it('confirm each other through the cameras alone, and show the same six digits', async () => {
+		const net = new FakeNetwork();
+		net.reachable = false;
+		const a = side(alice, net, frames);
+		const b = side(bob, net, frames);
+		await exchange(a, b);
+		expect(a.outcome).toMatchObject({ kind: 'confirmed', peerName: 'Bob' });
+		expect(b.outcome).toMatchObject({ kind: 'confirmed', peerName: 'Alice' });
+		expect((a.outcome as { code: string }).code).toBe((b.outcome as { code: string }).code);
+		expect(net.channels).toEqual([]);
+		expect(a.log.join('\n')).toMatch(/sending the proof \(\d+ bytes\) as \d+ frames/);
+	});
+
+	it('a phone showing someone else\'s identity with its own key is not confirmed', async () => {
+		const net = new FakeNetwork();
+		const honest = side(bob, net, frames);
+		const impostor = side(mallory, net, { ...frames, claim: { userHash: alice.userHash, card: alice.card } });
+		await exchange(honest, impostor);
+		expect(honest.outcome).toMatchObject({ kind: 'verified', reason: 'post-quantum signature does not verify' });
+	});
+
+	it('frames of another session are ignored', async () => {
+		const net = new FakeNetwork();
+		const a = side(alice, net, frames);
+		const b = side(bob, net, frames);
+		const m = side(mallory, net, frames);
+		const c = side(alice, net, frames); // Alice's other session, which Mallory pairs with
+		await a.engine.read(b.code); // a binds Bob, shows B
+		await m.engine.read(c.code);
+		await c.engine.read(m.code);
+		await m.engine.read(c.code); // Mallory verified c's B and shows frames
+		expect(m.stage).toBe('F');
+		await a.engine.read(m.code);
+		expect(a.stage).toBe('B');
+		expect(a.log.join('\n')).toMatch(/another session|own identity|nothing to do/);
 	});
 });

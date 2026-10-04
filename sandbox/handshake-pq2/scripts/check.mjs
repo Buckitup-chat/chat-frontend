@@ -48,7 +48,7 @@ const phone = async (init = {}) => {
 };
 
 /** Each page reads the other's current code, alternating, until both are done or time runs out. */
-const handshake = async (a, b, seconds = 30) => {
+const handshake = async (a, b, seconds = 30, pauseMs = 150) => {
 	const until = Date.now() + seconds * 1000;
 	while (Date.now() < until) {
 		const [outA, outB] = await Promise.all([a.evaluate(() => window.__pq2.outcome()), b.evaluate(() => window.__pq2.outcome())]);
@@ -57,7 +57,7 @@ const handshake = async (a, b, seconds = 30) => {
 		await a.evaluate((c) => window.__pq2.read(c), codeB);
 		const codeA = await a.evaluate(() => window.__pq2.code());
 		await b.evaluate((c) => window.__pq2.read(c), codeA);
-		await a.waitForTimeout(150);
+		await a.waitForTimeout(pauseMs);
 	}
 	return Promise.all([a.evaluate(() => window.__pq2.outcome()), b.evaluate(() => window.__pq2.outcome())]);
 };
@@ -81,6 +81,14 @@ try {
 	check('a phone showing Alice\'s identity with its own key is not confirmed by Bob', b2?.kind === 'verified' && /does not certify/.test(b2?.reason ?? ''), `${b2?.kind}: ${b2?.reason}`);
 	check('…and Bob\'s screen named Alice\'s identity as the one shown', b2?.peerHash === aliceCard.user_hash);
 	void m;
+
+	// Animated QR: no network channel at all, the proof goes through the codes.
+	const framesMode = { 'pq2.settings': JSON.stringify({ channel: 'frames', frameSize: 'large', fps: 8 }) };
+	const [carol, dave] = [await phone(framesMode), await phone(framesMode)];
+	const started = Date.now();
+	const [c, d] = await handshake(carol, dave, 60, 20);
+	check('two phones confirm each other through animated QR, with no channel', c?.kind === 'confirmed' && d?.kind === 'confirmed', `${c?.kind}/${d?.kind} ${c?.reason ?? ''}${d?.reason ?? ''} in ${((Date.now() - started) / 1000).toFixed(1)} s`);
+	check('…and show the same six digits', !!c?.code && c?.code === d?.code, `${c?.code} / ${d?.code}`);
 } finally {
 	await browser.close();
 	server.close();

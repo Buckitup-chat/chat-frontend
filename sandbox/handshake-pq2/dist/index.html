@@ -5,7 +5,7 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 	<meta name="theme-color" content="#241824" />
 	<title>PQ2 handshake sandbox</title>
-  <script type="module" crossorigin src="./assets/index-CjKunk7o.js"></script>
+  <script type="module" crossorigin src="./assets/index-Hj7IOWSc.js"></script>
   <link rel="stylesheet" crossorigin href="./assets/index-BcFBHqBu.css">
 </head>
 <body>
@@ -20,9 +20,24 @@
 	<section id="settings" hidden>
 		<label>Name <input id="name" autocomplete="off" /></label>
 		<label>Channel
-			<select id="ice">
+			<select id="channel">
 				<option value="none">STUN off — phones on one network</option>
 				<option value="stun">STUN on — Google, across networks</option>
+				<option value="frames">Animated QR — no network</option>
+			</select>
+		</label>
+		<label>Animated QR: frame size
+			<select id="frameSize">
+				<option value="small">Small — more frames, easier to read</option>
+				<option value="medium">Medium</option>
+				<option value="large">Large — fewer frames, harder to read</option>
+			</select>
+		</label>
+		<label>Animated QR: frames per second
+			<select id="fps">
+				<option value="3">3</option>
+				<option value="5">5</option>
+				<option value="8">8</option>
 			</select>
 		</label>
 		<label>Camera

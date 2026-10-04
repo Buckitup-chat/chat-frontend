@@ -41,6 +41,7 @@ blue D), and turns green, amber or red at the end.
 | 6 | Point a phone at a mirror | Nothing happens: its own code is ignored (see the log) |
 | 7 | Start a session and wait 90 s without scanning | ⌛ Session expired |
 | 8 | Laptop and phone. A laptop webcam reads the phone's B — the densest code — only from about 20 cm, if at all: hold the phone's screen to the webcam, then turn the phone to read the laptop's screen (⚙︎ → Camera: Back reads better), or pass a code by hand with "Copy my code" / "Paste a code" | Same as 1, slower |
+| 9 | Both on mobile data (or in airplane mode), ⚙︎ → Channel: Animated QR on both. After the B codes, keep the phones still while the codes change several times a second | Both: ✅ Confirmed and the same six digits, with "identity key matches · optical and post-quantum signatures ok". Note the time in "Timings" — "frames started" to "done" — and try the frame sizes and rates |
 
 In test 5, a phone that has confirmed nobody impersonates a stand-in
 identity instead. Without the reload, B would see its own identity and
@@ -57,11 +58,35 @@ other at all.
 - The spec's "one retry with configured ICE servers" (§5) is a setting here
   instead: a QWBP connection gathers its candidates before its code is shown,
   so changing ICE servers means new codes, i.e. a new session.
-- No multi-frame codes: with no network path between the phones, the result
-  is "verified in person, not confirmed", by design.
 - The QWBP connection is set up when the session starts, not after the
   optical check (§5 step 3), so C shows without waiting for the address
   gathering. Nothing of it is shown before C.
+
+## Animated QR
+
+An experiment that is not in the spec: with ⚙︎ → Channel: Animated QR, the
+phones use no network at all. After the B codes, each phone shows a loop of
+QR frames instead of C and D, reads the other's, and the post-quantum proof
+goes through the cameras (`src/frames.ts`).
+
+A phone sends the smallest proof that confirms it: its optical signature,
+its identity key (2,592 bytes) and an ML-DSA-87 signature over the
+transcript and its name (4,627 bytes) — about 7.3 KB. The network channel
+carries the whole card instead, about 30 KB. The transcript holds the
+contact key the codes showed, so the identity's signature over it ties that
+key to the identity for this session, as the card's certificate does for
+good. The receiving phone checks that the identity key is the user_hash the
+codes showed and that both signatures verify.
+
+The proof travels in base45 (RFC 9285), whose alphabet is the QR
+alphanumeric mode: 5.5 bits a character instead of 8. A frame reads
+`PQ2:F:<sender>:<index>:<count>:<received>:<data>`: the sender is its
+session (three bytes of its nonce), and "received" is how many of the other
+phone's frames it holds — a phone that holds everything keeps its frames up
+until the other one says so too, or for 20 s. Frame sizes: small about 48
+frames (QR version 8), medium about 25 (version 11, as dense as B), large
+about 16 (version 15). The six digits come from the transcript alone, as no
+channel is there to cover.
 
 ## Develop
 

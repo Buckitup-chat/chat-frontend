@@ -18,9 +18,24 @@
 	<section id="settings" hidden>
 		<label>Name <input id="name" autocomplete="off" /></label>
 		<label>Channel
-			<select id="ice">
+			<select id="channel">
 				<option value="none">STUN off — phones on one network</option>
 				<option value="stun">STUN on — Google, across networks</option>
+				<option value="frames">Animated QR — no network</option>
+			</select>
+		</label>
+		<label>Animated QR: frame size
+			<select id="frameSize">
+				<option value="small">Small — more frames, easier to read</option>
+				<option value="medium">Medium</option>
+				<option value="large">Large — fewer frames, harder to read</option>
+			</select>
+		</label>
+		<label>Animated QR: frames per second
+			<select id="fps">
+				<option value="3">3</option>
+				<option value="5">5</option>
+				<option value="8">8</option>
 			</select>
 		</label>
 		<label>Camera

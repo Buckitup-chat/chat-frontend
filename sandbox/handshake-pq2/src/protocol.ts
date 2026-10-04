@@ -147,12 +147,15 @@ const fingerprintsInOrder = (T: Uint8Array, a: string, b: string, fps: Fingerpri
 export const pqMessage = (T: Uint8Array, a: string, b: string, fps: Fingerprints): Uint8Array =>
 	concatBytes(utf8(PQ_TAG), fingerprintsInOrder(T, a, b, fps));
 
-/** The six digits both screens show; they cover the fingerprints, so a swapped channel changes them. */
-export const comparisonCode = (T: Uint8Array, a: string, b: string, fps: Fingerprints): string => {
-	const out = hkdfDerive(fingerprintsInOrder(T, a, b, fps), SAS_SALT, 'sas', 4);
+/** Four bytes as a big-endian number, mod 10^6, zero-padded: the six digits a screen shows. */
+export const sixDigits = (out: Uint8Array): string => {
 	const n = ((out[0] << 24) >>> 0) + (out[1] << 16) + (out[2] << 8) + out[3];
 	return String(n % 1_000_000).padStart(6, '0');
 };
+
+/** The six digits both screens show; they cover the fingerprints, so a swapped channel changes them. */
+export const comparisonCode = (T: Uint8Array, a: string, b: string, fps: Fingerprints): string =>
+	sixDigits(hkdfDerive(fingerprintsInOrder(T, a, b, fps), SAS_SALT, 'sas', 4));
 
 // ---------- signatures ----------
 

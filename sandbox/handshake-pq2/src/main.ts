@@ -9,6 +9,7 @@ import escapeHtml from '@/utils/escapeHtml';
 import { HandshakeEngine, type Outcome, type Stage, type Timings } from './engine';
 import { QwbpChannel } from './channel';
 import { createIdentity, type Identity } from './identity';
+import { FRAME_DATA_CHARS, type FrameSize } from './frames';
 import type { UserCardRow } from '@/lib/data/types';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -16,7 +17,10 @@ const withCamera = !new URLSearchParams(location.search).has('nocamera');
 
 interface Settings {
 	name: string;
-	ice: 'none' | 'stun';
+	/** none and stun: a WebRTC channel; frames: animated QR, no network. */
+	channel: 'none' | 'stun' | 'frames';
+	frameSize: FrameSize;
+	fps: number;
 	camera: 'user' | 'environment';
 	mode: 'honest' | 'impostor';
 }
@@ -35,7 +39,15 @@ const stored = <T>(key: string): T | null => {
 };
 
 const randomName = () => `Phone ${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
-const settings: Settings = { name: randomName(), ice: 'none', camera: 'user', mode: 'honest', ...stored<Partial<Settings>>(SETTINGS_KEY) };
+const settings: Settings = {
+	name: randomName(),
+	channel: 'none',
+	frameSize: 'medium',
+	fps: 5,
+	camera: 'user',
+	mode: 'honest',
+	...stored<Partial<Settings>>(SETTINGS_KEY),
+};
 const saveSettings = () => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 saveSettings(); // the phone keeps its name across reloads
 let identity: Identity = createIdentity(settings.name);
@@ -60,6 +72,7 @@ const stageText: Record<Stage, string> = {
 	B: 'Read their identity. Showing my signature (B).',
 	C: 'Their key is proved in person. Showing my channel offer (C).',
 	D: 'Showing my channel answer (D).',
+	F: 'Their key is proved in person. Exchanging the proofs as moving frames: hold still.',
 	done: '',
 };
 
@@ -71,17 +84,22 @@ const log = (line: string) => {
 	console.log('[pq2]', line);
 };
 
+let shownStage: Stage = 'idle';
 const show = async (code: string, stage: Stage) => {
 	currentCode = code;
-	$('qrWrap').dataset.stage = stage;
-	$('stage').textContent = stageText[stage];
+	if (stage !== shownStage) {
+		// Frames change several times a second; the text and the buzz follow the steps.
+		shownStage = stage;
+		$('qrWrap').dataset.stage = stage;
+		$('stage').textContent = stageText[stage];
+		navigator.vibrate?.(40);
+	}
 	await QRCode.toCanvas($<HTMLCanvasElement>('qr'), code, { errorCorrectionLevel: 'L', margin: 2, width: 720 });
-	navigator.vibrate?.(40);
 };
 
 const renderWho = () => {
 	const mode = settings.mode === 'impostor' ? ' · IMPOSTOR' : '';
-	const ice = settings.ice === 'stun' ? 'STUN on' : 'STUN off';
+	const ice = { none: 'STUN off', stun: 'STUN on', frames: `animated QR, ${settings.frameSize}, ${settings.fps}/s` }[settings.channel];
 	$('who').textContent = `${identity.card.name} · ${identity.userHash.slice(0, 12)}… · ${ice}${mode}`;
 };
 
@@ -92,7 +110,7 @@ const renderResult = (outcome: Outcome, timings: Timings) => {
 	$('qrWrap').dataset.outcome = outcome.kind;
 	const code = 'code' in outcome && outcome.code ? `<div class="code">${outcome.code}</div><div class="detail">Compare: the other phone must show the same six digits.</div>` : '';
 	if (outcome.kind === 'confirmed') {
-		box.innerHTML = `<div class="headline">✅ Confirmed: ${escapeHtml(outcome.peerName)}</div>${code}<div class="detail">${outcome.peerHash.slice(0, 16)}…<br>card valid · key certified · post-quantum signature ok</div>`;
+		box.innerHTML = `<div class="headline">✅ Confirmed: ${escapeHtml(outcome.peerName)}</div>${code}<div class="detail">${outcome.peerHash.slice(0, 16)}…<br>${outcome.card ? 'card valid · key certified · post-quantum signature ok' : 'identity key matches · optical and post-quantum signatures ok'}</div>`;
 	} else if (outcome.kind === 'verified') {
 		box.innerHTML = `<div class="headline">🟡 Key verified in person, not confirmed</div>${code}<div class="detail">${escapeHtml(outcome.reason)}<br>${outcome.peerHash.slice(0, 16)}…</div>`;
 	} else {
@@ -171,7 +189,8 @@ const onScan = (text: string) => {
 	lastScan = { text, at: now };
 	if (!scanned.has(text)) {
 		scanned.add(text);
-		log(`camera read ${text.startsWith('PQ2:') ? text.slice(4, 5) : 'a code that is not PQ2'} (${text.length} characters)`);
+		// Frames are many: the engine reports how far they got.
+		if (!text.startsWith('PQ2:F:')) log(`camera read ${text.startsWith('PQ2:') ? text.slice(4, 5) : 'a code that is not PQ2'} (${text.length} characters)`);
 	}
 	void engine?.read(text);
 };
@@ -211,11 +230,17 @@ const startSession = async () => {
 	clearResult();
 	$('log').innerHTML = '';
 	sessionStart = Date.now();
+	shownStage = 'idle';
 	renderWho();
-	const iceServers = settings.ice === 'stun' ? DEFAULT_ICE_SERVERS : [];
+	const iceServers = settings.channel === 'stun' ? DEFAULT_ICE_SERVERS : [];
 	engine = new HandshakeEngine({
 		identity,
-		channel: () => new QwbpChannel(iceServers, log),
+		...(settings.channel === 'frames'
+			? { frames: { dataChars: FRAME_DATA_CHARS[settings.frameSize], fps: settings.fps } }
+			: { channel: () => new QwbpChannel(iceServers, log) }),
+		onProgress: ({ sent, peerHas, received, total }) => {
+			$('stage').textContent = `Frames: they hold ${peerHas}/${sent} of mine, I hold ${received}/${total ?? '?'} of theirs. Hold still.`;
+		},
 		claim: settings.mode === 'impostor' ? impostorClaim() : undefined,
 		onShow: (code, stage) => void show(code, stage),
 		onLog: log,
@@ -226,7 +251,7 @@ const startSession = async () => {
 			letScreenSleep();
 			renderResult(outcome, timings);
 			navigator.vibrate?.(outcome.kind === 'confirmed' ? [200, 80, 200] : [500]);
-			if (outcome.kind === 'confirmed' && settings.mode === 'honest') localStorage.setItem(LAST_PEER_KEY, JSON.stringify(outcome.card));
+			if (outcome.kind === 'confirmed' && outcome.card && settings.mode === 'honest') localStorage.setItem(LAST_PEER_KEY, JSON.stringify(outcome.card));
 		},
 	});
 	engine.start();
@@ -238,7 +263,9 @@ const startSession = async () => {
 
 const fillSettings = () => {
 	$<HTMLInputElement>('name').value = settings.name;
-	$<HTMLSelectElement>('ice').value = settings.ice;
+	$<HTMLSelectElement>('channel').value = settings.channel;
+	$<HTMLSelectElement>('frameSize').value = settings.frameSize;
+	$<HTMLSelectElement>('fps').value = String(settings.fps);
 	$<HTMLSelectElement>('camera').value = settings.camera;
 	$<HTMLSelectElement>('mode').value = settings.mode;
 	const met = stored<UserCardRow>(LAST_PEER_KEY);
@@ -253,7 +280,9 @@ $('settingsBtn').addEventListener('click', () => {
 });
 
 $('applySettings').addEventListener('click', () => {
-	settings.ice = $<HTMLSelectElement>('ice').value as Settings['ice'];
+	settings.channel = $<HTMLSelectElement>('channel').value as Settings['channel'];
+	settings.frameSize = $<HTMLSelectElement>('frameSize').value as FrameSize;
+	settings.fps = Number($<HTMLSelectElement>('fps').value);
 	settings.camera = $<HTMLSelectElement>('camera').value as Settings['camera'];
 	settings.mode = $<HTMLSelectElement>('mode').value as Settings['mode'];
 	const name = $<HTMLInputElement>('name').value.trim();
