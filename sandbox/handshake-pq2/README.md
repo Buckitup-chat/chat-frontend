@@ -25,11 +25,11 @@ Safari cannot reach the other phone directly.
 
 ## Test by hand
 
-Hold the phones face to face, screens towards each other, about 15–25 cm
-apart. Each screen shows its code; the small preview in the corner is its
-camera. The frame around the code changes colour as the session advances
-(grey A → purple B → dark purple C → blue D), and turns green, amber or red
-at the end.
+Hold the phones face to face, screens towards each other, about 25–40 cm
+apart: closer, a front camera does not focus. Each screen shows its code;
+the small preview in the corner is its camera. The frame around the code
+changes colour as the session advances (grey A → purple B → dark purple C →
+blue D), and turns green, amber or red at the end.
 
 | # | Setup | Expected |
 |---|---|---|

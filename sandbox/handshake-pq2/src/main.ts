@@ -48,6 +48,8 @@ let sessionStart = 0;
 let lastScan = { text: '', at: 0 };
 /** Codes the camera read this session, so the log names each one once. */
 let scanned = new Set<string>();
+/** Frames the decoder looked at and found no code in. */
+let framesScanned = 0;
 let wakeLock: WakeLockSentinel | null = null;
 
 // ---------- the parts of the page ----------
@@ -127,8 +129,14 @@ const startCamera = async () => {
 	}
 	video.hidden = false;
 	if (!scanner) {
+		// qr-scanner prefers the browser's BarcodeDetector whenever the browser
+		// lists QR among its formats, and falls back only when it throws. A
+		// browser can list QR and still find nothing; the decoder qr-scanner
+		// ships reads the same in every browser.
+		(QrScanner as unknown as { _disableBarcodeDetector: boolean })._disableBarcodeDetector = true;
 		scanner = new QrScanner(video, (result) => onScan(result.data), {
 			returnDetailedScanResult: true,
+			onDecodeError: () => framesScanned++,
 			preferredCamera: settings.camera,
 			maxScansPerSecond: 12,
 			calculateScanRegion: (v) => {
@@ -144,7 +152,15 @@ const startCamera = async () => {
 		await scanner.start();
 	} catch (e) {
 		log(`camera did not start: ${(e as Error).message ?? e}`);
+		return;
 	}
+	log(`camera: ${video.videoWidth}×${video.videoHeight}, qr-scanner's own decoder`);
+	// Tells a camera that looks at codes and finds none from one that is not scanning at all.
+	const session = sessionStart;
+	framesScanned = 0;
+	setTimeout(() => {
+		if (session === sessionStart && !scanned.size) log(`camera: ${framesScanned} frames scanned in 5 s, no code found`);
+	}, 5_000);
 };
 
 const stopCamera = () => scanner?.stop();
