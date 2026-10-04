@@ -1,6 +1,6 @@
 // Channel adapters for the engine: QWBP over WebRTC in the browser, and a
 // fake network for the tests.
-import { MIN_PACKET_SIZE, QWBPConnection, decode } from 'qwbp';
+import { MIN_PACKET_SIZE, QWBPConnection, decode, encode } from 'qwbp';
 import { concatBytes, randomBytes } from '@noble/hashes/utils';
 import { equalBytes } from '@noble/post-quantum/utils.js';
 import type { ChannelAdapter, ChannelLink } from './engine';
@@ -11,6 +11,13 @@ const linkOf = (channel: RTCDataChannel): ChannelLink => ({
 		channel.onmessage = (event) => handler(String(event.data));
 	},
 });
+
+/**
+ * Addresses a code offers. QWBP's own cut, the first 4, can be all virtual
+ * networks on a computer running VMs or containers; more makes C and D denser,
+ * and B is already at the limit of what a camera reads.
+ */
+const MAX_ADDRESSES = 6;
 
 const candidatesOf = (payload: Uint8Array) =>
 	decode(payload).candidates.map((c) => `${c.type}/${c.ip}`).join(', ');
@@ -23,9 +30,8 @@ export class QwbpChannel implements ChannelAdapter {
 		this.conn = new QWBPConnection({
 			// An empty list means host candidates only: the phones must share a network.
 			iceServers,
-			// QWBP's default of 4 addresses can be all virtual ones on a computer
-			// running VMs or containers, leaving out the one the phone can reach.
-			maxCandidates: 8,
+			// All of them: payload() chooses what the code offers.
+			maxCandidates: 64,
 			// The engine's deadlines end every session long before, and close the connection.
 			timeout: 60 * 60_000,
 			onError: (e) => log(`channel: ${e.message}`),
@@ -34,9 +40,18 @@ export class QwbpChannel implements ChannelAdapter {
 
 	payload(): Promise<Uint8Array> {
 		this.own ??= this.conn.initialize().then(() => {
-			const payload = this.conn.getQRPayload();
+			const all = this.conn.getQRPayload();
 			// Without a single address the payload is not even a QWBP packet, and nothing could reach this phone.
-			if (payload.length < MIN_PACKET_SIZE) throw new Error('this phone has no network address to offer (airplane mode?)');
+			if (all.length < MIN_PACKET_SIZE) throw new Error('this phone has no network address to offer (airplane mode?)');
+			// UDP only: a TCP candidate repeats an address the data channel reaches
+			// over UDP anyway. As QWBP does, IPv4 first and one slot kept for a
+			// STUN-found address.
+			const { fingerprint, candidates } = decode(all);
+			const udp = candidates.filter((c) => c.protocol === 'udp');
+			const stun = udp.filter((c) => c.type === 'srflx').slice(0, 1);
+			const offered = [...udp.filter((c) => c.type === 'host').slice(0, MAX_ADDRESSES - stun.length), ...stun];
+			if (!offered.length) throw new Error('this phone has no UDP address to offer');
+			const payload = encode(fingerprint, offered);
 			this.log(`own payload ${payload.length} B, candidates: ${candidatesOf(payload)}`);
 			return payload;
 		});
