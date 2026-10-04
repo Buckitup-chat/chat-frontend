@@ -41,13 +41,14 @@ main { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 
 .qr {
 	background: #fff;
-	padding: 10px;
+	padding: 6px;
 	border-radius: 12px;
-	border: 8px solid #555;
+	border: 6px solid #555;
 	line-height: 0;
 	transition: border-color 0.2s;
 }
-.qr canvas { width: min(88vw, 460px) !important; height: auto !important; image-rendering: pixelated; }
+/* As large as the screen allows: B, the densest code, is at the limit of what a camera reads at arm's length. */
+.qr canvas { width: min(94vw, 72vh) !important; height: auto !important; image-rendering: pixelated; }
 .qr[data-stage='A'] { border-color: #666; }
 .qr[data-stage='B'] { border-color: #8e2b77; }
 .qr[data-stage='C'] { border-color: #611e52; }

@@ -23,6 +23,9 @@ export class QwbpChannel implements ChannelAdapter {
 		this.conn = new QWBPConnection({
 			// An empty list means host candidates only: the phones must share a network.
 			iceServers,
+			// QWBP's default of 4 addresses can be all virtual ones on a computer
+			// running VMs or containers, leaving out the one the phone can reach.
+			maxCandidates: 8,
 			// The engine's deadlines end every session long before, and close the connection.
 			timeout: 60 * 60_000,
 			onError: (e) => log(`channel: ${e.message}`),

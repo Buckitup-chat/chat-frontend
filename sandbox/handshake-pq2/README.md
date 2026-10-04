@@ -40,7 +40,7 @@ at the end.
 | 5 | After test 1, reload phone B: it gets a new identity. On phone A: ⚙︎ → Mode: Impostor. A now shows B's old identity with A's own key, and sends B's old card | B: 🟡 "card does not certify the contact key the codes showed". Never ✅ |
 | 6 | Point a phone at a mirror | Nothing happens: its own code is ignored (see the log) |
 | 7 | Start a session and wait 90 s without scanning | ⌛ Session expired |
-| 8 | Laptop and phone: ⚙︎ → Camera: Back on the phone, or "Paste a code" / "Copy my code" to pass codes by hand | Same as 1, slower |
+| 8 | Laptop and phone. A laptop webcam reads the phone's B — the densest code — only from about 20 cm, if at all: hold the phone's screen to the webcam, then turn the phone to read the laptop's screen (⚙︎ → Camera: Back reads better), or pass a code by hand with "Copy my code" / "Paste a code" | Same as 1, slower |
 
 In test 5, a phone that has confirmed nobody impersonates a stand-in
 identity instead. Without the reload, B would see its own identity and
