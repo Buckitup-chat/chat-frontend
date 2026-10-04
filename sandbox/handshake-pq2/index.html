@@ -21,9 +21,16 @@
 			<select id="channel">
 				<option value="none">STUN off — phones on one network</option>
 				<option value="stun">STUN on — Google, across networks</option>
+				<option value="turn">TURN — through a relay server</option>
 				<option value="frames">Animated QR — no network</option>
 			</select>
 		</label>
+		<label>TURN server URL
+			<input id="turnUrl" autocomplete="off" placeholder="turn:host:port?transport=tcp" />
+		</label>
+		<label>TURN user <input id="turnUser" autocomplete="off" /></label>
+		<label>TURN password <input id="turnPass" type="password" autocomplete="off" /></label>
+		<label class="check"><input id="relayOnly" type="checkbox" /> TURN: offer the relay's addresses only</label>
 		<label>Animated QR: frame size
 			<select id="frameSize">
 				<option value="small">Small — more frames, easier to read</option>

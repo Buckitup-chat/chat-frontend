@@ -89,6 +89,23 @@ try {
 	const [c, d] = await handshake(carol, dave, 60, 20);
 	check('two phones confirm each other through animated QR, with no channel', c?.kind === 'confirmed' && d?.kind === 'confirmed', `${c?.kind}/${d?.kind} ${c?.reason ?? ''}${d?.reason ?? ''} in ${((Date.now() - started) / 1000).toFixed(1)} s`);
 	check('…and show the same six digits', !!c?.code && c?.code === d?.code, `${c?.code} / ${d?.code}`);
+
+	// TURN, when a relay server is named (PQ2_TURN_URL, PQ2_TURN_USER,
+	// PQ2_TURN_PASS): both pages offer only its addresses, so the channel can
+	// only go through it.
+	if (process.env.PQ2_TURN_URL) {
+		const turnMode = {
+			'pq2.settings': JSON.stringify({
+				channel: 'turn', relayOnly: true, turnUrl: process.env.PQ2_TURN_URL,
+				turnUser: process.env.PQ2_TURN_USER ?? '', turnPass: process.env.PQ2_TURN_PASS ?? '',
+			}),
+		};
+		const [erin, frank] = [await phone(turnMode), await phone(turnMode)];
+		const [e, f] = await handshake(erin, frank, 60);
+		const offered = await erin.$$eval('#log li', (lis) => lis.map((li) => li.textContent).find((t) => t.includes('own payload')) ?? '');
+		check('two phones confirm each other through the TURN relay', e?.kind === 'confirmed' && f?.kind === 'confirmed', `${e?.kind}/${f?.kind} ${e?.reason ?? ''}${f?.reason ?? ''}`);
+		check('…offering the relay\'s addresses only', /offered: relay\//.test(offered) && !/host\//.test(offered), offered.trim());
+	}
 } finally {
 	await browser.close();
 	server.close();

@@ -42,6 +42,8 @@ blue D), and turns green, amber or red at the end.
 | 7 | Start a session and wait 90 s without scanning | ⌛ Session expired |
 | 8 | Laptop and phone. A laptop webcam reads the phone's B — the densest code — only from about 20 cm, if at all: hold the phone's screen to the webcam, then turn the phone to read the laptop's screen (⚙︎ → Camera: Back reads better), or pass a code by hand with "Copy my code" / "Paste a code" | Same as 1, slower |
 | 9 | Both on mobile data (or in airplane mode), ⚙︎ → Channel: Animated QR on both. After the B codes, keep the phones still while the codes change several times a second | Both: ✅ Confirmed and the same six digits, with "identity key matches · optical and post-quantum signatures ok". Note the time in "Timings" — "frames started" to "done" — and try the frame sizes and rates |
+| 10 | Both on mobile data, ⚙︎ → Channel: TURN with the relay server's URL, user and password (section "TURN") | Both: ✅ Confirmed, the same six digits; the log's "own payload" line offers `relay/…` addresses |
+| 11 | On one Wi-Fi, Channel: TURN with "offer the relay's addresses only" | Same as 10: the relay works without leaving the room |
 
 In test 5, a phone that has confirmed nobody impersonates a stand-in
 identity instead. Without the reload, B would see its own identity and
@@ -61,6 +63,48 @@ other at all.
 - The QWBP connection is set up when the session starts, not after the
   optical check (§5 step 3), so C shows without waiting for the address
   gathering. Nothing of it is shown before C.
+
+## TURN
+
+With ⚙︎ → Channel: TURN, the phones reach each other through a relay
+server when they share no network — both on mobile data, for instance. The
+settings take the server's URL (`turn:host:port?transport=tcp`), user and
+password, kept in this browser's storage. "Offer the relay's addresses
+only" leaves the phones' own addresses out of the code, so the connection
+goes through the relay even on one Wi-Fi.
+
+QWBP's code has no room for relay addresses: its format knows host and
+srflx candidates only, and it drops relay ones. The sandbox reads them from
+the connection's own description and puts them in the code as srflx — the
+other phone needs only where to send. The app needs the same.
+
+The relay sees only encrypted traffic: DTLS runs between the phones, and
+the fingerprints in the codes make sure the channel ends at the phone that
+showed them. What the relay learns is that two addresses exchanged a few
+kilobytes.
+
+### A relay server on Railway
+
+coturn from its Docker image, behind Railway's TCP proxy. Railway takes no
+UDP from outside; both phones then reach the relay over TCP, and their
+allocations meet inside the server. Tested here with a local TURN server,
+not yet on Railway.
+
+1. New service → Docker image `coturn/coturn:4.6.3`.
+2. Custom start command:
+
+   ```
+   turnserver -n --log-file=stdout --listening-port=3478 --realm=buckitup --lt-cred-mech --user=pq2:<password> --fingerprint --no-tls --no-dtls --no-cli --min-port=49152 --max-port=49252
+   ```
+
+3. Settings → Networking → TCP Proxy on port 3478. Railway gives
+   `<name>.proxy.rlwy.net:<port>`.
+4. On both phones: Channel: TURN, URL
+   `turn:<name>.proxy.rlwy.net:<port>?transport=tcp`, user `pq2`, the
+   password.
+
+The Chromium check runs the same through any relay:
+`PQ2_TURN_URL=turn:… PQ2_TURN_USER=… PQ2_TURN_PASS=… node sandbox/handshake-pq2/scripts/check.mjs`.
 
 ## Animated QR
 

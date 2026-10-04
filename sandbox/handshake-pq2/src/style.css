@@ -108,6 +108,7 @@ button.ghost { background: transparent; border: 1px solid var(--muted); color: v
 	gap: 10px;
 }
 #settings label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+#settings label.check { flex-direction: row; align-items: center; gap: 8px; }
 #settings input, #settings select {
 	font-size: 16px;
 	padding: 8px;

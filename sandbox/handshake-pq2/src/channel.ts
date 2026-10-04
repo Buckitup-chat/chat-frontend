@@ -1,6 +1,6 @@
 // Channel adapters for the engine: QWBP over WebRTC in the browser, and a
 // fake network for the tests.
-import { MIN_PACKET_SIZE, QWBPConnection, decode, encode } from 'qwbp';
+import { MIN_PACKET_SIZE, QWBPConnection, decode, encode, type QWBPCandidate } from 'qwbp';
 import { concatBytes, randomBytes } from '@noble/hashes/utils';
 import { equalBytes } from '@noble/post-quantum/utils.js';
 import type { ChannelAdapter, ChannelLink } from './engine';
@@ -22,11 +22,27 @@ const MAX_ADDRESSES = 6;
 const candidatesOf = (payload: Uint8Array) =>
 	decode(payload).candidates.map((c) => `${c.type}/${c.ip}`).join(', ');
 
+/**
+ * The relay (TURN) addresses in an SDP. QWBP's own list leaves relay
+ * candidates out and its format has no type for them; they go in as srflx,
+ * as all the other phone needs of one is where to send.
+ */
+const relaysOf = (sdp: string): QWBPCandidate[] =>
+	sdp.split('\n').flatMap((line) => {
+		const m = line.match(/^a=candidate:\S+ \d+ udp \d+ (\S+) (\d+) typ relay/i);
+		return m ? [{ ip: m[1], port: Number(m[2]), type: 'srflx' as const, protocol: 'udp' as const }] : [];
+	});
+
 export class QwbpChannel implements ChannelAdapter {
 	private readonly conn: QWBPConnection;
 	private own: Promise<Uint8Array> | null = null;
 
-	constructor(iceServers: RTCIceServer[], private readonly log: (line: string) => void) {
+	/** relayOnly: offer only the relay server's addresses, so that whatever connects goes through it. */
+	constructor(
+		iceServers: RTCIceServer[],
+		private readonly log: (line: string) => void,
+		private readonly relayOnly = false,
+	) {
 		this.conn = new QWBPConnection({
 			// An empty list means host candidates only: the phones must share a network.
 			iceServers,
@@ -44,15 +60,23 @@ export class QwbpChannel implements ChannelAdapter {
 			// Without a single address the payload is not even a QWBP packet, and nothing could reach this phone.
 			if (all.length < MIN_PACKET_SIZE) throw new Error('this phone has no network address to offer (airplane mode?)');
 			// UDP only: a TCP candidate repeats an address the data channel reaches
-			// over UDP anyway. As QWBP does, IPv4 first and one slot kept for a
-			// STUN-found address.
+			// over UDP anyway. Relay addresses first, then one STUN-found address,
+			// then the phone's own, IPv4 first as QWBP orders them.
 			const { fingerprint, candidates } = decode(all);
 			const udp = candidates.filter((c) => c.protocol === 'udp');
-			const stun = udp.filter((c) => c.type === 'srflx').slice(0, 1);
-			const offered = [...udp.filter((c) => c.type === 'host').slice(0, MAX_ADDRESSES - stun.length), ...stun];
-			if (!offered.length) throw new Error('this phone has no UDP address to offer');
-			const payload = encode(fingerprint, offered);
-			this.log(`own payload ${payload.length} B, candidates: ${candidatesOf(payload)}`);
+			const sdp = (this.conn as unknown as { pc: RTCPeerConnection | null }).pc?.localDescription?.sdp ?? '';
+			const offered = [
+				...relaysOf(sdp).slice(0, 2).map((c) => ({ c, kind: 'relay' })),
+				...(this.relayOnly ? [] : [
+					...udp.filter((c) => c.type === 'srflx').slice(0, 1).map((c) => ({ c, kind: 'srflx' })),
+					...udp.filter((c) => c.type === 'host').map((c) => ({ c, kind: 'host' })),
+				]),
+			].slice(0, MAX_ADDRESSES);
+			if (!offered.length) {
+				throw new Error(this.relayOnly ? 'the relay server gave this phone no address (check the TURN settings)' : 'this phone has no UDP address to offer');
+			}
+			const payload = encode(fingerprint, offered.map((o) => o.c));
+			this.log(`own payload ${payload.length} B, offered: ${offered.map((o) => `${o.kind}/${o.c.ip}`).join(', ')}`);
 			return payload;
 		});
 		return this.own;

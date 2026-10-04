@@ -17,8 +17,14 @@ const withCamera = !new URLSearchParams(location.search).has('nocamera');
 
 interface Settings {
 	name: string;
-	/** none and stun: a WebRTC channel; frames: animated QR, no network. */
-	channel: 'none' | 'stun' | 'frames';
+	/** none, stun and turn: a WebRTC channel; frames: animated QR, no network. */
+	channel: 'none' | 'stun' | 'turn' | 'frames';
+	/** The relay server for channel 'turn', as RTCIceServer takes it. */
+	turnUrl: string;
+	turnUser: string;
+	turnPass: string;
+	/** Offer only the relay server's addresses, so that a connection goes through it even on one network. */
+	relayOnly: boolean;
 	frameSize: FrameSize;
 	fps: number;
 	camera: 'user' | 'environment';
@@ -44,6 +50,10 @@ const settings: Settings = {
 	channel: 'none',
 	frameSize: 'medium',
 	fps: 5,
+	turnUrl: '',
+	turnUser: '',
+	turnPass: '',
+	relayOnly: true,
 	camera: 'user',
 	mode: 'honest',
 	...stored<Partial<Settings>>(SETTINGS_KEY),
@@ -99,7 +109,12 @@ const show = async (code: string, stage: Stage) => {
 
 const renderWho = () => {
 	const mode = settings.mode === 'impostor' ? ' · IMPOSTOR' : '';
-	const ice = { none: 'STUN off', stun: 'STUN on', frames: `animated QR, ${settings.frameSize}, ${settings.fps}/s` }[settings.channel];
+	const ice = {
+		none: 'STUN off',
+		stun: 'STUN on',
+		turn: `TURN${settings.relayOnly ? ', relay only' : ''}`,
+		frames: `animated QR, ${settings.frameSize}, ${settings.fps}/s`,
+	}[settings.channel];
 	$('who').textContent = `${identity.card.name} · ${identity.userHash.slice(0, 12)}… · ${ice}${mode}`;
 };
 
@@ -232,12 +247,17 @@ const startSession = async () => {
 	sessionStart = Date.now();
 	shownStage = 'idle';
 	renderWho();
-	const iceServers = settings.channel === 'stun' ? DEFAULT_ICE_SERVERS : [];
+	const iceServers = {
+		none: [],
+		stun: DEFAULT_ICE_SERVERS,
+		turn: [{ urls: settings.turnUrl, username: settings.turnUser, credential: settings.turnPass }],
+		frames: [],
+	}[settings.channel];
 	engine = new HandshakeEngine({
 		identity,
 		...(settings.channel === 'frames'
 			? { frames: { dataChars: FRAME_DATA_CHARS[settings.frameSize], fps: settings.fps } }
-			: { channel: () => new QwbpChannel(iceServers, log) }),
+			: { channel: () => new QwbpChannel(iceServers, log, settings.channel === 'turn' && settings.relayOnly) }),
 		onProgress: ({ sent, peerHas, received, total }) => {
 			$('stage').textContent = `Frames: they hold ${peerHas}/${sent} of mine, I hold ${received}/${total ?? '?'} of theirs. Hold still.`;
 		},
@@ -264,6 +284,10 @@ const startSession = async () => {
 const fillSettings = () => {
 	$<HTMLInputElement>('name').value = settings.name;
 	$<HTMLSelectElement>('channel').value = settings.channel;
+	$<HTMLInputElement>('turnUrl').value = settings.turnUrl;
+	$<HTMLInputElement>('turnUser').value = settings.turnUser;
+	$<HTMLInputElement>('turnPass').value = settings.turnPass;
+	$<HTMLInputElement>('relayOnly').checked = settings.relayOnly;
 	$<HTMLSelectElement>('frameSize').value = settings.frameSize;
 	$<HTMLSelectElement>('fps').value = String(settings.fps);
 	$<HTMLSelectElement>('camera').value = settings.camera;
@@ -281,6 +305,10 @@ $('settingsBtn').addEventListener('click', () => {
 
 $('applySettings').addEventListener('click', () => {
 	settings.channel = $<HTMLSelectElement>('channel').value as Settings['channel'];
+	settings.turnUrl = $<HTMLInputElement>('turnUrl').value.trim();
+	settings.turnUser = $<HTMLInputElement>('turnUser').value.trim();
+	settings.turnPass = $<HTMLInputElement>('turnPass').value;
+	settings.relayOnly = $<HTMLInputElement>('relayOnly').checked;
 	settings.frameSize = $<HTMLSelectElement>('frameSize').value as FrameSize;
 	settings.fps = Number($<HTMLSelectElement>('fps').value);
 	settings.camera = $<HTMLSelectElement>('camera').value as Settings['camera'];
