@@ -1,74 +1,8 @@
 # Backlog
 
-A living list. The top block is what blocks work right now; below it are product
-and technical tasks with no urgency attached.
-
----
-
-## 1. A rig with automatable WebAuthn (blocks autonomous testing)
-
-**The problem.** Logging into the app requires Touch ID. Every check that needs
-a live account — dialog sync, message delivery, avatars, offline → online, two
-accounts in one browser — runs into a human pressing a finger. A scenario cannot
-be run autonomously, let alone in CI. Right now every login costs one
-interruption of whoever owns the laptop.
-
-**What is needed.** A mode where `navigator.credentials.create/get` answer
-without a human, while the production path stays untouched.
-
-### Option A — a virtual authenticator over CDP (recommended)
-
-Chrome has a first-class `WebAuthn` domain in the DevTools Protocol:
-
-```js
-const client = await page.context().newCDPSession(page);
-await client.send('WebAuthn.enable');
-await client.send('WebAuthn.addVirtualAuthenticator', {
-  options: {
-    protocol: 'ctap2',
-    transport: 'internal',
-    hasUserVerification: true,
-    isUserVerified: true,
-    automaticPresenceSimulation: true,
-  },
-});
-```
-
-After that `create()` and `get()` return instantly and without prompts.
-
-- **Upside:** zero changes in application code — what is exercised is exactly
-  the path that ships, including `@lo-fi/webauthn-local-client` and unlocking
-  the vault. Works locally and in CI.
-- **Downside:** a `playwright` (or `puppeteer`) dependency plus a Chromium
-  download (~150 MB) — devDependencies only.
-- **Size:** about a day. A `tests/e2e/authenticator.ts` helper, a "logged-in
-  account" fixture, and one or two scenarios on top of it.
-
-### Option B — a test flag in the application
-
-`VITE_FAKE_AUTHENTICATOR=1` replaces the WebAuthn calls with a stub holding a
-deterministic key.
-
-- **Upside:** no new dependencies, works in any browser, including the preview
-  panel.
-- **Downside:** what is exercised is not the code that ships, and the codebase
-  gains a branch that bypasses authentication — one that must never be built
-  into a release by accident. It takes discipline (a CI check that the flag is
-  off in the production build).
-- **Size:** half a day.
-
-### Option C — vault fixtures without the UI
-
-Lay a ready unlocked vault straight into IndexedDB before the app starts,
-skipping the login screen.
-
-- **Upside:** the fastest of the three, no WebAuthn at all.
-- **Downside:** it covers neither login nor account creation — which is exactly
-  the stretch that breaks most often. The fixture has to be repaired every time
-  the vault format changes.
-
-**Recommendation:** A as the main route, C as an accelerator for tests that do
-not care about login. B only if A turns out to be incompatible with the build.
+A living list of product and technical tasks with no urgency attached. Numbers
+are stable: a finished item leaves a gap, so references keep pointing at the
+same item.
 
 ---
 
