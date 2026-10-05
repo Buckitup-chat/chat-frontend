@@ -170,11 +170,9 @@ rest of the session: a later code naming a different `user_hash` or
    ```
 
 **Channel failure.** If the channel has not opened 15 s after both payloads
-are known, the handshake ends *optically verified*. There is no retry: the
-relay's addresses are already in the codes, and other servers would mean new
-codes, i.e. a new session. The UI says so: "Key verified in person; not yet
-confirmed — check that both phones are online, or scan again on a shared
-Wi-Fi."
+are known, the handshake ends *optically verified*. There is no retry (§5a).
+The UI says so: "Key verified in person; not yet confirmed — check that both
+phones are online, or scan again on a shared Wi-Fi."
 
 **Session end.** After 90 s without completion, or when the person stops the
 scanner, the session is discarded; a new start mints a new nonce. Codes from
@@ -182,20 +180,29 @@ an ended session verify against nothing.
 
 ## 5a. Addresses and the relay
 
-**Credentials.** When the scanner opens, the client asks its backend for
-relay credentials: `GET /electric/v1/challenge`, then
-`POST /electric/v1/turn_credentials {user_hash, challenge_id, signature}`,
-signed like a read session (`pq_turn_relay` § Endpoint). It keeps them in
-memory and asks again when less than 60 s remain. Any failure — offline,
-`503 turn_unavailable`, `429` — means no relay. The handshake goes on with
-the phone's own addresses, which is all a shared network needs.
+**Credentials.** The client asks its backend for relay credentials when the
+add-contact view opens, one screen before the scanner (`pq_turn_relay`
+§ Endpoint):
+- `GET /electric/v1/challenge` (`api.getChallenge()`);
+- then `POST /electric/v1/turn_credentials {user_hash, challenge_id,
+  signature}`.
 
-**One connection per session, created at start.** QWBP gathers its addresses
-before it yields a payload, and a relay allocation takes up to a second or two.
-So the session creates its QWBP connection in step 1, with the relay as its
-only ICE server, or with none. Its payload is shown first in C or D, never
-before the optical check. Changing servers means a new connection, so a new
-session.
+The signature is ML-DSA-87 over the challenge string's UTF-8 bytes, unpadded
+base64 — the proof `api.ingestWithAuthEach` already sends. Extract it into one
+helper both use. `EncryptionManagerPQ.signChallenge` is not that proof: it
+base64-decodes the challenge first, and the server refuses the result.
+
+The client keeps the credentials in memory and asks again when less than 60 s
+remain. At session start it uses what it has, or waits at most 1 s for a
+request in flight. A failure, an offline phone, `503 turn_unavailable` or a
+timeout all mean no relay: the handshake goes on with the phone's own
+addresses, which is all a shared network needs.
+
+**One connection per session, created at start.** A relay allocation takes up
+to a second or two, so the session creates its QWBP connection in step 1, with
+the relay as its only ICE server, or with none. Its payload is shown first in
+C or D, never before the optical check. There is no retry with other servers:
+they would mean new codes, so a new session.
 
 **What goes into the code.** UDP addresses only, at most six:
 - the relay's first, at most two;
@@ -203,12 +210,24 @@ session.
 - then the phone's own (host) addresses.
 
 A TCP candidate only repeats an address the channel reaches over UDP anyway.
-QWBP 0.1.0 keeps four candidates by default, and its format has no type for
-relay addresses: it drops them. They go in typed as srflx — the other phone
-only needs where to send. The app does this inside QWBP, through a patch or a
-fork that accepts relay candidates and a candidate limit. Reading
-`localDescription` through QWBP's private `pc`, as the sandbox does, is not
-for the app.
+Relay addresses go in typed as srflx: QWBP's format has no relay type, and the
+other phone only needs where to send.
+
+**What QWBP needs.** QWBP 0.1.0 picks the addresses itself — host ones, then
+the first srflx — and drops relay candidates while parsing. Teaching it to
+parse relay as srflx is not enough: it would still keep one of the STUN
+address and the relays, and the STUN answer arrives first. So the patch adds
+one public hook and nothing else:
+- `selectCandidates(all)` receives every gathered candidate, relay included,
+  with its real type, and returns the list to encode;
+- QWBP's own `maxCandidates` carries the limit;
+- the payload is yielded once the hook's list is complete, or after 2 s,
+  instead of at gathering-complete: one slow or blocked transport must not
+  hold up the code.
+
+The ordering above stays a pure function in the app, tested there (§8). Reading
+`localDescription` through QWBP's private `pc`, as the sandbox does, is not for
+the app.
 
 **What the relay changes.** Nothing in §4. The relay carries DTLS between the
 phones; the fingerprints in `M` and in the SAS make sure the channel ends at
@@ -251,11 +270,14 @@ The card is not written into `allNetworkUsers` (§1).
 - `EncryptionManagerPQ` gains `signHandshakePQ(M)` (ML-DSA-87 under
   `sign_skey`) beside `signContactChallenge`.
 - `src/store/userPQ.store.js` — `confirmContact(userHash, card)` as in §6.
-- `src/lib/data/turnCredentials.ts` — fetch, memory cache and expiry of the
-  relay credentials (§5a), reusing the read-session PoP signer.
-- `qwbp` — patched or forked to carry relay candidates and a candidate limit
-  (§5a); the patch is versioned with the app, not applied at install time by
-  hand.
+- `src/lib/data/turnCredentials.ts` — fetch, memory cache, expiry and the
+  1 s wait of the relay credentials (§5a), with the challenge proof extracted
+  from `api.ingestWithAuthEach` into one helper.
+- The address list (§5a) — a pure function beside it, ported from the
+  sandbox's `relaysOf` and selection in `channel.ts`.
+- `qwbp` — patched with the `selectCandidates` hook and the early payload
+  (§5a), versioned with the app (a pinned fork or a committed patch), and
+  offered upstream.
 - Reference implementation: `sandbox/handshake-pq2` (`src/protocol.ts`,
   `src/engine.ts`, `src/channel.ts`) runs this protocol on two phones; its
   `frames.ts` is the animated-QR experiment of §10 and stays out of the app.
@@ -290,8 +312,10 @@ The card is not written into `allNetworkUsers` (§1).
 - A confirm message with a foreign card leaves `confirmed: false`.
 - The code's address list: relay first, at most two, then one srflx, then
   host, UDP only, at most six; relay addresses typed as srflx.
-- A failed credentials request (network error, `503`, `429`) starts the
-  session with no ICE servers.
+- A failed or slow credentials request (network error, `503`, no answer
+  within 1 s) starts the session with no ICE servers.
+- The challenge proof verifies the way the server checks it: over the
+  challenge string's UTF-8 bytes.
 - A session restarted while the old one is still awaiting (camera, QWBP,
   signing) never draws, stops the camera of, or completes the new one.
 
