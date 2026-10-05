@@ -192,9 +192,9 @@ add-contact view opens, one screen before the scanner (`pq_turn_relay`
   signature}`.
 
 The signature is ML-DSA-87 over the challenge string's UTF-8 bytes, unpadded
-base64 — the proof `api.ingestWithAuthEach` already sends. Extract it into one
-helper both use. `EncryptionManagerPQ.signChallenge` is not that proof: it
-base64-decodes the challenge first, and the server refuses the result.
+base64 — the proof ingest and read sessions already send. One helper signs it
+for all of them; a test pins the bytes, since a proof over anything else is
+refused and the handshake then runs without a relay, silently.
 
 The client keeps the credentials in memory and asks again when less than
 150 s remain: a session (90 s, then 15 s for the channel and 10 s for the
