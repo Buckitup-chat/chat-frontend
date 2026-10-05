@@ -78,17 +78,19 @@ Guardians are confirmed contacts, and their shares travel through the dialogs
 that already exist. This is what makes the friends' half post-quantum for free:
 every dialog message is wrapped with ML-KEM-1024.
 
-- **Spec (chat repo):** a new content type in the `07_content_polymorphism`
-  registry — a new JSON key, per the invariant that governs envelope evolution.
-  It carries the share, the scheme parameters, and the owner's locator hint.
-- **Client:** issue shares to selected contacts as messages; the guardian's
-  client recognises the type, stores the share, and confirms receipt; the owner
-  sees who holds what.
-- **Spares:** generate shares with a reserve at backup time and keep the
-  unissued ones in the account, so the circle can grow later without a reshare.
+- **Spec (chat repo):** `pq_recovery_shares` owns the wire contract and the
+  lifecycle, and registers `recovery_share`, `recovery_share_return` and
+  `recovery_binding` in `07_content_polymorphism` — new JSON keys, per the
+  invariant that governs envelope evolution.
+- **Client primitives:** the friends' half split with a commitment per split,
+  so a share from another split or an edited one is caught before it is
+  combined (`src/lib/recovery/shareSplit.ts`); the `recovery_share` codec;
+  contacts confirmed only through a verified QR handshake. The flows built on
+  them — issuing, keeping, spares, the owner's view — are Phase 7 (7.2–7.4).
 
-Acceptance: two accounts on staging — one issues shares, the other receives and
-confirms; a third contact added later gets a spare with no reshare.
+Acceptance: the split is pinned by golden vectors; a share from another split,
+or with one byte changed, fails its check; a contact becomes confirmed only
+through the handshake.
 
 ## Phase 3 — the node plane, hardened
 
@@ -164,20 +166,228 @@ Acceptance: the audit's contract probes (rollback, pinning, ten-year
 
 ## Phase 7 — the product surface
 
-- **Parameters** — a simple screen with defaults and an advanced one exposing counts,
-  thresholds and the timelock.
-- **Share lifecycle**: notify the owner when a guardian starts a recovery
-  of their own, since the share they hold becomes questionable.
-- **Device-link** ships before recovery: logging in on a second device is
-  the more basic need, and both live behind the same "I can't get in" door.
+Phases 1–6 built the primitives and the services, and none of them reaches a
+user: the Backup page shows "Blockchain Recovery — Coming Soon", and nothing in
+the client talks to the contract, the relayer or the nodes. This phase is that
+wiring, as screens. Device-link, which the decisions put first, is live: the
+login page's "Sync with other device".
+
+What it builds on:
+
+- **In the tree:** the sealed vault and its locator (`src/lib/recovery/vault.ts`),
+  the two halves (`vaultEnvelope.splitIntoHalves`), the split and its checks
+  (`src/lib/recovery/shareSplit.ts`), the `recovery_share` codec
+  (`src/lib/pq/content.ts`), confirmed contacts, and the account's `evm_skey` in
+  the vault.
+- **Deployed:** contracts v2 on Sepolia, the relayer with its indexer and
+  notifications, and the v2 nodes (overview §5).
+- **The wire contract:** the chat repo's `pq_recovery_shares` and the
+  `recovery_*` types in `07_content_polymorphism`.
+- **References:** `backitup-recovery-demo/src/lib/flows.ts` runs every on-chain
+  step but changing the policy and invalidating nonces, both through the
+  relayer and paying its own gas. The backend's `docs/INTEGRATION.md` documents
+  the relayer, the indexer and notifications; where it puts ECIES shares on
+  chain and reads meta-addresses from the registry, `pq_recovery_shares` and
+  7.1 replace it. The node API is the `backitup-node` README (`POST
+  /shares/:id/release`), its signed messages the SDK's
+  `src/constants/messages.ts`.
+
+The slices, in build order:
+
+### 7.0 Plumbing, no screen
+
+- `backitup-secret-recovery-sdk`, the stealth canon of Phase 5, comes in.
+  `buckitup-sdk-0.0.24.tgz` goes, and with it Account activation and the older
+  registry it writes to: nothing opens that modal, and Phase 7 reads no
+  registry, since the meta-address travels in the dialog (7.1).
+- The Sepolia entry of `bcConfig.json` carries the v2 addresses and start
+  blocks. The relayer, the notification servers and the node list are
+  configuration with ours as the default, since the design assumes many of
+  each.
+- `src/lib/recovery/` gains chain reads (`getSecret`, `roundState`,
+  `getGuardiansAt`, `getShareAt`, `hasApproved`, the round events), a gateway
+  that submits through the relayer or directly, and the node client.
+- `src/lib/pq/content.ts` gains the `recovery_binding` and
+  `recovery_share_return` codecs, and the ten-word code of § Returning, with
+  golden vectors.
+
+Acceptance: a dev build creates a secret on Sepolia through each gateway, and
+every configured node accepts a deposit for it.
+
+### 7.1 Becoming a guardian
+
+A guardian signs approvals with stealth keys derived from their own `evm_skey`,
+and the owner needs the guardian's meta-address to address a slot to them. A
+card carries no EVM address, and adding one would publish the very link between
+a chat identity and a chain address that stealth addresses exist to break. So
+the meta-address travels in the dialog: the owner sends an invitation, the
+guardian's client says plainly what is asked and by whom, and acceptance
+answers with the meta-address inside the ML-DSA-signed row. Consent then comes
+before custody, where `pq_recovery_shares` § Holding offers only giving a
+share back after it has arrived.
+
+Acceptance: an invitation accepted on one staging account yields, on the
+other, a meta-address from which the owner derives a stealth address the
+guardian's keys control.
+
+### 7.2 Creating a backup
+
+**Simple screen:** pick at least three guardians among the contacts who
+accepted; everything else has a default:
+
+| Parameter | Default |
+|---|---|
+| Shares needed (Shamir threshold) | a majority of the guardians, at least 2 |
+| Approvals needed (contract quorum) | equal to the threshold |
+| Spares | 2 |
+| Nodes | our configured set, a majority needed |
+| Timelock / window | the contract's defaults: 3 days / 7 days |
+| Gas | our relayer |
+
+**Advanced screen:** every row above, within the contract's bounds (timelock
+10 min – 365 d, window 1 h – 30 d), plus a relayer of the user's choice or
+paying their own gas with the address's balance shown.
+
+- It allows two guardians, saying that losing either loses the backup.
+- It refuses a quorum below the threshold: past quorum further approvals
+  revert, so an honest recovery could not gather enough shares.
+- The contract takes up to 50 guardians; the relayer takes up to 32 shares
+  and a call under its gas cap, so a larger set pays its own gas. The run
+  estimates gas before it publishes anything.
+- A node set other than ours travels with every share, since a recovering
+  device has no other way to learn which nodes hold the node half.
+
+The run follows `pq_recovery_shares` § Issuing: split S into halves and the
+friends' half into shares with the spares, seal the vault with the split inside
+and publish it, register the secret with delivery records in the slots, deposit
+the node shares, send one `recovery_share` per guardian, write the roster. Each
+step is resumable after a crash or a closed tab, and the persisted split is
+where a resume starts — a client that registers and then loses the split can
+only reshare.
+
+The screen does not finish without an alert channel (7.4). Skipping one is an
+explicit choice, and the roster keeps showing it as a warning.
+
+Acceptance, checked once 7.3 is in: on staging and Sepolia, an owner backs up
+to three guardians; the chain shows the delivery records, every node holds its
+share, and every guardian's client holds theirs.
+
+### 7.3 Keeping a share
+
+The guardian's side of § Holding and § Dying: validate, check against the
+on-chain root, copy into the guardian's own `user_storage`, tell the owner
+the share is stored, and list it under "Shares I keep" against the dialog
+peer's name — the chain answers with an address, so the holding stays the
+peer's claim. A share that does not verify, or names a deployment this build
+cannot reach, is kept and reported to the owner. A share can be given back,
+which the owner sees as a prompt to reshare.
+
+The client watches the contract. After a reshare it drops the superseded share
+once the replacement arrives, or once its viewing key finds no slot of the new
+version addressed to it — the case of a dropped guardian, who will never get a
+replacement and cannot read the owner's roster. A revoked secret drops at once.
+
+Acceptance: a share edited in transit is reported, not combined; a secret
+revoked on chain leaves its guardians holding nothing; the owner's client
+receives a *stored* receipt from each guardian.
+
+### 7.4 The owner's roster, alerts and veto
+
+- **Roster:** who holds a share, at what version, whether receipt is confirmed,
+  and confirmed holders against the threshold — the one number that answers "is
+  my backup real". Spares left, holdings gone stale after a reshare, shares
+  given back. It lives in a `user_storage` slot reached through the root map,
+  so a second device sees the same picture.
+- **Controls:** add or drop a guardian (a reshare), change the timelock and
+  window, hand a spare to an existing guardian, revoke for good.
+- **Alerts in the app:** on every start and while open, the client reads the
+  rounds on the owner's secrets. A round shows as a banner over every screen,
+  with the timelock's deadline and a one-tap veto (`cancelRecovery`).
+- **Alerts outside the app:** subscriptions on the notification servers the
+  owner has configured, several at once. Ours serves Telegram — the app signs
+  the bot's challenge with the owner key and shows the reply line to send — and
+  webhooks, which are how email, SMS and other messengers attach. Listing and
+  deleting subscriptions; the alert history.
+
+Acceptance: a round a guardian starts on Sepolia reaches the owner both in the
+app and on Telegram within the timelock, and the veto from the banner returns
+it to `None`; a reshare from three guardians to two leaves the two holding the
+new share and the dropped one holding nothing.
+
+### 7.5 Recovery — the "I can't get in" door
+
+The login page offers "Recover with friends" next to "Sync with other device".
+Device-link stays first: a person with any working device is better served by
+it.
+
+- **The recovering device** creates a temporary account and shows its
+  `user_hash` to pass to a guardian. When the guardian writes with `secret_ref`,
+  it answers with a `recovery_binding` and shows the ten-word code. A progress
+  screen follows the round — approvals, the timelock's countdown, the window,
+  node releases from the node set the returned shares name, and each returned
+  share as verified or set aside with its sender named. After an expired window
+  it offers a restart with a fresh candidate key. At the threshold it combines,
+  opens the vault, and lands in the original account.
+- **The guardian** opens "Help someone recover", enters the `user_hash`, picks
+  the holding, compares the ten words with the person on the call, opens the
+  round if none is open, and approves naming the candidate it verified. The
+  client sends the `recovery_share_return` by itself once the send gate opens.
+- **Manual return** (§ Manual return): the guardian's app emits the sealed
+  block, the recovering app imports nothing until the six digits match. The
+  digits come from the derivation inside `src/lib/pq/deviceLink.ts`, factored
+  out with the salt as a parameter rather than copied.
+- **The finale is not optional:** back in the original account, the client
+  runs a reshare and destroys the temporary account, keys and vault together.
+
+Acceptance: a full recovery on staging and Sepolia with two of three
+guardians, once through dialogs and once by manual return, ending in a reshare
+and no temporary account left; a veto in the timelock stops a third.
+
+### 7.6 Share lifecycle
+
+A guardian's own recovery makes the share they hold questionable, and the chain
+cannot reveal it without linking identities. Their client can: at the finale of
+its own recovery it tells every owner whose share it holds, and each owner's
+roster marks that holding and prompts a reshare. This relies on a cooperating
+client; for a device in an attacker's hands, the owner's own timelock and
+veto remain the defence.
+
+Acceptance: a guardian who recovers their account appears as questionable in
+the owner's roster without either of them doing anything else.
+
+### Retired by this phase
+
+The "Coming Soon" card, and with 7.5 the manual Shamir modals and
+`src/lib/wrapKeyShares.ts`, which were scaffolding for it.
+
+### Spec work in the chat repo
+
+`pq_recovery_shares` and the three `recovery_*` types are merged to the chat
+repo's `main` before 7.2, with what this phase adds to them:
+
+- content types for the invitation and acceptance (7.1), a receipt that says
+  *stored* (7.3), giving a share back (7.3) and a guardian's notice of their own
+  recovery (7.6) — the last three answer open questions of the spec;
+- a field on `recovery_share` and `recovery_share_return` for a node set other
+  than the default (7.2);
+- § Dying: a dropped guardian learns it from the new version's slots rather
+  than the owner's roster (7.3).
 
 ## Sequencing
 
-Phase 0 runs now. Phases 1 and 3 are independent of each other and can run in
-parallel. Phase 2 waits on the spec change landing in the chat repo. Phase 4
-depends on nothing but is worth doing after 3, since both touch the same
-deployment. Phase 5 gates Phase 6, because the contract's address derivation has
-to agree with the canon. Phase 7 follows the device-link work.
+Phases 0, 1 and 3–6 have landed in the repositories they own, and Phase 2's
+primitives in this one; its spec waits on the chat repo. They ran in the order
+their dependencies set: Phase 0 first, Phases 1 and 3 in parallel, Phase 4
+after 3 since both touch the same deployment, Phase 5 before 6 because the
+contract's address derivation has to agree with the canon. What they leave on
+the client side — Phase 2's flows, Phase 4's own-gas path and alert channels,
+Phase 5's SDK — is built in Phase 7.
+
+Phase 7 builds its slices in order and waits on the chat repo for the content
+types it adds. 7.2–7.4 reach a production build together: once a secret is on
+chain and guardians hold its shares, any quorum can run a round through the
+public relayer, with or without the screens of 7.5, so the alerts and veto of
+7.4 have to be there first — without them the timelock decorates nothing.
 
 ## What is not in scope
 
