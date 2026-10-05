@@ -231,7 +231,8 @@ address and the relays, and the STUN answer arrives first. So the patch adds
 one public hook and nothing else:
 - `selectCandidates(all)` receives every gathered candidate, relay included,
   with its real type, and returns the list to encode;
-- QWBP's own `maxCandidates` carries the limit;
+- QWBP's own `maxCandidates` carries the limit, set explicitly to 6: its
+  default is 4;
 - the payload is yielded once the hook's list is complete, or after 2 s,
   instead of at gathering-complete: one slow or blocked transport must not
   hold up the code.
@@ -249,8 +250,8 @@ the handshake *optically verified*.
 
 `Modal_QrHandshake.vue`, on `completed`:
 
-- `confirmed` and not a contact yet → `confirmContact(user_hash, contact_pkey, { name, notes: '', hidden: false })`; toast "Contact added and confirmed", SAS shown.
-- `confirmed` and already a contact → `confirmContact(user_hash, contact_pkey)`; toast "Contact confirmed".
+- `confirmed` and not a contact yet → `confirmContact(user_hash, card, { name, notes: '', hidden: false })`; toast "Contact added and confirmed", SAS shown.
+- `confirmed` and already a contact → `confirmContact(user_hash, card)`; toast "Contact confirmed".
 - not `confirmed` → `saveContact(user_hash, { name, notes: '', hidden: false, contact_pkey })` if new; toast "Key verified in person; not yet confirmed" with the reason.
 - The contact page opens by `user_hash`.
 
