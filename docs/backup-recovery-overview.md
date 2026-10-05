@@ -78,17 +78,17 @@ current implementation that is a smart contract (Sepolia):
 6. The recommended finale: **reshare** — old shares are invalidated and the
    circle is reissued (see the share-lifecycle decision).
 
-## 5. What already exists (September 2026)
+## 5. What already exists (October 2026)
 
 | Component | Where | State |
 |---|---|---|
 | Architecture RFC | `docs/restoration.livemd` | adopted as the basis of this work |
-| Contracts v2 (SecretRecovery + KeyRegistry) | `backitup-smart-contracts`, branch `security/contracts-v2` | not deployed — Sepolia still runs v1 at `0xe6342a319AA534d15D0aFA5cd947a6aF0Bc423c3` / `0x04FA3aa8A23501A70768E220A5Df684D6249EDe7` |
+| Contracts v2 (SecretRecovery + KeyRegistry) | `backitup-smart-contracts`, branch `security/contracts-v2` | deployed on Sepolia: `BackitupSecretRecovery` `0xd9FFD20F2DB9c774b9f0237c4837f52DCbD937a7`, `BackitupKeyRegistry` `0xAD6bD551224003E621d0B4b640C33eF29a5e9828` (blocks 11787427 / 11787426) |
 | SDK (split/ECIES/stealth/EIP-712) | `backitup-secret-recovery-sdk` | one stealth canon; refuses a threshold of 1 and detects a wrong recombination (a tag split with the secret); carries the v2 typed data, nonce keys and `RoundState`, pinned to the contracts by test; its `harness/` and the demo sign from them |
-| Relayer + indexer | Railway, live — `https://secret-recovery-production.up.railway.app` (v1) | the code reads the v2 ABI and waits for its deployment |
-| Nodes ×3 | Railway, live — `node-a-production-b16b`, `node-b-production-991a`, `generous-essence-production` (`.up.railway.app`), threshold 2 (v1) | the code reads the v2 contract and waits for its deployment |
-| E2E of the whole chain | `backitup-secret-recovery-sdk/harness` | v1: 10/10 scenarios, 7 full recoveries (July); not yet run against v2, which is not deployed |
-| Client: sealed vault in `user_storage` under a wrap key, found by the key alone; Local File; the key split by hand (dev builds) | `src/lib/recovery`, `src/lib/pq/vaultEnvelope.ts`, `src/views/backup` | Phase 1 of the plan; the split is scaffolding for Phase 2 |
+| Relayer + indexer + notifications | Railway, live — `https://backitup-recovery-backend-production.up.railway.app` | serves v2 |
+| Nodes ×3 | Railway, live — `backitup-node-production`, `backitup-node-b-production`, `backitup-node-c-production` (`.up.railway.app`) | v2 protocol: a deposit and a release are signed over the node id and a single-use nonce, a deposit also over the share's digest; the threshold is chosen per backup |
+| E2E of the whole chain | `backitup-secret-recovery-sdk/harness` | against v2: 7 of 10 scenarios pass; S4 and S5 need six nodes, S6 needs the relayer's per-call gas cap at 6.5 M |
+| Client: sealed vault in `user_storage` under a wrap key, found by the key alone; Local File; the friends' half split with its commitments, the `recovery_share` codec, confirmed contacts; the key split by hand (dev builds) | `src/lib/recovery`, `src/lib/pq/vaultEnvelope.ts`, `src/lib/pq/content.ts`, `src/views/backup` | Phase 1 of the plan and the primitives of Phase 2; no screen issues a share or reaches the chain yet (Phase 7) |
 | Threat model + hardening RFC SI-1…SI-6 | `backitup-smart-contracts/docs/security` | K-H1, SI-2, SI-4 implemented on `security/contracts-v2`; SI-1, SI-3, SI-5, SI-6 proposed |
 | Audit of every module | `docs/backup-recovery-audit-2026-09.md` | done: 3 critical, 11 high; crypto cores clean |
 
@@ -113,7 +113,9 @@ messenger, with a spoken code guarding the paste
 **Every parameter is customisable within reason.** A simple screen with
 defaults, and an advanced one exposing counts, thresholds and the timelock.
 The circle of helpers can grow *after* the backup exists: shares are generated
-with a reserve and the spares are kept in the account for exactly that.
+with a reserve and the spares are kept in the account for exactly that. A
+spare gives its holder custody, not a vote — a new guardian who approves a
+recovery costs a reshare (`pq_recovery_shares` § Spares).
 
 **The chain stays.** What it buys is not storage but an objective, observable
 record of who asked for recovery and who approved or refused — and the ability
