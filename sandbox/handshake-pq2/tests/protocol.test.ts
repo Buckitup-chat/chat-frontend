@@ -30,7 +30,7 @@ describe('messages', () => {
 			{ kind: 'A', ...partyA },
 			{ kind: 'B', ...partyA, sig },
 			{ kind: 'C', sig, qwbp },
-			{ kind: 'D', qwbp },
+			{ kind: 'D', tag: fill(6, 3), qwbp },
 		] as const) {
 			expect(parse(encode(m))).toEqual(m);
 		}

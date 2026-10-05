@@ -25,6 +25,7 @@ export const CONTACT_PKEY_BYTES = 33; // compressed secp256k1
 export const NONCE_BYTES = 16;
 export const SIG_BYTES = 64; // compact r‖s
 export const FINGERPRINT_BYTES = 32;
+export const SESSION_TAG_BYTES = 6;
 const MAX_QWBP_BYTES = 512;
 
 /** One side of a session, as the codes show it. */
@@ -38,7 +39,7 @@ export type Message =
 	| { kind: 'A'; userHash: string; contactPkey: Uint8Array; nonce: Uint8Array }
 	| { kind: 'B'; userHash: string; contactPkey: Uint8Array; nonce: Uint8Array; sig: Uint8Array }
 	| { kind: 'C'; sig: Uint8Array; qwbp: Uint8Array }
-	| { kind: 'D'; qwbp: Uint8Array };
+	| { kind: 'D'; tag: Uint8Array; qwbp: Uint8Array };
 
 const b64 = base64urlEncode;
 const utf8 = (s: string) => new TextEncoder().encode(s);
@@ -56,7 +57,7 @@ export const encode = (m: Message): string => {
 		case 'C':
 			return [PREFIX, 'C', b64(m.sig), b64(m.qwbp)].join(':');
 		case 'D':
-			return [PREFIX, 'D', b64(m.qwbp)].join(':');
+			return [PREFIX, 'D', b64(m.tag), b64(m.qwbp)].join(':');
 	}
 };
 
@@ -95,14 +96,18 @@ export const parse = (text: string): Message | null => {
 		const qwbp = variable(f[1], MAX_QWBP_BYTES);
 		return sig && qwbp ? { kind, sig, qwbp } : null;
 	}
-	if (kind === 'D' && f.length === 1) {
-		const qwbp = variable(f[0], MAX_QWBP_BYTES);
-		return qwbp ? { kind, qwbp } : null;
+	if (kind === 'D' && f.length === 2) {
+		const tag = fixed(f[0], SESSION_TAG_BYTES);
+		const qwbp = variable(f[1], MAX_QWBP_BYTES);
+		return tag && qwbp ? { kind, tag, qwbp } : null;
 	}
 	return null;
 };
 
 // ---------- transcript and derived values (§4) ----------
+
+/** What D carries to name its session: D has no signature, so without it a neighbour's D would be fed to the connection. */
+export const sessionTag = (T: Uint8Array): Uint8Array => sha256(T).slice(0, SESSION_TAG_BYTES);
 
 /** The two parties ordered by user_hash. Equal hashes are never a session. */
 export const order = <T extends { userHash: string }>(a: T, b: T): [T, T] => {

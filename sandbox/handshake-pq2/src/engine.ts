@@ -14,7 +14,7 @@ import {
 	sessionCode, split, toBase45, type Frame,
 } from './frames';
 import {
-	checkConfirm, comparisonCode, confirmMessage, encode, newNonce, parse, pqMessage, signOptical, signPq,
+	checkConfirm, comparisonCode, confirmMessage, encode, newNonce, parse, pqMessage, sessionTag, signOptical, signPq,
 	transcript, verifyOptical, type Message, type Party,
 } from './protocol';
 
@@ -217,7 +217,7 @@ export class HandshakeEngine {
 				this.opticallyVerified();
 				const payload = await this.payload();
 				if (!payload || !(await this.feed(m.qwbp))) return;
-				this.show({ kind: 'D', qwbp: payload }, 'D');
+				this.show({ kind: 'D', tag: sessionTag(this.T!), qwbp: payload }, 'D');
 			} else {
 				// Both showed C: both hold both payloads, and QWBP picks the roles.
 				if (!(await this.feed(m.qwbp))) return;
@@ -225,7 +225,8 @@ export class HandshakeEngine {
 			}
 			this.payloadsKnown();
 		} else if (m.kind === 'D' && this.stage === 'C' && !this.peerPayload) {
-			if (await this.feed(m.qwbp)) this.payloadsKnown();
+			if (!equalBytes(m.tag, sessionTag(this.T!))) this.noteOnce('ignored a D from another session');
+			else if (await this.feed(m.qwbp)) this.payloadsKnown();
 		} else {
 			// The camera keeps reading a code after its step is done; said once.
 			this.noteOnce(`${m.kind} read at stage ${this.stage}: nothing to do`);

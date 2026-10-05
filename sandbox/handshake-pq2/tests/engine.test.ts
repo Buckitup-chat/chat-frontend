@@ -173,6 +173,25 @@ describe('what is refused', () => {
 		expect(a.stage).toBe('D');
 	});
 
+	it('a D from another session is ignored, and the real D taken', async () => {
+		const net = new FakeNetwork();
+		const a = side(alice, net);
+		const b = side(bob, net);
+		await a.engine.read(b.code); // a binds Bob, shows B
+		await b.engine.read(a.code); // b verifies, shows C
+		await a.engine.read(b.code); // a verifies, shows D
+		expect(a.stage).toBe('D');
+		const real = parse(a.code);
+		if (real?.kind !== 'D') throw new Error('expected D');
+		// A neighbouring pair's D: a payload of its own, under its own session.
+		await b.engine.read(encode({ kind: 'D', tag: new Uint8Array(6).fill(1), qwbp: real.qwbp }));
+		expect(b.log.join('\n')).toMatch(/ignored a D from another session/);
+		await b.engine.read(a.code);
+		await run(a, b);
+		expect(a.outcome?.kind).toBe('confirmed');
+		expect(b.outcome?.kind).toBe('confirmed');
+	});
+
 	it('once bound, codes from another session are ignored', async () => {
 		const net = new FakeNetwork();
 		const a = side(alice, net);

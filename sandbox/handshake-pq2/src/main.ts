@@ -59,7 +59,11 @@ const settings: Settings = {
 	mode: 'honest',
 	...stored<Partial<Settings>>(SETTINGS_KEY),
 };
-const saveSettings = () => localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+// The relay password stays in the page too: any page on this origin reads localStorage.
+const saveSettings = () => {
+	const { turnPass: _secret, ...kept } = settings;
+	localStorage.setItem(SETTINGS_KEY, JSON.stringify(kept));
+};
 saveSettings(); // the phone keeps its name across reloads
 let identity: Identity = createIdentity(settings.name);
 

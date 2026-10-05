@@ -5,12 +5,23 @@ import { concatBytes, randomBytes } from '@noble/hashes/utils';
 import { equalBytes } from '@noble/post-quantum/utils.js';
 import type { ChannelAdapter, ChannelLink } from './engine';
 
-const linkOf = (channel: RTCDataChannel): ChannelLink => ({
-	send: (text) => channel.send(text),
-	onMessage: (handler) => {
-		channel.onmessage = (event) => handler(String(event.data));
-	},
-});
+/** Messages that arrive before the engine listens are kept for it: the peer may confirm the moment the channel opens. */
+export const linkOf = (channel: Pick<RTCDataChannel, 'send' | 'onmessage'>): ChannelLink => {
+	const early: string[] = [];
+	let handler: ((text: string) => void) | null = null;
+	channel.onmessage = (event) => {
+		const text = String(event.data);
+		if (handler) handler(text);
+		else early.push(text);
+	};
+	return {
+		send: (text) => channel.send(text),
+		onMessage: (h) => {
+			handler = h;
+			for (const text of early.splice(0)) h(text);
+		},
+	};
+};
 
 /**
  * Addresses a code offers. QWBP's own cut, the first 4, can be all virtual
@@ -18,6 +29,29 @@ const linkOf = (channel: RTCDataChannel): ChannelLink => ({
  * and B is already at the limit of what a camera reads.
  */
 const MAX_ADDRESSES = 6;
+/** An IPv6 address takes 19 bytes in the code against IPv4's 7; two keep C and D below B's density. */
+const MAX_IPV6 = 2;
+
+type Offered = { c: QWBPCandidate; kind: 'relay' | 'srflx' | 'host' };
+
+/**
+ * What a code offers (spec §5a): UDP only, relay addresses first (at most two),
+ * then one STUN-found address, then the phone's own — at most six, at most two
+ * of them IPv6. Relay addresses arrive already typed as srflx (`relaysOf`).
+ */
+export const selectAddresses = (relays: QWBPCandidate[], gathered: QWBPCandidate[], relayOnly: boolean): Offered[] => {
+	const udp = gathered.filter((c) => c.protocol === 'udp');
+	let ipv6 = 0;
+	return [
+		...relays.slice(0, 2).map((c) => ({ c, kind: 'relay' as const })),
+		...(relayOnly ? [] : [
+			...udp.filter((c) => c.type === 'srflx').slice(0, 1).map((c) => ({ c, kind: 'srflx' as const })),
+			...udp.filter((c) => c.type === 'host').map((c) => ({ c, kind: 'host' as const })),
+		]),
+	]
+		.filter((o) => !o.c.ip.includes(':') || ++ipv6 <= MAX_IPV6)
+		.slice(0, MAX_ADDRESSES);
+};
 
 const candidatesOf = (payload: Uint8Array) =>
 	decode(payload).candidates.map((c) => `${c.type}/${c.ip}`).join(', ');
@@ -59,19 +93,11 @@ export class QwbpChannel implements ChannelAdapter {
 			const all = this.conn.getQRPayload();
 			// Without a single address the payload is not even a QWBP packet, and nothing could reach this phone.
 			if (all.length < MIN_PACKET_SIZE) throw new Error('this phone has no network address to offer (airplane mode?)');
-			// UDP only: a TCP candidate repeats an address the data channel reaches
-			// over UDP anyway. Relay addresses first, then one STUN-found address,
-			// then the phone's own, IPv4 first as QWBP orders them.
+			// QWBP keeps relay addresses out of its own list; they are read from the
+			// description here. The app gets them from a hook in QWBP instead (spec §5a).
 			const { fingerprint, candidates } = decode(all);
-			const udp = candidates.filter((c) => c.protocol === 'udp');
 			const sdp = (this.conn as unknown as { pc: RTCPeerConnection | null }).pc?.localDescription?.sdp ?? '';
-			const offered = [
-				...relaysOf(sdp).slice(0, 2).map((c) => ({ c, kind: 'relay' })),
-				...(this.relayOnly ? [] : [
-					...udp.filter((c) => c.type === 'srflx').slice(0, 1).map((c) => ({ c, kind: 'srflx' })),
-					...udp.filter((c) => c.type === 'host').map((c) => ({ c, kind: 'host' })),
-				]),
-			].slice(0, MAX_ADDRESSES);
+			const offered = selectAddresses(relaysOf(sdp), candidates, this.relayOnly);
 			if (!offered.length) {
 				throw new Error(this.relayOnly ? 'the relay server gave this phone no address (check the TURN settings)' : 'this phone has no UDP address to offer');
 			}
@@ -103,7 +129,8 @@ export class QwbpChannel implements ChannelAdapter {
 	close(): void {
 		this.conn.close();
 		// close() cannot stop a setup already under way; close again once it is done.
-		this.own?.then(() => this.conn.close(), () => {});
+		const again = () => this.conn.close();
+		this.own?.then(again, again);
 	}
 }
 
@@ -140,11 +167,15 @@ export class FakeNetwork {
 	}
 
 	private pipe(): [ChannelLink, ChannelLink] {
+		// Like linkOf: a message sent before the other end listens waits for it.
 		const handlers: [((t: string) => void) | null, ((t: string) => void) | null] = [null, null];
+		const early: [string[], string[]] = [[], []];
+		const deliver = (to: 0 | 1, text: string) => (handlers[to] ? handlers[to]!(text) : early[to].push(text));
 		const end = (me: 0 | 1): ChannelLink => ({
-			send: (text) => setTimeout(() => handlers[me === 0 ? 1 : 0]?.(text), this.latencyMs),
+			send: (text) => setTimeout(() => deliver(me === 0 ? 1 : 0, text), this.latencyMs),
 			onMessage: (h) => {
 				handlers[me] = h;
+				for (const text of early[me].splice(0)) h(text);
 			},
 		});
 		return [end(0), end(1)];
