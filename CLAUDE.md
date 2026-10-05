@@ -134,8 +134,10 @@ Exempt: logs, working notes, investigation and migration reports. Their subject
 - Staging backend: `buckitup.xyz` (may be down; a 503 on `/shapes` is theirs,
   not ours).
 - WebAuthn login in the embedded browser panel is unreliable after host sleep;
-  account *creation* works. This blocks manual verification of logged-in flows
-  — see `docs/backlog.md` §1 for the planned fix.
+  account *creation* works. Logged-in flows are checked by the E2E suite
+  instead, whose virtual authenticator needs no finger (`e2e/fixtures.ts`,
+  `npm run test:e2e`). The suite is heavy and runs against staging: run it
+  when asked, not after every change.
 - Vite pre-bundling breaks packages that ship workers as relative-URL assets
   (`@tanstack/browser-db-sqlite-persistence`, `@journeyapps/wa-sqlite`); they
   are excluded in `vite.config.js`. If you see "OPFS worker terminated
