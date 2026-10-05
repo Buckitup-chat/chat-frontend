@@ -49,8 +49,8 @@ export interface FramesProgress {
 	sent: number;
 	peerHas: number;
 	received: number;
-	/** The peer's frame count, once a frame of it was read. */
-	total: number | null;
+	/** The peer's frame count. */
+	total: number;
 }
 
 export interface EngineOptions {
@@ -97,7 +97,6 @@ export class HandshakeEngine {
 	private T: Uint8Array | null = null;
 	private mySig: Uint8Array | null = null;
 	private conn: ChannelAdapter | null = null;
-	private ownPayload!: Promise<Uint8Array>;
 	private myPayload: Uint8Array | null = null;
 	private peerPayload: Uint8Array | null = null;
 	/** Once both payloads are known: what the channel must carry, and the six digits. */
@@ -107,7 +106,6 @@ export class HandshakeEngine {
 	private started = 0;
 	private timings: Timings = {};
 	private deadline: ReturnType<typeof setTimeout> | undefined;
-	private ignoredOwn = false;
 	private readonly idle = new Set<string>();
 	// Animated-QR mode.
 	private ownFrames: string[] | null = null;
@@ -139,8 +137,7 @@ export class HandshakeEngine {
 			// shows as soon as the peer is verified; gathering can take seconds.
 			this.conn = this.o.channel!();
 			this.conn.onOpen((link) => this.channelOpen(link));
-			this.ownPayload = this.conn.payload();
-			this.ownPayload.catch(() => {}); // reported when C or D needs it
+			this.conn.payload().catch(() => {}); // starts gathering; reported when C or D needs it
 		}
 		this.setDeadline(this.o.sessionMs, () => ({ kind: 'expired', reason: `no handshake within ${this.o.sessionMs / 1000} s` }));
 		this.log(`session started as ${short(this.me.userHash)}${this.o.claim ? ' (impersonating)' : ''}`);
@@ -175,8 +172,7 @@ export class HandshakeEngine {
 	private acceptsFrom(m: Message): boolean {
 		if (!('userHash' in m)) return true;
 		if (m.userHash === this.me.userHash) {
-			if (!this.ignoredOwn) this.log('ignored a code with our own identity (a reflection, or a second device of this account)');
-			this.ignoredOwn = true;
+			this.noteOnce('ignored a code with our own identity (a reflection, or a second device of this account)');
 			return false;
 		}
 		if (this.peer && (m.userHash !== this.peer.userHash || !equalBytes(m.contactPkey, this.peer.contactPkey) || !equalBytes(m.nonce, this.peer.nonce))) {
@@ -230,10 +226,9 @@ export class HandshakeEngine {
 			this.payloadsKnown();
 		} else if (m.kind === 'D' && this.stage === 'C' && !this.peerPayload) {
 			if (await this.feed(m.qwbp)) this.payloadsKnown();
-		} else if (!this.idle.has(`${m.kind}${this.stage}`)) {
+		} else {
 			// The camera keeps reading a code after its step is done; said once.
-			this.idle.add(`${m.kind}${this.stage}`);
-			this.log(`${m.kind} read at stage ${this.stage}: nothing to do`);
+			this.noteOnce(`${m.kind} read at stage ${this.stage}: nothing to do`);
 		}
 	}
 
@@ -256,7 +251,7 @@ export class HandshakeEngine {
 	/** Own payload, or null when the session is over — it ends here when the connection could not be set up. */
 	private async payload(): Promise<Uint8Array | null> {
 		try {
-			this.myPayload = await this.ownPayload;
+			this.myPayload = await this.conn!.payload();
 		} catch (e) {
 			const reason = `no channel: ${(e as Error).message}`;
 			this.log(reason);

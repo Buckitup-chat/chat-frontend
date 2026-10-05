@@ -77,10 +77,9 @@ try {
 	const mallory = await phone({ 'pq2.settings': JSON.stringify({ mode: 'impostor' }), 'pq2.lastPeerCard': JSON.stringify(aliceCard) });
 	await bob.evaluate(() => document.getElementById('restart').click());
 	await bob.waitForFunction(() => window.__pq2.stage() === 'A');
-	const [m, b2] = await handshake(mallory, bob);
+	const [, b2] = await handshake(mallory, bob);
 	check('a phone showing Alice\'s identity with its own key is not confirmed by Bob', b2?.kind === 'verified' && /does not certify/.test(b2?.reason ?? ''), `${b2?.kind}: ${b2?.reason}`);
 	check('…and Bob\'s screen named Alice\'s identity as the one shown', b2?.peerHash === aliceCard.user_hash);
-	void m;
 
 	// Animated QR: no network channel at all, the proof goes through the codes.
 	const framesMode = { 'pq2.settings': JSON.stringify({ channel: 'frames', frameSize: 'large', fps: 8 }) };

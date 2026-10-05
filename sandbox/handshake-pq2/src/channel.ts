@@ -48,8 +48,8 @@ export class QwbpChannel implements ChannelAdapter {
 			iceServers,
 			// All of them: payload() chooses what the code offers.
 			maxCandidates: 64,
-			// The engine's deadlines end every session long before, and close the connection.
-			timeout: 60 * 60_000,
+			// Longer than any session (90 s, then 15 s for the channel); the engine closes it first.
+			timeout: 3 * 60_000,
 			onError: (e) => log(`channel: ${e.message}`),
 		});
 	}
@@ -102,6 +102,8 @@ export class QwbpChannel implements ChannelAdapter {
 
 	close(): void {
 		this.conn.close();
+		// close() cannot stop a setup already under way; close again once it is done.
+		this.own?.then(() => this.conn.close(), () => {});
 	}
 }
 

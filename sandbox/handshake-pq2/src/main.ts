@@ -9,7 +9,8 @@ import escapeHtml from '@/utils/escapeHtml';
 import { HandshakeEngine, type Outcome, type Stage, type Timings } from './engine';
 import { QwbpChannel } from './channel';
 import { createIdentity, type Identity } from './identity';
-import { FRAME_DATA_CHARS, type FrameSize } from './frames';
+import { FRAME_DATA_CHARS, FRAME_PREFIX, type FrameSize } from './frames';
+import { PREFIX } from './protocol';
 import type { UserCardRow } from '@/lib/data/types';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -104,7 +105,7 @@ const show = async (code: string, stage: Stage) => {
 		$('stage').textContent = stageText[stage];
 		navigator.vibrate?.(40);
 	}
-	await QRCode.toCanvas($<HTMLCanvasElement>('qr'), code, { errorCorrectionLevel: 'L', margin: 2, width: 720 });
+	await QRCode.toCanvas($<HTMLCanvasElement>('qr'), code, { errorCorrectionLevel: 'L', margin: 2, scale: 2 });
 };
 
 const renderWho = () => {
@@ -205,7 +206,7 @@ const onScan = (text: string) => {
 	if (!scanned.has(text)) {
 		scanned.add(text);
 		// Frames are many: the engine reports how far they got.
-		if (!text.startsWith('PQ2:F:')) log(`camera read ${text.startsWith('PQ2:') ? text.slice(4, 5) : 'a code that is not PQ2'} (${text.length} characters)`);
+		if (!text.startsWith(FRAME_PREFIX)) log(`camera read ${text.startsWith(`${PREFIX}:`) ? text.slice(PREFIX.length + 1, PREFIX.length + 2) : 'a code that is not PQ2'} (${text.length} characters)`);
 	}
 	void engine?.read(text);
 };
@@ -259,7 +260,7 @@ const startSession = async () => {
 			? { frames: { dataChars: FRAME_DATA_CHARS[settings.frameSize], fps: settings.fps } }
 			: { channel: () => new QwbpChannel(iceServers, log, settings.channel === 'turn' && settings.relayOnly) }),
 		onProgress: ({ sent, peerHas, received, total }) => {
-			$('stage').textContent = `Frames: they hold ${peerHas}/${sent} of mine, I hold ${received}/${total ?? '?'} of theirs. Hold still.`;
+			$('stage').textContent = `Frames: they hold ${peerHas}/${sent} of mine, I hold ${received}/${total} of theirs. Hold still.`;
 		},
 		claim: settings.mode === 'impostor' ? impostorClaim() : undefined,
 		onShow: (code, stage) => void show(code, stage),
