@@ -57,12 +57,8 @@ other at all.
 
 ## What it does not do
 
-- The spec's "one retry with configured ICE servers" (§5) is a setting here
-  instead: a QWBP connection gathers its candidates before its code is shown,
-  so changing ICE servers means new codes, i.e. a new session.
-- The QWBP connection is set up when the session starts, not after the
-  optical check (§5 step 3), so C shows without waiting for the address
-  gathering. Nothing of it is shown before C.
+- The relay's credentials are typed into the settings; the app fetches
+  short-lived ones from its backend (spec §5a).
 
 ## TURN
 
@@ -76,32 +72,24 @@ goes through the relay even on one Wi-Fi.
 QWBP's code has no room for relay addresses: its format knows host and
 srflx candidates only, and it drops relay ones. The sandbox reads them from
 the connection's own description and puts them in the code as srflx — the
-other phone needs only where to send. The app needs the same.
+other phone needs only where to send. The app does the same inside QWBP
+rather than around it (spec §5a).
 
 The relay sees only encrypted traffic: DTLS runs between the phones, and
 the fingerprints in the codes make sure the channel ends at the phone that
 showed them. What the relay learns is that two addresses exchanged a few
 kilobytes.
 
-### A relay server on Railway
+### A relay server
 
-coturn from its Docker image, behind Railway's TCP proxy. Railway takes no
-UDP from outside; both phones then reach the relay over TCP, and their
-allocations meet inside the server. Tested here with a local TURN server,
-not yet on Railway.
+The app's relay is the chat backend's: coturn next to the release, with
+short-lived credentials from `POST /electric/v1/turn_credentials`
+(`chat/docs/pq/reqs/pq_turn_relay.proposed.md`). The sandbox takes any TURN
+server with a user and a password; a local one:
 
-1. New service → Docker image `coturn/coturn:4.6.3`.
-2. Custom start command:
-
-   ```
-   turnserver -n --log-file=stdout --listening-port=3478 --realm=buckitup --lt-cred-mech --user=pq2:<password> --fingerprint --no-tls --no-dtls --no-cli --min-port=49152 --max-port=49252
-   ```
-
-3. Settings → Networking → TCP Proxy on port 3478. Railway gives
-   `<name>.proxy.rlwy.net:<port>`.
-4. On both phones: Channel: TURN, URL
-   `turn:<name>.proxy.rlwy.net:<port>?transport=tcp`, user `pq2`, the
-   password.
+```
+docker run --network=host coturn/coturn -n --lt-cred-mech --user=pq2:<password> --realm=buckitup --listening-port=3478 --fingerprint --no-cli
+```
 
 The Chromium check runs the same through any relay:
 `PQ2_TURN_URL=turn:… PQ2_TURN_USER=… PQ2_TURN_PASS=… node sandbox/handshake-pq2/scripts/check.mjs`.
