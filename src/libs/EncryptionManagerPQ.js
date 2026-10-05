@@ -723,7 +723,7 @@ export class EncryptionManagerPQ extends EventTarget {
     }
 
     let msg = typeof challenge === 'string'
-      ? Uint8Array.from(atob(challenge), c => c.charCodeAt(0))
+      ? new TextEncoder().encode(challenge)
       : challenge;
 
     return ml_dsa87.sign(msg, this.#signSkey);
