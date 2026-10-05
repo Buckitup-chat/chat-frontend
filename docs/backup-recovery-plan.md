@@ -207,9 +207,10 @@ The slices, in build order:
 - `src/lib/recovery/` gains chain reads (`getSecret`, `roundState`,
   `getGuardiansAt`, `getShareAt`, `hasApproved`, the round events), a gateway
   that submits through the relayer or directly, and the node client.
-- `src/lib/pq/content.ts` gains the `recovery_binding` and
-  `recovery_share_return` codecs, and the ten-word code of § Returning, with
-  golden vectors.
+- `src/lib/pq/content.ts` gains the `recovery_invite`,
+  `recovery_invite_reply`, `recovery_binding` and `recovery_share_return`
+  codecs; the meta keys of § Inviting and the ten-word code of § Returning come
+  with them. All of it is pinned by golden vectors.
 
 Acceptance: a dev build creates a secret on Sepolia through each gateway, and
 every configured node accepts a deposit for it.
@@ -220,15 +221,18 @@ A guardian signs approvals with stealth keys derived from their own `evm_skey`,
 and the owner needs the guardian's meta-address to address a slot to them. A
 card carries no EVM address, and adding one would publish the very link between
 a chat identity and a chain address that stealth addresses exist to break. So
-the meta-address travels in the dialog: the owner sends an invitation, the
-guardian's client says plainly what is asked and by whom, and acceptance
-answers with the meta-address inside the ML-DSA-signed row. Consent then comes
-before custody, where `pq_recovery_shares` § Holding offers only giving a
-share back after it has arrived.
+the meta-address travels in the dialog, as `pq_recovery_shares` § Inviting
+specifies: the owner sends a `recovery_invite`, the guardian's client says
+plainly what is asked and by whom, and a `recovery_invite_reply` accepts with
+the meta-address inside the ML-DSA-signed row, or declines. Consent comes
+before custody, and the guardian derives the meta keys from the vault alone, so
+their own recovery keeps them.
 
 Acceptance: an invitation accepted on one staging account yields, on the
 other, a meta-address from which the owner derives a stealth address the
-guardian's keys control.
+guardian's keys control. The guardian's meta-address is the same on a linked
+device and after the guardian restores their account; an acceptance that
+replays another guardian's meta-address is refused.
 
 ### 7.2 Creating a backup
 
@@ -362,12 +366,13 @@ The "Coming Soon" card, and with 7.5 the manual Shamir modals and
 
 ### Spec work in the chat repo
 
-`pq_recovery_shares` and the three `recovery_*` types are merged to the chat
-repo's `main` before 7.2, with what this phase adds to them:
+`pq_recovery_shares`, with § Inviting and its `recovery_*` types, is merged to
+the chat repo's `main` before 7.1. What this phase adds to it lands before the
+slice that names it:
 
-- content types for the invitation and acceptance (7.1), a receipt that says
-  *stored* (7.3), giving a share back (7.3) and a guardian's notice of their own
-  recovery (7.6) — the last three answer open questions of the spec;
+- content types for a receipt that says *stored* (7.3), giving a share back
+  (7.3) and a guardian's notice of their own recovery (7.6), each answering an
+  open question of the spec;
 - a field on `recovery_share` and `recovery_share_return` for a node set other
   than the default (7.2);
 - § Dying: a dropped guardian learns it from the new version's slots rather
