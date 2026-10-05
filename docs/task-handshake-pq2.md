@@ -55,7 +55,7 @@ fields do not decode to their length.
 A  PQ2:A:<user_hash>:<contact_pkey>:<nonce>
 B  PQ2:B:<user_hash>:<contact_pkey>:<nonce>:<sig>
 C  PQ2:C:<sig>:<qwbp>
-D  PQ2:D:<qwbp>
+D  PQ2:D:<tag>:<qwbp>
 ```
 
 | Field | Bytes | Meaning |
@@ -64,9 +64,10 @@ D  PQ2:D:<qwbp>
 | `contact_pkey` | 33 | The sender's handshake key, compressed secp256k1 |
 | `nonce` | 16 | Fresh random per session (`randomBytes(16)`) |
 | `sig` | 64 | ECDSA over the transcript, §4, compact `r‖s` |
-| `qwbp` | 55–150 chars | The sender's QWBP bootstrap payload (`QWBPConnection.getQRPayload()`), which carries its DTLS certificate fingerprint and up to six addresses (§5a): 34 bytes plus 7 per IPv4 and 19 per IPv6 address |
+| `tag` | 6 | The first 6 bytes of `SHA-256(T)`. D carries no signature, so the tag is what names its session: a D whose tag is not the reader's is ignored, or a neighbouring pair's D would be fed to the connection |
+| `qwbp` | 55–135 chars | The sender's QWBP bootstrap payload (`QWBPConnection.getQRPayload()`), which carries its DTLS certificate fingerprint and up to six addresses, at most two of them IPv6 (§5a): 34 bytes plus 7 per IPv4 and 19 per IPv6 address |
 
-Sizes: A ≈ 205 bytes, B ≈ 292, C up to ≈ 245, D up to ≈ 160 — QR versions 7–11 at
+Sizes: A ≈ 205 bytes, B ≈ 292, C up to ≈ 230, D up to ≈ 150 — QR versions 7–11 at
 error-correction level L, as today.
 
 ## 4. Transcript and signatures
@@ -113,7 +114,8 @@ the camera; "read" means the camera decoded a code. A device's own data is
 rest of the session: a later code naming a different `user_hash` or
 `contact_pkey` is ignored.
 
-1. **Start.** Generate `nonce_me`; show **A**; start the 90 s session timer.
+1. **Start.** Generate `nonce_me`; create the session's QWBP connection
+   (§5a); show **A**; start the 90 s session timer.
 2. **Read A** (state 1 only): bind the counterpart; compute `T`, sign it; show
    **B**.
 3. **Read B** (states 1–2): bind the counterpart if not bound (both scanned
@@ -129,13 +131,15 @@ rest of the session: a later code naming a different `user_hash` or
    symmetric race): verify `sig` as in 3 and feed the counterpart's payload to
    the connection this device already has. Both hold both payloads; QWBP picks
    offerer and answerer by comparing fingerprints, so neither needs a D.
-5. **Read D** (state 3 only — this device showed C): feed the payload to the
-   connection.
+5. **Read D** (state 3 only — this device showed C): if its `tag` is not this
+   session's, ignore it; otherwise feed the payload to the connection.
 6. **Channel.** QWBP derives the ICE credentials from the scanned
    fingerprint, and WebRTC's DTLS handshake accepts only a peer whose
    certificate has that fingerprint — that is what makes the channel the one
    negotiated on screen. When the data channel opens, each side sends **one**
-   message and expects one:
+   message and expects one. A message that arrives before this side listens
+   — the peer may send the moment the channel opens — is kept for it, not
+   dropped:
 
    ```json
    { "type": "PQ2_CONFIRM", "card": <own signed user card row>, "sig": "<base64 sigPQ>" }
@@ -192,22 +196,29 @@ base64 — the proof `api.ingestWithAuthEach` already sends. Extract it into one
 helper both use. `EncryptionManagerPQ.signChallenge` is not that proof: it
 base64-decodes the challenge first, and the server refuses the result.
 
-The client keeps the credentials in memory and asks again when less than 60 s
-remain. At session start it uses what it has, or waits at most 1 s for a
+The client keeps the credentials in memory and asks again when less than
+150 s remain: a session (90 s, then 15 s for the channel and 10 s for the
+confirmation) must not outlive its credential, or the relay refuses it
+mid-session. At session start it uses what it has, or waits at most 1 s for a
 request in flight. A failure, an offline phone, `503 turn_unavailable` or a
 timeout all mean no relay: the handshake goes on with the phone's own
 addresses, which is all a shared network needs.
 
 **One connection per session, created at start.** A relay allocation takes up
 to a second or two, so the session creates its QWBP connection in step 1, with
-the relay as its only ICE server, or with none. Its payload is shown first in
+the relay as its only ICE server, or with none — passed as `iceServers: []`,
+explicitly: QWBP falls back to Google's STUN servers when the option is
+missing. Its `timeout` is at least 3 minutes, longer than any session; QWBP's
+default of 30 s closes a connection while the codes are still being read. Its
+payload is shown first in
 C or D, never before the optical check. There is no retry with other servers:
 they would mean new codes, so a new session.
 
 **What goes into the code.** UDP addresses only, at most six:
 - the relay's first, at most two;
 - then one STUN-found address — the relay answers STUN too;
-- then the phone's own (host) addresses.
+- then the phone's own (host) addresses;
+- at most two IPv6 addresses in all, so C and D stay below B's density.
 
 A TCP candidate only repeats an address the channel reaches over UDP anyway.
 Relay addresses go in typed as srflx: QWBP's format has no relay type, and the
@@ -311,9 +322,14 @@ The card is not written into `allNetworkUsers` (§1).
   `confirmed: false` and no card.
 - A confirm message with a foreign card leaves `confirmed: false`.
 - The code's address list: relay first, at most two, then one srflx, then
-  host, UDP only, at most six; relay addresses typed as srflx.
+  host, UDP only, at most six, at most two IPv6; relay addresses typed as
+  srflx.
+- A D whose tag is another session's is ignored, and the real D is taken.
+- A confirm message that arrives before the engine listens on the channel
+  is still read.
 - A failed or slow credentials request (network error, `503`, no answer
-  within 1 s) starts the session with no ICE servers.
+  within 1 s) starts the session with an empty ICE server list — the
+  `RTCPeerConnection` configuration is checked, not just the option passed.
 - The challenge proof verifies the way the server checks it: over the
   challenge string's UTF-8 bytes.
 - A session restarted while the old one is still awaiting (camera, QWBP,
