@@ -215,9 +215,10 @@ describe('T-CONTENT-APPEND-ONLY: a longer envelope round-trips intact', () => {
 });
 
 describe('T-CONTENT-RECOVERY-SHARE: a guardian share envelope', () => {
+	const nodeSet = { threshold: 2, nodes: ['n_' + '0'.repeat(32) + '@https://a.example/recovery/node', 'n_' + '1'.repeat(32) + '@https://b.example/recovery/node'] };
 	const part = {
 		kind: 'recovery_share' as const,
-		secretRef: 'eip155:11155111:0xe634/0x9f3c',
+		secretRef: 'eip155:11155111:0xd9ff/0x9f3c',
 		version: 1,
 		threshold: 2,
 		total: 3,
@@ -226,23 +227,39 @@ describe('T-CONTENT-RECOVERY-SHARE: a guardian share envelope', () => {
 		splitId: '4f1c'.repeat(8),
 		shareIndex: 2,
 		splitProof: ['leafA', 'leafB', 'leafC'],
-		rest: [],
+		nodeSet,
 	};
+	const head = [part.secretRef, 1, 2, 3, 'CAFxyz', 1_715_000_000, part.splitId, 2];
 
-	it('round-trips at the registry positions', () => {
+	it('round-trips at the registry positions, the node set last', () => {
 		const json = encodeContent([part]);
-		expect(JSON.parse(json)).toEqual({
-			recovery_share: [part.secretRef, 1, 2, 3, 'CAFxyz', 1_715_000_000, part.splitId, 2, ['leafA', 'leafB', 'leafC']],
-		});
+		expect(JSON.parse(json)).toEqual({ recovery_share: [...head, ['leafA', 'leafB', 'leafC'], [2, nodeSet.nodes]] });
 		expect(decodeContent(json)).toEqual([part]);
 	});
 
-	it('accepts a longer array and ignores its tail; takes a missing proof as an empty one, which no check passes', () => {
-		const wire = [part.secretRef, 1, 2, 3, 'CAFxyz', 1_715_000_000, part.splitId, 2, ['leafA'], 'a future field'];
+	it('accepts a longer array and keeps its tail; takes a missing proof or node set as none, which no check passes', () => {
+		const wire = [...head, ['leafA'], [2, nodeSet.nodes], 'a future field'];
 		const decoded = decodeContent(JSON.stringify({ recovery_share: wire }));
-		expect(decoded[0]).toMatchObject({ splitProof: ['leafA'], rest: ['a future field'] });
+		expect(decoded[0]).toMatchObject({ splitProof: ['leafA'], nodeSet, rest: ['a future field'] });
 		expect(JSON.parse(encodeContent(decoded)).recovery_share).toEqual(wire);
-		expect(decodeContent(JSON.stringify({ recovery_share: wire.slice(0, 8) }))[0]).toMatchObject({ splitProof: [] });
+		expect(decodeContent(JSON.stringify({ recovery_share: head }))[0]).toMatchObject({ splitProof: [], nodeSet: null });
+		expect(decodeContent(JSON.stringify({ recovery_share: [...head, ['leafA']] }))[0]).toMatchObject({ nodeSet: null });
+	});
+
+	it('refuses a node set of more than its two elements: the root covers only those', () => {
+		const wire = [...head, ['leafA'], [2, nodeSet.nodes, 'unauthenticated']];
+		expect(() => decodeContent(JSON.stringify({ recovery_share: wire }))).toThrow(ContentDecodeError);
+	});
+
+	it('takes a null proof as none, like a null node set', () => {
+		expect(decodeContent(JSON.stringify({ recovery_share: [...head, null, [2, nodeSet.nodes]] }))[0]).toMatchObject({ splitProof: [], nodeSet });
+	});
+
+	it('keeps a newer tail behind a missing node set in place', () => {
+		const wire = [...head, ['leafA'], null, 'a future field'];
+		const decoded = decodeContent(JSON.stringify({ recovery_share: wire }));
+		expect(decoded[0]).toMatchObject({ nodeSet: null, rest: ['a future field'] });
+		expect(JSON.parse(encodeContent(decoded)).recovery_share).toEqual(wire);
 	});
 
 	it('refuses a malformed envelope rather than guessing its fields', () => {
@@ -250,8 +267,10 @@ describe('T-CONTENT-RECOVERY-SHARE: a guardian share envelope', () => {
 			[part.secretRef, '1', 2, 3, 'CAFxyz', 1, part.splitId, 2],
 			[part.secretRef, 1, 2.5, 3, 'CAFxyz', 1, part.splitId, 2],
 			[part.secretRef, 1, 2, 3, 'CAFxyz', 1, part.splitId],
-			[part.secretRef, 1, 2, 3, 'CAFxyz', 1, part.splitId, 2, 'not a list'],
-			[part.secretRef, 1, 2, 3, 'CAFxyz', 1, part.splitId, 2, [1, 2]],
+			[...head, 'not a list'],
+			[...head, [1, 2]],
+			[...head, ['leafA'], 'not a node set'],
+			[...head, ['leafA'], [2, [1]]],
 		];
 		for (const wire of bad) expect(() => decodeContent(JSON.stringify({ recovery_share: wire }))).toThrow(ContentDecodeError);
 	});
@@ -267,4 +286,61 @@ describe('T-CONTENT-RECOVERY-SHARE: a guardian share envelope', () => {
 		expect(reply).not.toContain('leafA');
 		expect(reply).toContain('🔐 recovery share');
 	});
+});
+
+describe('T-CONTENT-QUOTE-ALLOWLIST: what a quote copies', () => {
+	it('names a type this build does not know instead of copying it: it may hold a key', () => {
+		const unknown = decodeContent(JSON.stringify({ review_list_key: ['SECRETPASSWORD'] }));
+		const reply = encodeContent([{ kind: 'quote', authorHash: 'u_a', messageId: 'm', signHash: 's', snapshot: unknown }]);
+		expect(reply).not.toContain('SECRETPASSWORD');
+		expect(reply).toContain('[review_list_key]');
+	});
+});
+
+describe('T-CONTENT-RECOVERY: the other recovery envelopes', () => {
+	const nodeSet = { threshold: 2, nodes: ['n_' + '0'.repeat(32) + '@https://a.example/recovery/node', 'n_' + '1'.repeat(32) + '@https://b.example/recovery/node'] };
+	const parts = {
+		recovery_share_return: {
+			kind: 'recovery_share_return' as const,
+			secretRef: 'eip155:10:0x4590/0x9f3c', version: 1, splitId: '4f1c'.repeat(8), threshold: 2, total: 3, shareIndex: 2,
+			round: 4, candidate: '0x7a1b', shareB64: 'CAFxyz', createdAt: 1_715_600_000, splitProof: ['leafA', 'leafB', 'leafC'], nodeSet,
+		},
+		recovery_binding: { kind: 'recovery_binding' as const, secretRef: 'eip155:10:0x4590/0x9f3c', candidate: '0x7a1b', userHash: 'u_ab12', signatureB64: 'c2ln' },
+		recovery_invite: { kind: 'recovery_invite' as const, inviteId: '9b2e'.repeat(8), deployment: 'eip155:10:0x4590', createdAt: 1_715_000_000 },
+		recovery_invite_reply: {
+			kind: 'recovery_invite_reply' as const, inviteId: '9b2e'.repeat(8), answer: 'accept', metaAddress: '0x02a1', proofB64: 'cHJvb2Y', createdAt: 1_715_000_300,
+		},
+	};
+	const wires = {
+		recovery_share_return: ['eip155:10:0x4590/0x9f3c', 1, '4f1c'.repeat(8), 2, 3, 2, 4, '0x7a1b', 'CAFxyz', 1_715_600_000, ['leafA', 'leafB', 'leafC'], [2, nodeSet.nodes]],
+		recovery_binding: ['eip155:10:0x4590/0x9f3c', '0x7a1b', 'u_ab12', 'c2ln'],
+		recovery_invite: ['9b2e'.repeat(8), 'eip155:10:0x4590', 1_715_000_000],
+		recovery_invite_reply: ['9b2e'.repeat(8), 'accept', '0x02a1', 'cHJvb2Y', 1_715_000_300],
+	};
+
+	for (const type of Object.keys(parts) as (keyof typeof parts)[]) {
+		it(`${type}: round-trips at the registry positions, and keeps a newer tail`, () => {
+			const json = encodeContent([parts[type]]);
+			expect(JSON.parse(json)).toEqual({ [type]: wires[type] });
+			expect(decodeContent(json)).toEqual([parts[type]]);
+			const longer = decodeContent(JSON.stringify({ [type]: [...wires[type], 'a future field'] }));
+			expect(longer[0]).toMatchObject({ rest: ['a future field'] });
+			expect(JSON.parse(encodeContent(longer))[type]).toEqual([...wires[type], 'a future field']);
+		});
+
+		it(`${type}: refuses an envelope one field short, or with a field of the wrong type`, () => {
+			const short = wires[type].slice(0, -1);
+			const wrong = [...wires[type]];
+			wrong[0] = 42;
+			for (const wire of type === 'recovery_share_return' ? [wires[type].slice(0, 9), wrong] : [short, wrong]) {
+				expect(() => decodeContent(JSON.stringify({ [type]: wire }))).toThrow(ContentDecodeError);
+			}
+		});
+
+		it(`${type}: is named in a quote, never copied`, () => {
+			const reply = encodeContent([{ kind: 'quote', authorHash: 'u_a', messageId: 'm', signHash: 's', snapshot: [parts[type]] }]);
+			expect(reply).not.toContain(JSON.stringify(wires[type][0]));
+			expect(contentToText([parts[type]])).toMatch(/^(🔐|🛡) /);
+		});
+	}
 });

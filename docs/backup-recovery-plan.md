@@ -217,16 +217,16 @@ every configured node accepts a deposit for it.
 
 ### 7.1 Becoming a guardian
 
-A guardian signs approvals with stealth keys derived from their own `evm_skey`,
-and the owner needs the guardian's meta-address to address a slot to them. A
+A guardian signs approvals with stealth keys derived from a meta seed in their
+vault (`src/lib/recovery/guardianInvite.ts`), and the owner needs the guardian's meta-address to address a slot to them. A
 card carries no EVM address, and adding one would publish the very link between
 a chat identity and a chain address that stealth addresses exist to break. So
 the meta-address travels in the dialog, as `pq_recovery_shares` § Inviting
 specifies: the owner sends a `recovery_invite`, the guardian's client says
 plainly what is asked and by whom, and a `recovery_invite_reply` accepts with
 the meta-address inside the ML-DSA-signed row, or declines. Consent comes
-before custody, and the guardian derives the meta keys from the vault alone, so
-their own recovery keeps them.
+before custody, and the meta keys come from the vault alone — not the
+account's EVM key — so the guardian's own recovery keeps them.
 
 Acceptance: an invitation accepted on one staging account yields, on the
 other, a meta-address from which the owner derives a stealth address the
