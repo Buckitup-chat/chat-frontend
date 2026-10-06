@@ -201,9 +201,10 @@ The slices, in build order:
   registry it writes to: nothing opens that modal, and Phase 7 reads no
   registry, since the meta-address travels in the dialog (7.1).
 - The Sepolia entry of `bcConfig.json` carries the v2 addresses and start
-  blocks. The relayer, the notification servers and the node list are
-  configuration with ours as the default, since the design assumes many of
-  each.
+  blocks. The relayer and the notification servers are configuration with
+  ours as the default, since the design assumes many of each. Nodes are not
+  configured: the client knows the nodes it syncs with or has met, plus any URL
+  the owner types in (§ 7.2).
 - `src/lib/recovery/` gains chain reads (`getSecret`, `roundState`,
   `getGuardiansAt`, `getShareAt`, `hasApproved`, the round events), a gateway
   that submits through the relayer or directly, and the node client on node
@@ -219,7 +220,7 @@ The slices, in build order:
   with them. All of it is pinned by golden vectors.
 
 Acceptance: a dev build creates a secret on Sepolia through each gateway, and
-every configured node accepts a deposit for it.
+every node of a hand-picked set accepts a deposit for it.
 
 ### 7.1 Becoming a guardian
 
@@ -250,7 +251,7 @@ accepted; everything else has a default:
 | Shares needed (Shamir threshold) | a majority of the guardians, at least 2 |
 | Approvals needed (contract quorum) | equal to the threshold |
 | Spares | 2 |
-| Nodes | the default set, with a spare, e.g. 3 of 5 — it needs operators besides us (`pq_recovery_services`, Open question 1); until they exist, the simple screen has no default and asks for a choice |
+| Nodes | built from the nodes the client knows: one per operator, guardians' excluded, up to five, a majority needed, at least three; with fewer operators the screen asks the owner to add nodes |
 | Timelock / window | the contract's defaults: 3 days / 7 days |
 | Gas | our relayer |
 
@@ -265,13 +266,14 @@ paying their own gas with the address's balance shown.
   and a call under its gas cap, so a larger set pays its own gas. The run
   estimates gas before it publishes anything.
 - Nodes of the owner's choice (`pq_recovery_services` § Choosing nodes),
-  among the descriptors the client gathers from known nodes, contacts' devices
-  and typed URLs:
+  among the nodes the client offers — a verified descriptor for the secret's
+  deployment, a stable `https://` name, a recent `/health`:
   - it counts operators, not nodes, and refuses a set in which one operator
     holds a threshold;
-  - it refuses a node whose operator is a guardian of the same secret;
-  - BuckitUp counts as one operator, endorsed by one pinned identity, so our
-    nodes stay below the threshold of any set;
+  - an organisation's set of accounts is one operator, BuckitUp's under the
+    same rules as anyone's; until sets are published, the client build
+    carries BuckitUp's set and every other account counts alone;
+  - it refuses a node whose operator includes any guardian of the same secret;
   - it suggests a spare.
 - The node set, default or chosen, travels with every share as `node_set`,
   since a recovering device has no other way to learn it.
@@ -291,7 +293,9 @@ Acceptance, checked once 7.3 is in: on staging and Sepolia, an owner backs up
 to three guardians; the chain shows the delivery records, every node holds its
 share, and every guardian's client holds theirs. A node set in which one
 operator holds the threshold, or a node run by one of the guardians, is
-refused before anything is published.
+refused before anything is published. The default: with nodes of three
+operators known it backs up without a choice and leaves out a guardian's
+node; with only BuckitUp's nodes known it asks the owner to add nodes.
 
 ### 7.3 Keeping a share
 
@@ -397,7 +401,9 @@ slice that names it:
 - in `pq_recovery_services`: node protocol v3 — key-derived ids, the `/info`
   descriptor with its operator endorsement, the encrypted release and the
   holding check — which 7.0's node client and 7.2's choice need, and the
-  SDK's v3 messages with it;
+  SDK's v3 messages with it; and, later, how an organisation publishes its
+  set of accounts (its Open question 1), which replaces the set built into the
+  client;
 - § Dying: a dropped guardian learns it from the new version's slots rather
   than the owner's roster (7.3).
 
