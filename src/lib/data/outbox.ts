@@ -600,7 +600,7 @@ async function currentOutcome(id: string, userHash: string): Promise<EntryOutcom
 	return 'pending';
 }
 
-export async function awaitServerAccepted(id: string, userHash: string): Promise<EntryOutcome> {
+export async function awaitServerAccepted(id: string, userHash: string, { signal }: { signal?: AbortSignal } = {}): Promise<EntryOutcome> {
 	const transportOutcome = async (): Promise<EntryOutcome | null> => {
 		const outcome = await currentOutcome(id, userHash);
 		if (outcome !== 'pending' && outcome !== 'unknown') return outcome;
@@ -610,18 +610,29 @@ export async function awaitServerAccepted(id: string, userHash: string): Promise
 		return serverAccepted ? { kind: 'accepted' } : null;
 	};
 
+	signal?.throwIfAborted();
 	const immediate = await transportOutcome();
 	if (immediate) return immediate;
+	signal?.throwIfAborted();
 
-	return new Promise<EntryOutcome>((resolve) => {
+	return new Promise<EntryOutcome>((resolve, reject) => {
 		let settled = false;
+		const stop = () => {
+			settled = true;
+			unsubscribe();
+			clearInterval(failsafeTimer);
+			signal?.removeEventListener('abort', onAbort);
+		};
+		const onAbort = () => {
+			if (settled) return;
+			stop();
+			reject(signal!.reason);
+		};
 		const recheck = () => {
 			if (settled) return;
 			void transportOutcome().then((outcome) => {
 				if (!outcome || settled) return;
-				settled = true;
-				unsubscribe();
-				clearInterval(failsafeTimer);
+				stop();
 				resolve(outcome);
 			});
 		};
@@ -629,6 +640,7 @@ export async function awaitServerAccepted(id: string, userHash: string): Promise
 			if (changedUserHash === userHash) recheck();
 		});
 		const failsafeTimer = setInterval(recheck, FAILSAFE_RECHECK_MS);
+		signal?.addEventListener('abort', onAbort);
 		recheck();
 	});
 }

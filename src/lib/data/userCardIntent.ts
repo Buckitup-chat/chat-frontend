@@ -154,7 +154,7 @@ export class BootstrapCardRejectedError extends Error {
 	}
 }
 
-export type CardConstructionMode = 'register' | 'import' | 'sign-in' | 'update';
+export type CardConstructionMode = 'register' | 'import' | 'sign-in' | 'update' | 'recover';
 
 export type CardDecision =
 	| { kind: 'proven' }
@@ -179,6 +179,7 @@ async function readBootstrapOperations(userHash: string): Promise<BootstrapOpera
 	} catch {
 		return blocked('pending_unreadable');
 	}
+	let accepted = false;
 	let pending: PendingBootstrapCard | null = null;
 	let rejected: string | null = null;
 	let unconfirmed = false;
@@ -190,11 +191,12 @@ async function readBootstrapOperations(userHash: string): Promise<BootstrapOpera
 			continue;
 		}
 		const state = intent.ref ? await storedWriteState(intent.ref, userHash) : { kind: 'unconfirmed' as const };
-		if (state.kind === 'accepted') return { kind: 'read', accepted: true, pending: null, rejected: null };
-		if (state.kind === 'unconfirmed') unconfirmed = true;
+		if (state.kind === 'accepted') accepted = true;
+		else if (state.kind === 'unconfirmed') unconfirmed = true;
 		else if (state.kind === 'rejected') rejected = state.reason;
 		else pending = { kind: 'stored', intentId: entry.id, outboxId: intent.ref! };
 	}
+	if (accepted) return { kind: 'read', accepted: true, pending, rejected: null };
 	if (scan.issues.some((issue) => issue.owner === 'current')) return blocked('pending_unreadable');
 	if (unconfirmed) return blocked('bootstrap_unconfirmed');
 	return { kind: 'read', accepted: false, pending, rejected };
@@ -225,7 +227,16 @@ async function shapeCardOf(row: UserCardRow | undefined): Promise<ShapeCard> {
 	return verification.status === 'verified' ? { kind: 'card', row } : { kind: 'unverified' };
 }
 
-export async function decideCardConstruction(userHash: string, mode: CardConstructionMode): Promise<CardDecision> {
+export async function acceptedCardTimestamp(userHash: string): Promise<number | null> {
+	const accepted = await readAcceptedBase('user_cards', userHash, userHash);
+	return accepted.kind === 'present' ? timestampOf(accepted.row.owner_timestamp) : null;
+}
+
+export async function decideCardConstruction(
+	userHash: string,
+	mode: CardConstructionMode,
+	{ acceptedAfter = null }: { acceptedAfter?: number | null } = {},
+): Promise<CardDecision> {
 	const accepted = await readAcceptedBase('user_cards', userHash, userHash);
 	switch (accepted.kind) {
 		case 'locked': return blocked('accepted_locked');
@@ -235,6 +246,18 @@ export async function decideCardConstruction(userHash: string, mode: CardConstru
 		case 'missing': break;
 		default: return assertNever(accepted);
 	}
+	if (mode === 'recover') {
+		const acceptedTs = accepted.kind === 'present' ? timestampOf(accepted.row.owner_timestamp) : null;
+		if (acceptedTs !== null && acceptedTs > (acceptedAfter ?? 0)) return { kind: 'proven' };
+		const ops = await readBootstrapOperations(userHash);
+		if (ops.kind === 'blocked') return ops;
+		if (ops.pending) return { kind: 'reuse-bootstrap', operation: ops.pending };
+		const pending = await readPendingCardWrites(userHash);
+		if ('kind' in pending) return pending;
+		const ownerTimestamp = await nextCardTimestamp(userHash, Math.max(acceptedTs ?? 0, pending.highest ?? 0));
+		return typeof ownerTimestamp === 'number' ? { kind: 'author-bootstrap', ownerTimestamp } : ownerTimestamp;
+	}
+
 	const cards = getUserCardsCollection();
 
 	if (mode === 'update') {
