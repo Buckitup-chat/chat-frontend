@@ -188,8 +188,8 @@ What it builds on:
   relayer and paying its own gas. The backend's `docs/INTEGRATION.md` documents
   the relayer, the indexer and notifications; where it puts ECIES shares on
   chain and reads meta-addresses from the registry, `pq_recovery_shares` and
-  7.1 replace it. The node API is the `backitup-node` README (`POST
-  /shares/:id/release`), its signed messages the SDK's
+  7.1 replace it. The node API is `pq_recovery_services` § URLs and § Nodes
+  (protocol v3, under `/recovery/node/...`), its signed messages the SDK's
   `src/constants/messages.ts`.
 
 The slices, in build order:
@@ -209,8 +209,8 @@ The slices, in build order:
   `getGuardiansAt`, `getShareAt`, `hasApproved`, the round events), a gateway
   that submits through the relayer or directly, and the node client on node
   protocol v3 (`pq_recovery_services` § Nodes): it decrypts a release with the
-  candidate key, verifies `/info` descriptors, and reads a node's holding with
-  `GET /shares/:id`.
+  candidate key, verifies `/recovery/node/info` descriptors, and reads a
+  node's holding with `GET /recovery/node/shares/:id`.
 - `src/lib/recovery/shareSplit.ts` moves to root v2: `node_set` hashed into
   `split_root` (`pq_recovery_shares` § Re-issuing), the golden vectors
   re-pinned.
@@ -322,7 +322,7 @@ receives a *stored* receipt from each guardian.
   and confirmed holders against the threshold — the one number that answers "is
   my backup real". Spares left, holdings gone stale after a reshare, shares
   given back. Each node's holding, checked periodically with
-  `GET /shares/:id` — a node that is up but wiped counts as lost; when lost
+  `GET /recovery/node/shares/:id` — a node that is up but wiped counts as lost; when lost
   holdings eat into the spare, a prompt to reshare. It lives in a
   `user_storage` slot reached through the root map, so a second device sees
   the same picture.
