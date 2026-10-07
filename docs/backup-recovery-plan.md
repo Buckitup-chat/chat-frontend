@@ -188,8 +188,8 @@ What it builds on:
   relayer and paying its own gas. The backend's `docs/INTEGRATION.md` documents
   the relayer, the indexer and notifications; where it puts ECIES shares on
   chain and reads meta-addresses from the registry, `pq_recovery_shares` and
-  7.1 replace it. The node API is the `backitup-node` README (`POST
-  /shares/:id/release`), its signed messages the SDK's
+  7.1 replace it. The node API is `pq_recovery_services` § URLs and § Nodes
+  (protocol v3, under `/recovery/node/...`), its signed messages the SDK's
   `src/constants/messages.ts`.
 
 The slices, in build order:
@@ -201,19 +201,26 @@ The slices, in build order:
   registry it writes to: nothing opens that modal, and Phase 7 reads no
   registry, since the meta-address travels in the dialog (7.1).
 - The Sepolia entry of `bcConfig.json` carries the v2 addresses and start
-  blocks. The relayer, the notification servers and the node list are
-  configuration with ours as the default, since the design assumes many of
-  each.
+  blocks. The relayer and the notification servers are configuration with
+  ours as the default, since the design assumes many of each. Nodes are not
+  configured: the client knows the nodes it syncs with or has met, plus any URL
+  the owner types in (§ 7.2).
 - `src/lib/recovery/` gains chain reads (`getSecret`, `roundState`,
   `getGuardiansAt`, `getShareAt`, `hasApproved`, the round events), a gateway
-  that submits through the relayer or directly, and the node client.
+  that submits through the relayer or directly, and the node client on node
+  protocol v3 (`pq_recovery_services` § Nodes): it decrypts a release with the
+  candidate key, verifies `/recovery/node/info` descriptors, and reads a
+  node's holding with `GET /recovery/node/shares/:id`.
+- `src/lib/recovery/shareSplit.ts` moves to root v2: `node_set` hashed into
+  `split_root` (`pq_recovery_shares` § Re-issuing), the golden vectors
+  re-pinned.
 - `src/lib/pq/content.ts` gains the `recovery_invite`,
   `recovery_invite_reply`, `recovery_binding` and `recovery_share_return`
   codecs; the meta keys of § Inviting and the ten-word code of § Returning come
   with them. All of it is pinned by golden vectors.
 
 Acceptance: a dev build creates a secret on Sepolia through each gateway, and
-every configured node accepts a deposit for it.
+every node of a hand-picked set accepts a deposit for it.
 
 ### 7.1 Becoming a guardian
 
@@ -244,7 +251,7 @@ accepted; everything else has a default:
 | Shares needed (Shamir threshold) | a majority of the guardians, at least 2 |
 | Approvals needed (contract quorum) | equal to the threshold |
 | Spares | 2 |
-| Nodes | our configured set, a majority needed |
+| Nodes | built from the nodes the client knows: one per operator, guardians' excluded, up to five, a majority needed, at least three; with fewer operators the screen asks the owner to add nodes |
 | Timelock / window | the contract's defaults: 3 days / 7 days |
 | Gas | our relayer |
 
@@ -258,8 +265,18 @@ paying their own gas with the address's balance shown.
 - The contract takes up to 50 guardians; the relayer takes up to 32 shares
   and a call under its gas cap, so a larger set pays its own gas. The run
   estimates gas before it publishes anything.
-- A node set other than ours travels with every share, since a recovering
-  device has no other way to learn which nodes hold the node half.
+- Nodes of the owner's choice (`pq_recovery_services` § Choosing nodes),
+  among the nodes the client offers — a verified descriptor for the secret's
+  deployment, a stable `https://` name, a recent `/health`:
+  - it counts operators, not nodes, and refuses a set in which one operator
+    holds a threshold;
+  - an organisation's set of accounts is one operator, BuckitUp's under the
+    same rules as anyone's; until sets are published, the client build
+    carries BuckitUp's set and every other account counts alone;
+  - it refuses a node whose operator includes any guardian of the same secret;
+  - it suggests a spare.
+- The node set, default or chosen, travels with every share as `node_set`,
+  since a recovering device has no other way to learn it.
 
 The run follows `pq_recovery_shares` § Issuing: split S into halves and the
 friends' half into shares with the spares, seal the vault with the split inside
@@ -274,7 +291,11 @@ explicit choice, and the roster keeps showing it as a warning.
 
 Acceptance, checked once 7.3 is in: on staging and Sepolia, an owner backs up
 to three guardians; the chain shows the delivery records, every node holds its
-share, and every guardian's client holds theirs.
+share, and every guardian's client holds theirs. A node set in which one
+operator holds the threshold, or a node run by one of the guardians, is
+refused before anything is published. The default: with nodes of three
+operators known it backs up without a choice and leaves out a guardian's
+node; with only BuckitUp's nodes known it asks the owner to add nodes.
 
 ### 7.3 Keeping a share
 
@@ -300,8 +321,11 @@ receives a *stored* receipt from each guardian.
 - **Roster:** who holds a share, at what version, whether receipt is confirmed,
   and confirmed holders against the threshold — the one number that answers "is
   my backup real". Spares left, holdings gone stale after a reshare, shares
-  given back. It lives in a `user_storage` slot reached through the root map,
-  so a second device sees the same picture.
+  given back. Each node's holding, checked periodically with
+  `GET /recovery/node/shares/:id` — a node that is up but wiped counts as lost; when lost
+  holdings eat into the spare, a prompt to reshare. It lives in a
+  `user_storage` slot reached through the root map, so a second device sees
+  the same picture.
 - **Controls:** add or drop a guardian (a reshare), change the timelock and
   window, hand a spare to an existing guardian, revoke for good.
 - **Alerts in the app:** on every start and while open, the client reads the
@@ -316,7 +340,8 @@ receives a *stored* receipt from each guardian.
 Acceptance: a round a guardian starts on Sepolia reaches the owner both in the
 app and on Telegram within the timelock, and the veto from the banner returns
 it to `None`; a reshare from three guardians to two leaves the two holding the
-new share and the dropped one holding nothing.
+new share and the dropped one holding nothing; a node switched off long
+enough to eat the spare shows in the roster with a prompt to reshare.
 
 ### 7.5 Recovery — the "I can't get in" door
 
@@ -373,8 +398,12 @@ slice that names it:
 - content types for a receipt that says *stored* (7.3), giving a share back
   (7.3) and a guardian's notice of their own recovery (7.6), each answering an
   open question of the spec;
-- a field on `recovery_share` and `recovery_share_return` for a node set other
-  than the default (7.2);
+- in `pq_recovery_services`: node protocol v3 — key-derived ids, the `/info`
+  descriptor with its operator endorsement, the encrypted release and the
+  holding check — which 7.0's node client and 7.2's choice need, and the
+  SDK's v3 messages with it; and, later, how an organisation publishes its
+  set of accounts (its Open question 1), which replaces the set built into the
+  client;
 - § Dying: a dropped guardian learns it from the new version's slots rather
   than the owner's roster (7.3).
 
