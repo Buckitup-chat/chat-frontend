@@ -177,6 +177,23 @@ describe('global sync status', () => {
 	});
 });
 
+describe('global sync status: read access awaiting approval', () => {
+	it('a blocked shape keeps the chip off Synced; unblocking restores Synced', async () => {
+		const gate = await import('@/lib/data/accessGate');
+		const w = mountList();
+		await vi.waitFor(() => expect(statusText(w)).toBe('Synced'));
+
+		gate.markShapeBlocked('user_card');
+		await nextTick();
+		expect(statusText(w)).not.toBe('Synced');
+
+		gate.markShapeUnblocked('user_card');
+		await nextTick();
+		expect(statusText(w)).toBe('Synced');
+		gate.resetGate();
+	});
+});
+
 describe('global sync status priority', () => {
 	it('orders offline, unknown, attention, unfinished, synced', () => {
 		expect(accountSyncState(false, { intents: 0, unfinished: 0, quarantined: 1 })).toBe('offline');

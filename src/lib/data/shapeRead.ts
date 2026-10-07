@@ -8,6 +8,8 @@
 // Both facts below were paid for once and belong in one place rather than at
 // every call site.
 
+import { bearerFor, handleShapeAuth401 } from './readSession';
+
 declare const ELECTRIC_API_URL: string; // build-time define (vite.config.js)
 
 /** Absolute URL for an Electric path, tolerating a missing define and a
@@ -47,7 +49,20 @@ export const readShapeOnce = async <T>(table: string, where: string, signal?: Ab
 	// int4 with HTTP 500, and random digits + counter concatenated overflowed it.
 	const salt = Math.floor(Math.random() * 1e6) * 1000 + (++probe % 1000);
 	const query = encodeURIComponent(`${where} AND ${salt}=${salt}`);
-	const res = await fetch(electricUrl(`/shapes?table=${table}&where=${query}&offset=-1`), { signal });
+	const doFetch = () => {
+		const auth = bearerFor(table);
+		return fetch(electricUrl(`/shapes?table=${table}&where=${query}&offset=-1`), {
+			signal,
+			headers: auth ? { Authorization: auth } : undefined,
+		});
+	};
+	let res = await doFetch();
+	if (res.status === 401) {
+		const json = await res.json().catch(() => null) as { error?: string; shape?: string } | null;
+		if (json?.error === 'read_session_required' && json.shape && await handleShapeAuth401(json as { error: string; shape: string }, table)) {
+			res = await doFetch();
+		}
+	}
 	if (!res.ok) throw new Error(`${table} read failed: HTTP ${res.status}`);
 	return ((await res.json()) as Array<{ value?: T }>)
 		.map((r) => r.value)

@@ -6,6 +6,7 @@
 	</div>
 
 	<QuarantinedWritesBanner v-if="$userPQ.currentUser" />
+	<AccessGateBanner v-if="$userPQ.currentUser" />
 
 	<div class="wrapper" v-if="$userPQ.currentUser">
 		<Menu class="_menu" :class="{ _opened: $menuOpened }" />
@@ -149,6 +150,7 @@ import { useMenu } from '@/composables/useMenu';
 
 import Loader from './components/Loader.vue';
 import QuarantinedWritesBanner from '@/components/QuarantinedWritesBanner.vue';
+import AccessGateBanner from '@/components/AccessGateBanner.vue';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';
 import Swal from '@/components/swal/Swal_.vue';

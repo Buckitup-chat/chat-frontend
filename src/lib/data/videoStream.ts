@@ -17,6 +17,7 @@ import { fromBase64 } from '@/lib/pq/signature';
 import { CHUNK_SIZE } from '@/lib/pq/fileCrypto';
 import { downloadFile, type DownloadProgress } from './fileTransfer';
 import { getCachedMedia, putCachedMedia } from './mediaCache';
+import { bearerFor, openSession } from './readSession';
 
 declare const ELECTRIC_API_URL: string;
 
@@ -47,6 +48,10 @@ const installListeners = () => {
 		const msg = event.data as { type?: string; sessionId?: string };
 		if (msg?.type === 'need-session' && msg.sessionId && active.has(msg.sessionId)) {
 			post(active.get(msg.sessionId));
+		} else if (msg?.type === 'need-token' && msg.sessionId && active.has(msg.sessionId)) {
+			void openSession('file_chunk').then((token) => {
+				post({ type: 'token', sessionId: msg.sessionId, token: token || '' });
+			});
 		}
 	});
 	navigator.serviceWorker.addEventListener('controllerchange', () => {
@@ -112,6 +117,7 @@ export const openVideo = async (
 ): Promise<VideoSource> => {
 	if (await ensureWorker()) {
 		const sessionId = crypto.randomUUID();
+		const bearer = bearerFor('file_chunk');
 		const registration = {
 			type: 'register',
 			sessionId,
@@ -121,6 +127,7 @@ export const openVideo = async (
 			totalSize: video.size,
 			mimeType: video.mimeType,
 			baseUrl: ELECTRIC_API_URL,
+			token: bearer ? bearer.replace('Bearer ', '') : '',
 		};
 		active.set(sessionId, registration);
 		post(registration);

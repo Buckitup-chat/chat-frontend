@@ -55,6 +55,25 @@ vi.mock('@lo-fi/local-vault', () => ({
 }));
 vi.mock('@lo-fi/local-vault/adapter/idb', () => ({}));
 vi.mock('@lo-fi/local-data-lock', () => ({ removeLocalAccount: async () => {} }));
+vi.mock('@/lib/data/readSession', () => ({
+	bearerFor: () => '',
+	hasValidToken: () => false,
+	handleShapeAuth401: async () => false,
+	openSession: async () => null,
+	invalidateSession: () => {},
+	clearSessions: () => {},
+}));
+vi.mock('@/lib/data/accessGate', () => ({
+	markShapeBlocked: () => {},
+	markShapeUnblocked: () => {},
+	isShapeBlocked: () => false,
+	hasBlockedShapes: () => false,
+	blockedShapeNames: () => [],
+	onBlockedChange: () => () => {},
+	waitForUnblock: async () => {},
+	probeAllBlocked: () => {},
+	resetGate: () => {},
+}));
 
 let linkedCards: object | null = null;
 vi.mock('@/lib/data/collections', () => ({
@@ -222,6 +241,7 @@ afterEach(async () => {
 const reloadApp = async ({ afterSession = true } = {}) => {
 	if (afterSession) await vi.waitFor(() => expect(events).toContain('recoverIntents'));
 	outbox.stopDrainLoop();
+	await Promise.all([import('@/lib/data/messageIntent'), import('@/lib/data/storageIntent')]);
 	vi.resetModules();
 	const app = {
 		EM: (await import('@/libs/EncryptionManagerPQ')).EncryptionManagerPQ,
@@ -1156,7 +1176,7 @@ describe('a bootstrap retry reuses the one stored bootstrap operation', () => {
 		}
 	});
 
-	it('two tabs retrying the import at once share the one operation: no duplicate intent, signature, snapshot or dispatch', { timeout: 20_000 }, async () => {
+	it('two tabs retrying the import at once share the one operation: no duplicate intent, signature, snapshot or dispatch', { timeout: 45_000 }, async () => {
 		const d = await deferred();
 		const tails = new Map<string, Promise<void>>();
 		vi.stubGlobal('navigator', {

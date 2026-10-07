@@ -204,6 +204,9 @@ describe('IndexedDB read-cache fallback: real dialog gate through Page_Chat.vue 
 		try {
 			const store = useDialogsStore();
 			await waitUntil(() => store.isMessageAdmitted(dialogHash, anchor.message_id, anchor.sign_hash));
+			// The anchor is admitted mid-pass; the bubbles render only once the pass ends.
+			await waitUntil(() => wrapper.find(`[data-msg-id="${forged.message_id}"]`).exists()
+				&& wrapper.find(`[data-msg-id="${forgedTombstone.message_id}"]`).exists());
 
 			expect(store.isMessageAdmitted(dialogHash, forged.message_id, forged.sign_hash)).toBe(false);
 			expect(wrapper.text()).not.toContain('forged content');

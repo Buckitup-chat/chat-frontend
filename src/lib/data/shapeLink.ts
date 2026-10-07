@@ -2,7 +2,7 @@ import { isControlMessage } from '@tanstack/electric-db-collection';
 
 export interface ShapeLink {
 	fetchClient: typeof fetch;
-	onError: () => Record<string, never>;
+	onError: (error?: unknown) => Record<string, never> | Promise<Record<string, never> | undefined> | undefined;
 	report(): void;
 	onStreamError(handler: () => void): () => void;
 	hasFailed(): boolean;
@@ -30,7 +30,7 @@ export function createShapeLink(): ShapeLink {
 				if (!init?.signal?.aborted) report();
 				throw e;
 			}
-			if (!response.ok && response.status !== 409) report();
+			if (!response.ok && response.status !== 409 && response.status !== 401) report();
 			return response;
 		},
 		onError: () => {
