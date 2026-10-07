@@ -5,7 +5,7 @@
 // "The secret is not on chain" and "the chain did not answer" are different
 // answers, and a caller acting on the first must never get it from the second
 // (audit N-C1): an RPC failure is a ChainUnavailableError, never a null.
-import { Contract, JsonRpcProvider, isError, type EventLog, type Result } from 'ethers';
+import { Contract, EventLog, JsonRpcProvider, isAddress, isError, isHexString, type Result } from 'ethers';
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
 import { nonceKey, registryNonceKey } from 'backitup-secret-recovery-sdk/lib/contract/nonceKey';
 import type { Deployment, RecoveryContract } from './deployments';
@@ -104,18 +104,31 @@ const LOG_STEP = 10_000;
 const LOG_STEPS_AT_ONCE = 8;
 
 /**
- * A contract-level answer (a revert) passes through as it is: it says
- * something about the secret. So does an argument the caller got wrong.
- * Anything else — a timeout, a refused connection, a malformed response —
- * says nothing, and becomes a ChainUnavailableError.
+ * A revert passes through as it is: it says something about the secret. A
+ * revert is known by its data — the contracts revert with custom errors, so
+ * it is never empty — since ethers reports any JSON-RPC error on eth_call
+ * (a rate limit, a missing header, an upstream timeout) as a CALL_EXCEPTION
+ * too, without data. That, and anything else — a refused connection, a
+ * malformed response — says nothing, and becomes a ChainUnavailableError.
  */
 const answered = async <T>(read: () => Promise<T>): Promise<T> => {
 	try {
 		return await read();
 	} catch (e) {
-		if (isError(e, 'CALL_EXCEPTION') || isError(e, 'INVALID_ARGUMENT')) throw e;
+		if (isError(e, 'CALL_EXCEPTION') && typeof e.data === 'string' && e.data.length > 2) throw e;
 		throw new ChainUnavailableError(`the chain did not answer: ${(e as Error).message}`);
 	}
+};
+
+// An argument the caller got wrong — an id from a malformed message, say — is
+// refused before the chain is asked, so it cannot pass for an outage.
+const bytes32 = (id: string): string => {
+	if (!isHexString(id, 32)) throw new TypeError(`not a secret id (bytes32): ${id}`);
+	return id;
+};
+const address = (a: string): string => {
+	if (!isAddress(a)) throw new TypeError(`not an address: ${a}`);
+	return a;
 };
 
 export class RecoveryChain {
@@ -123,9 +136,12 @@ export class RecoveryChain {
 	readonly contracts: Readonly<Record<RecoveryContract, Contract>>;
 
 	constructor(readonly deployment: Deployment) {
-		// Polled while a receipt is awaited: an OP block takes 2 s, and ethers'
-		// default of 4 s would notice each receipt a block or two late.
-		this.provider = new JsonRpcProvider(deployment.rpcUrl, deployment.chainId, { staticNetwork: true, pollingInterval: 1000 });
+		// Polled while a receipt is awaited; ethers' default of 4 s would notice
+		// each OP receipt a block or two late.
+		this.provider = new JsonRpcProvider(deployment.rpcUrl, deployment.chainId, {
+			staticNetwork: true,
+			pollingInterval: deployment.blockTime * 500,
+		});
 		this.contracts = {
 			secretRecovery: new Contract(deployment.secretRecovery, ABI.secretRecovery, this.provider),
 			keyRegistry: new Contract(deployment.keyRegistry, ABI.keyRegistry, this.provider),
@@ -136,8 +152,16 @@ export class RecoveryChain {
 		return this.contracts.secretRecovery;
 	}
 
+	/** The latest block's timestamp: the clock the contracts check deadlines against. */
+	async now(): Promise<number> {
+		const block = await answered(() => this.provider.getBlock('latest'));
+		if (!block) throw new ChainUnavailableError('the chain did not answer: no latest block');
+		return block.timestamp;
+	}
+
 	/** The secret's state, or null when no secret has that id — never null for a chain that did not answer. */
 	async readSecret(id: string): Promise<SecretState | null> {
+		bytes32(id);
 		try {
 			return (await answered(() => this.recovery.getSecret(id))).toObject() as SecretState;
 		} catch (e) {
@@ -147,36 +171,47 @@ export class RecoveryChain {
 	}
 
 	async roundState(id: string): Promise<RoundState> {
+		bytes32(id);
 		return Number(await answered(() => this.recovery.roundState(id))) as RoundState;
 	}
 
 	/** The guardians' stealth addresses at `version`, in the contract's order. */
 	async guardiansAt(id: string, version: bigint): Promise<string[]> {
+		bytes32(id);
 		return [...(await answered(() => this.recovery.getGuardiansAt(id, version)))];
 	}
 
 	/** One guardian slot at `version`: the ephemeral key its stealth address derives from, and what it carries. */
 	async shareAt(id: string, version: bigint, stealthAddress: string): Promise<{ ephemeralPubKey: string; shareEncrypted: string }> {
+		bytes32(id);
+		address(stealthAddress);
 		const r = await answered(() => this.recovery.getShareAt(id, version, stealthAddress));
 		return { ephemeralPubKey: r.ephemeralPubKey, shareEncrypted: r.shareEncrypted };
 	}
 
 	async hasApproved(id: string, candidate: string, guardian: string): Promise<boolean> {
+		bytes32(id);
+		address(candidate);
+		address(guardian);
 		return answered(() => this.recovery.hasApproved(id, candidate, guardian));
 	}
 
 	async canDecrypt(account: string, id: string): Promise<boolean> {
+		address(account);
+		bytes32(id);
 		return answered(() => this.recovery.canDecrypt(account, id));
 	}
 
 	/** The keyed nonce `signer` signs its next payload about secret `id` with. */
 	async nonce(signer: string, id: string): Promise<bigint> {
-		const key = nonceKey(id as `0x${string}`);
+		address(signer);
+		const key = nonceKey(bytes32(id) as `0x${string}`);
 		return answered(() => this.recovery.nonces(signer, key));
 	}
 
 	/** The keyed nonce `registrant` signs its next registration for `scheme` with. */
 	async registryNonce(registrant: string, scheme: number): Promise<bigint> {
+		address(registrant);
 		const key = registryNonceKey(scheme);
 		return answered(() => this.contracts.keyRegistry.nonces(registrant, key));
 	}
@@ -188,11 +223,13 @@ export class RecoveryChain {
 	}
 
 	/**
-	 * The round events of secret `id`, oldest first, from `fromBlock` (the
-	 * deployment's start by default) to the latest block, read in steps a
-	 * public RPC accepts.
+	 * The round events of secret `id`, oldest first, from `fromBlock` to the
+	 * latest block, read in steps a public RPC accepts. The default start is
+	 * the deployment's, and the cost grows with its age: a caller that knows
+	 * when the secret was created, or what it has read before, passes that.
 	 */
 	async roundEvents(id: string, fromBlock = this.deployment.startBlock): Promise<RoundEvent[]> {
+		bytes32(id);
 		const latest = await answered(() => this.provider.getBlockNumber());
 		// Any of the round events, about this id.
 		const filter = [Object.keys(ROUND_EVENTS), id];
@@ -203,7 +240,11 @@ export class RecoveryChain {
 			const batch = await answered(() =>
 				Promise.all(steps.slice(i, i + LOG_STEPS_AT_ONCE).map((from) => this.recovery.queryFilter(filter, from, Math.min(from + LOG_STEP - 1, latest)))),
 			);
-			logs.push(...(batch.flat() as EventLog[]));
+			for (const log of batch.flat()) {
+				// The filter matches only these events; a log they do not decode came malformed.
+				if (!(log instanceof EventLog)) throw new ChainUnavailableError(`the chain returned an undecodable log in ${log.transactionHash}`);
+				logs.push(log);
+			}
 		}
 		return logs.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index).map((log) => ROUND_EVENTS[log.eventName](log.args, log.blockNumber));
 	}

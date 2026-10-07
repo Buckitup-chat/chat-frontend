@@ -40,9 +40,14 @@ export interface Bodies {
 	registerKeys: { registrant: string; scheme: bigint; stealthMetaAddress: string; deadline: bigint; signature: string };
 }
 
+/**
+ * A submission that was accepted: PROCESSED once mined, PROCESSING while a
+ * relayer is still sending it (the relayer's dispatch record). `txHash` is
+ * absent while an identical request ahead of this one is being sent.
+ */
 export interface Dispatch {
-	txHash: string;
-	status: string;
+	txHash?: string;
+	status: 'PROCESSING' | 'PROCESSED';
 }
 
 export type Gateway = { [K in keyof Bodies]: (body: Bodies[K]) => Promise<Dispatch> };
@@ -95,7 +100,10 @@ export const relayerGateway = (baseUrl: string, fetchImpl: typeof fetch = fetch)
 			signal: AbortSignal.timeout(RELAYER_TIMEOUT_MS),
 		});
 		if (!res.ok) throw new RelayerError(route, res.status, await res.text());
-		return (await res.json()) as Dispatch;
+		// A payload sent before answers with that send's record, a failed one included.
+		const record = (await res.json()) as { txHash?: string; status: string; errorMsg?: string };
+		if (record.status === 'ERROR') throw new RelayerError(route, res.status, record.errorMsg ?? 'dispatch failed');
+		return { txHash: record.txHash, status: record.status as Dispatch['status'] };
 	});
 };
 
@@ -124,20 +132,42 @@ const CALLS: { [K in keyof Bodies]: (b: Bodies[K]) => DirectCall } = {
 export const directCall = <K extends keyof Bodies>(name: K, body: Bodies[K]): DirectCall => CALLS[name](body);
 
 /**
+ * One batch of guardian approvals for secret `id`, from the bodies each
+ * guardian's signBound returned. Each approval keeps only its own four
+ * fields: the relayer refuses any other.
+ */
+export const approvalBatch = (bodies: Bodies['approveRecovery'][]): Bodies['approveRecoveryBatch'] => {
+	const id = bodies[0]?.id;
+	if (!id || bodies.some((b) => b.id !== id)) throw new Error('an approval batch is one or more approvals of the same secret');
+	return { id, approvals: bodies.map(({ candidate, signer, deadline, signature }) => ({ candidate, signer, deadline, signature })) };
+};
+
+// A mined or reverted transaction is reported long before this; one still
+// pending after it was dropped or underpriced, and is not waited for further.
+const RECEIPT_TIMEOUT_MS = 180_000;
+
+/**
  * Straight to the contracts from `payerPrivateKey`, which pays the gas. Each
  * call is simulated first, as a relayer's preflight is — a revert costs
  * nothing and comes back by name — and the receipt is awaited, so a revert
- * on chain is reported as one rather than as a later timeout.
+ * on chain throws (CALL_EXCEPTION) rather than surfacing as a later timeout.
+ * Calls go one at a time: concurrent sends from one wallet would take the
+ * same nonce, and all but one would fail.
  */
 export const directGateway = (chain: RecoveryChain, payerPrivateKey: string): Gateway => {
 	const payer = new Wallet(payerPrivateKey, chain.provider);
-	return gatewayOf(async (name, body) => {
+	let queue: Promise<unknown> = Promise.resolve();
+	const submit = async (name: keyof Bodies, body: unknown): Promise<Dispatch> => {
 		const { contract, fn, args } = directCall(name, body as never);
 		const method = chain.contracts[contract].connect(payer).getFunction(fn);
 		await method.staticCall(...args);
 		const tx = await method(...args);
-		const receipt = await tx.wait();
-		if (!receipt || receipt.status !== 1) throw new Error(`transaction ${tx.hash} reverted on chain`);
-		return { txHash: tx.hash, status: 'MINED' };
+		await tx.wait(1, RECEIPT_TIMEOUT_MS);
+		return { txHash: tx.hash, status: 'PROCESSED' };
+	};
+	return gatewayOf((name, body) => {
+		const sent = queue.then(() => submit(name, body));
+		queue = sent.catch(() => undefined);
+		return sent;
 	});
 };

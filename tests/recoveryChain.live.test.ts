@@ -10,12 +10,19 @@
 // Mainnet; run one locally), the direct path a funded RECOVERY_PAYER_KEY.
 // Either is skipped when what it needs is not given.
 import { describe, it, expect, vi } from 'vitest';
-import { Wallet, hexlify, randomBytes } from 'ethers';
+import { FetchRequest, Wallet, hexlify, randomBytes } from 'ethers';
 import type { Hex } from 'backitup-secret-recovery-sdk/lib/types';
 import { recoveryDeployment } from '@/lib/recovery/deployments';
-import { RecoveryChain, RoundState } from '@/lib/recovery/chain';
+import { ChainUnavailableError, RecoveryChain, RoundState } from '@/lib/recovery/chain';
 import { signAddSecret, signBound } from '@/lib/recovery/typedData';
 import { directGateway, relayerGateway, type Gateway, type ShareInput } from '@/lib/recovery/gateway';
+
+// Requests go out as a browser's do, through fetch: under node ethers uses
+// node:http, which sends no User-Agent, and some public RPCs refuse that.
+FetchRequest.registerGetUrl(async (req) => {
+	const res = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body ?? undefined });
+	return { statusCode: res.status, statusMessage: res.statusText, headers: Object.fromEntries(res.headers), body: new Uint8Array(await res.arrayBuffer()) };
+});
 
 const env = process.env;
 const live = env.RECOVERY_CHAIN === '1';
@@ -50,8 +57,12 @@ const createsSecret = async (chain: RecoveryChain, gateway: Gateway) => {
 	const dispatch = await gateway.addSecret(body);
 	expect(dispatch.txHash).toMatch(/^0x[0-9a-f]{64}$/i);
 
-	// A relayer answers before the transaction is mined.
-	const secret = await vi.waitUntil(() => chain.readSecret(id), { interval: 2000, timeout: 90_000 });
+	// A relayer answers before the transaction is mined; a read the RPC drops on
+	// the way is asked again.
+	const secret = await vi.waitUntil(() => chain.readSecret(id).catch((e) => (e instanceof ChainUnavailableError ? null : Promise.reject(e))), {
+		interval: 2000,
+		timeout: 90_000,
+	});
 	expect(secret).toMatchObject({ owner: owner.address, label, threshold: 2n, revoked: false, recoveryActive: false });
 	const onChain = await chain.guardiansAt(id, secret.version);
 	expect(new Set(onChain)).toEqual(new Set(shares.map((s) => s.stealthAddress)));

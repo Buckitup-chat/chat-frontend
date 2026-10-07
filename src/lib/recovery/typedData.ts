@@ -39,9 +39,10 @@ export const typesFor = (primaryType: Signable): Record<string, TypedDataField[]
 };
 
 // The contract caps `deadline` at MAX_SIGNATURE_LIFETIME (a day) past the
-// executing block; an hour leaves room for a slow relayer.
+// executing block; an hour leaves room for a slow relayer. It counts from the
+// chain's clock, not the device's: a node without NTP may be hours off.
 const SIGNATURE_LIFETIME_SEC = 3600;
-export const newDeadline = (nowSeconds = Math.floor(Date.now() / 1000)): bigint => BigInt(nowSeconds + SIGNATURE_LIFETIME_SEC);
+export const newDeadline = (chainNow: number): bigint => BigInt(chainNow + SIGNATURE_LIFETIME_SEC);
 
 /**
  * Once per chain client and contract, before the first signature: a
@@ -98,9 +99,9 @@ export const signAddSecret = async (
 ): Promise<{ id: string; body: Bodies['addSecret'] }> => {
 	const signer = new Wallet(privateKey).address;
 	const id = secretIdOf(signer, fields.label);
-	// The domain check of a first signature goes out with the nonce read.
-	const [nonce] = await Promise.all([chain.nonce(signer, id), checkDomain(chain, 'secretRecovery')]);
-	const deadline = newDeadline();
+	// The domain check of a first signature goes out with the reads.
+	const [nonce, now] = await Promise.all([chain.nonce(signer, id), chain.now(), checkDomain(chain, 'secretRecovery')]);
+	const deadline = newDeadline(now);
 	const signature = await signTyped(chain, privateKey, 'AddSecret', { ...fields, nonce, deadline });
 	return { id, body: { ...fields, signer, deadline, signature } };
 };
@@ -112,9 +113,9 @@ type BodyOf<P extends Signable> = Bodies[Uncapitalize<P> & keyof Bodies];
 
 /**
  * Signs a payload about secret `id` by the key's address, and returns the
- * body to submit. The secret and the signer's nonce for it are read together,
- * right before the signature, since the contract checks both against storage
- * at execution. For InitiateRecovery `round` is the stored one, before the
+ * body to submit. The secret, the signer's nonce for it and the chain's time
+ * are read together, right before the signature, since the contract checks
+ * them at execution. For InitiateRecovery `round` is the stored one, before the
  * initiation increments it.
  */
 export const signBound = async <P extends BoundType>(
@@ -125,9 +126,9 @@ export const signBound = async <P extends BoundType>(
 	fields: BoundFields<P>,
 ): Promise<{ body: BodyOf<P>; secret: SecretState }> => {
 	const signer = new Wallet(privateKey).address;
-	const [secret, nonce] = await Promise.all([chain.readSecret(id), chain.nonce(signer, id), checkDomain(chain, 'secretRecovery')]);
+	const [secret, nonce, now] = await Promise.all([chain.readSecret(id), chain.nonce(signer, id), chain.now(), checkDomain(chain, 'secretRecovery')]);
 	if (!secret) throw new Error(`no secret ${id} on chain ${chain.deployment.chainId}`);
-	const deadline = newDeadline();
+	const deadline = newDeadline(now);
 	const message = { ...fields, id, version: secret.version, round: secret.recoveryRound, nonce, deadline } as TypedMessages[P];
 	const signature = await signTyped<BoundType>(chain, privateKey, primaryType, message);
 	return { body: { ...fields, id, signer, deadline, signature } as BodyOf<P>, secret };

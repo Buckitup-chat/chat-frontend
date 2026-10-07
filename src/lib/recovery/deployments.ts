@@ -16,6 +16,8 @@ export interface Deployment {
 	keyRegistry: string;
 	/** The block the contracts were deployed in; nothing of them is older. */
 	startBlock: number;
+	/** Seconds between blocks; receipts are polled at half of it. */
+	blockTime: number;
 	/** The relayer's base URL, or null where none is run for this deployment. */
 	relayerUrl: string | null;
 }
@@ -33,6 +35,7 @@ export const DEPLOYMENTS: Readonly<Record<number, Deployment>> = {
 		secretRecovery: '0xd9FFD20F2DB9c774b9f0237c4837f52DCbD937a7',
 		keyRegistry: '0xAD6bD551224003E621d0B4b640C33eF29a5e9828',
 		startBlock: 11787426,
+		blockTime: 12,
 		relayerUrl: 'https://backitup-recovery-backend-production.up.railway.app',
 	},
 	// OP Mainnet: a test deployment; no relayer is hosted for it.
@@ -42,6 +45,7 @@ export const DEPLOYMENTS: Readonly<Record<number, Deployment>> = {
 		secretRecovery: '0x45907bD5636CCECE1819fCd6433DEC71C78F3BB3',
 		keyRegistry: '0x8364c4550CA2171A9bB2277B74C8B73ae2eBF21c',
 		startBlock: 157813997,
+		blockTime: 2,
 		relayerUrl: null,
 	},
 };
