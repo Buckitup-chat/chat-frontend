@@ -24,14 +24,16 @@ interface ReadSessionEntry {
 
 const sessions = new Map<string, ReadSessionEntry>();
 const inflight = new Map<string, Promise<ReadSessionEntry | null>>();
+const tableShapes = new Map<string, string>();
+let generation = 0;
 
 const RENEW_AHEAD_MS = 60_000;
 const FETCH_TIMEOUT_MS = 15_000;
 
 // ---------- public API ----------
 
-export function bearerFor(shape: string): string {
-	const entry = sessions.get(shape);
+export function bearerFor(shapeOrTable: string): string {
+	const entry = sessions.get(tableShapes.get(shapeOrTable) ?? shapeOrTable);
 	if (!entry || Date.now() >= entry.expiresAt) return '';
 	return `Bearer ${entry.token}`;
 }
@@ -41,8 +43,9 @@ export function hasValidToken(shape: string): boolean {
 	return !!entry && Date.now() < entry.expiresAt;
 }
 
-export async function handleShapeAuth401(json: { error: string; shape: string }): Promise<boolean> {
+export async function handleShapeAuth401(json: { error: string; shape: string }, table?: string): Promise<boolean> {
 	const { shape } = json;
+	if (table) tableShapes.set(table, shape);
 	invalidateSession(shape);
 	const entry = await openSession(shape);
 	return entry !== null;
@@ -55,13 +58,13 @@ export async function openSession(shape: string): Promise<string | null> {
 		return result?.token ?? null;
 	}
 
-	const promise = doOpen(shape);
+	const promise = doOpen(shape, generation);
 	inflight.set(shape, promise);
 	try {
 		const result = await promise;
 		return result?.token ?? null;
 	} finally {
-		inflight.delete(shape);
+		if (inflight.get(shape) === promise) inflight.delete(shape);
 	}
 }
 
@@ -71,25 +74,46 @@ export function invalidateSession(shape: string): void {
 	sessions.delete(shape);
 }
 
+export async function whenSignedIn(): Promise<void> {
+	const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
+	const em = EncryptionManagerPQ.getInstance();
+	if (em.isAuth) return;
+	await new Promise<void>((resolve) => {
+		const onAuthChange = (event: Event) => {
+			if (!(event as CustomEvent<{ isAuthenticated?: boolean }>).detail?.isAuthenticated) return;
+			em.removeEventListener('authChange', onAuthChange);
+			resolve();
+		};
+		em.addEventListener('authChange', onAuthChange);
+	});
+}
+
 export function clearSessions(): void {
 	for (const entry of sessions.values()) {
 		if (entry.renewTimer) clearTimeout(entry.renewTimer);
 	}
 	sessions.clear();
 	inflight.clear();
+	tableShapes.clear();
+	generation++;
 }
 
 // ---------- internals ----------
 
-async function doOpen(shape: string): Promise<ReadSessionEntry | null> {
+async function doOpen(shape: string, gen: number): Promise<ReadSessionEntry | null> {
+	const stale = () => gen !== generation;
 	const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
+	if (stale()) return null;
 	const em = EncryptionManagerPQ.getInstance();
 	if (!em.isAuth) return null;
 
 	const userHash = em.currentUserHash as string | null;
 	if (!userHash) return null;
 	const challengeResp = await fetchChallenge();
-	const sigBytes: Uint8Array = await em.signChallenge(challengeResp.challenge);
+	if (stale()) return null;
+	const challengeBytes = new TextEncoder().encode(challengeResp.challenge);
+	const sigBytes: Uint8Array = await em.signChallenge(challengeBytes);
+	if (stale()) return null;
 	const signature = toBase64(sigBytes).replace(/=+$/, '');
 
 	const resp = await fetch(`${ELECTRIC_API_URL}/read_session`, {
@@ -106,6 +130,7 @@ async function doOpen(shape: string): Promise<ReadSessionEntry | null> {
 
 	if (resp.ok) {
 		const body = await resp.json() as { token: string; shape: string; expires_in: number };
+		if (stale()) return null;
 		const entry: ReadSessionEntry = {
 			token: body.token,
 			shape: body.shape,
@@ -120,6 +145,7 @@ async function doOpen(shape: string): Promise<ReadSessionEntry | null> {
 
 	if (resp.status === 403) {
 		const body = await resp.json().catch(() => null) as { error?: string } | null;
+		if (stale()) return null;
 		if (body?.error === 'not_in_trust_chain') {
 			markShapeBlocked(shape);
 			return null;

@@ -241,6 +241,7 @@ afterEach(async () => {
 const reloadApp = async ({ afterSession = true } = {}) => {
 	if (afterSession) await vi.waitFor(() => expect(events).toContain('recoverIntents'));
 	outbox.stopDrainLoop();
+	await Promise.all([import('@/lib/data/messageIntent'), import('@/lib/data/storageIntent')]);
 	vi.resetModules();
 	const app = {
 		EM: (await import('@/libs/EncryptionManagerPQ')).EncryptionManagerPQ,

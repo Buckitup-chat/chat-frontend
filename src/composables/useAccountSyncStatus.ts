@@ -1,6 +1,7 @@
 import { ref, computed, watch, onScopeDispose, type ComputedRef } from 'vue';
 import { accountOutboxSnapshot, onOutboxChange } from '@/lib/data/outbox';
 import { intentsOf, onIntentChange } from '@/lib/data/intents';
+import { hasBlockedShapes, onBlockedChange } from '@/lib/data/accessGate';
 
 export type AccountSyncState = 'offline' | 'syncing' | 'needs_attention' | 'synced';
 
@@ -58,9 +59,11 @@ export function useAccountSyncStatus(
 	};
 	onScopeDispose(onOutboxChange(onChange));
 	onScopeDispose(onIntentChange(onChange));
+	const accessBlocked = ref(hasBlockedShapes());
+	onScopeDispose(onBlockedChange(() => { accessBlocked.value = hasBlockedShapes(); }));
 
 	return computed(() => {
 		const state = accountSyncState(online(), counts.value);
-		return state === 'synced' && readFallback() ? 'syncing' : state;
+		return state === 'synced' && (readFallback() || accessBlocked.value) ? 'syncing' : state;
 	});
 }

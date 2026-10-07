@@ -59,7 +59,7 @@ export const readShapeOnce = async <T>(table: string, where: string, signal?: Ab
 	let res = await doFetch();
 	if (res.status === 401) {
 		const json = await res.json().catch(() => null) as { error?: string; shape?: string } | null;
-		if (json?.error === 'read_session_required' && json.shape && await handleShapeAuth401(json as { error: string; shape: string })) {
+		if (json?.error === 'read_session_required' && json.shape && await handleShapeAuth401(json as { error: string; shape: string }, table)) {
 			res = await doFetch();
 		}
 	}

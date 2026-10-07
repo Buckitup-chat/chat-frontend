@@ -48,7 +48,7 @@ const installListeners = () => {
 		const msg = event.data as { type?: string; sessionId?: string };
 		if (msg?.type === 'need-session' && msg.sessionId && active.has(msg.sessionId)) {
 			post(active.get(msg.sessionId));
-		} else if (msg?.type === 'need-token' && msg.sessionId) {
+		} else if (msg?.type === 'need-token' && msg.sessionId && active.has(msg.sessionId)) {
 			void openSession('file_chunk').then((token) => {
 				post({ type: 'token', sessionId: msg.sessionId, token: token || '' });
 			});

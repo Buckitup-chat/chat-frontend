@@ -69,7 +69,7 @@ export function probeAllBlocked(): void {
 	for (const entry of blocked.values()) {
 		if (entry.probeTimer) clearTimeout(entry.probeTimer);
 		entry.probeTimer = null;
-		void probeOne(entry);
+		void probeOne(entry, true);
 	}
 }
 
@@ -99,7 +99,7 @@ function scheduleProbe(entry: BlockedShape): void {
 	}, entry.probeInterval);
 }
 
-async function probeOne(entry: BlockedShape): Promise<void> {
+async function probeOne(entry: BlockedShape, retryParked = false): Promise<void> {
 	if (!blocked.has(entry.shape)) return;
 	try {
 		const token = await openSession(entry.shape);
@@ -111,6 +111,7 @@ async function probeOne(entry: BlockedShape): Promise<void> {
 		// network error — will retry
 	}
 	if (!blocked.has(entry.shape)) return;
+	if (retryParked) for (const resolve of entry.waiters.splice(0)) resolve();
 	entry.probeInterval = Math.min(entry.probeInterval * 2, MAX_PROBE_MS);
 	scheduleProbe(entry);
 }

@@ -97,8 +97,10 @@ const getChunk = async (session, index, sessionId) => {
 		session.cache.set(index, hit);
 		return hit;
 	}
+	const sentToken = session.token;
 	let r = await fetchChunk(session, index);
 	if (r.status === 401) {
+		if (session.token === sentToken) session.token = null;
 		await requestToken(session, sessionId);
 		r = await fetchChunk(session, index);
 	}

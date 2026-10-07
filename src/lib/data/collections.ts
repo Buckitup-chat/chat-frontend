@@ -27,8 +27,8 @@ import type {
 
 import { electricUrl } from './shapeRead';
 import { FetchError } from '@electric-sql/client';
-import { bearerFor, handleShapeAuth401 } from './readSession';
-import { waitForUnblock } from './accessGate';
+import { bearerFor, handleShapeAuth401, whenSignedIn } from './readSession';
+import { isShapeBlocked, markShapeUnblocked, waitForUnblock } from './accessGate';
 
 // Electric serializes Postgres bigint (int8) as string; timestamps fit in 2^53.
 const parser = { int8: (v: string) => Number(v) };
@@ -57,18 +57,37 @@ const assertUserHash = (value: string): string => {
 
 const shapeDefaults = { parser, runtimeVisibility: alwaysActiveVisibility };
 
-const gatedOnError = (link: ShapeLink) => async (error: Error) => {
-	if (error instanceof FetchError && error.status === 401) {
-		const json = error.json as { error?: string; shape?: string } | undefined;
-		if (json?.error === 'read_session_required' && json.shape) {
-			const ok = await handleShapeAuth401({ error: json.error, shape: json.shape });
-			if (ok) return {};
-			await waitForUnblock(json.shape);
+const gatedStream = (link: ShapeLink, table: string, fetchClient: typeof fetch = link.fetchClient) => {
+	let parkedOn: string | null = null;
+	return {
+		fetchClient: (async (input, init) => {
+			const response = await fetchClient(input, init);
+			if (response.ok && parkedOn) {
+				markShapeUnblocked(parkedOn);
+				parkedOn = null;
+			}
+			return response;
+		}) as typeof fetch,
+		onError: async (error: Error) => {
+			if (error instanceof FetchError && error.status === 401) {
+				const json = error.json as { error?: string; shape?: string } | undefined;
+				if (json?.error === 'read_session_required' && json.shape) {
+					const ok = await handleShapeAuth401({ error: json.error, shape: json.shape }, table);
+					if (ok) return {};
+					if (!isShapeBlocked(json.shape)) {
+						await whenSignedIn();
+						return {};
+					}
+					parkedOn = json.shape;
+					link.report();
+					await waitForUnblock(json.shape);
+					return {};
+				}
+			}
+			link.report();
 			return {};
-		}
-	}
-	link.report();
-	return {};
+		},
+	};
 };
 
 // Wrap an Electric collection config with the shared SQLite persistence when
@@ -113,8 +132,7 @@ const buildUserCards = () =>
 				params: { table: 'user_cards' },
 				...shapeDefaults,
 				headers: { Authorization: () => bearerFor('user_cards') },
-				fetchClient: userCardsFetch,
-				onError: gatedOnError(userCardsShapeLink),
+				...gatedStream(userCardsShapeLink, 'user_cards', userCardsFetch),
 			},
 			getKey: (r) => r.user_hash,
 		}))
@@ -147,8 +165,7 @@ const buildUserStorage = (userHash: string) => {
 				params: { table: 'user_storage', where: `user_hash = '${assertUserHash(userHash)}'` },
 				...shapeDefaults,
 				headers: { Authorization: () => bearerFor('user_storage') },
-				fetchClient: link.fetchClient,
-				onError: gatedOnError(link),
+				...gatedStream(link, 'user_storage'),
 			},
 			getKey: (r) => `${r.user_hash}|${r.uuid}`,
 		}))
@@ -200,8 +217,7 @@ const dialogShape = (table: string, dialogHash: string, link: ShapeLink) => ({
 	params: { table, where: `dialog_hash = '${assertDialogHash(dialogHash)}'` },
 	...shapeDefaults,
 	headers: { Authorization: () => bearerFor(table) },
-	fetchClient: link.fetchClient,
-	onError: gatedOnError(link),
+	...gatedStream(link, table),
 });
 
 const buildDialogCollections = (dialogHash: string) => {
