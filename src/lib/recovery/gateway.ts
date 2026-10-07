@@ -3,21 +3,17 @@
 // The signatures are the same either way; only who submits differs. Without
 // the second path a relayer outage would stop every recovery action, the
 // owner's veto included (chat repo: pq_recovery_services § Relayer).
-import { Contract, Wallet } from 'ethers';
+import { Wallet } from 'ethers';
+import type { ShareInput } from 'backitup-secret-recovery-sdk/lib/types';
 import type { RecoveryChain } from './chain';
+import type { RecoveryContract } from './deployments';
 
-type WriteContract = 'secretRecovery' | 'keyRegistry';
-
-export interface ShareInput {
-	stealthAddress: string;
-	ephemeralPubKey: string;
-	shareEncrypted: string;
-}
+export type { ShareInput };
 
 interface Signed {
 	signer: string;
-	/** Unix seconds, as a decimal string. */
-	deadline: string;
+	/** Unix seconds. */
+	deadline: bigint;
 	signature: string;
 }
 
@@ -29,19 +25,19 @@ export interface Approval extends Signed {
 	candidate: string;
 }
 
-/** The relayer's request bodies (backitup-recovery-backend relayer DTOs): uints as decimal strings, thresholds as numbers. */
+/** What each entry point takes: the values that were signed, and the signature. typedData.ts's sign helpers return them. */
 export interface Bodies {
-	addSecret: Signed & { label: string; shares: ShareInput[]; threshold: number; recoveryDelay: string; recoveryWindow: string };
-	reshare: AboutSecret & { shares: ShareInput[]; threshold: number };
-	setRecoveryPolicy: AboutSecret & { recoveryDelay: string; recoveryWindow: string };
+	addSecret: Signed & { label: string; shares: ShareInput[]; threshold: bigint; recoveryDelay: bigint; recoveryWindow: bigint };
+	reshare: AboutSecret & { shares: ShareInput[]; threshold: bigint };
+	setRecoveryPolicy: AboutSecret & { recoveryDelay: bigint; recoveryWindow: bigint };
 	initiateRecovery: AboutSecret;
 	approveRecovery: AboutSecret & { candidate: string };
 	approveRecoveryBatch: { id: string; approvals: Approval[] };
 	cancelRecovery: AboutSecret;
 	revokeSecret: AboutSecret;
-	/** Burns `signer`'s nonce under `key` (decimal uint192) on `contract`, retiring every signature issued against it. */
-	invalidateNonce: Signed & { contract: WriteContract; key: string };
-	registerKeys: { registrant: string; scheme: string; stealthMetaAddress: string; deadline: string; signature: string };
+	/** Burns `signer`'s nonce under `key` on `contract`, retiring every signature issued against it. */
+	invalidateNonce: Signed & { contract: RecoveryContract; key: bigint };
+	registerKeys: { registrant: string; scheme: bigint; stealthMetaAddress: string; deadline: bigint; signature: string };
 }
 
 export interface Dispatch {
@@ -75,6 +71,14 @@ const ROUTES: { [K in keyof Bodies]: string } = {
 	registerKeys: 'register-keys',
 };
 
+const gatewayOf = (send: (name: keyof Bodies, body: unknown) => Promise<Dispatch>): Gateway =>
+	Object.fromEntries((Object.keys(ROUTES) as (keyof Bodies)[]).map((name) => [name, (body: unknown) => send(name, body)])) as Gateway;
+
+// The relayer's DTOs (backitup-recovery-backend) take uints as decimal
+// strings, and a threshold — at most 32 — as a number.
+const relayerJson = (key: string, value: unknown): unknown =>
+	typeof value === 'bigint' ? (key === 'threshold' ? Number(value) : value.toString()) : value;
+
 // A half-open connection never settles on its own, and the button the person
 // pressed would hang with it.
 const RELAYER_TIMEOUT_MS = 30_000;
@@ -82,104 +86,58 @@ const RELAYER_TIMEOUT_MS = 30_000;
 /** A relayer at `baseUrl` (its routes are `<base>/api/relayer/<route>`). */
 export const relayerGateway = (baseUrl: string, fetchImpl: typeof fetch = fetch): Gateway => {
 	const base = baseUrl.replace(/\/+$/, '');
-	const post = async (route: string, body: unknown): Promise<Dispatch> => {
+	return gatewayOf(async (name, body) => {
+		const route = ROUTES[name];
 		const res = await fetchImpl(`${base}/api/relayer/${route}`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(body),
+			body: JSON.stringify(body, relayerJson),
 			signal: AbortSignal.timeout(RELAYER_TIMEOUT_MS),
 		});
 		if (!res.ok) throw new RelayerError(route, res.status, await res.text());
 		return (await res.json()) as Dispatch;
-	};
-	return Object.fromEntries(
-		(Object.keys(ROUTES) as (keyof Bodies)[]).map((name) => [name, (body: unknown) => post(ROUTES[name], body)]),
-	) as Gateway;
+	});
 };
 
-// Both contracts inherit it from BackitupSigned.
-const INVALIDATE_NONCE = 'function invalidateNonceWithSig(address signer, uint192 key, uint256 deadline, bytes signature) returns (uint256 nonce)';
+export interface DirectCall {
+	contract: RecoveryContract;
+	fn: string;
+	args: unknown[];
+}
 
-/** The entry points a signed payload is submitted to, per contract. */
-export const WRITE_ABI: Readonly<Record<WriteContract, readonly string[]>> = {
-	secretRecovery: [
-		'function addSecretWithSig(string label, (address stealthAddress, bytes ephemeralPubKey, bytes shareEncrypted)[] shares, uint256 threshold, uint256 recoveryDelay, uint256 recoveryWindow, address signer, uint256 deadline, bytes signature) returns (bytes32 id)',
-		'function reshareWithSig(bytes32 id, (address stealthAddress, bytes ephemeralPubKey, bytes shareEncrypted)[] shares, uint256 threshold, address signer, uint256 deadline, bytes signature)',
-		'function setRecoveryPolicyWithSig(bytes32 id, uint256 recoveryDelay, uint256 recoveryWindow, address signer, uint256 deadline, bytes signature)',
-		'function initiateRecoveryWithSig(bytes32 id, address signer, uint256 deadline, bytes signature)',
-		'function approveRecoveryWithSig(bytes32 id, address candidate, address signer, uint256 deadline, bytes signature)',
-		'function approveRecoveryBatchWithSig(bytes32 id, (address candidate, address signer, uint256 deadline, bytes signature)[] approvals)',
-		'function cancelRecoveryWithSig(bytes32 id, address signer, uint256 deadline, bytes signature)',
-		'function revokeSecretWithSig(bytes32 id, address signer, uint256 deadline, bytes signature)',
-		INVALIDATE_NONCE,
-	],
-	keyRegistry: [
-		'function registerKeysOnBehalf(address registrant, uint256 scheme, bytes stealthMetaAddress, uint256 deadline, bytes signature)',
-		INVALIDATE_NONCE,
-	],
+const onRecovery = (fn: string, ...args: unknown[]): DirectCall => ({ contract: 'secretRecovery', fn, args });
+
+/** The contract call each body becomes. */
+const CALLS: { [K in keyof Bodies]: (b: Bodies[K]) => DirectCall } = {
+	addSecret: (b) => onRecovery('addSecretWithSig', b.label, b.shares, b.threshold, b.recoveryDelay, b.recoveryWindow, b.signer, b.deadline, b.signature),
+	reshare: (b) => onRecovery('reshareWithSig', b.id, b.shares, b.threshold, b.signer, b.deadline, b.signature),
+	setRecoveryPolicy: (b) => onRecovery('setRecoveryPolicyWithSig', b.id, b.recoveryDelay, b.recoveryWindow, b.signer, b.deadline, b.signature),
+	initiateRecovery: (b) => onRecovery('initiateRecoveryWithSig', b.id, b.signer, b.deadline, b.signature),
+	approveRecovery: (b) => onRecovery('approveRecoveryWithSig', b.id, b.candidate, b.signer, b.deadline, b.signature),
+	approveRecoveryBatch: (b) => onRecovery('approveRecoveryBatchWithSig', b.id, b.approvals),
+	cancelRecovery: (b) => onRecovery('cancelRecoveryWithSig', b.id, b.signer, b.deadline, b.signature),
+	revokeSecret: (b) => onRecovery('revokeSecretWithSig', b.id, b.signer, b.deadline, b.signature),
+	invalidateNonce: (b) => ({ contract: b.contract, fn: 'invalidateNonceWithSig', args: [b.signer, b.key, b.deadline, b.signature] }),
+	registerKeys: (b) => ({ contract: 'keyRegistry', fn: 'registerKeysOnBehalf', args: [b.registrant, b.scheme, b.stealthMetaAddress, b.deadline, b.signature] }),
 };
 
-/** The contract call each body becomes: which contract, which function, which arguments. */
-export const directCall = <K extends keyof Bodies>(name: K, b: Bodies[K]): { contract: WriteContract; fn: string; args: unknown[] } => {
-	const signed = (s: Signed) => [s.signer, BigInt(s.deadline), s.signature];
-	switch (name) {
-		case 'addSecret': {
-			const x = b as Bodies['addSecret'];
-			return { contract: 'secretRecovery', fn: 'addSecretWithSig', args: [x.label, x.shares, BigInt(x.threshold), BigInt(x.recoveryDelay), BigInt(x.recoveryWindow), ...signed(x)] };
-		}
-		case 'reshare': {
-			const x = b as Bodies['reshare'];
-			return { contract: 'secretRecovery', fn: 'reshareWithSig', args: [x.id, x.shares, BigInt(x.threshold), ...signed(x)] };
-		}
-		case 'setRecoveryPolicy': {
-			const x = b as Bodies['setRecoveryPolicy'];
-			return { contract: 'secretRecovery', fn: 'setRecoveryPolicyWithSig', args: [x.id, BigInt(x.recoveryDelay), BigInt(x.recoveryWindow), ...signed(x)] };
-		}
-		case 'approveRecovery': {
-			const x = b as Bodies['approveRecovery'];
-			return { contract: 'secretRecovery', fn: 'approveRecoveryWithSig', args: [x.id, x.candidate, ...signed(x)] };
-		}
-		case 'approveRecoveryBatch': {
-			const x = b as Bodies['approveRecoveryBatch'];
-			const approvals = x.approvals.map((a) => ({ candidate: a.candidate, signer: a.signer, deadline: BigInt(a.deadline), signature: a.signature }));
-			return { contract: 'secretRecovery', fn: 'approveRecoveryBatchWithSig', args: [x.id, approvals] };
-		}
-		case 'invalidateNonce': {
-			const x = b as Bodies['invalidateNonce'];
-			return { contract: x.contract, fn: 'invalidateNonceWithSig', args: [x.signer, BigInt(x.key), BigInt(x.deadline), x.signature] };
-		}
-		case 'registerKeys': {
-			const x = b as Bodies['registerKeys'];
-			return { contract: 'keyRegistry', fn: 'registerKeysOnBehalf', args: [x.registrant, BigInt(x.scheme), x.stealthMetaAddress, BigInt(x.deadline), x.signature] };
-		}
-		default: {
-			// initiateRecovery, cancelRecovery, revokeSecret: the id and the signature.
-			const x = b as AboutSecret;
-			return { contract: 'secretRecovery', fn: `${name}WithSig`, args: [x.id, ...signed(x)] };
-		}
-	}
-};
+export const directCall = <K extends keyof Bodies>(name: K, body: Bodies[K]): DirectCall => CALLS[name](body);
 
 /**
  * Straight to the contracts from `payerPrivateKey`, which pays the gas. Each
  * call is simulated first, as a relayer's preflight is — a revert costs
- * nothing and comes back with its name — and the receipt is awaited, so a
- * revert on chain is reported as one rather than as a later timeout.
+ * nothing and comes back by name — and the receipt is awaited, so a revert
+ * on chain is reported as one rather than as a later timeout.
  */
 export const directGateway = (chain: RecoveryChain, payerPrivateKey: string): Gateway => {
 	const payer = new Wallet(payerPrivateKey, chain.provider);
-	const contracts = {
-		secretRecovery: new Contract(chain.deployment.secretRecovery, WRITE_ABI.secretRecovery, payer),
-		keyRegistry: new Contract(chain.deployment.keyRegistry, WRITE_ABI.keyRegistry, payer),
-	};
-	const send = async (name: keyof Bodies, body: unknown): Promise<Dispatch> => {
+	return gatewayOf(async (name, body) => {
 		const { contract, fn, args } = directCall(name, body as never);
-		const method = contracts[contract].getFunction(fn);
+		const method = chain.contracts[contract].connect(payer).getFunction(fn);
 		await method.staticCall(...args);
 		const tx = await method(...args);
 		const receipt = await tx.wait();
 		if (!receipt || receipt.status !== 1) throw new Error(`transaction ${tx.hash} reverted on chain`);
 		return { txHash: tx.hash, status: 'MINED' };
-	};
-	return Object.fromEntries((Object.keys(ROUTES) as (keyof Bodies)[]).map((name) => [name, (body: unknown) => send(name, body)])) as Gateway;
+	});
 };

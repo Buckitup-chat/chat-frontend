@@ -6,6 +6,9 @@
 // relayers, and a client that pays its own gas needs none (gateway.ts).
 import { AbiCoder, keccak256 } from 'ethers';
 
+/** The two contracts of a deployment, named as its address fields are. */
+export type RecoveryContract = 'secretRecovery' | 'keyRegistry';
+
 export interface Deployment {
 	chainId: number;
 	rpcUrl: string;
@@ -19,10 +22,14 @@ export interface Deployment {
 
 /** The deployments of contracts v2 (backitup-smart-contracts, `security/contracts-v2`). */
 export const DEPLOYMENTS: Readonly<Record<number, Deployment>> = {
-	// Sepolia: the deployment the hosted relayer and nodes serve.
+	// Sepolia: the deployment the hosted relayer and nodes serve. Its RPC keeps
+	// logs back to the start block, where round events are read from, and
+	// answers batched requests; publicnode drops Sepolia logs older than about
+	// 10k blocks. It refuses requests without a User-Agent, which a browser
+	// always sends and ethers under node does not.
 	11155111: {
 		chainId: 11155111,
-		rpcUrl: 'https://ethereum-sepolia-rpc.publicnode.com',
+		rpcUrl: 'https://0xrpc.io/sep',
 		secretRecovery: '0xd9FFD20F2DB9c774b9f0237c4837f52DCbD937a7',
 		keyRegistry: '0xAD6bD551224003E621d0B4b640C33eF29a5e9828',
 		startBlock: 11787426,

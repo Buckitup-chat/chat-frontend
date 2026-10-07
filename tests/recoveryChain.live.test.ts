@@ -9,8 +9,9 @@
 // The relayer path needs a relayer for the deployment (none is hosted for OP
 // Mainnet; run one locally), the direct path a funded RECOVERY_PAYER_KEY.
 // Either is skipped when what it needs is not given.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Wallet, hexlify, randomBytes } from 'ethers';
+import type { Hex } from 'backitup-secret-recovery-sdk/lib/types';
 import { recoveryDeployment } from '@/lib/recovery/deployments';
 import { RecoveryChain, RoundState } from '@/lib/recovery/chain';
 import { signAddSecret, signBound } from '@/lib/recovery/typedData';
@@ -32,42 +33,30 @@ const deployment = live
 const shareSet = () => {
 	const guardians = [Wallet.createRandom(), Wallet.createRandom()];
 	const shares: ShareInput[] = guardians.map((g) => ({
-		stealthAddress: g.address,
-		ephemeralPubKey: Wallet.createRandom().signingKey.compressedPublicKey,
-		shareEncrypted: '0x01' + hexlify(randomBytes(32)).slice(2),
+		stealthAddress: g.address as Hex,
+		ephemeralPubKey: Wallet.createRandom().signingKey.compressedPublicKey as Hex,
+		shareEncrypted: ('0x01' + hexlify(randomBytes(32)).slice(2)) as Hex,
 	}));
 	return { guardians, shares };
-};
-
-// A relayer answers before the transaction is mined; the chain is read until
-// what was sent is there.
-const until = async <T>(read: () => Promise<T | null>, what: string): Promise<T> => {
-	for (let i = 0; i < 45; i++) {
-		const got = await read();
-		if (got !== null) return got;
-		await new Promise((r) => setTimeout(r, 2000));
-	}
-	throw new Error(`${what} did not appear on chain`);
 };
 
 const createsSecret = async (chain: RecoveryChain, gateway: Gateway) => {
 	const owner = Wallet.createRandom();
 	const { guardians, shares } = shareSet();
 	const label = `acceptance-${Date.now()}`;
-	const { id, signer, signature, deadline } = await signAddSecret(chain, owner.privateKey, {
-		label, shares, threshold: 2n, recoveryDelay: 0n, recoveryWindow: 0n,
-	} as never);
-	const dispatch = await gateway.addSecret({
-		label, shares, threshold: 2, recoveryDelay: '0', recoveryWindow: '0', signer, deadline: deadline.toString(), signature,
-	});
+	const fromBlock = await chain.provider.getBlockNumber();
+	const { id, body } = await signAddSecret(chain, owner.privateKey, { label, shares, threshold: 2n, recoveryDelay: 0n, recoveryWindow: 0n });
+	expect(await chain.readSecret(id)).toBeNull();
+	const dispatch = await gateway.addSecret(body);
 	expect(dispatch.txHash).toMatch(/^0x[0-9a-f]{64}$/i);
 
-	const secret = await until(() => chain.readSecret(id), `secret ${id}`);
+	// A relayer answers before the transaction is mined.
+	const secret = await vi.waitUntil(() => chain.readSecret(id), { interval: 2000, timeout: 90_000 });
 	expect(secret).toMatchObject({ owner: owner.address, label, threshold: 2n, revoked: false, recoveryActive: false });
 	const onChain = await chain.guardiansAt(id, secret.version);
 	expect(new Set(onChain)).toEqual(new Set(shares.map((s) => s.stealthAddress)));
 	expect((await chain.shareAt(id, secret.version, shares[0].stealthAddress)).shareEncrypted).toBe(shares[0].shareEncrypted);
-	return { id, owner, guardians, txHash: dispatch.txHash };
+	return { id, owner, guardians, fromBlock, txHash: dispatch.txHash };
 };
 
 describe.skipIf(!live)('a secret on a live deployment', () => {
@@ -80,20 +69,21 @@ describe.skipIf(!live)('a secret on a live deployment', () => {
 
 	it.skipIf(!env.RECOVERY_PAYER_KEY)('is created straight on the contract, and a round on it opened and vetoed', async () => {
 		const gateway = directGateway(chain, env.RECOVERY_PAYER_KEY!);
-		const { id, owner, guardians, txHash } = await createsSecret(chain, gateway);
+		const { id, owner, guardians, fromBlock, txHash } = await createsSecret(chain, gateway);
 		console.log(`direct: secret ${id}, tx ${txHash}`);
 
-		const g = guardians[0];
-		const initiate = await signBound(chain, g.privateKey, g.address, 'InitiateRecovery', id, {} as never);
-		await gateway.initiateRecovery({ id, signer: g.address, deadline: initiate.deadline.toString(), signature: initiate.signature });
+		const initiate = await signBound(chain, guardians[0].privateKey, 'InitiateRecovery', id, {});
+		await gateway.initiateRecovery(initiate.body);
 		expect(await chain.roundState(id)).toBe(RoundState.Voting);
 
-		const cancel = await signBound(chain, owner.privateKey, owner.address, 'CancelRecovery', id, {} as never);
-		await gateway.cancelRecovery({ id, signer: owner.address, deadline: cancel.deadline.toString(), signature: cancel.signature });
+		const cancel = await signBound(chain, owner.privateKey, 'CancelRecovery', id, {});
+		await gateway.cancelRecovery(cancel.body);
 		expect(await chain.roundState(id)).toBe(RoundState.None);
 
-		const events = await chain.roundEvents(id);
+		const events = await chain.roundEvents(id, fromBlock);
 		expect(events.map((e) => [e.type, e.round])).toEqual([['initiated', 1n], ['cancelled', 1n]]);
-		expect(events[0]).toMatchObject({ initiator: g.address });
+		expect(events[0]).toMatchObject({ initiator: guardians[0].address });
+		// The same, read from the deployment's start: every log step, in batches.
+		expect(await chain.roundEvents(id)).toEqual(events);
 	}, 180_000);
 });
