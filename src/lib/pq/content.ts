@@ -161,14 +161,17 @@ export interface RecoveryBindingPart extends Extensible {
 	signatureB64: string;
 }
 
-/** An owner asking a contact to become a guardian (07 § recovery_invite). */
+/**
+ * An owner asking a contact to become a guardian (07 § recovery_invite). It
+ * carries no time of its own: an invitation and its reply only travel in a
+ * dialog, whose row's message_id (UUIDv7, signed with the row) says when.
+ */
 export interface RecoveryInvitePart extends Extensible {
 	kind: 'recovery_invite';
 	/** 16 random bytes, lowercase hex. */
 	inviteId: string;
 	/** `eip155:<chainId>:<contract>`, where the guardian would approve. */
 	deployment: string;
-	createdAt: number;
 }
 
 /** The contact's answer to an invitation (07 § recovery_invite_reply). */
@@ -181,7 +184,6 @@ export interface RecoveryInviteReplyPart extends Extensible {
 	metaAddress: string;
 	/** On accept, the spending key's EIP-191 signature, unpadded base64; empty on decline. */
 	proofB64: string;
-	createdAt: number;
 }
 
 /**
@@ -294,11 +296,11 @@ const encodePart = (part: ContentPart): unknown => {
 				recovery_binding: [part.secretRef, part.candidate, part.userHash, part.signatureB64, ...(part.rest ?? [])],
 			};
 		case 'recovery_invite':
-			return { recovery_invite: [part.inviteId, part.deployment, part.createdAt, ...(part.rest ?? [])] };
+			return { recovery_invite: [part.inviteId, part.deployment, ...(part.rest ?? [])] };
 		case 'recovery_invite_reply':
 			return {
 				recovery_invite_reply: [
-					part.inviteId, part.answer, part.metaAddress, part.proofB64, part.createdAt, ...(part.rest ?? []),
+					part.inviteId, part.answer, part.metaAddress, part.proofB64, ...(part.rest ?? []),
 				],
 			};
 		case 'unknown':
@@ -554,20 +556,19 @@ const decodeRecoveryBinding = (r: unknown): RecoveryBindingPart => {
 };
 
 const decodeRecoveryInvite = (r: unknown): RecoveryInvitePart => {
-	if (!head(r, 'ssn')) throw new ContentDecodeError('malformed recovery_invite envelope');
-	return { kind: 'recovery_invite', inviteId: r[0], deployment: r[1], createdAt: r[2], ...tailOf(r, 3) };
+	if (!head(r, 'ss')) throw new ContentDecodeError('malformed recovery_invite envelope');
+	return { kind: 'recovery_invite', inviteId: r[0], deployment: r[1], ...tailOf(r, 2) };
 };
 
 const decodeRecoveryInviteReply = (r: unknown): RecoveryInviteReplyPart => {
-	if (!head(r, 'ssssn')) throw new ContentDecodeError('malformed recovery_invite_reply envelope');
+	if (!head(r, 'ssss')) throw new ContentDecodeError('malformed recovery_invite_reply envelope');
 	return {
 		kind: 'recovery_invite_reply',
 		inviteId: r[0],
 		answer: r[1],
 		metaAddress: r[2],
 		proofB64: r[3],
-		createdAt: r[4],
-		...tailOf(r, 5),
+		...tailOf(r, 4),
 	};
 };
 

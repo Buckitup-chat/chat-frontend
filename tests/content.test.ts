@@ -306,16 +306,16 @@ describe('T-CONTENT-RECOVERY: the other recovery envelopes', () => {
 			round: 4, candidate: '0x7a1b', shareB64: 'CAFxyz', createdAt: 1_715_600_000, splitProof: ['leafA', 'leafB', 'leafC'], nodeSet,
 		},
 		recovery_binding: { kind: 'recovery_binding' as const, secretRef: 'eip155:10:0x4590/0x9f3c', candidate: '0x7a1b', userHash: 'u_ab12', signatureB64: 'c2ln' },
-		recovery_invite: { kind: 'recovery_invite' as const, inviteId: '9b2e'.repeat(8), deployment: 'eip155:10:0x4590', createdAt: 1_715_000_000 },
+		recovery_invite: { kind: 'recovery_invite' as const, inviteId: '9b2e'.repeat(8), deployment: 'eip155:10:0x4590' },
 		recovery_invite_reply: {
-			kind: 'recovery_invite_reply' as const, inviteId: '9b2e'.repeat(8), answer: 'accept', metaAddress: '0x02a1', proofB64: 'cHJvb2Y', createdAt: 1_715_000_300,
+			kind: 'recovery_invite_reply' as const, inviteId: '9b2e'.repeat(8), answer: 'accept', metaAddress: '0x02a1', proofB64: 'cHJvb2Y',
 		},
 	};
 	const wires = {
 		recovery_share_return: ['eip155:10:0x4590/0x9f3c', 1, '4f1c'.repeat(8), 2, 3, 2, 4, '0x7a1b', 'CAFxyz', 1_715_600_000, ['leafA', 'leafB', 'leafC'], [2, nodeSet.nodes]],
 		recovery_binding: ['eip155:10:0x4590/0x9f3c', '0x7a1b', 'u_ab12', 'c2ln'],
-		recovery_invite: ['9b2e'.repeat(8), 'eip155:10:0x4590', 1_715_000_000],
-		recovery_invite_reply: ['9b2e'.repeat(8), 'accept', '0x02a1', 'cHJvb2Y', 1_715_000_300],
+		recovery_invite: ['9b2e'.repeat(8), 'eip155:10:0x4590'],
+		recovery_invite_reply: ['9b2e'.repeat(8), 'accept', '0x02a1', 'cHJvb2Y'],
 	};
 
 	for (const type of Object.keys(parts) as (keyof typeof parts)[]) {
