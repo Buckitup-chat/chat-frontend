@@ -40,6 +40,7 @@
     "@vueuse/core": "^13.0.0",
     "aes-js": "^3.1.2",
     "axios": "^1.8.4",
+    "backitup-secret-recovery-sdk": "file:src/libs/backitup-secret-recovery-sdk-0.3.0.tgz",
     "bootstrap": "^5.3.3",
     "buckitup-sdk": "./src/libs/buckitup-sdk-0.0.24.tgz",
     "buffer": "^6.0.3",
