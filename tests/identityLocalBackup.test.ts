@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { defineComponent, h, type Component } from 'vue';
 import { mount, flushPromises, type DOMWrapper } from '@vue/test-utils';
