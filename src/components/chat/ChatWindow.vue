@@ -177,11 +177,55 @@
                   <template v-else>{{ fmtSize(f.size) }}</template>
                 </div>
               </div>
+              <template v-if="playableAudioType(f)">
+                <span v-if="audios[f.fileId]?.status === 'loading'" class="msg-file-spinner" title="Loading audio"></span>
+                <button v-else-if="audios[f.fileId]?.status !== 'ready'" type="button"
+                  class="msg-file-action msg-audio-toggle" title="Play" @click="playAudio(f)">
+                  <svg class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9l7-4.5z" /></svg>
+                </button>
+              </template>
               <button v-if="downloads[f.fileId]?.status !== 'downloading'" type="button"
                 class="msg-file-action" @click="emit('downloadFile', f)"
                 :title="downloads[f.fileId]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
               <span v-else class="msg-file-spinner"></span>
             </div>
+
+            <!-- Audio plays from its decrypted bytes, fetched on Play only. -->
+            <template v-if="playableAudioType(f)">
+              <div v-if="audios[f.fileId]?.status === 'loading'" class="msg-audio-note">
+                Loading audio<template v-if="audios[f.fileId].total"> · chunk {{ audios[f.fileId].done }} of {{ audios[f.fileId].total }}</template>
+              </div>
+              <div v-else-if="audios[f.fileId]?.status === 'error'" class="msg-audio-note msg-file-err">
+                {{ audios[f.fileId].message }}
+              </div>
+              <template v-else-if="audios[f.fileId]?.status === 'ready'">
+                <audio :ref="(el) => setAudioElement(f.fileId, el)" preload="auto" :src="audios[f.fileId].url"
+                  @loadedmetadata="trackAudio(f.fileId, $event)" @durationchange="trackAudio(f.fileId, $event)"
+                  @timeupdate="trackAudio(f.fileId, $event)" @play="trackAudio(f.fileId, $event)"
+                  @pause="trackAudio(f.fileId, $event)" @ended="trackAudio(f.fileId, $event)"
+                  @error="audioErrors = { ...audioErrors, [f.fileId]: true }"></audio>
+                <div class="msg-audio-player">
+                  <button type="button" class="msg-file-action msg-audio-toggle"
+                    :title="audioPlayback[f.fileId]?.playing ? 'Pause' : 'Play'"
+                    @click="toggleAudio(f.fileId)">
+                    <svg v-if="audioPlayback[f.fileId]?.playing" class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.5h2.5v9H4.5zM9 3.5h2.5v9H9z" /></svg>
+                    <svg v-else class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9l7-4.5z" /></svg>
+                  </button>
+                  <input type="range" class="msg-audio-seek" min="0" step="1"
+                    :max="audioPlayback[f.fileId]?.duration || 0" :value="audioPlayback[f.fileId]?.current || 0"
+                    :disabled="!audioPlayback[f.fileId]?.duration"
+                    :aria-label="'Seek in ' + f.name"
+                    :aria-valuetext="fmtTime(audioPlayback[f.fileId]?.current) + ' of ' + fmtTime(audioPlayback[f.fileId]?.duration)"
+                    @input="seekAudio(f.fileId, $event.target.value)" />
+                  <span class="msg-audio-time">
+                    {{ fmtTime(audioPlayback[f.fileId]?.current) }} / {{ fmtTime(audioPlayback[f.fileId]?.duration) }}
+                  </span>
+                </div>
+                <div v-if="audioErrors[f.fileId]" class="msg-audio-note msg-file-err">
+                  This browser cannot play this file. Download it instead.
+                </div>
+              </template>
+            </template>
 
             <!-- §2.4 availability. Partial is a normal state in a network with
                  no internet, so: no red, no warning icon, and the wording says
@@ -375,6 +419,7 @@ import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { useMenu } from '@/composables/useMenu';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
+import { playableAudioType } from '@/composables/useAudioPlayback';
 import Avatar from 'vue-boring-avatars';
 
 const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
@@ -429,6 +474,10 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
+  audios: {
+    type: Object,
+    default: () => ({})
+  },
   messages: {
     type: Array,
     required: true,
@@ -443,7 +492,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -591,6 +640,62 @@ const toggleQuoteChain = (msg, qi) => {
   expandedQuotes.value = next;
 };
 const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
+
+const audioElements = new Map();
+const playWhenReady = new Set();
+const audioErrors = ref({});
+const setAudioElement = (fileId, el) => {
+  if (el) audioElements.set(fileId, el);
+  else audioElements.delete(fileId);
+};
+const playAudio = (part) => {
+  playWhenReady.add(part.fileId);
+  audioErrors.value = { ...audioErrors.value, [part.fileId]: false };
+  emit('playAudio', part);
+};
+watch(() => props.audios, async (audios) => {
+  for (const id of [...playWhenReady]) {
+    const status = audios[id]?.status;
+    if (status === 'loading') continue;
+    playWhenReady.delete(id);
+    if (status !== 'ready') continue;
+    await nextTick();
+    audioElements.get(id)?.play()?.catch?.(() => {});
+  }
+  if (!Object.keys(audios).length) {
+    if (Object.keys(audioErrors.value).length) audioErrors.value = {};
+    if (Object.keys(audioPlayback.value).length) audioPlayback.value = {};
+  }
+});
+
+const audioPlayback = ref({});
+const trackAudio = (fileId, event) => {
+  const el = event.target;
+  audioPlayback.value = {
+    ...audioPlayback.value,
+    [fileId]: {
+      current: el.currentTime || 0,
+      duration: Number.isFinite(el.duration) ? el.duration : 0,
+      playing: !el.paused && !el.ended,
+    },
+  };
+};
+const toggleAudio = (fileId) => {
+  const el = audioElements.get(fileId);
+  if (!el) return;
+  if (el.paused) el.play()?.catch?.(() => {});
+  else el.pause();
+};
+const seekAudio = (fileId, value) => {
+  const el = audioElements.get(fileId);
+  if (!el) return;
+  el.currentTime = Number(value);
+  audioPlayback.value = { ...audioPlayback.value, [fileId]: { ...audioPlayback.value[fileId], current: el.currentTime } };
+};
+const fmtTime = (seconds) => {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
 const checkpointsOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'checkpoint');
 
 /** Availability only shows while it is genuinely partial — a complete file
@@ -1237,6 +1342,12 @@ watch(() => props.messages, () => {
 .msg-file-meta { font-size: 10px; color: #6b6875; }
 .msg-file-err { color: #dc3545; }
 .msg-file-action { border: none; background: #241824; color: #fff; border-radius: 999px; width: 26px; height: 26px; font-size: 13px; line-height: 1; flex-shrink: 0; }
+.msg-audio-toggle { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.msg-audio-icon { width: 14px; height: 14px; fill: currentColor; display: block; }
+.msg-audio-player { display: flex; align-items: center; gap: 8px; width: 260px; max-width: 100%; margin-top: 6px; }
+.msg-audio-seek { flex: 1; min-width: 0; height: 24px; accent-color: #8e2b77; cursor: pointer; }
+.msg-audio-time { font-size: 12px; color: #6c5a6c; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.msg-audio-note { font-size: 12px; color: #6c5a6c; margin-top: 4px; }
 .msg-file-spinner { width: 16px; height: 16px; border: 2px solid rgba(36,24,36,.2); border-top-color: #8e2b77; border-radius: 50%; flex-shrink: 0; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
