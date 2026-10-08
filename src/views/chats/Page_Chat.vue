@@ -913,6 +913,13 @@ const handleCreateCheckpoint = async () => {
         // it WILL be retried and the marker appears when a connection
         // returns. Telling the user it failed outright would be the inverse
         // of the old false "signed" — both misreport the outbox contract.
+        if (e?.message === 'CHECKPOINT_AWAITING_APPROVAL') {
+            $swal.fire({
+                icon: 'info', title: 'Checkpoint waits for approval',
+                text: 'The signed checkpoint is stored on this device and is sent once the device owner approves your account.',
+            });
+            return;
+        }
         const queued = e?.cause && e.cause.name === 'IngestError' && !e.cause.permanent;
         if (queued) {
             $swal.fire({
@@ -1076,7 +1083,7 @@ const handleEditMessage = async (messageId, newText) => {
             if (awaitPendingEditUnlock(pendingEdits.value, messageId, myToken)) pendingEdits.value = new Map(pendingEdits.value);
             return;
         }
-        if (submitPendingEdit(pendingEdits.value, messageId, myToken, signHash, ownerTimestamp)) {
+        if (submitPendingEdit(pendingEdits.value, messageId, myToken, signHash, ownerTimestamp, { awaitingApproval: status === 'awaiting_approval' })) {
             pendingEdits.value = new Map(pendingEdits.value);
             reconcilePendingEdits();
         }

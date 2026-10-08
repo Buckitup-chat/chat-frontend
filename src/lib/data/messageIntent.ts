@@ -191,6 +191,12 @@ export async function trustedRowBase(
 	return freshestOf(verified, own);
 }
 
+const fileIdsOf = (parts: unknown[] | undefined): string[] =>
+	(parts ?? []).flatMap((part) => {
+		const fileId = (part as { fileId?: unknown } | null)?.fileId;
+		return typeof fileId === 'string' && fileId ? [fileId] : [];
+	});
+
 export async function materializeMessageIntent(
 	payload: DialogIntentPayload,
 	token: SessionToken
@@ -218,10 +224,12 @@ export async function materializeMessageIntent(
 				: null;
 			const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(payload.observedTails));
 			assertSessionUnchanged(token, 'materializeMessageIntent:afterEncrypt');
+			const fileIds = payload.kind === 'edit' ? fileIdsOf(payload.parts) : [];
 			return {
 				kind: 'ready-row',
 				relation: 'dialog_messages',
 				mutationType: 'update',
+				...(fileIds.length ? { fileIds } : {}),
 				row: {
 					message_id: payload.messageId,
 					dialog_hash: payload.dialogHash,
@@ -278,10 +286,12 @@ async function materializeNewMessage(
 	const contentB64 = await DialogCrypto.encryptContent(myKey, encodeContent(payload.parts));
 	const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(payload.observedTails));
 	assertSessionUnchanged(token, 'materializeMessageIntent:afterEncrypt');
+	const fileIds = fileIdsOf(payload.parts);
 	return {
 		kind: 'ready-row',
 		relation: 'dialog_messages',
 		mutationType: 'insert',
+		...(fileIds.length ? { fileIds } : {}),
 		row: {
 			message_id: payload.messageId,
 			dialog_hash: payload.dialogHash,

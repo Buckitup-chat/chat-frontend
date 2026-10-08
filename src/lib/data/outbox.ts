@@ -28,6 +28,7 @@
 import { WebLocksLeader } from '@tanstack/offline-transactions';
 import { IndexedDbStore } from './indexedDbStore';
 import { IngestError } from './ingest';
+import { shapeOfTable } from './writeContracts';
 import { VaultLockedError, AccountMismatchError } from './keyCustody';
 import { createSecureStore, DecryptFailedError, type StringStore } from './secureStore';
 
@@ -60,7 +61,27 @@ export interface OutboxEntry {
 	scope?: string;
 	sourceIntentId?: string;
 	discoveryBlocked?: DependencyDiscoveryBlock;
+	/**
+	 * The trust chain refused this write (`not_in_trust_chain`): it waits for
+	 * the device owner's approval of `shape`, neither failed nor on a retry
+	 * schedule. Every pending write of that shape waits with it; only an
+	 * approval probe sends one of them.
+	 */
+	approvalHeld?: ApprovalHold;
+	/**
+	 * Files the row's (encrypted) content cites: its dependencies include
+	 * their manifests, also when they are worked out again later.
+	 */
+	fileIds?: string[];
 }
+
+export interface ApprovalHold {
+	/** The gate's shape name (shapeOfTable), the unit a vouch grants. */
+	shape: string;
+	heldAt: number;
+}
+
+export const AWAITING_APPROVAL_MESSAGE = 'it waits for approval by the device owner';
 
 export type DependencyBlockReason =
 	| 'storage_unavailable'
@@ -686,9 +707,11 @@ export interface EnqueueOptions {
 	sourceIntentId?: string;
 	discoveryBlocked?: DependencyDiscoveryBlock;
 	observeAttempt?: boolean;
+	fileIds?: string[];
 }
 
 export async function enqueue(mutations: unknown[], userHash: string, opts: EnqueueOptions = {}): Promise<string | null> {
+	if (mutations.length !== 1) throw new Error(`outbox: an entry holds exactly one mutation, got ${mutations.length}`);
 	if (!userHash) return null;
 	try {
 		const active = await activeEntryCount(userHash);
@@ -712,6 +735,7 @@ export async function enqueue(mutations: unknown[], userHash: string, opts: Enqu
 			...(opts.scope ? { scope: opts.scope } : {}),
 			...(opts.sourceIntentId ? { sourceIntentId: opts.sourceIntentId } : {}),
 			...(opts.discoveryBlocked ? { discoveryBlocked: opts.discoveryBlocked } : {}),
+			...(opts.fileIds?.length ? { fileIds: opts.fileIds } : {}),
 		};
 		if (entry.discoveryBlocked) delete entry.dependsOn;
 		if (opts.observeAttempt) preRegisteredAttempts.set(entry.id, observeAttempt(userHash, entry.id));
@@ -747,6 +771,7 @@ export async function markServerAccepted(id: string | null): Promise<boolean> {
 	entry.serverAcceptedAt = Date.now();
 	delete entry.nextAttemptAt;
 	delete entry.discoveryBlocked;
+	delete entry.approvalHeld;
 	await sealFor(entry.userHash).set(id, JSON.stringify(entry));
 	notifyOutcomeChange(entry.userHash);
 	return true;
@@ -812,12 +837,19 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 		const network = error instanceof IngestError && error.network;
 		if (network) entry.lastErrorNetwork = true;
 		else delete entry.lastErrorNetwork;
+		const wasHeld = !!entry.approvalHeld;
 		if (error instanceof IngestError && error.permanent) {
 			entry.status = 'quarantined';
 			entry.quarantinedAt = Date.now();
 			delete entry.nextAttemptAt;
 			delete entry.discoveryBlocked;
+			delete entry.approvalHeld;
 			console.warn(`[outbox] quarantined ${entry.relation} entry ${id}: ${entry.lastError}`);
+		} else if (error instanceof IngestError && error.approvalBlocked) {
+			entry.approvalHeld ??= { shape: shapeOfTable(entry.relation), heldAt: Date.now() };
+			delete entry.nextAttemptAt;
+		} else if (entry.approvalHeld) {
+			delete entry.nextAttemptAt;
 		} else if (entry.status !== 'quarantined') {
 			// RETRYABLE_FAILURE carries the time of its next attempt (ADR §5),
 			// persisted so a reload resumes the schedule instead of resetting
@@ -828,6 +860,7 @@ export async function recordFailure(id: string | null, error: unknown): Promise<
 		await sealFor(entry.userHash).set(id, JSON.stringify(entry));
 		if (entry.status === 'quarantined') notifyOutcomeChange(entry.userHash);
 		else notifyQueueChange(entry.userHash);
+		if (wasHeld !== !!entry.approvalHeld) notifyApprovalHeldChange(entry.userHash);
 	} catch {
 		/* diagnostics only — never let bookkeeping break the send path */
 	}
@@ -912,6 +945,14 @@ function invalidEntryReason(value: unknown, key: string): string | null {
 		if (status !== 'pending') return `status ${status} cannot carry discoveryBlocked`;
 		if (e.dependsOn !== undefined) return 'discoveryBlocked cannot carry dependsOn';
 	}
+	if (e.approvalHeld !== undefined) {
+		const hold = e.approvalHeld;
+		if (!isPlainObject(hold) || !isNonEmptyString(hold.shape) || !isTimestamp(hold.heldAt)) return 'approvalHeld is malformed';
+		if (status !== 'pending') return `status ${status} cannot carry approvalHeld`;
+		if (e.nextAttemptAt !== undefined) return 'approvalHeld cannot carry nextAttemptAt';
+		if (e.discoveryBlocked !== undefined) return 'approvalHeld cannot carry discoveryBlocked';
+	}
+	if (e.fileIds !== undefined && !(Array.isArray(e.fileIds) && e.fileIds.every(isNonEmptyString))) return 'fileIds is not a list of ids';
 	if (e.sourceIntentId !== undefined && !isNonEmptyString(e.sourceIntentId)) return 'sourceIntentId is not an id';
 	if (TERMINAL_STATUSES.has(status) && e.mutations.length > 0) return `status ${status} still carries mutations`;
 	if (!TERMINAL_STATUSES.has(status) && e.mutations.length === 0) return 'mutations is empty';
@@ -1465,13 +1506,100 @@ const dependencyState = (dependent: OutboxEntry, depId: string, view: Dependency
 export async function readyEntries(userHash: string, now: number = Date.now()): Promise<OutboxEntry[]> {
 	const scan = await scanOutbox(userHash);
 	const view = dependencyViewOf(scan);
+	const paused = heldShapesOf(scan.entries);
 	return scan.entries.filter((e) => {
 		if (e.status === 'quarantined' || e.status === 'discarded' || e.status === 'accepted'
 			|| e.status === 'server_accepted_pending_reconcile') return false;
 		if (e.discoveryBlocked) return false;
+		if (pausedForApproval(e, paused) && !probingEntryIds.has(e.id)) return false;
 		if ((e.nextAttemptAt ?? 0) > now) return false;
 		return (e.dependsOn ?? []).every((dep) => dependencyState(e, dep, view) === 'resolved');
 	});
+}
+
+const probingEntryIds = new Set<string>();
+const approvalHeldListeners = new Set<(userHash: string) => void>();
+
+const isActive = (e: OutboxEntry): boolean =>
+	e.status !== 'quarantined' && e.status !== 'discarded' && e.status !== 'accepted'
+	&& e.status !== 'server_accepted_pending_reconcile';
+
+const heldShapesOf = (entries: OutboxEntry[]): Set<string> =>
+	new Set(entries.filter((e) => isActive(e) && e.approvalHeld).map((e) => e.approvalHeld!.shape));
+
+const pausedForApproval = (e: OutboxEntry, held: Set<string>): boolean =>
+	isActive(e) && (!!e.approvalHeld || held.has(shapeOfTable(e.relation)));
+
+export function awaitingApprovalIds(entries: OutboxEntry[]): Set<string> {
+	const held = heldShapesOf(entries);
+	const paused = new Set(entries.filter((e) => pausedForApproval(e, held)).map((e) => e.id));
+	const waiting = new Set(paused);
+	for (const e of entries) {
+		if (isActive(e) && (e.dependsOn ?? []).some((dep) => paused.has(dep))) waiting.add(e.id);
+	}
+	return waiting;
+}
+
+export function onApprovalHeldChange(handler: (userHash: string) => void): () => void {
+	approvalHeldListeners.add(handler);
+	return () => { approvalHeldListeners.delete(handler); };
+}
+
+function notifyApprovalHeldChange(userHash: string): void {
+	for (const handler of approvalHeldListeners) {
+		try {
+			handler(userHash);
+		} catch (e) {
+			console.warn('[outbox] onApprovalHeldChange subscriber threw:', e);
+		}
+	}
+	notifyOtherTabs(userHash);
+}
+
+export async function approvalHeldShapes(userHash: string): Promise<Set<string>> {
+	return heldShapesOf((await scanOutbox(userHash)).entries);
+}
+
+export async function approvalProbeCandidate(userHash: string, shape: string): Promise<OutboxEntry | null> {
+	const scan = await scanOutbox(userHash);
+	const view = dependencyViewOf(scan);
+	return scan.entries
+		.filter((e) => isActive(e) && e.approvalHeld?.shape === shape)
+		.filter((e) => (e.dependsOn ?? []).every((dep) => dependencyState(e, dep, view) === 'resolved'))
+		.sort((a, b) => a.createdAt - b.createdAt)[0] ?? null;
+}
+
+export async function sendApprovalProbe(
+	userHash: string,
+	outboxId: string,
+	send: (mutations: unknown[]) => Promise<unknown>,
+	hooks: DrainHooks = {},
+): Promise<SenderAttempt | null> {
+	probingEntryIds.add(outboxId);
+	try {
+		const submission = await submitEntryToSender(userHash, outboxId, send, hooks, { targeted: true });
+		if (submission.disposition.kind !== 'attempting') return null;
+		return await submission.attempt;
+	} finally {
+		probingEntryIds.delete(outboxId);
+	}
+}
+
+async function releaseApprovalHeld(userHash: string, shape: string): Promise<void> {
+	let released = false;
+	for (const held of (await entriesOf(userHash)).filter((e) => e.approvalHeld?.shape === shape)) {
+		await withRecordLock(held.id, async () => {
+			const result = await readEntry(held.id);
+			if (result.kind !== 'entry' || result.entry.approvalHeld?.shape !== shape) return;
+			delete result.entry.approvalHeld;
+			await sealFor(result.entry.userHash).set(held.id, JSON.stringify(result.entry));
+			released = true;
+		});
+	}
+	if (released) {
+		notifyQueueChange(userHash);
+		notifyApprovalHeldChange(userHash);
+	}
 }
 
 export async function dependencyCandidates(
@@ -1607,8 +1735,10 @@ function blockedIssuesOf(scan: OutboxScan): BlockedDependentIssue[] {
 
 export const STATE_UNCONFIRMED_MESSAGE = 'its stored state cannot be read right now — it is not sent until it can be';
 
+export type HeldReason = DependencyBlockReason | 'awaiting_approval';
+
 export type HeldState =
-	| { kind: 'held'; reason: DependencyBlockReason; message: string }
+	| { kind: 'held'; reason: HeldReason; message: string }
 	| { kind: 'clear' }
 	| { kind: 'unconfirmed'; cause: 'unavailable' | 'missing' | 'corrupt' | 'foreign' | 'other_account' };
 
@@ -1619,6 +1749,7 @@ export async function heldStateOf(id: string, userHash: string): Promise<HeldSta
 	if (result.kind === 'corrupt') return { kind: 'unconfirmed', cause: 'corrupt' };
 	if (result.kind === 'foreign') return { kind: 'unconfirmed', cause: 'foreign' };
 	if (result.entry.userHash !== userHash) return { kind: 'unconfirmed', cause: 'other_account' };
+	if (result.entry.approvalHeld) return { kind: 'held', reason: 'awaiting_approval', message: AWAITING_APPROVAL_MESSAGE };
 	const block = result.entry.discoveryBlocked;
 	return block ? { kind: 'held', reason: block.reason, message: block.message } : { kind: 'clear' };
 }
@@ -1708,7 +1839,9 @@ export async function accountOutboxSnapshot(userHash: string): Promise<AccountOu
 }
 
 export async function pendingCount(userHash: string): Promise<number> {
-	return (await pendingEntries(userHash)).length;
+	const pending = await pendingEntries(userHash);
+	const held = heldShapesOf(pending);
+	return pending.filter((e) => !pausedForApproval(e, held)).length;
 }
 
 export interface DrainResult {
@@ -1965,6 +2098,7 @@ export async function drainOutbox(
 				const result = await send(entry.mutations);
 				const recorded = await markServerAccepted(entry.id);
 				sent++;
+				if (recorded && entry.approvalHeld) await releaseApprovalHeld(userHash, entry.approvalHeld.shape);
 				// The first answer in this drain ends every backoff that only
 				// waited for a connection, so the rest go in this same pass.
 				if (!answered) {
@@ -2144,7 +2278,7 @@ export interface SenderSubmission {
 	disposition:
 		| { kind: 'attempting' }
 		/** `not-sender`: this tab does not lead the account's sending — the leader tab sends it. */
-		| { kind: 'queued'; reason: 'not-ready' | 'not-sender'; held?: { reason: DependencyBlockReason; message: string } }
+		| { kind: 'queued'; reason: 'not-ready' | 'not-sender'; held?: { reason: HeldReason; message: string } }
 		/** Already past its attempt: accepted by the server, rejected or discarded. */
 		| { kind: 'settled'; outcome: EntryOutcome };
 	attempt: Promise<SenderAttempt>;
@@ -2173,6 +2307,11 @@ export async function submitEntryToSender(
 		|| (sender && (await readyEntries(userHash)).some((e) => e.id === outboxId))
 		|| underWay();
 	if (!sender) notifyOtherTabs(userHash);
+	const awaitingApproval = !attempting && (!!stored.entry.approvalHeld
+		|| awaitingApprovalIds(await entriesOf(userHash).catch(() => [])).has(outboxId));
+	const held = awaitingApproval
+		? { reason: 'awaiting_approval' as const, message: AWAITING_APPROVAL_MESSAGE }
+		: block ? { reason: block.reason, message: block.message } : null;
 	if (attempting && observed.settled === null && !opts.targeted) {
 		let expected = expectedAttempts.get(userHash);
 		if (!expected) expectedAttempts.set(userHash, (expected = new Set()));
@@ -2186,7 +2325,7 @@ export async function submitEntryToSender(
 	return {
 		disposition: attempting
 			? { kind: 'attempting' }
-			: { kind: 'queued', reason: sender ? 'not-ready' : 'not-sender', ...(block ? { held: { reason: block.reason, message: block.message } } : {}) },
+			: { kind: 'queued', reason: sender ? 'not-ready' : 'not-sender', ...(held ? { held } : {}) },
 		attempt,
 	};
 }

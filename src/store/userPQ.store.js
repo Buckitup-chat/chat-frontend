@@ -282,9 +282,10 @@ export const userPQStore = defineStore('userPQ', () => {
     return true;
   };
 
-  // Resolves `{ pending }` once the profile is saved on this device; pending
-  // while the server does not have all of it yet (offline, the outbox sends
-  // it when the connection is back). Throws when it can never get there.
+  // Resolves `{ pending, awaitingApproval }` once the profile is saved on this
+  // device; pending while the server does not have all of it yet (offline,
+  // the outbox sends it when the connection is back), awaitingApproval while
+  // it waits for the device owner's approval. Throws when it can never get there.
   const updateCurrentUserProfile = async ({ name, notes, avatarUuid, avatarDataUrl }) => {
     if (!em.value || !currentUserHash.value) return null;
 
@@ -306,7 +307,7 @@ export const userPQStore = defineStore('userPQ', () => {
     const card = saved.cardPublished ? null : await em.value.pushCurrentUserCard();
 
     await refreshMyLocalUsers();
-    return { pending: saved.pending || card === 'queued' };
+    return { pending: saved.pending || card === 'queued', awaitingApproval: saved.awaitingApproval === true };
   };
 
   // What a contact keeps in the contacts slot, out of whatever the caller

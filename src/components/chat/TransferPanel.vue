@@ -27,7 +27,7 @@
 
       <div class="transfer-list">
         <div v-for="(it, i) in visibleItems" :key="it.id" class="transfer-row"
-          :class="{ '_active': it.status === 'active', '_paused': it.status === 'paused', '_error': it.status === 'error', '_foreign': isForeign(it) }"
+          :class="{ '_active': it.status === 'active', '_paused': it.status === 'paused', '_error': it.status === 'error' || it.status === 'rejected', '_foreign': isForeign(it) }"
           draggable="true"
           @dragstart="onDragStart($event, i)" @dragend="dragFrom = null"
           @dragenter.prevent @dragover.prevent="onDragOver($event)" @drop.prevent="onDrop(i)">
@@ -46,7 +46,7 @@
           </div>
           <button v-if="actionOf(it)" type="button" class="transfer-btn"
             @click="applyAction(it)">{{ actionOf(it) }}</button>
-          <button v-if="it.status !== 'done'" type="button" class="transfer-cancel" title="Cancel this file"
+          <button v-if="it.status !== 'done' && it.status !== 'awaiting_approval'" type="button" class="transfer-cancel" title="Cancel this file"
             @click="$transfers.cancel(it.id)">✕</button>
         </div>
         <div v-if="hiddenCount" class="transfer-more" role="button" @click="expanded = !expanded">
@@ -111,6 +111,10 @@ const captionOf = (it) => {
       return `Waiting · ${fmtSize(it.size)}`;
     case 'error':
       return 'Interrupted — will retry on Start';
+    case 'awaiting_approval':
+      return 'Uploaded · goes out with its message once the device owner approves your account — it cannot be cancelled';
+    case 'rejected':
+      return 'Refused by the server — see the failed writes';
     case 'done':
       return 'Sent';
     default:
@@ -118,7 +122,7 @@ const captionOf = (it) => {
   }
 };
 
-const actionOf = (it) => ({ active: 'Pause', paused: 'Resume', error: 'Retry', waiting: null, done: null }[it.status]);
+const actionOf = (it) => ({ active: 'Pause', paused: 'Resume', error: 'Retry', waiting: null, awaiting_approval: null, rejected: null, done: null }[it.status]);
 const applyAction = (it) => {
   if (it.status === 'active') $transfers.pause(it.id);
   else $transfers.start(it.id);

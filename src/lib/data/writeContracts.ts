@@ -93,6 +93,21 @@ export const OWNER_FIELD: Record<string, string> = {
 	files: 'uploader_hash',
 };
 
+const SHAPE_OF_TABLE: Record<string, string> = {
+	user_cards: 'user_card',
+	user_storage_versions: 'user_storage',
+	files: 'file',
+	file_chunks: 'file_chunk',
+	origins: 'origin',
+	vouch_tokens: 'vouch_token',
+	dialog_messages_versions: 'dialog_messages',
+	review_versions: 'review',
+};
+
+export function shapeOfTable(table: string): string {
+	return SHAPE_OF_TABLE[table] ?? table;
+}
+
 const ENTITY_KEY_FIELD: Record<string, string> = {
 	dialog_messages: 'message_id',
 	dialog_message_reactions: 'reaction_hash',

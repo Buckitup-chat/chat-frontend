@@ -236,13 +236,15 @@
                  retraction, so saying "delivered" about the message would name
                  the wrong thing. ↻ = durably queued in the outbox, or an
                  intent kept for recovery before it got there; 🔒 = waiting
-                 for the vault; ! only for a permanent rejection. -->
+                 for the vault; ⏳ = waiting for the device owner's approval;
+                 ! only for a permanent rejection. -->
             <!-- a terminal verification failure outranks any transport ✓ -->
             <span v-if="msg._verify === 'blocked' || (msg._verify === 'invalid' && msg._verifyTerminal)" class="sync-status error" title="Delivered, but it failed verification in this conversation">!</span>
             <span v-else-if="msg._syncStatus === 'sending'" class="sync-status local" title="Saved locally">◌</span>
             <span v-else-if="msg._syncStatus === 'syncing'" class="sync-status pending" title="Sending…">✓</span>
             <span v-else-if="msg._syncStatus === 'queued'" class="sync-status local" title="Queued — will retry automatically">↻</span>
             <span v-else-if="msg._syncStatus === 'awaiting_unlock'" class="sync-status local" title="Waiting for unlock">🔒</span>
+            <span v-else-if="msg._syncStatus === 'awaiting_approval'" class="sync-status local" title="Saved on this device — sent once the device owner approves your account">⏳</span>
             <span v-else-if="msg._syncStatus === 'awaiting_recovery'" class="sync-status local" title="Not sent yet — kept on this device, retried on reconnect or next login">↻</span>
             <span v-else-if="msg._syncStatus === 'synced' && msg._deliveredToPeers"
               :class="['sync-status', msg._deleted ? 'tombstone' : 'delivered']"
@@ -257,6 +259,7 @@
                  attempted text as if it had landed. -->
             <span v-if="msg._editStatus === 'syncing' || msg._editStatus === 'awaiting_echo'" class="sync-status pending" title="Saving edit…">✎</span>
             <span v-else-if="msg._editStatus === 'awaiting_unlock'" class="sync-status local" title="Waiting for unlock">🔒</span>
+            <span v-else-if="msg._editStatus === 'awaiting_approval'" class="sync-status local" title="Edit saved on this device — sent once the device owner approves your account">✎⏳</span>
             <span v-else-if="msg._editStatus === 'error'" class="sync-status error" title="Edit not saved — others still see the previous version">✎!</span>
             <!-- Read receipts are irreversible and tied to this exact revision,
                  so they are only ever produced by the explicit action below. -->

@@ -14,6 +14,7 @@ import {
 	getUserStorageCollection,
 } from './collections';
 import { isShapeBlocked } from './accessGate';
+import { shapeOfTable } from './writeContracts';
 
 interface AwaitableCollection {
 	utils?: { awaitTxId?: (txId: number, timeout?: number) => Promise<boolean> };
@@ -100,7 +101,7 @@ export async function awaitShapeVisibility(
 	txids: number[],
 	label = 'shape'
 ): Promise<boolean> {
-	if (isShapeBlocked(label)) return true;
+	if (isShapeBlocked(shapeOfTable(label))) return true;
 	const awaitTxId = collection?.utils?.awaitTxId;
 	if (!awaitTxId || txids.length === 0) return true;
 

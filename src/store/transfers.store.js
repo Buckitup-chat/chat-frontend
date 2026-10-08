@@ -112,6 +112,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 		let lastTick = { t: Date.now(), done: byId(id).done };
 		patch(id, { status: 'active', speed: 0 });
 
+		let manifestAccepted = null;
 		try {
 			const bytes = new Uint8Array(await item.blob.arrayBuffer());
 			const part = await dialogs.uploadAttachment({
@@ -137,11 +138,19 @@ export const useTransfersStore = defineStore('transfers', () => {
 						speed: prev ? prev * 0.6 + instant * 0.4 : instant,
 					});
 				},
+				onAwaitingApproval: (accepted) => { manifestAccepted = accepted; },
 			});
+			if (manifestAccepted) {
+				patch(id, { status: 'awaiting_approval', part, speed: 0 });
+				followManifest(id, item.name, manifestAccepted);
+				addPart(item, part);
+				await sendBatch(item.batchId);
+				return;
+			}
 			patch(id, { status: 'done', part, speed: 0 });
-			patchBatch(item.batchId, (b) => ({ ...b, parts: [...b.parts, { order: item.order, part }] }));
+			addPart(item, part);
 			scheduleRemoval(id);
-			await maybeSendBatch(item.batchId);
+			await sendBatch(item.batchId);
 		} catch (e) {
 			if (pauseRequested.delete(id)) {
 				patch(id, { status: 'paused', speed: 0 });
@@ -160,10 +169,36 @@ export const useTransfersStore = defineStore('transfers', () => {
 		}
 	};
 
+	const sendBatch = async (batchId) => {
+		try {
+			await maybeSendBatch(batchId);
+		} catch (e) {
+			console.error('[transfers] the composed message could not be sent:', e);
+			patchBatch(batchId, (b) => ({ ...b, status: 'error' }));
+		}
+	};
+
+	const addPart = (item, part) =>
+		patchBatch(item.batchId, (b) => ({ ...b, parts: [...b.parts, { order: item.order, part }] }));
+
+	const followManifest = (id, name, manifestAccepted) => {
+		manifestAccepted
+			.then(() => {
+				if (byId(id)?.status !== 'awaiting_approval') return;
+				patch(id, { status: 'done', speed: 0 });
+				scheduleRemoval(id);
+			}, (e) => {
+				console.error('[transfers]', name, 'manifest refused:', e);
+				if (byId(id)?.status === 'awaiting_approval') patch(id, { status: 'rejected', speed: 0 });
+			})
+			.catch((e) => console.error('[transfers]', name, 'could not record the manifest verdict:', e));
+	};
+
 	// ---------- batch completion ----------
 
+	const SETTLED = new Set(['done', 'awaiting_approval', 'rejected']);
 	const liveOf = (batchId) =>
-		items.value.filter((it) => it.batchId === batchId && it.status !== 'done');
+		items.value.filter((it) => it.batchId === batchId && !SETTLED.has(it.status));
 
 	const maybeSendBatch = async (batchId) => {
 		const batch = batches.value.get(batchId);
@@ -188,7 +223,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 
 		batches.value = new Map(batches.value).set(batchId, { ...batch, status: 'sending' });
 		await dialogs.dispatchMessageIntent(captured.intentId, captured.payload, captured.token, (status) => {
-			if (status === 'synced' || status === 'error') {
+			if (status === 'synced' || status === 'error' || status === 'awaiting_approval') {
 				batches.value = new Map(batches.value).set(batchId, { ...batch, status });
 			}
 		});
@@ -220,10 +255,13 @@ export const useTransfersStore = defineStore('transfers', () => {
 		drain();
 	};
 
-	/** Cancels ONE row; the rest of its batch still becomes the message. */
 	const cancel = async (id) => {
 		const item = byId(id);
-		if (!item) return;
+		if (!item || item.status === 'awaiting_approval') return;
+		if (item.status === 'rejected') {
+			removeItem(id);
+			return;
+		}
 		if (item.status === 'active') {
 			aborts.get(id)?.abort(); // the batch decision re-runs when the abort settles
 			return;
@@ -245,7 +283,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 		batches.value = closed;
 		for (const it of [...items.value]) {
 			if (it.status === 'active') aborts.get(it.id)?.abort();
-			else if (it.status !== 'done') removeItem(it.id);
+			else if (!SETTLED.has(it.status) || it.status === 'rejected') removeItem(it.id);
 		}
 	};
 

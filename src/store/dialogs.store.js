@@ -15,7 +15,10 @@ import { nextOwnerTimestamp } from '@/lib/data/time';
 import { computeTails } from '@/lib/data/refs';
 import { getAccepted, getAllAcceptedForRelation } from '@/lib/data/acceptedSnapshot';
 import { recordOwnObservedTails, getOwnObservedTails, discardOwnObservedTails } from '@/lib/data/ownObservedTails';
-import { quarantinedEntries, discardEntry, currentSessionToken, sameSessionToken, pendingEntries, awaitServerAccepted, onOutboxChange } from '@/lib/data/outbox';
+import {
+    quarantinedEntries, discardEntry, currentSessionToken, sameSessionToken, pendingEntries, awaitServerAccepted, onOutboxChange,
+    awaitingApprovalIds,
+} from '@/lib/data/outbox';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
@@ -317,13 +320,15 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const [pending, quarantined, intents] = await Promise.all([
             pendingEntries(owner), quarantinedEntries(owner), intentsOf(owner),
         ]);
+        const awaitingApproval = awaitingApprovalIds(pending);
         for (const e of pending) {
             if (e.relation !== 'dialog_messages') continue;
             for (const m of e.mutations || []) {
                 const id = messageIdOfRow(m);
                 if (!want.has(id)) continue;
                 const accepted = e.status === 'server_accepted_pending_reconcile' || !!e.reconciledAt;
-                out.set(id, { status: accepted ? 'synced' : 'queued', signHash: (m.modified ?? m.changes)?.sign_hash ?? null });
+                const status = accepted ? 'synced' : awaitingApproval.has(e.id) ? 'awaiting_approval' : 'queued';
+                out.set(id, { status, signHash: (m.modified ?? m.changes)?.sign_hash ?? null });
             }
         }
         for (const e of quarantined) {
@@ -738,6 +743,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 }
                 onStatus?.('synced');
             } else {
+                if (handle.held?.reason === 'awaiting_approval') onStatus?.('awaiting_approval');
                 reportOutcome(handle.outboxId ? awaitServerAccepted(handle.outboxId, payload.ownerHash) : handle.acceptance);
             }
         } catch (e) {
@@ -830,7 +836,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     /** Runs an intent's dispatch in its chain, once; resolves after its acceptance. */
-    const runOnChain = (chainKey, intentId, token, onSigned) => {
+    // `onHeld(handle)`: the write is stored and held for the device owner's
+    // approval. The chain still waits for its acceptance — the next write of
+    // this chain builds on it — but the caller can say so now.
+    const runOnChain = (chainKey, intentId, token, onSigned, onHeld) => {
         const running = chainRuns.get(intentId);
         if (running) return running;
         const run = serialized(writeChains, chainKey, async () => {
@@ -839,6 +848,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 signedOf.set(intentId, { signHash: row?.sign_hash ?? null, ownerTimestamp: row?.owner_timestamp ?? null });
                 onSigned?.(row);
             });
+            if (handle?.held?.reason === 'awaiting_approval') onHeld?.(handle);
             if (handle) await handle.acceptance;
             return handle;
         });
@@ -853,6 +863,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
     const awaitsUnlock = (run) => run.then(() => false, (e) => {
         if (e instanceof VaultLockedError) return true;
         throw e;
+    });
+
+    const revisionOutcome = (chainKey, intentId, token) => new Promise((resolve, reject) => {
+        const run = runOnChain(chainKey, intentId, token, undefined, () => resolve('awaiting_approval'));
+        awaitsUnlock(run).then((locked) => resolve(locked ? 'awaiting_unlock' : 'dispatched'), reject);
     });
 
     const messageChainOf = (messageId) => (intent) =>
@@ -899,11 +914,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
             return id;
         });
 
-        if (await awaitsUnlock(runOnChain(chainKey, intentId, token))) {
+        const outcome = await revisionOutcome(chainKey, intentId, token);
+        if (outcome === 'awaiting_unlock') {
             return { messageId, status: 'awaiting_unlock', signHash: null, ownerTimestamp: null };
         }
         const signed = signedOf.get(intentId);
-        return { messageId, status: 'dispatched', signHash: signed?.signHash ?? null, ownerTimestamp: signed?.ownerTimestamp ?? null };
+        return { messageId, status: outcome, signHash: signed?.signHash ?? null, ownerTimestamp: signed?.ownerTimestamp ?? null };
     };
 
     // ---------- file transport (§1.5, §2.1–2.3) ----------
@@ -926,7 +942,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * not have. Previews are computed here, from the plaintext — the device
      * never sees it, so nowhere else can compute them.
      */
-    const uploadAttachment = async (fileMeta, { onProgress, signal, prepared: preparedIn, resuming = false } = {}) => {
+    const uploadAttachment = async (fileMeta, { onProgress, signal, prepared: preparedIn, resuming = false, onAwaitingApproval } = {}) => {
         const { name, mimeType, bytes, createdAt, blob } = fileMeta;
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
@@ -956,9 +972,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const preview = blob && (isImageMime(mimeType) || video)
             ? await (video ? buildVideoPreview(blob) : buildImagePreview(blob)).catch(() => null)
             : null;
-        return preview
+        const part = preview
             ? { kind: video ? 'video' : 'image', ...preview, ...common }
             : { kind: 'file', ...common };
+        if (up.manifestAwaitingApproval) {
+            if (onAwaitingApproval) onAwaitingApproval(up.manifestAwaitingApproval);
+            else await up.manifestAwaitingApproval;
+        }
+        return part;
     };
 
     /** Playable source for a video part; streams when a worker is available. */
@@ -994,7 +1015,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             if (id === null) throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
             return id;
         });
-        return { messageId, status: (await awaitsUnlock(runOnChain(chainKey, intentId, token))) ? 'awaiting_unlock' : 'dispatched' };
+        return { messageId, status: await revisionOutcome(chainKey, intentId, token) };
     };
 
     /**
@@ -1386,6 +1407,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const sent = new Promise((resolve, reject) => { settle = { resolve, reject }; });
         const messageId = await sendMessage(peerHash, [part], (status, cause) => {
             if (status === 'synced') settle.resolve();
+            else if (status === 'awaiting_approval') settle.reject(new Error('CHECKPOINT_AWAITING_APPROVAL'));
             else if (status === 'error' || status === 'queued' || status === 'awaiting_recovery') settle.reject(new Error('CHECKPOINT_SEND_FAILED', { cause }));
         }, null, null, 'checkpoint');
         await sent;
@@ -1687,7 +1709,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             for (const item of optimisticItems.value.values()) {
                 if (item.type === 'reaction' && item.logicalKey === logicalKey) item.reactionHash = row?.reaction_hash ?? item.reactionHash;
             }
-        });
+        }, () => updateOptimisticStatus(optimisticId, 'awaiting_approval'));
         run.then(
             (handle) => {
                 if (!handle) {

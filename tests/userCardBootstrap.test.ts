@@ -70,6 +70,8 @@ vi.mock('@/lib/data/accessGate', () => ({
 	hasBlockedShapes: () => false,
 	blockedShapeNames: () => [],
 	onBlockedChange: () => () => {},
+	setWriteProber: () => {},
+	syncBlockedWrites: () => {},
 	waitForUnblock: async () => {},
 	probeAllBlocked: () => {},
 	resetGate: () => {},

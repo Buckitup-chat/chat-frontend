@@ -1142,7 +1142,12 @@ export class EncryptionManagerPQ extends EventTarget {
 
     const cardStatus = cardChanged ? await this.#publishCardOrQueue(updated) : 'synced';
 
-    return { card: updated, pending: rootStatus !== 'synced' || cardStatus !== 'synced', cardPublished: cardChanged };
+    return {
+      card: updated,
+      pending: rootStatus !== 'synced' || cardStatus !== 'synced',
+      awaitingApproval: rootStatus === 'awaiting-approval',
+      cardPublished: cardChanged,
+    };
   }
 
   async loadUserProfile() {

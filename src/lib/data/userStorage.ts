@@ -47,11 +47,13 @@ import { wireBool } from '@/lib/pq/schema';
 
 /**
  * 'queued': signed and in the outbox, which delivers it — the connection was
- * missing, or the write waits behind another. 'awaiting-recovery': durable
- * but not yet signed (locked vault, or no known base); intent recovery signs
- * it later. Neither is on the server yet; neither is lost.
+ * missing, or the write waits behind another. 'awaiting-approval': signed and
+ * in the outbox, held until the device owner approves this account's
+ * user_storage writes. 'awaiting-recovery': durable but not yet signed
+ * (locked vault, or no known base); intent recovery signs it later. None is
+ * on the server yet; none is lost.
  */
-export type StorageSyncStatus = 'synced' | 'syncing' | 'queued' | 'failed' | 'awaiting-recovery';
+export type StorageSyncStatus = 'synced' | 'syncing' | 'queued' | 'failed' | 'awaiting-recovery' | 'awaiting-approval';
 
 // What we persist locally: the server-shaped row plus local-only metadata.
 interface LocalStorageEntry {
@@ -284,10 +286,20 @@ async function upsertStorageEditLive(
 		return { row: projected, sync: Promise.resolve({ status: 'queued' as const, error }) };
 	};
 
+	const markAwaitingApproval = async (): Promise<UpsertResult> => {
+		assertSessionUnchanged(token, 'upsertStorageEditLive:beforeAwaitingApprovalProjection');
+		await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'awaiting-approval' } satisfies LocalStorageEntry, userHash);
+		return { row: projected, sync: Promise.resolve({ status: 'awaiting-approval' as const }) };
+	};
+
 	let handle: DeliveryHandle | null = null;
 	try {
 		handle = await result.dispatchPromise;
 		if (handle.phase === 'accepted') return await settle({ kind: 'accepted' });
+		if (handle.held?.reason === 'awaiting_approval') {
+			void handle.acceptance.then(settle).catch(() => { /* session changed: the next session reads the server */ });
+			return await markAwaitingApproval();
+		}
 		if (opts.untilQueued) {
 			// Done for the caller once durable; the local copy still follows
 			// the server's verdict when it comes.
@@ -387,12 +399,13 @@ export async function putStorageJsonPatch(opts: UpsertJsonPatchOptions): Promise
  * it is durable on this device and shown from there, across reloads; the
  * outbox or intent recovery takes it to the server. Resolves with where it
  * is: 'synced' when the server has it, 'queued' when it waits in the
- * outbox, 'awaiting-recovery' when it waits to be signed. Throws only when
+ * outbox, 'awaiting-approval' when it waits there for the device owner's
+ * approval, 'awaiting-recovery' when it waits to be signed. Throws only when
  * it can never get there: refused by the server, or not durable at all.
  */
 export async function saveStorageJsonPatch(
 	opts: UpsertJsonPatchOptions
-): Promise<'synced' | 'queued' | 'awaiting-recovery'> {
+): Promise<'synced' | 'queued' | 'awaiting-recovery' | 'awaiting-approval'> {
 	const { userHash, uuid, jsonPatch, signSkey, deletedFlag = false } = opts;
 	const write = await upsertStorageEditLive({ userHash, uuid, deletedFlag, jsonPatch }, null, signSkey, { untilQueued: true });
 	const sync = await write.sync;

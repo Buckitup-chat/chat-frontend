@@ -41,6 +41,7 @@ export interface DependencyDiscoveryOptions {
 	observedKeys?: string[];
 	freshnessChecked?: boolean;
 	admission?: NonNullable<DependencyDiscoveryBlock['admission']>;
+	fileIds?: string[];
 }
 
 const admissionConfirmed = async (admission: NonNullable<DependencyDiscoveryBlock['admission']>): Promise<boolean> => {
@@ -68,7 +69,8 @@ export async function discoverDependencies(
 	const dialogHash = relation !== 'dialog_keys' && DIALOG_RELATIONS.includes(relation) && typeof row?.dialog_hash === 'string'
 		? row.dialog_hash
 		: '';
-	if (!chained && !cardOwner && !dialogHash) return { kind: 'found', dependsOn: [] };
+	const fileIds = new Set(opts.fileIds ?? []);
+	if (!chained && !cardOwner && !dialogHash && !fileIds.size) return { kind: 'found', dependsOn: [] };
 
 	let admission: DependencyDiscoveryBlock['admission'];
 	if (opts.admission) {
@@ -117,6 +119,13 @@ export async function discoverDependencies(
 	if (dialogHash) {
 		for (const e of all) {
 			if (e.relation === 'dialog_keys' && rowOfEntry(e)?.dialog_hash === dialogHash) deps.add(e.id);
+		}
+	}
+
+	if (fileIds.size) {
+		for (const e of all) {
+			const fileId = rowOfEntry(e)?.file_id;
+			if (e.relation === 'files' && typeof fileId === 'string' && fileIds.has(fileId)) deps.add(e.id);
 		}
 	}
 
