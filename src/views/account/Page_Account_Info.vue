@@ -24,8 +24,8 @@
 					</button>
 
 
-					<button type="button" class="btn btn-dark rounded-pill _action_btn"
-						@click="$mitt.emit('modal::open', { id: 'account_backup' })">
+					<button type="button" class="btn btn-dark rounded-pill _action_btn" title="Download backup file"
+						@click="$mitt.emit('modal::open', { id: 'account_backup_local' })">
 						<i class="_icon_backups bg-white"></i>
 					</button>
 
