@@ -23,10 +23,11 @@ import {
 	newFileId,
 } from '@/lib/pq/fileCrypto';
 import { sendMutationsAndAwaitShape } from './ingest';
-import { getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
+import { deleteCachedChunk, getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 import { readShapeOnce } from './shapeRead';
-import { wireBool } from '@/lib/pq/schema';
 import { bearerFor, openSession } from './readSession';
+import { ChunkHashes, FileVerificationError, assertChunkBytes, readVerifiedManifest } from './fileIntegrity';
+import type { SignPkeyResolver } from './rowVerification';
 
 declare const ELECTRIC_API_URL: string; // the chunk endpoints below are not shapes
 
@@ -219,20 +220,27 @@ export interface FileAvailability {
  * Partial availability is a normal state in a network without internet, not
  * an error: manifests replicate ahead of bytes, and the missing chunks come
  * on their own. The counts come from the same rows the sync protocol uses —
- * the signed manifest for the total, the chunk rows for what is here.
+ * the manifest for the total, the chunk rows for what is here. The total and
+ * the deleted flag are the uploader's only once the manifest verifies: one
+ * that does not is refused with a FileVerificationError, and one that cannot
+ * be checked yet counts as not arrived.
  */
-export const fileAvailability = async (fileId: string): Promise<FileAvailability> => {
-	const manifests = await readShapeOnce<Record<string, unknown>>('files', `file_id='${fileId}'`).catch(() => []);
-	const manifest = manifests.find((v) => v.file_id === fileId);
-	if (!manifest) return { present: 0, total: 0, unknown: true, deleted: false };
+export const fileAvailability = async (
+	fileId: string,
+	opts: { resolveSignPkey?: SignPkeyResolver } = {},
+): Promise<FileAvailability> => {
+	const unknown: FileAvailability = { present: 0, total: 0, unknown: true, deleted: false };
+	let manifest;
+	try {
+		manifest = await readVerifiedManifest(fileId, opts);
+	} catch (e) {
+		if (e instanceof FileVerificationError && e.kind === 'invalid') throw e;
+		return unknown;
+	}
+	if (!manifest) return unknown;
 
 	const chunks = await existingChunks(fileId);
-	return {
-		present: chunks.size,
-		total: Number(manifest.chunk_count) || 0,
-		unknown: false,
-		deleted: wireBool(manifest.deleted_flag),
-	};
+	return { present: chunks.size, total: manifest.chunkCount, unknown: false, deleted: manifest.deleted };
 };
 
 export interface DownloadProgress {
@@ -242,9 +250,12 @@ export interface DownloadProgress {
 }
 
 /**
- * Fetches and decrypts a file. chunkCount comes from the files manifest;
- * integrity is end-to-end — GCM authentication fails on any corrupted chunk,
- * independent of what any device claimed about the bytes.
+ * Fetches and decrypts a file. The count and order of its chunks are the
+ * uploader's: the manifest and each chunk's row must verify, and each
+ * chunk's bytes must hash to what its row says (fileIntegrity.ts) — GCM
+ * alone would accept any of the file's chunks at any index. A file that
+ * fails is refused with a FileVerificationError before anything more is
+ * fetched, and nothing of it is cached.
  */
 export const downloadFile = async (opts: {
 	fileId: string;
@@ -253,25 +264,32 @@ export const downloadFile = async (opts: {
 	/** Each decrypted chunk as it lands — lets a consumer start before the end. */
 	onChunk?: (index: number, plain: Uint8Array) => void;
 	signal?: AbortSignal;
+	resolveSignPkey?: SignPkeyResolver;
 }): Promise<Uint8Array> => {
 	const { fileId, encSecretB64, onProgress, signal } = opts;
 	const secret = fromBase64(encSecretB64);
 
-	const manifests = await readShapeOnce<Record<string, unknown>>('files', `file_id='${fileId}'`, signal);
-	const manifest = manifests.find((v) => v.file_id === fileId);
+	const manifest = await readVerifiedManifest(fileId, { signal, resolveSignPkey: opts.resolveSignPkey });
 	if (!manifest) throw new Error('file manifest not found');
-	if (wireBool(manifest.deleted_flag)) throw new Error('file was deleted by its uploader');
-	const total = Number(manifest.chunk_count);
+	if (manifest.deleted) throw new Error('file was deleted by its uploader');
+	const total = manifest.chunkCount;
+	const hashes = new ChunkHashes(manifest, signal);
 
 	requestPersistentStorage();
 	const parts: Uint8Array[] = [];
 	let size = 0;
 	for (let i = 0; i < total; i++) {
 		signal?.throwIfAborted();
+		const expected = await hashes.expected(i);
 		// Disk before network: chunks are immutable, so a cached one is
 		// exactly the one the device would serve — a reload or a lost uplink
-		// reassembles from here.
+		// reassembles from here. A cached copy that does not match is dropped
+		// and fetched again.
 		let encrypted = await getCachedChunk(fileId, i);
+		if (encrypted && chunkDataHash(encrypted) !== expected) {
+			await deleteCachedChunk(fileId, i);
+			encrypted = null;
+		}
 		const fromCache = !!encrypted;
 		if (!encrypted) {
 			const fetchChunk = () => {
@@ -288,10 +306,11 @@ export const downloadFile = async (opts: {
 			}
 			if (!r.ok) throw new Error(`chunk ${i} unavailable: HTTP ${r.status}`);
 			encrypted = new Uint8Array(await r.arrayBuffer());
+			assertChunkBytes(fileId, i, expected, encrypted);
 		}
 		const plain = await decryptChunk(secret, encrypted);
-		// Cache only what decrypted: GCM passing is the integrity check, and
-		// a corrupt fetch must not poison future loads.
+		// Cached only once it is the signed chunk and decrypts: a bad fetch
+		// must not poison future loads.
 		if (!fromCache) void putCachedChunk(fileId, i, encrypted);
 		parts.push(plain);
 		size += plain.length;

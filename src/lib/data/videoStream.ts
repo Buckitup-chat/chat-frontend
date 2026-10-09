@@ -16,6 +16,7 @@
 import { fromBase64 } from '@/lib/pq/signature';
 import { CHUNK_SIZE } from '@/lib/pq/fileCrypto';
 import { downloadFile, type DownloadProgress } from './fileTransfer';
+import { ChunkHashes, readVerifiedManifest } from './fileIntegrity';
 import { getCachedMedia, putCachedMedia } from './mediaCache';
 import { bearerFor, openSession } from './readSession';
 
@@ -37,6 +38,8 @@ export interface VideoSource {
 
 /** Registration payloads for every live session, keyed by session id. */
 const active = new Map<string, Record<string, unknown>>();
+/** The verified chunk hashes behind each session; the worker asks again when a row arrives late. */
+const chunkHashes = new Map<string, ChunkHashes>();
 let listenersInstalled = false;
 
 const post = (message: unknown) => navigator.serviceWorker.controller?.postMessage(message);
@@ -48,6 +51,16 @@ const installListeners = () => {
 		const msg = event.data as { type?: string; sessionId?: string };
 		if (msg?.type === 'need-session' && msg.sessionId && active.has(msg.sessionId)) {
 			post(active.get(msg.sessionId));
+		} else if (msg?.type === 'need-chunk-hashes' && msg.sessionId && chunkHashes.has(msg.sessionId)) {
+			const sessionId = msg.sessionId;
+			void chunkHashes.get(sessionId)!.list(true).then(
+				(list) => {
+					const registration = active.get(sessionId);
+					if (registration) registration.chunkHashes = list;
+					post({ type: 'chunk-hashes', sessionId, chunkHashes: list });
+				},
+				() => post({ type: 'chunk-hashes', sessionId, chunkHashes: null }),
+			);
 		} else if (msg?.type === 'need-token' && msg.sessionId && active.has(msg.sessionId)) {
 			void openSession('file_chunk').then((token) => {
 				post({ type: 'token', sessionId: msg.sessionId, token: token || '' });
@@ -116,6 +129,12 @@ export const openVideo = async (
 	} = {},
 ): Promise<VideoSource> => {
 	if (await ensureWorker()) {
+		// The worker decrypts what it fetches but does not verify signatures:
+		// it holds each chunk to the hash verified here (fileIntegrity.ts).
+		const manifest = await readVerifiedManifest(video.fileId, { signal: opts.signal });
+		if (!manifest) throw new Error('file manifest not found');
+		if (manifest.deleted) throw new Error('file was deleted by its uploader');
+		const hashes = new ChunkHashes(manifest, opts.signal);
 		const sessionId = crypto.randomUUID();
 		const bearer = bearerFor('file_chunk');
 		const registration = {
@@ -128,14 +147,17 @@ export const openVideo = async (
 			mimeType: video.mimeType,
 			baseUrl: ELECTRIC_API_URL,
 			token: bearer ? bearer.replace('Bearer ', '') : '',
+			chunkHashes: await hashes.list(),
 		};
 		active.set(sessionId, registration);
+		chunkHashes.set(sessionId, hashes);
 		post(registration);
 		return {
 			url: `/encrypted-video/${sessionId}`,
 			streaming: true,
 			release: () => {
 				active.delete(sessionId);
+				chunkHashes.delete(sessionId);
 				post({ type: 'unregister', sessionId });
 			},
 		};

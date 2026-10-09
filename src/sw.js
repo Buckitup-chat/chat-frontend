@@ -15,6 +15,7 @@
 import { precacheAndRoute, createHandlerBoundToURL, cleanupOutdatedCaches } from 'workbox-precaching';
 import { NavigationRoute, registerRoute } from 'workbox-routing';
 import { parseRange, planChunks } from '@/lib/pq/videoRange';
+import { chunkDataHash } from '@/lib/pq/fileCrypto';
 
 self.skipWaiting();
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
@@ -45,11 +46,18 @@ self.addEventListener('message', (event) => {
 			mimeType: msg.mimeType,
 			baseUrl: msg.baseUrl,
 			token: msg.token || null,
+			// Per index: the hash its bytes must have, null while its signed
+			// row has not reached the page, false if the page refused the row.
+			chunkHashes: msg.chunkHashes || [],
 			cache: new Map(),
 			key: null,
 		});
 	} else if (msg.type === 'unregister') {
 		sessions.delete(msg.sessionId);
+	} else if (msg.type === 'chunk-hashes' && msg.sessionId) {
+		const s = sessions.get(msg.sessionId);
+		// Always a new array, so a waiting request sees the answer arrive.
+		if (s) s.chunkHashes = msg.chunkHashes ? [...msg.chunkHashes] : [...s.chunkHashes];
 	} else if (msg.type === 'token' && msg.sessionId) {
 		const s = sessions.get(msg.sessionId);
 		if (s) s.token = msg.token || null;
@@ -85,6 +93,23 @@ const requestToken = async (session, sessionId) => {
 	return session.token;
 };
 
+// GCM would accept any of this file's chunks at any index; the page verified
+// the uploader's signatures and sent the hash each index must have. A row
+// that reached the page after the session started is asked for once.
+const expectedHash = async (session, index, sessionId) => {
+	if (session.chunkHashes[index] == null) {
+		const asked = session.chunkHashes;
+		const clients = await self.clients.matchAll({ type: 'window' });
+		for (const c of clients) c.postMessage({ type: 'need-chunk-hashes', sessionId });
+		for (let i = 0; i < 30 && session.chunkHashes === asked; i++) {
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	}
+	const expected = session.chunkHashes[index];
+	if (typeof expected !== 'string') throw new Error(`chunk ${index}: could not be verified`);
+	return expected;
+};
+
 const fetchChunk = (session, index) => {
 	const headers = session.token ? { Authorization: `Bearer ${session.token}` } : undefined;
 	return fetch(`${session.baseUrl}/file_chunk/${session.fileId}/${index}`, { headers });
@@ -97,6 +122,7 @@ const getChunk = async (session, index, sessionId) => {
 		session.cache.set(index, hit);
 		return hit;
 	}
+	const expected = await expectedHash(session, index, sessionId);
 	const sentToken = session.token;
 	let r = await fetchChunk(session, index);
 	if (r.status === 401) {
@@ -106,8 +132,9 @@ const getChunk = async (session, index, sessionId) => {
 	}
 	if (!r.ok) throw new Error(`chunk ${index}: HTTP ${r.status}`);
 	const blob = new Uint8Array(await r.arrayBuffer());
-	// nonce(12) || ciphertext || tag — GCM failing means the bytes are not
-	// what the sender encrypted, and nothing unverified is ever served.
+	if (chunkDataHash(blob) !== expected) throw new Error(`chunk ${index}: could not be verified`);
+	// nonce(12) || ciphertext || tag — the signed bytes of chunk `index`,
+	// decrypted; nothing unverified is ever served.
 	const plain = new Uint8Array(await crypto.subtle.decrypt(
 		{ name: 'AES-GCM', iv: blob.slice(0, 12) },
 		await importKey(session),

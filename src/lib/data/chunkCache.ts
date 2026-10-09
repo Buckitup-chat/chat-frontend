@@ -90,6 +90,17 @@ export const putCachedChunk = async (fileId: string, index: number, bytes: Uint8
 	}
 };
 
+/** Drops one chunk: a cached copy that no longer matches its signed hash. */
+export const deleteCachedChunk = async (fileId: string, index: number): Promise<void> => {
+	const db = await openDb();
+	if (!db) return;
+	try {
+		await reqAsPromise(tx(db, 'readwrite').delete(chunkKey(fileId, index)));
+	} catch {
+		/* blocked — the download refetches and overwrites it anyway */
+	}
+};
+
 /** Oldest-used chunks go first once the byte budget is crossed. */
 const evictOverBudget = async (db: IDBDatabase): Promise<void> => {
 	const all = await reqAsPromise<ChunkRecord[]>(tx(db, 'readonly').getAll());

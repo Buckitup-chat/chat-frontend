@@ -52,6 +52,7 @@ import { useCollectionRows } from '@/lib/data/useCollection';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
+import { isRefusedFile } from '@/lib/data/fileIntegrity';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
 import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
 import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
@@ -709,7 +710,8 @@ const imagesByFileId = ref({});
 
 const fetchImage = async (part) => {
     const id = part.fileId;
-    if (imagesByFileId.value[id]?.url || imagesByFileId.value[id]?.status === 'downloading') return;
+    // A refused file is refused again on any retry: the same bytes, the same signatures.
+    if (imagesByFileId.value[id]?.url || ['downloading', 'unverified'].includes(imagesByFileId.value[id]?.status)) return;
 
     const cached = getCachedMedia(id);
     if (cached) {
@@ -731,7 +733,7 @@ const fetchImage = async (part) => {
         imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'done', url } };
     } catch (e) {
         console.error('Image download failed:', e);
-        imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'error' } };
+        imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: isRefusedFile(e) ? 'unverified' : 'error' } };
     }
 };
 
@@ -768,6 +770,9 @@ const checkAvailability = async (fileId) => {
         if (!a.unknown) recordAvailability(fileId, a.present, a.total);
     } catch (e) {
         console.warn('Availability check failed for', fileId, e);
+        if (isRefusedFile(e)) {
+            availabilityByFileId.value = { ...availabilityByFileId.value, [fileId]: { present: 0, total: 0, unknown: false, deleted: false, unverified: true } };
+        }
     }
 };
 
@@ -847,7 +852,7 @@ const handlePlayVideo = async (part) => {
         };
     } catch (e) {
         console.error('Video open failed:', e);
-        videosByFileId.value = { ...videosByFileId.value, [id]: { status: 'error' } };
+        videosByFileId.value = { ...videosByFileId.value, [id]: { status: isRefusedFile(e) ? 'unverified' : 'error' } };
     }
 };
 
@@ -877,7 +882,7 @@ const handleDownloadFile = async (filePart) => {
         downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'done' } };
     } catch (e) {
         console.error('Download failed:', e);
-        downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'error' } };
+        downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: isRefusedFile(e) ? 'unverified' : 'error' } };
         // A failure usually means chunks are still travelling — re-read the
         // counts so the row can say how far along it is instead of just "failed".
         checkAvailability(fileId);

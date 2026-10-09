@@ -107,6 +107,9 @@
                 <div v-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
                   video failed — tap to retry
                 </div>
+                <div v-else-if="videos[v.fileId]?.status === 'unverified'" class="msg-image-progress _err">
+                  This video could not be verified
+                </div>
                 <!-- Duration travels in the envelope (07 §"video" pos 7), so the
                      badge shows before any chunk arrives; while playing the
                      native controls own the timeline. -->
@@ -138,6 +141,9 @@
               <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'error'" class="msg-image-progress _err">
                 image failed — tap to retry
               </div>
+              <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'unverified'" class="msg-image-progress _err">
+                This image could not be verified
+              </div>
             </div>
 
             <!-- §1.6 grid: one bubble, 3px gutters, outer corners inherit the
@@ -165,7 +171,10 @@
               <div class="msg-file-body" role="button" @click="emit('showFileState', f, msg)">
                 <div class="msg-file-name">{{ f.name }}</div>
                 <div class="msg-file-meta">
-                  <template v-if="downloads[f.fileId]?.status === 'downloading'">
+                  <template v-if="refusedFile(f)">
+                    {{ fmtSize(f.size) }} · <span class="msg-file-err">This file could not be verified</span>
+                  </template>
+                  <template v-else-if="downloads[f.fileId]?.status === 'downloading'">
                     {{ fmtSize(f.size) }} · chunk {{ downloads[f.fileId].done }} of {{ downloads[f.fileId].total }}
                   </template>
                   <template v-else-if="downloads[f.fileId]?.status === 'error'">
@@ -177,10 +186,10 @@
                   <template v-else>{{ fmtSize(f.size) }}</template>
                 </div>
               </div>
-              <button v-if="downloads[f.fileId]?.status !== 'downloading'" type="button"
+              <button v-if="downloads[f.fileId]?.status !== 'downloading' && !refusedFile(f)" type="button"
                 class="msg-file-action" @click="emit('downloadFile', f)"
                 :title="downloads[f.fileId]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
-              <span v-else class="msg-file-spinner"></span>
+              <span v-else-if="!refusedFile(f)" class="msg-file-spinner"></span>
             </div>
 
             <!-- §2.4 availability. Partial is a normal state in a network with
@@ -597,6 +606,10 @@ const partial = (part) => {
   if (!a || a.unknown || a.deleted || !a.total) return null;
   return a.present < a.total ? a : null;
 };
+/** A file whose manifest or chunks contradict the uploader's signatures:
+ *  refused, so no download button — another attempt gets the same answer. */
+const refusedFile = (part) =>
+  props.downloads[part.fileId]?.status === 'unverified' || !!props.availability[part.fileId]?.unverified;
 const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
 const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 

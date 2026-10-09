@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { webcrypto } from 'node:crypto';
+import { chunkDataHash } from '@/lib/pq/fileCrypto';
 
 vi.mock('workbox-precaching', () => ({
 	precacheAndRoute: () => {},
@@ -83,7 +84,8 @@ describe('service worker refreshes an expired file_chunk token', () => {
 	it('waits for the page\'s need-token answer and retries with fresh-token, not expired-token', async () => {
 		const worker = await loadWorker();
 		const secret = webcrypto.getRandomValues(new Uint8Array(32));
-		installBackend(await encryptChunk(secret));
+		const blob = await encryptChunk(secret);
+		installBackend(blob);
 
 		const pageInbox: any[] = [];
 		worker.clients.push({
@@ -109,6 +111,7 @@ describe('service worker refreshes an expired file_chunk token', () => {
 			mimeType: 'video/mp4',
 			baseUrl: 'https://api.test',
 			token: 'expired-token',
+			chunkHashes: [chunkDataHash(blob)],
 		});
 
 		const res = await worker.request(`/encrypted-video/${SESSION_ID}`, `bytes=0-${PLAIN.length - 1}`);
@@ -131,7 +134,8 @@ describe('service worker refreshes an expired file_chunk token', () => {
 	it('control: a session registered without a token waits for the page and succeeds', async () => {
 		const worker = await loadWorker();
 		const secret = webcrypto.getRandomValues(new Uint8Array(32));
-		installBackend(await encryptChunk(secret));
+		const blob = await encryptChunk(secret);
+		installBackend(blob);
 		worker.clients.push({
 			postMessage: (msg) => {
 				if (msg.type !== 'need-token') return;
@@ -141,7 +145,7 @@ describe('service worker refreshes an expired file_chunk token', () => {
 		worker.postToWorker({
 			type: 'register', sessionId: SESSION_ID, fileId: FILE_ID, encSecret: secret,
 			chunkSize: PLAIN.length, totalSize: PLAIN.length, mimeType: 'video/mp4',
-			baseUrl: 'https://api.test', token: '',
+			baseUrl: 'https://api.test', token: '', chunkHashes: [chunkDataHash(blob)],
 		});
 
 		const res = await worker.request(`/encrypted-video/${SESSION_ID}`, `bytes=0-${PLAIN.length - 1}`);
@@ -159,6 +163,10 @@ describe('page answers need-token only for its own video session', () => {
 		}));
 		vi.doMock('@/lib/data/fileTransfer', () => ({ downloadFile: async () => { throw new Error('fallback not expected'); } }));
 		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: async () => null, putCachedMedia: async () => {} }));
+		vi.doMock('@/lib/data/fileIntegrity', () => ({
+			readVerifiedManifest: async () => ({ fileId: FILE_ID, chunkCount: 1, deleted: false }),
+			ChunkHashes: class { async list() { return ['fd_00']; } },
+		}));
 
 		const swListeners: Record<string, Listener[]> = {};
 		const toWorker: any[] = [];
@@ -183,6 +191,7 @@ describe('page answers need-token only for its own video session', () => {
 		vi.doUnmock('@/lib/data/readSession');
 		vi.doUnmock('@/lib/data/fileTransfer');
 		vi.doUnmock('@/lib/data/mediaCache');
+		vi.doUnmock('@/lib/data/fileIntegrity');
 	});
 
 	it('control: the owning tab answers need-token with its token', async () => {
