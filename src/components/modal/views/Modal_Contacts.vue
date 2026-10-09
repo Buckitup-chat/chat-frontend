@@ -1,13 +1,9 @@
 <template>
 	<!-- Header -->
 	<div class="p-2">
-		<div class="d-flex justify-content-center align-items-center text-secondary mb-2" v-if="inputData.metaRequired">
-			You can select only contacts with label
-			<InfoTooltip class="align-self-center ms-2" :content="'Activated explanation'" />
-		</div>
-		<ContactsList class="_list" @select="select" :selected="selected" :excluded="inputData.excluded" :meta-required="inputData.metaRequired" />
+		<ContactsList class="_list" @select="select" :selected="selected" :excluded="inputData.excluded" />
 
-		<div class="d-flex justify-content-center mt-2" v-if="inputData.metaRequired">
+		<div class="d-flex justify-content-center mt-2">
 			<button class="btn btn-dark w-100" :disabled="!selected.length" @click="applySelected()">Select</button>
 		</div>
 	</div>

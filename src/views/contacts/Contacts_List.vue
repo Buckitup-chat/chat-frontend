@@ -11,11 +11,8 @@
 		<div class="_list">
 			<div class="_contact" @click="select(contact.address)" v-for="contact in filteredList" :class="{ _selected: isSelected(contact.address) }">
 				<Account_Item_PQ :account="contact" class="w-100" />
-				<div v-if="metaRequired && contact.metaPublicKey">
-					<div class="_icon_activated bg-success me-2"></div>
-				</div>
 			</div>
-			<div class="px-2 mt-2" v-if="!metaRequired">
+			<div class="px-2 mt-2">
 				<button class="btn btn-dark rounded-pill d-flex align-items-center justify-content-center p-2 w-100" @click="$mitt.emit('modal::open', { id: 'add_contact_handshake' })">
 					<i class="_icon_plus bg-white"></i>
 					<span class="ms-2">Add new contact</span>
@@ -62,8 +59,6 @@
 </style>
 
 <script setup>
-import { web3Store } from '@/store/web3.store';
-
 import { userPQStore } from '@/store/userPQ.store';
 
 
@@ -71,14 +66,12 @@ import { ref, onMounted, inject, computed, onUnmounted } from 'vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 
 const $userPQ = userPQStore();
-const $web3 = web3Store();
 const $mitt = inject('$mitt');
 const search = ref();
 
-const { selected, excluded, metaRequired } = defineProps({
+const { selected, excluded } = defineProps({
 	selected: { type: Array, default: () => [] },
 	excluded: { type: Array, default: () => [] },
-	metaRequired: { type: Boolean },
 });
 
 const emit = defineEmits(['select']);

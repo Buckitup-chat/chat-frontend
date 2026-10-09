@@ -116,8 +116,6 @@ h6 {
 </style>
 
 <script setup>
-import { web3Store } from '@/store/web3.store';
-
 import { userPQStore } from '@/store/userPQ.store';
 
 
@@ -127,7 +125,6 @@ import { inject, ref, onMounted, nextTick } from 'vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 
 const $mitt = inject('$mitt');
-const $web3 = web3Store();
 // const $user = userStore();
 const $userPQ = userPQStore();
 
@@ -256,8 +253,6 @@ const reset = () => {
 // 			},
 // 		});
 
-// 		await $user.checkMetaWallet();
-
 // 		nextTick(() => {
 // 			try {
 // 				$router.replace({ name: 'account_info' });
@@ -317,8 +312,6 @@ const signinPQ = async () => {
 		// 		avatar: nextUser.avatar,
 		// 	},
 		// });
-
-		// await $user.checkMetaWallet();
 
 		nextTick(() => {
 			try {

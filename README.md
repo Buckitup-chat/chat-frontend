@@ -50,7 +50,7 @@ src/
   composables/  Vue composables (useMenu, useLoader, ...)
   libs/         Crypto & infrastructure modules (EncryptionManagerPQ, DialogCrypto, p2p, ...)
   router/       vue-router config
-  store/        Pinia stores (user, dialogs, web3, ...)
+  store/        Pinia stores (user, dialogs, ...)
   lib/data/     Typed Electric/TanStack data layer (collections, ingest, local KV)
   utils/        Helpers
   views/        Route pages (auth, chats, rooms, contacts, backup, account, ...)

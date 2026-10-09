@@ -85,15 +85,6 @@ export const modalRegistry = {
 		icon: '_icon_reload',
 	},
 
-	account_activate: {
-		header: false,
-		component: 'Modal_Account_Activate',
-		modalClass: 'modal-sm',
-		title: 'Account Activation',
-		icon: '_icon_profile',
-		bodyClass: 'p-0',
-	},
-
 	account_backup_local: {
 		header: true,
 		component: 'Modal_Account_Backup_Local',

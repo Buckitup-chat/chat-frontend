@@ -13,11 +13,9 @@ import '@fontsource/inter/700.css';
 import 'bootstrap';
 import './scss/app.scss';
 
-import { web3Store } from './store/web3.store.js';
 import { userStore } from './store/user.store.js';
 import { userPQStore } from './store/userPQ.store';
 import { createPinia } from 'pinia';
-import $socket from './libs/socket';
 import $mitt from './libs/emitter';
 import { useLoader } from './composables/useLoader';
 import $swal from './libs/swal';
@@ -59,11 +57,6 @@ app.config.globalProperties.$isProd = $isProd;
 
 app.config.globalProperties.$filters = globalFilters;
 app.config.globalProperties.$location = window.location;
-
-app.provide('$socket', $socket);
-
-// web3Store
-app.config.globalProperties.$web3 = web3Store();
 
 app.config.globalProperties.$user = userStore();
 

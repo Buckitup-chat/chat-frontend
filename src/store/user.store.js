@@ -5,7 +5,6 @@
 import { defineStore } from 'pinia';
 import * as $enigma from '../libs/enigma';
 import { Wallet } from 'ethers';
-import { web3Store } from './web3.store'; // TODO: PHASE 4 - web3Store also deleted
 import { ref, watch, reactive, computed } from 'vue';
 import { clearLockKeyCache } from '@lo-fi/local-data-lock';
 import $swal from '../libs/swal';
@@ -25,7 +24,7 @@ export const userStore = defineStore('user', () => {
 
 	const defaultAvatar = '/img/profile.webp';
 	const accountInfoKeys = ['name', 'notes', 'avatar'];
-	const contactKeys = ['publicKey', 'address', 'name', 'notes', 'avatar', 'hidden', 'metaPublicKey'];
+	const contactKeys = ['publicKey', 'address', 'name', 'notes', 'avatar', 'hidden'];
 	const backupKeys = ['tag', 'shares'];
 
 	const account = ref();
@@ -35,7 +34,6 @@ export const userStore = defineStore('user', () => {
 	const contacts = computed(() => Object.values(contactsMap));
 
 	const rooms = reactive([]);
-	const registeredMetaWallet = ref();
 
 	const vaults = ref([]);
 	const isOnline = ref(navigator.onLine);
@@ -52,20 +50,6 @@ export const userStore = defineStore('user', () => {
 			delete contactsMap[key];
 		}
 		contacts.length = 0;
-		registeredMetaWallet.value = null;
-	};
-
-	const checkMetaWallet = async () => {
-		try {
-			if (account.value && !registeredMetaWallet.value) {
-				const metaPublicKey = await web3Store().registryContract.metaPublicKeys(account.value.address);
-				if (metaPublicKey && metaPublicKey.length > 2) {
-					registeredMetaWallet.value = true;
-				}
-			}
-		} catch (error) {
-			console.error('checkMetaWallet error', error);
-		}
 	};
 
 	const yJs = {};
@@ -387,8 +371,6 @@ export const userStore = defineStore('user', () => {
 			}
 
 			const wallet = new Wallet(privateKeyHex);
-			const signature = await wallet.signMessage(privateKeyHex);
-			const meta = await web3Store().bukitupClient.generateKeysFromSignature(signature);
 			const combinedKeyPairB64 = $enigma.combineKeypair(privateKeyB64, publicKeyB64);
 
 			const account = {
@@ -398,8 +380,6 @@ export const userStore = defineStore('user', () => {
 				privateKeyB64,
 				publicKey: publicKeyHex,
 				publicKeyB64,
-				metaPublicKey: meta.spendingKeyPair.account.publicKey,
-				metaPrivateKey: meta.spendingKeyPair.privatekey,
 				combinedKeyPairB64,
 			};
 
@@ -455,8 +435,6 @@ export const userStore = defineStore('user', () => {
 		contactKeys,
 		backupKeys,
 
-		checkMetaWallet,
-		registeredMetaWallet,
 		checkOnline,
 		isOnline,
 
