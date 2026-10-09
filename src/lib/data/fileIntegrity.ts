@@ -9,19 +9,23 @@
 // - each chunk's row (`file_chunks`) binds its index to `data_hash`, the
 //   SHA3-512 of its encrypted bytes, under the same uploader's key.
 //
+// The uploader is the sender of the message that carries the file: a
+// manifest anyone else signed, however validly, does not speak for the file.
 // A chunk's row is accepted when its signature is the one the manifest lists
 // at that index and verifies over the row. What that yields is one expected
 // `data_hash` per index; the bytes are then held to it. The service worker,
-// which streams video and cannot afford ML-DSA per range request, gets those
-// hashes from the page and compares hashes only.
+// which streams video and cannot afford ML-DSA per range request, asks the
+// page for the hash of each chunk and compares hashes only.
 
 import { sha3_512 } from '@noble/hashes/sha3';
+import { equalBytes } from '@noble/post-quantum/utils.js';
 import { chunkDataHash } from '@/lib/pq/fileCrypto';
 import { toBytes } from '@/lib/pq/signature';
 import { wireBool } from '@/lib/pq/schema';
-import { VaultLockedError } from './keyCustody';
-import { verifyRowWithKey, type SignPkeyResolver } from './rowVerification';
+import { verifyReplicatedRow, verifyRowWithKey, type SignPkeyResolver } from './rowVerification';
 import { readShapeOnce } from './shapeRead';
+
+type Row = Record<string, unknown>;
 
 /**
  * `invalid`: the data contradicts the uploader's signatures. The file is
@@ -49,7 +53,6 @@ export const isRefusedFile = (e: unknown): boolean => e instanceof FileVerificat
 
 export interface VerifiedManifest {
 	fileId: string;
-	uploaderHash: string;
 	/** The uploader's verified signing key; the chunk rows are checked under it. */
 	signPkey: string;
 	chunkCount: number;
@@ -61,31 +64,29 @@ export interface VerifiedManifest {
 const defaultResolver: SignPkeyResolver = async (userHash) =>
 	(await import('./cardRegistry')).getVerifiedSignPkey(userHash);
 
-const equalBytes = (a: Uint8Array, b: Uint8Array): boolean =>
-	a.length === b.length && a.every((x, i) => x === b[i]);
+/** The file's chunk rows by index, as the shape has them now. */
+export const readChunkRows = async (fileId: string, signal?: AbortSignal): Promise<Map<number, Row>> => {
+	const rows = await readShapeOnce<Row>('file_chunks', `file_id='${fileId}'`, signal);
+	return new Map(rows.map((r) => [Number(r.chunk_index), r]));
+};
 
-/** The manifest row as signed by its uploader, or a FileVerificationError. */
+/** The manifest row as signed by `uploaderHash`, the sender of the message carrying the file. */
 export const verifyManifest = async (
 	fileId: string,
-	row: Record<string, unknown>,
+	uploaderHash: string,
+	row: Row,
 	resolveSignPkey: SignPkeyResolver = defaultResolver,
 ): Promise<VerifiedManifest> => {
 	const refuse = (detail: string) => new FileVerificationError(fileId, 'invalid', detail);
 	if (row.file_id !== fileId) throw refuse('the manifest names another file');
-	const uploaderHash = typeof row.uploader_hash === 'string' ? row.uploader_hash : '';
-	if (!uploaderHash) throw refuse('the manifest names no uploader');
+	if (row.uploader_hash !== uploaderHash) throw refuse("the manifest is not the sender's");
 
-	let signPkey: string | null;
-	try {
-		signPkey = await resolveSignPkey(uploaderHash);
-	} catch (e) {
-		if (e instanceof VaultLockedError) throw new FileVerificationError(fileId, 'unavailable', 'the vault is locked');
-		throw e;
+	let signPkey: string | null = null;
+	const verdict = await verifyReplicatedRow('files', row, async (hash) => (signPkey = await resolveSignPkey(hash)));
+	if (verdict.status === 'unavailable') {
+		throw new FileVerificationError(fileId, 'unavailable', verdict.reason === 'locked' ? 'the vault is locked' : "the uploader's card has not arrived");
 	}
-	if (!signPkey) throw new FileVerificationError(fileId, 'unavailable', "the uploader's card has not arrived");
-
-	const verdict = verifyRowWithKey('files', row, signPkey);
-	if (verdict.status !== 'verified') throw refuse(`the manifest's signature does not hold (${verdict.reason})`);
+	if (verdict.status !== 'verified' || !signPkey) throw refuse(`the manifest's signature does not hold (${verdict.status === 'verified' ? 'no key' : verdict.reason})`);
 
 	const deleted = wireBool(row.deleted_flag);
 	const chunkCount = Number(row.chunk_count);
@@ -95,20 +96,13 @@ export const verifyManifest = async (
 	if (!deleted && (!Number.isInteger(chunkCount) || chunkCount < 1 || listed.length !== chunkCount)) {
 		throw refuse(`the manifest lists ${listed.length} chunk signatures for ${row.chunk_count} chunks`);
 	}
-	return { fileId, uploaderHash, signPkey, chunkCount, deleted, chunkSignHashes: listed.map(toBytes) };
+	return { fileId, signPkey, chunkCount, deleted, chunkSignHashes: listed.map(toBytes) };
 };
 
-/**
- * The file's verified manifest, or null when it has not arrived. Refuses
- * before anything is fetched.
- */
-export const readVerifiedManifest = async (
-	fileId: string,
-	opts: { signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver } = {},
-): Promise<VerifiedManifest | null> => {
-	const rows = await readShapeOnce<Record<string, unknown>>('files', `file_id='${fileId}'`, opts.signal);
-	const row = rows.find((r) => r.file_id === fileId);
-	return row ? verifyManifest(fileId, row, opts.resolveSignPkey) : null;
+/** True when the row carries the signature the manifest lists at `index`: a hash comparison, no signature check. */
+const isListed = (manifest: VerifiedManifest, index: number, row: Row): boolean => {
+	const listed = manifest.chunkSignHashes[index];
+	return !!listed && typeof row.sign_b64 === 'string' && !!row.sign_b64 && equalBytes(sha3_512(toBytes(row.sign_b64)), listed);
 };
 
 /**
@@ -117,13 +111,9 @@ export const readVerifiedManifest = async (
  * their own: they are signed, and the signature is the one the manifest lists
  * at this index.
  */
-export const verifyChunkRow = (manifest: VerifiedManifest, index: number, row: Record<string, unknown>): string => {
+export const verifyChunkRow = (manifest: VerifiedManifest, index: number, row: Row): string => {
 	const refuse = (detail: string) => new FileVerificationError(manifest.fileId, 'invalid', detail, index);
-	const listed = manifest.chunkSignHashes[index];
-	if (!listed) throw refuse(`the manifest has ${manifest.chunkCount} chunks`);
-	if (typeof row.sign_b64 !== 'string' || !row.sign_b64 || !equalBytes(sha3_512(toBytes(row.sign_b64)), listed)) {
-		throw refuse('its row carries a signature the manifest does not list');
-	}
+	if (!isListed(manifest, index, row)) throw refuse('its row carries a signature the manifest does not list');
 	const verdict = verifyRowWithKey('file_chunks', row, manifest.signPkey);
 	if (verdict.status !== 'verified') throw refuse(`its row's signature does not hold (${verdict.reason})`);
 	if (typeof row.data_hash !== 'string') throw refuse('its row has no data hash');
@@ -137,56 +127,55 @@ export const assertChunkBytes = (fileId: string, index: number, expectedDataHash
 	}
 };
 
-/** Per index: the expected hash, `null` while the row has not arrived, `false` when the row is refused. */
-export type ChunkHashList = Array<string | null | false>;
-
 /**
  * Expected chunk hashes of one verified file. Chunk rows replicate after the
- * manifest and one by one, so they are read once, and again when an index is
- * missing; a row is verified the first time it is needed.
+ * manifest and one by one: a row missing from those read with the manifest is
+ * read for again once. A row is verified the first time it is needed.
  */
 export class ChunkHashes {
-	private rows: Map<number, Record<string, unknown>> | null = null;
 	private readonly expectedByIndex = new Map<number, string>();
 
 	constructor(
 		readonly manifest: VerifiedManifest,
+		private rows: Map<number, Row>,
 		private readonly signal?: AbortSignal,
 	) {}
 
-	private async load(fresh: boolean): Promise<Map<number, Record<string, unknown>>> {
-		if (this.rows && !fresh) return this.rows;
-		const rows = await readShapeOnce<Record<string, unknown>>('file_chunks', `file_id='${this.manifest.fileId}'`, this.signal);
-		this.rows = new Map(rows.map((r) => [Number(r.chunk_index), r]));
-		return this.rows;
+	/** Chunks here whose row is the one the manifest lists. */
+	listedPresent(): number {
+		let n = 0;
+		for (const [index, row] of this.rows) if (isListed(this.manifest, index, row)) n++;
+		return n;
 	}
 
 	/** The hash chunk `index` must have; throws `unavailable` while its row is missing, `invalid` if it is refused. */
 	async expected(index: number): Promise<string> {
 		const known = this.expectedByIndex.get(index);
 		if (known) return known;
-		const row = (await this.load(false)).get(index) ?? (await this.load(true)).get(index);
+		if (!this.rows.has(index)) this.rows = await readChunkRows(this.manifest.fileId, this.signal);
+		const row = this.rows.get(index);
 		if (!row) throw new FileVerificationError(this.manifest.fileId, 'unavailable', 'its signed row has not arrived', index);
 		const hash = verifyChunkRow(this.manifest, index, row);
 		this.expectedByIndex.set(index, hash);
 		return hash;
 	}
-
-	/** Every index at once, for a consumer that cannot verify rows itself. `fresh` re-reads the rows. */
-	async list(fresh = false): Promise<ChunkHashList> {
-		const rows = await this.load(fresh);
-		return Array.from({ length: this.manifest.chunkCount }, (_, index) => {
-			const known = this.expectedByIndex.get(index);
-			if (known) return known;
-			const row = rows.get(index);
-			if (!row) return null;
-			try {
-				const hash = verifyChunkRow(this.manifest, index, row);
-				this.expectedByIndex.set(index, hash);
-				return hash;
-			} catch {
-				return false;
-			}
-		});
-	}
 }
+
+/**
+ * The file's verified manifest and its chunk rows, read together; null when
+ * the manifest has not arrived. Refuses before anything is fetched.
+ */
+export const readVerifiedFile = async (
+	fileId: string,
+	uploaderHash: string,
+	opts: { signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver } = {},
+): Promise<{ manifest: VerifiedManifest; hashes: ChunkHashes } | null> => {
+	const [manifests, rows] = await Promise.all([
+		readShapeOnce<Row>('files', `file_id='${fileId}'`, opts.signal),
+		readChunkRows(fileId, opts.signal),
+	]);
+	const row = manifests.find((r) => r.file_id === fileId);
+	if (!row) return null;
+	const manifest = await verifyManifest(fileId, uploaderHash, row, opts.resolveSignPkey);
+	return { manifest, hashes: new ChunkHashes(manifest, rows, opts.signal) };
+};

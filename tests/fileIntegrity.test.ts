@@ -9,51 +9,56 @@ import { sha3_512 } from '@noble/hashes/sha3';
 import { signFields, toBase64, fromBase64 } from '@/lib/pq/signature';
 import { chunkDataHash, encryptChunk, generateEncSecret } from '@/lib/pq/fileCrypto';
 
-const cache = new Map<string, Uint8Array>();
+// The chunk cache as chunkCache.ts keeps it: bytes under the hash they were stored with.
+const cache = new Map<string, { bytes: Uint8Array; dataHash: string }>();
 const cachePuts: string[] = [];
 vi.mock('@/lib/data/chunkCache', () => ({
-	getCachedChunk: async (fileId: string, i: number) => cache.get(`${fileId}:${i}`) ?? null,
-	putCachedChunk: async (fileId: string, i: number, bytes: Uint8Array) => {
-		cachePuts.push(`${fileId}:${i}`);
-		cache.set(`${fileId}:${i}`, bytes);
+	getCachedChunk: async (fileId: string, i: number, dataHash: string) => {
+		const rec = cache.get(`${fileId}:${i}`);
+		return rec && rec.dataHash === dataHash ? rec.bytes : null;
 	},
-	deleteCachedChunk: async (fileId: string, i: number) => {
-		cache.delete(`${fileId}:${i}`);
+	putCachedChunk: async (fileId: string, i: number, bytes: Uint8Array, dataHash: string) => {
+		cachePuts.push(`${fileId}:${i}`);
+		cache.set(`${fileId}:${i}`, { bytes, dataHash });
 	},
 	requestPersistentStorage: () => {},
 }));
 
 const { downloadFile, fileAvailability } = await import('@/lib/data/fileTransfer');
-const { ChunkHashes, FileVerificationError, verifyManifest } = await import('@/lib/data/fileIntegrity');
+const { FileVerificationError, verifyManifest } = await import('@/lib/data/fileIntegrity');
 
 const UPLOADER = 'u_' + 'a'.repeat(128);
 const FILE_ID = 'f_' + '0192aaaa00007000800000000000000a'.slice(0, 32);
 const keys = ml_dsa87.keygen(new Uint8Array(32).fill(7));
 const PKEY = toBase64(keys.publicKey);
-const resolveSignPkey = async (hash: string) => (hash === UPLOADER ? PKEY : null);
+// Another account, with valid keys of its own.
+const MALLORY = 'u_' + 'e'.repeat(128);
+const malloryKeys = ml_dsa87.keygen(new Uint8Array(32).fill(9));
+const cards: Record<string, string> = { [UPLOADER]: PKEY, [MALLORY]: toBase64(malloryKeys.publicKey) };
+const resolveSignPkey = async (hash: string) => cards[hash] ?? null;
 const unpadded = (b64: string) => b64.replace(/=+$/, '');
 
 type Row = Record<string, unknown>;
 
 /** Uploads as uploadFile does: each chunk encrypted and its row signed, then the manifest over the rows' signatures. */
-const makeFile = async (plains: string[], secret = generateEncSecret()) => {
+const makeFile = async (plains: string[], secret = generateEncSecret(), signer = { hash: UPLOADER, secretKey: keys.secretKey }) => {
 	const ts = 1_800_000_000;
 	const bytes: Uint8Array[] = [];
 	const chunkRows: Row[] = [];
 	const signHashes: string[] = [];
 	for (const [i, text] of plains.entries()) {
 		const encrypted = await encryptChunk(secret, new TextEncoder().encode(text));
-		const fields = { chunk_index: i, data_hash: chunkDataHash(encrypted), file_id: FILE_ID, owner_timestamp: ts, size: encrypted.length, uploader_hash: UPLOADER };
-		const sign = signFields(fields, keys.secretKey);
+		const fields = { chunk_index: i, data_hash: chunkDataHash(encrypted), file_id: FILE_ID, owner_timestamp: ts, size: encrypted.length, uploader_hash: signer.hash };
+		const sign = signFields(fields, signer.secretKey);
 		signHashes.push(toBase64(sha3_512(fromBase64(sign))));
 		bytes.push(encrypted);
 		chunkRows.push({ ...fields, sign_b64: sign });
 	}
 	const manifest = {
 		chunk_count: plains.length, chunk_sign_hashes: signHashes, chunk_size: 4 * 1024 * 1024, deleted_flag: false,
-		file_id: FILE_ID, owner_timestamp: ts, total_size: plains.join('').length, uploader_hash: UPLOADER,
+		file_id: FILE_ID, owner_timestamp: ts, total_size: plains.join('').length, uploader_hash: signer.hash,
 	};
-	const manifestRow: Row = { ...manifest, sign_b64: signFields(manifest as never, keys.secretKey) };
+	const manifestRow: Row = { ...manifest, sign_b64: signFields(manifest as never, signer.secretKey) };
 	return { secret, secretB64: toBase64(secret), bytes, chunkRows, manifestRow, plain: plains.join('') };
 };
 
@@ -73,7 +78,7 @@ beforeEach(() => {
 	cache.clear();
 	cachePuts.length = 0;
 	chunkRequests = [];
-	globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+	globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 		const url = decodeURIComponent(typeof input === 'string' ? input : input.toString());
 		const shape = (rows: Row[]) => new Response(JSON.stringify(rows.map((value) => ({ value }))), { status: 200 });
 		if (url.includes('/shapes?table=files&')) return shape(server.manifest ? [onWire(server.manifest)] : []);
@@ -88,7 +93,9 @@ beforeEach(() => {
 	}) as unknown as typeof fetch;
 });
 
-const download = (secretB64: string) => downloadFile({ fileId: FILE_ID, encSecretB64: secretB64, resolveSignPkey });
+/** As the chat page asks: for a file in a message UPLOADER sent. */
+const download = (secretB64: string) => downloadFile({ fileId: FILE_ID, uploaderHash: UPLOADER, encSecretB64: secretB64, resolveSignPkey });
+const availability = (resolve: (hash: string) => Promise<string | null> = resolveSignPkey) => fileAvailability(FILE_ID, UPLOADER, { resolveSignPkey: resolve });
 const refusal = async (p: Promise<unknown>) => {
 	const e = await p.then(() => null, (err) => err);
 	expect(e).toBeInstanceOf(FileVerificationError);
@@ -100,12 +107,12 @@ describe('a file the uploader signed', () => {
 		const f = await makeFile(['first ', 'second ', 'third']);
 		server = { manifest: f.manifestRow, chunkRows: f.chunkRows, bytes: f.bytes };
 		expect(new TextDecoder().decode(await download(f.secretB64))).toBe(f.plain);
-		expect(await fileAvailability(FILE_ID, { resolveSignPkey })).toEqual({ present: 3, total: 3, unknown: false, deleted: false });
+		expect(await availability()).toEqual({ present: 3, total: 3, unknown: false, deleted: false });
 	});
 
 	it('verifies a manifest whose chunk signature hashes arrive unpadded, as the shape serves them', async () => {
 		const f = await makeFile(['only']);
-		const manifest = await verifyManifest(FILE_ID, onWire(f.manifestRow), resolveSignPkey);
+		const manifest = await verifyManifest(FILE_ID, UPLOADER, onWire(f.manifestRow), resolveSignPkey);
 		expect(manifest.chunkCount).toBe(1);
 	});
 });
@@ -115,7 +122,7 @@ describe('a manifest changed without its signature', () => {
 		const f = await makeFile(['a', 'b', 'c']);
 		server = { manifest: { ...f.manifestRow, chunk_count: 2 }, chunkRows: f.chunkRows, bytes: f.bytes };
 		expect((await refusal(download(f.secretB64))).kind).toBe('invalid');
-		expect((await refusal(fileAvailability(FILE_ID, { resolveSignPkey }))).kind).toBe('invalid');
+		expect((await refusal(availability())).kind).toBe('invalid');
 		expect(chunkRequests).toEqual([]);
 	});
 
@@ -131,16 +138,16 @@ describe('a manifest changed without its signature', () => {
 		const f = await makeFile(['a']);
 		server = { manifest: { ...f.manifestRow, deleted_flag: true }, chunkRows: f.chunkRows, bytes: f.bytes };
 		expect((await refusal(download(f.secretB64))).kind).toBe('invalid');
-		expect((await refusal(fileAvailability(FILE_ID, { resolveSignPkey }))).kind).toBe('invalid');
+		expect((await refusal(availability())).kind).toBe('invalid');
 		expect(chunkRequests).toEqual([]);
 	});
 
 	it('waits, rather than refuses, while the uploader\'s card has not arrived', async () => {
 		const f = await makeFile(['a']);
 		server = { manifest: f.manifestRow, chunkRows: f.chunkRows, bytes: f.bytes };
-		const e = await refusal(downloadFile({ fileId: FILE_ID, encSecretB64: f.secretB64, resolveSignPkey: async () => null }));
+		const e = await refusal(downloadFile({ fileId: FILE_ID, uploaderHash: UPLOADER, encSecretB64: f.secretB64, resolveSignPkey: async () => null }));
 		expect(e.kind).toBe('unavailable');
-		expect(await fileAvailability(FILE_ID, { resolveSignPkey: async () => null })).toMatchObject({ unknown: true });
+		expect(await availability(async () => null)).toMatchObject({ unknown: true });
 	});
 });
 
@@ -184,22 +191,57 @@ describe('chunks out of place', () => {
 		expect(await refusal(download(f.secretB64))).toMatchObject({ kind: 'unavailable', chunkIndex: 1 });
 	});
 
-	it('a cached chunk that is not the signed one is evicted and fetched again', async () => {
+	it('a cached chunk stored under another hash is fetched again and overwritten', async () => {
 		const f = await makeFile(['zero', 'one']);
 		server = { manifest: f.manifestRow, chunkRows: f.chunkRows, bytes: f.bytes };
-		cache.set(`${FILE_ID}:0`, f.bytes[1]);
+		cache.set(`${FILE_ID}:0`, { bytes: f.bytes[1], dataHash: chunkDataHash(f.bytes[1]) });
 		expect(new TextDecoder().decode(await download(f.secretB64))).toBe('zeroone');
 		expect(chunkRequests).toEqual([0, 1]);
-		expect(cache.get(`${FILE_ID}:0`)).toEqual(f.bytes[0]);
+		expect(cache.get(`${FILE_ID}:0`)).toEqual({ bytes: f.bytes[0], dataHash: chunkDataHash(f.bytes[0]) });
+	});
+
+	it('a cached chunk under its signed hash is read without a fetch', async () => {
+		const f = await makeFile(['zero']);
+		server = { manifest: f.manifestRow, chunkRows: f.chunkRows, bytes: [] };
+		cache.set(`${FILE_ID}:0`, { bytes: f.bytes[0], dataHash: chunkDataHash(f.bytes[0]) });
+		expect(new TextDecoder().decode(await download(f.secretB64))).toBe('zero');
+		expect(chunkRequests).toEqual([]);
 	});
 });
 
-describe('the hash list the video worker gets', () => {
-	it('gives each index its signed hash, null for a row not here, false for a refused row', async () => {
+describe('a file signed by someone other than its sender', () => {
+	it('another account re-signs the manifest and rows to reorder the chunks: refused, not played in its order', async () => {
+		const f = await makeFile(['AAAA', 'BBBB']);
+		// Mallory does not know the secret; she re-signs rows that point at the real bytes in her order.
+		const forged = await makeFile(['x', 'y'], undefined, { hash: MALLORY, secretKey: malloryKeys.secretKey });
+		const rows = [1, 0].map((src, i) => {
+			const fields = { ...f.chunkRows[src], chunk_index: i, uploader_hash: MALLORY };
+			delete (fields as Row).sign_b64;
+			return { ...fields, sign_b64: signFields(fields as never, malloryKeys.secretKey) };
+		});
+		const manifest = { ...forged.manifestRow, chunk_sign_hashes: rows.map((r) => toBase64(sha3_512(fromBase64(r.sign_b64 as string)))) };
+		delete (manifest as Row).sign_b64;
+		const manifestRow = { ...manifest, sign_b64: signFields(manifest as never, malloryKeys.secretKey) };
+		server = { manifest: manifestRow, chunkRows: rows, bytes: [f.bytes[1], f.bytes[0]] };
+		expect((await refusal(download(f.secretB64))).kind).toBe('invalid');
+		expect((await refusal(availability())).kind).toBe('invalid');
+		expect(chunkRequests).toEqual([]);
+	});
+
+	it('a manifest naming the sender but signed with another key: refused', async () => {
+		const f = await makeFile(['AAAA']);
+		const manifest = { ...f.manifestRow };
+		delete (manifest as Row).sign_b64;
+		server = { manifest: { ...manifest, sign_b64: signFields(manifest as never, malloryKeys.secretKey) }, chunkRows: f.chunkRows, bytes: f.bytes };
+		expect((await refusal(download(f.secretB64))).kind).toBe('invalid');
+	});
+});
+
+describe('availability', () => {
+	it('counts only the chunk rows the manifest lists', async () => {
 		const f = await makeFile(['zero', 'one', 'two']);
-		server = { manifest: f.manifestRow, chunkRows: [f.chunkRows[0], { ...f.chunkRows[2], data_hash: f.chunkRows[0].data_hash }], bytes: f.bytes };
-		const manifest = await verifyManifest(FILE_ID, onWire(f.manifestRow), resolveSignPkey);
-		const list = await new ChunkHashes(manifest).list();
-		expect(list).toEqual([chunkDataHash(f.bytes[0]), null, false]);
+		const injected = { ...f.chunkRows[0], chunk_index: 2, sign_b64: f.chunkRows[0].sign_b64 };
+		server = { manifest: f.manifestRow, chunkRows: [f.chunkRows[0], f.chunkRows[1], injected, { ...f.chunkRows[1], chunk_index: 5 }], bytes: f.bytes };
+		expect(await availability()).toEqual({ present: 2, total: 3, unknown: false, deleted: false });
 	});
 });

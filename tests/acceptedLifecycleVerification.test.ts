@@ -406,7 +406,7 @@ describe('one boundary for every row family', () => {
 	});
 
 	it('a relation without local verification says so', async () => {
-		expect(await verifyReplicatedRow('reviews', { review_id: 'r', author_hash: alice.userHash }, resolve)).toEqual({ status: 'unsupported', reason: 'no_local_verification' });
+		expect(await verifyReplicatedRow('file_chunks', { file_id: 'f', uploader_hash: alice.userHash }, resolve)).toEqual({ status: 'unsupported', reason: 'no_local_verification' });
 	});
 
 	it('the lifecycle completes for user_storage, dialog_keys and user_cards on the same terms', async () => {

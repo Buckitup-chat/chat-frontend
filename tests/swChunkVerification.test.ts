@@ -1,9 +1,9 @@
 // The video worker serves a chunk only if its bytes hash to what the page
 // verified for that index: GCM alone would play any of the file's chunks at
-// any position. Driven through the real src/sw.js, as swTokenRefresh is.
+// any position. Driven through the real src/sw.js and videoStream.ts.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { webcrypto } from 'node:crypto';
-import { chunkDataHash } from '@/lib/pq/fileCrypto';
+import { chunkDataHash, encryptChunk } from '@/lib/pq/fileCrypto';
+import { bodyOf, loadWorker, rangeOf, type TestWorker } from './helpers/swHarness';
 
 vi.mock('workbox-precaching', () => ({
 	precacheAndRoute: () => {},
@@ -15,8 +15,6 @@ vi.mock('workbox-routing', () => ({
 	registerRoute: () => {},
 }));
 
-type Listener = (event: any) => void;
-
 const CHUNK = 16;
 const PLAINS = [new TextEncoder().encode('0123456789abcdef'), new TextEncoder().encode('ghijklmnopqrstuv')];
 const SESSION_ID = 'video-session-v';
@@ -25,44 +23,7 @@ const FILE_ID = 'file-v';
 let fetched: number[];
 let pageInbox: any[];
 
-const loadWorker = async () => {
-	const listeners: Record<string, Listener[]> = {};
-	const clients: Array<{ postMessage: (m: any) => void }> = [];
-	vi.stubGlobal('self', {
-		addEventListener: (type: string, fn: Listener) => (listeners[type] ??= []).push(fn),
-		skipWaiting: () => {},
-		clients: { claim: async () => {}, matchAll: async () => clients },
-		__WB_MANIFEST: [],
-	});
-	vi.resetModules();
-	await import('@/sw.js');
-	const dispatch = (type: string, event: any) => listeners[type]?.forEach((fn) => fn(event));
-	return {
-		clients,
-		postToWorker: (data: any) => dispatch('message', { data }),
-		request: (path: string, range: string): Promise<Response> => {
-			let responded: Promise<Response> | null = null;
-			dispatch('fetch', {
-				request: new Request(`https://app.test${path}`, { headers: { range } }),
-				respondWith: (p: Promise<Response>) => { responded = p; },
-			});
-			if (!responded) throw new Error('worker did not handle the request');
-			return responded;
-		},
-	};
-};
-
-const encrypt = async (secret: Uint8Array, plain: Uint8Array) => {
-	const key = await webcrypto.subtle.importKey('raw', secret, { name: 'AES-GCM' }, false, ['encrypt']);
-	const iv = webcrypto.getRandomValues(new Uint8Array(12));
-	const ct = new Uint8Array(await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
-	const blob = new Uint8Array(12 + ct.length);
-	blob.set(iv);
-	blob.set(ct, 12);
-	return blob;
-};
-
-/** A backend that serves `served[i]` for index i, with a valid token. */
+/** A backend that serves `served[i]` for index i. */
 const installBackend = (served: Uint8Array[]) => {
 	vi.stubGlobal('fetch', async (input: string) => {
 		const index = Number(/\/file_chunk\/[^/]+\/(\d+)$/.exec(String(input))?.[1]);
@@ -71,17 +32,32 @@ const installBackend = (served: Uint8Array[]) => {
 	});
 };
 
-const register = (worker: Awaited<ReturnType<typeof loadWorker>>, secret: Uint8Array, chunkHashes: Array<string | null | false>) =>
+/** A page that answers need-chunk-hash with `answer(index)` — a hash, or null for a row it refused. */
+const addPage = (worker: TestWorker, answer: (index: number) => string | null) => {
+	worker.clients.push({
+		postMessage: (msg) => {
+			pageInbox.push(msg);
+			if (msg.type === 'need-chunk-hash') {
+				setTimeout(() => worker.postToWorker({ type: 'chunk-hash', sessionId: msg.sessionId, index: msg.index, hash: answer(msg.index) }), 20);
+			}
+		},
+	});
+};
+
+const register = (worker: TestWorker, secret: Uint8Array, chunkHashes: Record<number, string>) =>
 	worker.postToWorker({
 		type: 'register', sessionId: SESSION_ID, fileId: FILE_ID, encSecret: secret, chunkSize: CHUNK,
 		totalSize: CHUNK * PLAINS.length, mimeType: 'video/mp4', baseUrl: 'https://api.test', token: 'fresh-token', chunkHashes,
 	});
 
-const rangeOf = (index: number) => `bytes=${index * CHUNK}-${index * CHUNK + CHUNK - 1}`;
-const body = (res: Response) => res.arrayBuffer().then(
-	(b) => ({ ok: true as const, bytes: new Uint8Array(b) }),
-	(e: Error) => ({ ok: false as const, error: e.message }),
-);
+const play = (worker: TestWorker, index: number) => worker.request(`/encrypted-video/${SESSION_ID}`, rangeOf(index, CHUNK)).then(bodyOf);
+
+const setup = async () => {
+	const worker = await loadWorker();
+	const secret = crypto.getRandomValues(new Uint8Array(32));
+	const blobs = await Promise.all(PLAINS.map((p) => encryptChunk(secret, p)));
+	return { worker, secret, blobs, hashes: blobs.map(chunkDataHash) };
+};
 
 beforeEach(() => {
 	fetched = [];
@@ -93,50 +69,98 @@ afterEach(() => {
 
 describe('the video worker holds each chunk to its verified hash', () => {
 	it('serves a chunk whose bytes are the signed ones', async () => {
-		const worker = await loadWorker();
-		const secret = webcrypto.getRandomValues(new Uint8Array(32));
-		const blobs = await Promise.all(PLAINS.map((p) => encrypt(secret, p)));
+		const { worker, secret, blobs, hashes } = await setup();
 		installBackend(blobs);
-		register(worker, secret, blobs.map(chunkDataHash));
-		expect(await body(await worker.request(`/encrypted-video/${SESSION_ID}`, rangeOf(1)))).toEqual({ ok: true, bytes: PLAINS[1] });
+		register(worker, secret, { 0: hashes[0], 1: hashes[1] });
+		expect(await play(worker, 1)).toEqual({ ok: true, bytes: PLAINS[1] });
 	});
 
 	it('refuses chunk 1\'s bytes served for index 0, though they decrypt', async () => {
-		const worker = await loadWorker();
-		const secret = webcrypto.getRandomValues(new Uint8Array(32));
-		const blobs = await Promise.all(PLAINS.map((p) => encrypt(secret, p)));
+		const { worker, secret, blobs, hashes } = await setup();
 		installBackend([blobs[1], blobs[1]]);
-		register(worker, secret, blobs.map(chunkDataHash));
-		const res = await body(await worker.request(`/encrypted-video/${SESSION_ID}`, rangeOf(0)));
-		expect(res.ok).toBe(false);
-		expect(res).toMatchObject({ error: expect.stringContaining('chunk 0: could not be verified') });
+		register(worker, secret, { 0: hashes[0], 1: hashes[1] });
+		const res = await play(worker, 0);
+		expect(res).toMatchObject({ ok: false, error: expect.stringContaining('chunk 0: could not be verified') });
 	});
 
-	it('does not fetch a chunk whose row the page refused', async () => {
-		const worker = await loadWorker();
-		const secret = webcrypto.getRandomValues(new Uint8Array(32));
-		const blobs = await Promise.all(PLAINS.map((p) => encrypt(secret, p)));
+	it('asks the page for the hash of a chunk it was not given, and plays with the answer', async () => {
+		const { worker, secret, blobs, hashes } = await setup();
 		installBackend(blobs);
-		register(worker, secret, [false, chunkDataHash(blobs[1])]);
-		expect((await body(await worker.request(`/encrypted-video/${SESSION_ID}`, rangeOf(0)))).ok).toBe(false);
+		addPage(worker, (i) => hashes[i]);
+		register(worker, secret, { 0: hashes[0] });
+		expect(await play(worker, 1)).toEqual({ ok: true, bytes: PLAINS[1] });
+		expect(pageInbox).toEqual([{ type: 'need-chunk-hash', sessionId: SESSION_ID, index: 1 }]);
+	});
+
+	it('does not fetch a chunk the page has no hash for', async () => {
+		const { worker, secret, blobs, hashes } = await setup();
+		installBackend(blobs);
+		addPage(worker, () => null);
+		register(worker, secret, { 0: hashes[0] });
+		expect((await play(worker, 1)).ok).toBe(false);
 		expect(fetched).toEqual([]);
 	});
+});
 
-	it('asks the page once for a hash that was not there at registration, and plays with its answer', async () => {
-		const worker = await loadWorker();
-		const secret = webcrypto.getRandomValues(new Uint8Array(32));
-		const blobs = await Promise.all(PLAINS.map((p) => encrypt(secret, p)));
-		installBackend(blobs);
-		worker.clients.push({
-			postMessage: (msg) => {
-				pageInbox.push(msg);
-				if (msg.type === 'need-chunk-hashes') {
-					setTimeout(() => worker.postToWorker({ type: 'chunk-hashes', sessionId: msg.sessionId, chunkHashes: blobs.map(chunkDataHash) }), 50);
-				}
+describe('the page behind a video session', () => {
+	const pageSetup = async (expected: (index: number) => Promise<string>) => {
+		vi.resetModules();
+		vi.doMock('@/lib/data/readSession', () => ({ bearerFor: () => 'Bearer t', openSession: async () => 't' }));
+		vi.doMock('@/lib/data/fileTransfer', () => ({ downloadFile: async () => { throw new Error('fallback not expected'); } }));
+		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: () => null, putCachedMedia: () => '' }));
+		vi.doMock('@/lib/data/fileIntegrity', async (importOriginal) => ({
+			...(await importOriginal<typeof import('@/lib/data/fileIntegrity')>()),
+			readVerifiedFile: async () => ({ manifest: { fileId: FILE_ID, chunkCount: 2, deleted: false }, hashes: { expected } }),
+		}));
+		const listeners: Record<string, Array<(e: any) => void>> = {};
+		const toWorker: any[] = [];
+		vi.stubGlobal('window', { isSecureContext: true });
+		vi.stubGlobal('navigator', {
+			serviceWorker: {
+				controller: { postMessage: (m: any) => toWorker.push(m) },
+				ready: Promise.resolve(),
+				getRegistration: async () => ({}),
+				addEventListener: (type: string, fn: (e: any) => void) => (listeners[type] ??= []).push(fn),
 			},
 		});
-		register(worker, secret, [chunkDataHash(blobs[0]), null]);
-		expect(await body(await worker.request(`/encrypted-video/${SESSION_ID}`, rangeOf(1)))).toEqual({ ok: true, bytes: PLAINS[1] });
-		expect(pageInbox).toEqual([{ type: 'need-chunk-hashes', sessionId: SESSION_ID }]);
+		const { openVideo } = await import('@/lib/data/videoStream');
+		const { FileVerificationError } = await import('@/lib/data/fileIntegrity');
+		const fromWorker = (data: any) => listeners.message?.forEach((fn) => fn({ data }));
+		return { openVideo, FileVerificationError, toWorker, fromWorker };
+	};
+	const video = { fileId: FILE_ID, uploaderHash: 'u_' + 'a'.repeat(128), encSecretB64: 'AAAA', size: 32, mimeType: 'video/mp4' };
+	const settle = () => new Promise((r) => setTimeout(r, 20));
+
+	afterEach(() => {
+		for (const m of ['readSession', 'fileTransfer', 'mediaCache', 'fileIntegrity']) vi.doUnmock(`@/lib/data/${m}`);
+	});
+
+	it('registers with chunk 0 verified, answers a later index, and reports a refused one', async () => {
+		let refusedBy: unknown = null;
+		const tab = await pageSetup(async (i) => {
+			if (i === 0) return 'fd_zero';
+			if (i === 1) return 'fd_one';
+			throw new tab.FileVerificationError(FILE_ID, 'invalid', 'forged row', i);
+		});
+		const source = await tab.openVideo(video, { onRefused: (e) => (refusedBy = e) });
+		const sessionId = source.url.split('/').pop();
+		expect(tab.toWorker[0]).toMatchObject({ type: 'register', sessionId, chunkHashes: { 0: 'fd_zero' } });
+
+		tab.fromWorker({ type: 'need-chunk-hash', sessionId, index: 1 });
+		tab.fromWorker({ type: 'need-chunk-hash', sessionId, index: 2 });
+		await settle();
+		expect(tab.toWorker.slice(1)).toEqual([
+			{ type: 'chunk-hash', sessionId, index: 1, hash: 'fd_one' },
+			{ type: 'chunk-hash', sessionId, index: 2, hash: null },
+		]);
+		expect(refusedBy).toBeInstanceOf(tab.FileVerificationError);
+	});
+
+	it('refuses at open a file whose first chunk is refused, and registers nothing', async () => {
+		const tab = await pageSetup(async (i) => {
+			throw new tab.FileVerificationError(FILE_ID, 'invalid', 'forged row', i);
+		});
+		await expect(tab.openVideo(video)).rejects.toMatchObject({ kind: 'invalid', chunkIndex: 0 });
+		expect(tab.toWorker).toEqual([]);
 	});
 });

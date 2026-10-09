@@ -91,7 +91,7 @@
             <div v-for="v in videosOf(msg)" :key="v.fileId" class="msg-video">
               <div class="msg-video-frame" :style="{ aspectRatio: v.widthAspect + ' / ' + v.heightAspect }"
                 :role="videos[v.fileId]?.url ? undefined : 'button'"
-                @click="!videos[v.fileId]?.url && videos[v.fileId]?.status !== 'opening' && emit('playVideo', v)">
+                @click="!refused[v.fileId] && !videos[v.fileId]?.url && videos[v.fileId]?.status !== 'opening' && emit('playVideo', v)">
                 <img v-if="thumbUrl(v)" class="msg-image-blur" :src="thumbUrl(v)" alt="" />
                 <video v-if="videos[v.fileId]?.url" class="msg-video-el"
                   :src="videos[v.fileId].url" controls playsinline
@@ -104,11 +104,9 @@
                 <div v-else class="msg-video-play" aria-hidden="true">
                   <span class="msg-video-triangle"></span>
                 </div>
-                <div v-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
+                <div v-if="refused[v.fileId]" class="msg-image-progress _err">This video could not be verified</div>
+                <div v-else-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
                   video failed — tap to retry
-                </div>
-                <div v-else-if="videos[v.fileId]?.status === 'unverified'" class="msg-image-progress _err">
-                  This video could not be verified
                 </div>
                 <!-- Duration travels in the envelope (07 §"video" pos 7), so the
                      badge shows before any chunk arrives; while playing the
@@ -135,14 +133,12 @@
               <img v-if="thumbUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbUrl(imagesOf(msg)[0])" alt="" />
               <img v-if="images[imagesOf(msg)[0].fileId]?.url" class="msg-image-full"
                 :src="images[imagesOf(msg)[0].fileId].url" :alt="imagesOf(msg)[0].name" />
-              <div v-if="images[imagesOf(msg)[0].fileId]?.status === 'downloading'" class="msg-image-progress">
+              <div v-if="refused[imagesOf(msg)[0].fileId]" class="msg-image-progress _err">This image could not be verified</div>
+              <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'downloading'" class="msg-image-progress">
                 {{ images[imagesOf(msg)[0].fileId].done }} / {{ images[imagesOf(msg)[0].fileId].total }} chunks
               </div>
               <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'error'" class="msg-image-progress _err">
                 image failed — tap to retry
-              </div>
-              <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'unverified'" class="msg-image-progress _err">
-                This image could not be verified
               </div>
             </div>
 
@@ -155,6 +151,7 @@
                 @click="openLightbox(msg, i)">
                 <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
                 <img v-if="images[im.fileId]?.url" class="msg-image-full" :src="images[im.fileId].url" :alt="im.name" />
+                <div v-if="refused[im.fileId]" class="msg-image-progress _err">could not be verified</div>
                 <div v-if="overflowCount(msg) && i === visibleImages(msg).length - 1" class="msg-gallery-more">
                   +{{ overflowCount(msg) }}
                 </div>
@@ -186,10 +183,12 @@
                   <template v-else>{{ fmtSize(f.size) }}</template>
                 </div>
               </div>
-              <button v-if="downloads[f.fileId]?.status !== 'downloading' && !refusedFile(f)" type="button"
-                class="msg-file-action" @click="emit('downloadFile', f)"
-                :title="downloads[f.fileId]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
-              <span v-else-if="!refusedFile(f)" class="msg-file-spinner"></span>
+              <template v-if="!refusedFile(f)">
+                <button v-if="downloads[f.fileId]?.status !== 'downloading'" type="button"
+                  class="msg-file-action" @click="emit('downloadFile', f)"
+                  :title="downloads[f.fileId]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
+                <span v-else class="msg-file-spinner"></span>
+              </template>
             </div>
 
             <!-- §2.4 availability. Partial is a normal state in a network with
@@ -322,7 +321,8 @@
         <img v-if="images[currentFrame.part.fileId]?.url"
           :src="images[currentFrame.part.fileId].url" :alt="currentFrame.part.name" />
         <img v-else-if="thumbUrl(currentFrame.part)" class="_blur" :src="thumbUrl(currentFrame.part)" alt="" />
-        <div v-if="images[currentFrame.part.fileId]?.status === 'downloading'" class="msg-image-progress">
+        <div v-if="refused[currentFrame.part.fileId]" class="msg-image-progress _err">This image could not be verified</div>
+        <div v-else-if="images[currentFrame.part.fileId]?.status === 'downloading'" class="msg-image-progress">
           {{ images[currentFrame.part.fileId].done }} / {{ images[currentFrame.part.fileId].total }} chunks
         </div>
       </div>
@@ -428,6 +428,11 @@ const props = defineProps({
     default: () => ({})
   },
   availability: {
+    type: Object,
+    default: () => ({})
+  },
+  /** fileId → true for a file whose manifest or chunks contradict the uploader's signatures (docs/invariants.md §6a). */
+  refused: {
     type: Object,
     default: () => ({})
   },
@@ -608,8 +613,7 @@ const partial = (part) => {
 };
 /** A file whose manifest or chunks contradict the uploader's signatures:
  *  refused, so no download button — another attempt gets the same answer. */
-const refusedFile = (part) =>
-  props.downloads[part.fileId]?.status === 'unverified' || !!props.availability[part.fileId]?.unverified;
+const refusedFile = (part) => !!props.refused[part.fileId];
 const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
 const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 

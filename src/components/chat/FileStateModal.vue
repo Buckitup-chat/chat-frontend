@@ -11,7 +11,11 @@
       <div class="fs-name">{{ part.name }}</div>
       <div class="fs-meta">{{ fmtSize(part.size) }}<template v-if="from"> · from {{ from }}</template><template v-if="sentAt"> · {{ sentAt }}</template></div>
 
-      <template v-if="availability && !availability.unknown">
+      <p v-if="refused" class="fs-note fs-refused">
+        This file could not be verified: what this node holds does not match
+        what its sender signed.
+      </p>
+      <template v-else-if="availability && !availability.unknown">
         <div class="fs-chunks">
           <span v-for="i in availability.total" :key="i" class="fs-chunk"
             :class="{ _have: i <= availability.present }"></span>
@@ -50,6 +54,8 @@ import { computed } from 'vue';
 const props = defineProps({
   part: { type: Object, required: true },
   availability: { type: Object, default: null },
+  /** The file's manifest or chunks contradict its sender's signatures (docs/invariants.md §6a). */
+  refused: { type: Boolean, default: false },
   log: { type: Array, default: () => [] },
   from: { type: String, default: '' },
   sentAt: { type: String, default: '' },
@@ -75,6 +81,8 @@ const describe = (e) => {
 </script>
 
 <style lang="scss" scoped>
+.fs-refused { color: #dc3545; }
+
 .fs-modal {
   position: fixed;
   inset: 0;

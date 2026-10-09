@@ -46,18 +46,22 @@ self.addEventListener('message', (event) => {
 			mimeType: msg.mimeType,
 			baseUrl: msg.baseUrl,
 			token: msg.token || null,
-			// Per index: the hash its bytes must have, null while its signed
-			// row has not reached the page, false if the page refused the row.
-			chunkHashes: msg.chunkHashes || [],
+			// Index → the hash its bytes must have, as the page verified it.
+			chunkHashes: { ...msg.chunkHashes },
+			// Index → requests waiting for the page to answer for it.
+			hashWaiters: new Map(),
 			cache: new Map(),
 			key: null,
 		});
 	} else if (msg.type === 'unregister') {
 		sessions.delete(msg.sessionId);
-	} else if (msg.type === 'chunk-hashes' && msg.sessionId) {
+	} else if (msg.type === 'chunk-hash' && msg.sessionId) {
 		const s = sessions.get(msg.sessionId);
-		// Always a new array, so a waiting request sees the answer arrive.
-		if (s) s.chunkHashes = msg.chunkHashes ? [...msg.chunkHashes] : [...s.chunkHashes];
+		if (s) {
+			if (msg.hash) s.chunkHashes[msg.index] = msg.hash;
+			for (const wake of s.hashWaiters.get(msg.index) ?? []) wake();
+			s.hashWaiters.delete(msg.index);
+		}
 	} else if (msg.type === 'token' && msg.sessionId) {
 		const s = sessions.get(msg.sessionId);
 		if (s) s.token = msg.token || null;
@@ -93,20 +97,21 @@ const requestToken = async (session, sessionId) => {
 	return session.token;
 };
 
-// GCM would accept any of this file's chunks at any index; the page verified
-// the uploader's signatures and sent the hash each index must have. A row
-// that reached the page after the session started is asked for once.
+// GCM would accept any of this file's chunks at any index. The page verifies
+// the uploader's signatures and answers, per index, the hash its bytes must
+// have; no answer within 3 s and the chunk is not served.
 const expectedHash = async (session, index, sessionId) => {
-	if (session.chunkHashes[index] == null) {
-		const asked = session.chunkHashes;
+	if (!session.chunkHashes[index]) {
+		const answered = new Promise((wake) => {
+			session.hashWaiters.set(index, [...(session.hashWaiters.get(index) ?? []), wake]);
+			setTimeout(wake, 3000);
+		});
 		const clients = await self.clients.matchAll({ type: 'window' });
-		for (const c of clients) c.postMessage({ type: 'need-chunk-hashes', sessionId });
-		for (let i = 0; i < 30 && session.chunkHashes === asked; i++) {
-			await new Promise((r) => setTimeout(r, 100));
-		}
+		for (const c of clients) c.postMessage({ type: 'need-chunk-hash', sessionId, index });
+		await answered;
 	}
 	const expected = session.chunkHashes[index];
-	if (typeof expected !== 'string') throw new Error(`chunk ${index}: could not be verified`);
+	if (!expected) throw new Error(`chunk ${index}: could not be verified`);
 	return expected;
 };
 

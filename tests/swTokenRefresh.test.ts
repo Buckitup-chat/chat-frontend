@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { webcrypto } from 'node:crypto';
 import { chunkDataHash } from '@/lib/pq/fileCrypto';
+import { loadWorker } from './helpers/swHarness';
 
 vi.mock('workbox-precaching', () => ({
 	precacheAndRoute: () => {},
@@ -21,33 +22,6 @@ const FILE_ID = 'file-1';
 let timeline: string[];
 let fetches: Array<{ url: string; authorization: string | null }>;
 
-const loadWorker = async () => {
-	const listeners: Record<string, Listener[]> = {};
-	const clients: Array<{ postMessage: (m: any) => void }> = [];
-	vi.stubGlobal('self', {
-		addEventListener: (type: string, fn: Listener) => (listeners[type] ??= []).push(fn),
-		skipWaiting: () => {},
-		clients: { claim: async () => {}, matchAll: async () => clients },
-		__WB_MANIFEST: [],
-	});
-	vi.resetModules();
-	await import('@/sw.js');
-	const dispatch = (type: string, event: any) => listeners[type]?.forEach((fn) => fn(event));
-	return {
-		clients,
-		postToWorker: (data: any) => dispatch('message', { data }),
-		/** Fires a fetch event at the worker and returns what it responded with. */
-		request: (path: string, range?: string): Promise<Response> => {
-			let responded: Promise<Response> | null = null;
-			dispatch('fetch', {
-				request: new Request(`https://app.test${path}`, { headers: range ? { range } : {} }),
-				respondWith: (p: Promise<Response>) => { responded = p; },
-			});
-			if (!responded) throw new Error('worker did not handle the request');
-			return responded;
-		},
-	};
-};
 
 const encryptChunk = async (secret: Uint8Array) => {
 	const key = await webcrypto.subtle.importKey('raw', secret, { name: 'AES-GCM' }, false, ['encrypt']);
@@ -111,7 +85,7 @@ describe('service worker refreshes an expired file_chunk token', () => {
 			mimeType: 'video/mp4',
 			baseUrl: 'https://api.test',
 			token: 'expired-token',
-			chunkHashes: [chunkDataHash(blob)],
+			chunkHashes: { 0: chunkDataHash(blob) },
 		});
 
 		const res = await worker.request(`/encrypted-video/${SESSION_ID}`, `bytes=0-${PLAIN.length - 1}`);
@@ -145,7 +119,7 @@ describe('service worker refreshes an expired file_chunk token', () => {
 		worker.postToWorker({
 			type: 'register', sessionId: SESSION_ID, fileId: FILE_ID, encSecret: secret,
 			chunkSize: PLAIN.length, totalSize: PLAIN.length, mimeType: 'video/mp4',
-			baseUrl: 'https://api.test', token: '', chunkHashes: [chunkDataHash(blob)],
+			baseUrl: 'https://api.test', token: '', chunkHashes: { 0: chunkDataHash(blob) },
 		});
 
 		const res = await worker.request(`/encrypted-video/${SESSION_ID}`, `bytes=0-${PLAIN.length - 1}`);
@@ -163,9 +137,9 @@ describe('page answers need-token only for its own video session', () => {
 		}));
 		vi.doMock('@/lib/data/fileTransfer', () => ({ downloadFile: async () => { throw new Error('fallback not expected'); } }));
 		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: async () => null, putCachedMedia: async () => {} }));
-		vi.doMock('@/lib/data/fileIntegrity', () => ({
-			readVerifiedManifest: async () => ({ fileId: FILE_ID, chunkCount: 1, deleted: false }),
-			ChunkHashes: class { async list() { return ['fd_00']; } },
+		vi.doMock('@/lib/data/fileIntegrity', async (importOriginal) => ({
+			...(await importOriginal<typeof import('@/lib/data/fileIntegrity')>()),
+			readVerifiedFile: async () => ({ manifest: { fileId: FILE_ID, chunkCount: 2, deleted: false }, hashes: { expected: async () => 'fd_00' } }),
 		}));
 
 		const swListeners: Record<string, Listener[]> = {};
@@ -185,7 +159,7 @@ describe('page answers need-token only for its own video session', () => {
 	};
 
 	const settle = () => new Promise((r) => setTimeout(r, 50));
-	const video = { fileId: FILE_ID, encSecretB64: 'AAAA', size: 16, mimeType: 'video/mp4' };
+	const video = { fileId: FILE_ID, uploaderHash: 'u_' + 'a'.repeat(128), encSecretB64: 'AAAA', size: 16, mimeType: 'video/mp4' };
 
 	afterEach(() => {
 		vi.doUnmock('@/lib/data/readSession');
