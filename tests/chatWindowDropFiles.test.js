@@ -23,7 +23,7 @@ const file = (name) => new File([new Uint8Array([1, 2, 3])], name, { type: 'appl
 const transferOf = (files, folders = []) => ({
 	types: ['Files'],
 	files,
-	items: files.map((f) => ({ webkitGetAsEntry: () => ({ isDirectory: folders.includes(f.name) }) })),
+	items: files.map((f) => ({ kind: 'file', webkitGetAsEntry: () => ({ isDirectory: folders.includes(f.name) }) })),
 	dropEffect: 'none',
 });
 
@@ -78,6 +78,25 @@ describe('dropping files over a dialog', () => {
 		expect(w.emitted('sendFile')).toBeUndefined();
 	});
 
+	it('does not send back a picture dragged from the page itself, which Chrome drags as a file', async () => {
+		const w = render();
+		w.element.dispatchEvent(new Event('dragstart', { bubbles: true }));
+		const drop = await dragEvent(w, 'drop', transferOf([file('photo.jpg')]));
+		expect(drop.defaultPrevented).toBe(false);
+		expect(w.emitted('sendFile')).toBeUndefined();
+		w.element.dispatchEvent(new Event('dragend', { bubbles: true }));
+		await dragEvent(w, 'drop', transferOf([file('a.pdf')]));
+		expect(w.emitted('sendFile')).toHaveLength(1);
+	});
+
+	it('matches folders to files among the file items only, whatever text entries the drag carries', async () => {
+		const w = render();
+		const t = transferOf([file('photos'), file('note.txt')], ['photos']);
+		t.items = [{ kind: 'string', webkitGetAsEntry: () => null }, ...t.items];
+		await dragEvent(w, 'drop', t);
+		expect(w.emitted('sendFile')[0][0].map((f) => f.name)).toEqual(['note.txt']);
+	});
+
 	it('names a dropped folder and sends the files beside it', async () => {
 		const w = render();
 		await dragEvent(w, 'drop', transferOf([file('photos'), file('note.txt')], ['photos']));
@@ -86,9 +105,9 @@ describe('dropping files over a dialog', () => {
 	});
 });
 
-const paste = (wrapper, files) => {
+const paste = (wrapper, files, types = files.length ? ['Files'] : ['text/plain']) => {
 	const event = new Event('paste', { bubbles: true, cancelable: true });
-	Object.defineProperty(event, 'clipboardData', { value: { files } });
+	Object.defineProperty(event, 'clipboardData', { value: { files, types } });
 	wrapper.find('input[type="text"]').element.dispatchEvent(event);
 	return event;
 };
@@ -99,6 +118,13 @@ describe('pasting into the input', () => {
 		const event = paste(w, [file('shot.png')]);
 		expect(event.defaultPrevented).toBe(true);
 		expect(w.emitted('sendFile')[0][0].map((f) => f.name)).toEqual(['shot.png']);
+	});
+
+	it('leaves a copy from Word or Excel to the input as text, though it carries a picture', async () => {
+		const w = render();
+		const event = paste(w, [file('image.png')], ['text/plain', 'text/html', 'Files']);
+		expect(event.defaultPrevented).toBe(false);
+		expect(w.emitted('sendFile')).toBeUndefined();
 	});
 
 	it('leaves pasted text to the input', async () => {

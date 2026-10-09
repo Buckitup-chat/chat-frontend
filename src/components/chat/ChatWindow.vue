@@ -1,6 +1,7 @@
 <template>
   <div class="chat-window d-flex flex-column w-100 h-100"
-    @dragenter="onDragEnter" @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop">
+    @dragenter="onDragEnter" @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop"
+    @dragstart="onPageDragStart" @dragend="onPageDragEnd">
     <!-- Files dropped anywhere over the dialog send as the attach button does. -->
     <div v-if="dropActive" class="drop-overlay">Drop to send to {{ title }}</div>
     <!-- Header -->
@@ -850,8 +851,15 @@ const dropActive = computed(() => dragDepth.value > 0);
 const dropNotice = ref('');
 let noticeTimer = null;
 
-/** A drag of files from outside. Text, links and in-app drags (the upload queue) carry no 'Files'. */
-const carriesFiles = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+// A drag that started in the page — a picture in a message, which Chrome
+// drags as a file — is not a file from outside, and dropping it back must
+// not send it.
+let dragFromPage = false;
+const onPageDragStart = () => { dragFromPage = true; };
+const onPageDragEnd = () => { dragFromPage = false; };
+
+/** A drag of files from outside. Text, links and the upload queue carry no 'Files'. */
+const carriesFiles = (e) => !dragFromPage && Array.from(e.dataTransfer?.types || []).includes('Files');
 
 const showDropNotice = (text) => {
   dropNotice.value = text;
@@ -885,7 +893,8 @@ const onDrop = (e) => {
   // rather than sent empty or lost without a word.
   const folders = [];
   const files = [];
-  const items = Array.from(e.dataTransfer.items || []);
+  // The items list also holds the drag's text entries; only file items line up with files.
+  const items = Array.from(e.dataTransfer.items || []).filter((it) => it.kind === 'file');
   Array.from(e.dataTransfer.files || []).forEach((file, i) => {
     if (items[i]?.webkitGetAsEntry?.()?.isDirectory) folders.push(file.name);
     else files.push(file);
@@ -894,10 +903,13 @@ const onDrop = (e) => {
   sendFiles(files);
 };
 
-// A screenshot pasted into the input sends like a dropped file; pasted text stays text.
+// A screenshot pasted into the input sends like a dropped file; pasted text
+// stays text — including a copy from Word or Excel, which carries a picture
+// of the selection beside the text.
 const onPaste = (e) => {
   const files = Array.from(e.clipboardData?.files || []);
-  if (!files.length || !canSendFiles.value) return;
+  const isText = Array.from(e.clipboardData?.types || []).includes('text/plain');
+  if (!files.length || isText || !canSendFiles.value) return;
   e.preventDefault();
   sendFiles(files);
 };
