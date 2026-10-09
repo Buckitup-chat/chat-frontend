@@ -1,7 +1,7 @@
 <template>
   <div class="chat-window d-flex flex-column w-100 h-100"
     @dragenter="onDragEnter" @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop">
-    <!-- Files dropped anywhere over the dialog send as the 📎 button does. -->
+    <!-- Files dropped anywhere over the dialog send as the attach button does. -->
     <div v-if="dropActive" class="drop-overlay">Drop to send to {{ title }}</div>
     <!-- Header -->
     <div class="chat-header d-flex align-items-center justify-content-between px-3 py-2 border-bottom">
@@ -843,9 +843,11 @@ const onFilePicked = (e) => {
 
 // ---------- drag and drop, paste (desktop) ----------
 
-const dropActive = ref(false);
+// dragenter/dragleave fire for every child crossed: the overlay shows while
+// the count is above zero.
+const dragDepth = ref(0);
+const dropActive = computed(() => dragDepth.value > 0);
 const dropNotice = ref('');
-let dragDepth = 0; // dragenter/dragleave fire for every child crossed
 let noticeTimer = null;
 
 /** A drag of files from outside. Text, links and in-app drags (the upload queue) carry no 'Files'. */
@@ -860,32 +862,25 @@ const showDropNotice = (text) => {
 const onDragEnter = (e) => {
   if (!carriesFiles(e) || !canSendFiles.value) return;
   e.preventDefault();
-  dragDepth++;
-  dropActive.value = true;
+  dragDepth.value++;
 };
 
-// Cancelling dragover is what makes this a drop target. Without it the
-// browser opens the dropped file in place of the app, and the dialog is gone.
+// Cancelling dragover is what makes this a drop target; anywhere else the
+// app-wide guard (fileDropGuard.ts) keeps the browser from opening the file.
 const onDragOver = (e) => {
-  if (!carriesFiles(e)) return;
+  if (!carriesFiles(e) || !canSendFiles.value) return;
   e.preventDefault();
-  e.dataTransfer.dropEffect = canSendFiles.value ? 'copy' : 'none';
+  e.dataTransfer.dropEffect = 'copy';
 };
 
-const onDragLeave = (e) => {
-  if (!dropActive.value) return;
-  if (--dragDepth <= 0) {
-    dragDepth = 0;
-    dropActive.value = false;
-  }
+const onDragLeave = () => {
+  if (dragDepth.value) dragDepth.value--;
 };
 
 const onDrop = (e) => {
-  if (!carriesFiles(e)) return;
+  if (!carriesFiles(e) || !canSendFiles.value) return;
   e.preventDefault();
-  dragDepth = 0;
-  dropActive.value = false;
-  if (!canSendFiles.value) return;
+  dragDepth.value = 0;
   // A folder arrives as a File with no content; it is named and left out
   // rather than sent empty or lost without a word.
   const folders = [];

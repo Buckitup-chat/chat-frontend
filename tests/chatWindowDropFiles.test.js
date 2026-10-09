@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 // Files dropped over an open dialog, or pasted into its input, send as the
-// attach button does: one composed message, captioned by the input
-// (docs/backlog.md §9).
+// attach button does: one composed message, captioned by the input.
 import { describe, it, expect, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
+import { installFileDropGuard } from '@/lib/fileDropGuard';
 
 vi.mock('vue-boring-avatars', () => ({ default: { template: '<span />' } }));
 
@@ -86,36 +86,36 @@ describe('dropping files over a dialog', () => {
 	});
 });
 
+const paste = (wrapper, files) => {
+	const event = new Event('paste', { bubbles: true, cancelable: true });
+	Object.defineProperty(event, 'clipboardData', { value: { files } });
+	wrapper.find('input[type="text"]').element.dispatchEvent(event);
+	return event;
+};
+
 describe('pasting into the input', () => {
 	it('sends a pasted screenshot', async () => {
 		const w = render();
-		const event = new Event('paste', { bubbles: true, cancelable: true });
-		Object.defineProperty(event, 'clipboardData', { value: { files: [file('shot.png')] } });
-		w.find('input[type="text"]').element.dispatchEvent(event);
+		const event = paste(w, [file('shot.png')]);
 		expect(event.defaultPrevented).toBe(true);
 		expect(w.emitted('sendFile')[0][0].map((f) => f.name)).toEqual(['shot.png']);
 	});
 
 	it('leaves pasted text to the input', async () => {
 		const w = render();
-		const event = new Event('paste', { bubbles: true, cancelable: true });
-		Object.defineProperty(event, 'clipboardData', { value: { files: [] } });
-		w.find('input[type="text"]').element.dispatchEvent(event);
+		const event = paste(w, []);
 		expect(event.defaultPrevented).toBe(false);
 		expect(w.emitted('sendFile')).toBeUndefined();
 	});
 });
 
 describe('a room, which has no peer and takes no files', () => {
-	it('has no attach button and is no drop target, yet a dropped file still does not replace the app', async () => {
+	it('has no attach button and is no drop target', async () => {
 		const w = render({});
 		expect(w.find('.attach-btn').exists()).toBe(false);
 		const t = transferOf([file('a.pdf')]);
 		await dragEvent(w, 'dragenter', t);
 		expect(w.find('.drop-overlay').exists()).toBe(false);
-		const over = await dragEvent(w, 'dragover', t);
-		expect(over.defaultPrevented).toBe(true);
-		expect(t.dropEffect).toBe('none');
 		await dragEvent(w, 'drop', t);
 		expect(w.emitted('sendFile')).toBeUndefined();
 	});
@@ -126,5 +126,36 @@ describe('the attach button', () => {
 		const w = render();
 		expect(w.find('.attach-btn i.bi.bi-paperclip').exists()).toBe(true);
 		expect(w.find('.attach-btn').text()).toBe('');
+	});
+});
+
+describe('the app-wide guard', () => {
+	const guarded = () => {
+		const root = document.createElement('div');
+		installFileDropGuard(root);
+		return root;
+	};
+	const fire = (el, type, dataTransfer, before) => {
+		const event = new Event(type, { bubbles: true, cancelable: true });
+		Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+		before?.(event);
+		el.dispatchEvent(event);
+		return event;
+	};
+
+	it('keeps a file dropped where nothing takes it from replacing the app', () => {
+		const root = guarded();
+		const t = transferOf([file('a.pdf')]);
+		expect(fire(root, 'dragover', t).defaultPrevented).toBe(true);
+		expect(t.dropEffect).toBe('none');
+		expect(fire(root, 'drop', t).defaultPrevented).toBe(true);
+	});
+
+	it('leaves a drop target its own effect, and drags without files alone', () => {
+		const root = guarded();
+		const t = { ...transferOf([file('a.pdf')]), dropEffect: 'copy' };
+		fire(root, 'dragover', t, (e) => e.preventDefault());
+		expect(t.dropEffect).toBe('copy');
+		expect(fire(root, 'dragover', { types: ['text/plain'] }).defaultPrevented).toBe(false);
 	});
 });
