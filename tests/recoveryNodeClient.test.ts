@@ -58,8 +58,8 @@ const ENDORSED: NodeDescriptor = {
 	node_sig: NODE_SIG,
 	operator_sig: toBase64(ml_dsa87.sign(descriptorBytes(unsigned), operatorKeys.secretKey)),
 };
-const verify = (d: unknown, { card = operator as VerifiedCard | null, url = URL_, dep = deployment } = {}) =>
-	verifyDescriptor(d, { url, deployment: dep }, card);
+const verify = (d: unknown, { card = operator as VerifiedCard | null, url = URL_, dep = deployment, id = undefined as string | undefined } = {}) =>
+	verifyDescriptor(d, { url, deployment: dep, id }, card);
 
 describe('the node id and descriptor', () => {
 	it('derive as the SDK derives them', () => {
@@ -92,7 +92,9 @@ describe('the node id and descriptor', () => {
 	});
 
 	it('is refused when another node serves it, or it names another deployment', () => {
-		expect(verify(ENDORSED, { url: 'https://other.example/recovery/node' })).toMatchObject({ reason: 'wrong_url' });
+		expect(verify(ENDORSED, { id: NODE_ID })).toMatchObject({ ok: true });
+		expect(verify(ENDORSED, { id: OTHER_ID })).toMatchObject({ reason: 'wrong_node' });
+		expect(verify(ENDORSED, { url: 'https://other.example/recovery/node' })).toMatchObject({ reason: 'wrong_node' });
 		expect(verify(ENDORSED, { dep: { ...deployment, chainId: 10 } })).toMatchObject({
 			reason: 'wrong_deployment',
 		});
@@ -130,6 +132,13 @@ describe('the node id and descriptor', () => {
 			'https://u:p@node.example/recovery/node',
 			'https://node.example/recovery/node?x=1',
 			'https://node.example/recovery/node#f',
+			'https://node.example/recovery/node/',
+			'https://node.example/recovery/node#',
+			'https://node.example/recovery/node?',
+			'https://svc.internal/recovery/node',
+			'https://box.lan/recovery/node',
+			'https://nas.home.arpa/recovery/node',
+			'https://node.localhost/recovery/node',
 			'not a url',
 		]) {
 			expect(isStableNodeUrl(url), url).toBe(false);
@@ -161,32 +170,50 @@ describe('a release', () => {
 	});
 });
 
-/** A fake node: records each request and answers what `answer` returns. */
-const fakeNode = (answer: (path: string, body: any) => { status: number; body?: unknown; text?: string }) => {
+type Answer = { status: number; body?: unknown; text?: string };
+
+/**
+ * A fake node: records each request and answers what `answer` returns. Its
+ * health check reports `healthId` unless `answer` handles `/health` itself.
+ */
+const fakeNode = (answer: (path: string, body: any) => Answer | undefined, healthId: string | null = NODE_ID) => {
 	const requests: { path: string; body: any }[] = [];
 	const fetchImpl = (async (...[input, init]: Parameters<typeof fetch>) => {
 		const path = String(input).slice(URL_.length);
 		const body = init?.body ? JSON.parse(String(init.body)) : null;
 		requests.push({ path, body });
-		const a = answer(path, body);
+		const a = answer(path, body) ?? (path === '/health' && healthId ? { status: 200, body: { nodeId: healthId } } : { status: 200, text: '<html></html>' });
 		return new Response(a.text ?? JSON.stringify(a.body ?? {}), { status: a.status });
 	}) as typeof fetch;
 	return { requests, fetch: fetchImpl };
 };
+/** Answers `answer` everywhere but the health check. */
+const at = (answer: Answer) => (path: string) => (path === '/health' ? undefined : answer);
 
 const node = { id: NODE_ID, url: URL_ };
+const OTHER_ID = 'n_' + '0'.repeat(32);
 const OWNER_PRIV = '0x' + '0b'.repeat(32);
+const down = (async () => {
+	throw new TypeError('fetch failed');
+}) as typeof fetch;
 
 describe('the node client', () => {
 	it('deposits a share signed by the owner, as the node rebuilds it', async () => {
-		const n = fakeNode(() => ({ status: 200, body: { ok: true, nodeId: NODE_ID, staged: true } }));
+		const n = fakeNode(at({ status: 200, body: { ok: true, nodeId: NODE_ID, staged: true } }));
 		const out = await depositShare(node, { id: '0x' + 'AB'.repeat(32), version: 2, share: SHARE }, OWNER_PRIV, { fetch: n.fetch, now: () => 1791200000 });
 		expect(out).toEqual({ staged: true });
-		const [{ path, body }] = n.requests;
+		const { path, body } = n.requests[1];
 		expect(path).toBe('/shares');
 		expect(body).toMatchObject({ id: SECRET_ID, version: 2, share: SHARE, ts: 1791200000 });
 		const text = depositMessage({ nodeId: NODE_ID, id: body.id, version: body.version, share: body.share, nonce: body.nonce, ts: body.ts });
 		expect(verifyMessage(text, body.sig)).toBe(computeAddress(new SigningKey(OWNER_PRIV).publicKey));
+	});
+
+	it('sends no share to a URL another node, or no node, now answers', async () => {
+		for (const n of [fakeNode(at({ status: 200, body: { nodeId: OTHER_ID } }), OTHER_ID), fakeNode(at({ status: 200 }), null)]) {
+			await expect(depositShare(node, { id: SECRET_ID, version: 1, share: SHARE }, OWNER_PRIV, { fetch: n.fetch })).rejects.toBeInstanceOf(NodeError);
+			expect(n.requests.map((r) => r.path)).toEqual(['/health']);
+		}
 	});
 
 	it('asks a release as the candidate and opens it', async () => {
@@ -200,8 +227,8 @@ describe('the node client', () => {
 		expect(verifyMessage(text, body.sig)).toBe(candidate);
 	});
 
-	it('refuses an answer from another node, and reports the node’s own refusal', async () => {
-		const other = fakeNode(() => ({ status: 200, body: { nodeId: 'n_' + '0'.repeat(32), version: 4, share_ecies: SHARE_ECIES } }));
+	it('refuses an answer from another node, and reports the node\u2019s own refusal', async () => {
+		const other = fakeNode(() => ({ status: 200, body: { nodeId: OTHER_ID, version: 4, share_ecies: SHARE_ECIES } }));
 		await expect(requestRelease(node, SECRET_ID, RECIPIENT_PRIV, { fetch: other.fetch })).rejects.toThrow(/answered as/);
 		const notYet = fakeNode(() => ({ status: 403, body: { error: 'canDecrypt=false: not authorized yet' } }));
 		await expect(requestRelease(node, SECRET_ID, RECIPIENT_PRIV, { fetch: notYet.fetch })).rejects.toMatchObject({ status: 403 });
@@ -209,30 +236,41 @@ describe('the node client', () => {
 		await expect(requestRelease(node, SECRET_ID, RECIPIENT_PRIV, { fetch: garbled.fetch })).rejects.toThrow(/does not open/);
 	});
 
-	it('fetches a descriptor and a health check, and tells a node that is down', async () => {
-		const up = fakeNode((path) => (path === '/info' ? { status: 200, body: ENDORSED } : { status: 200, body: { nodeId: NODE_ID } }));
+	it('fetches a descriptor, and counts a node up only when it answers as itself', async () => {
+		const up = fakeNode((path) => (path === '/info' ? { status: 200, body: ENDORSED } : undefined));
 		expect(await fetchDescriptor(URL_, { fetch: up.fetch })).toEqual(ENDORSED);
-		expect(await nodeIsUp(URL_, { fetch: up.fetch })).toBe(true);
+		expect(await nodeIsUp(node, { fetch: up.fetch })).toBe(true);
 		const unconfigured = fakeNode(() => ({ status: 503, body: { error: 'NODE_URL is not configured' } }));
 		await expect(fetchDescriptor(URL_, { fetch: unconfigured.fetch })).rejects.toThrow(/NODE_URL is not configured/);
-		expect(await nodeIsUp(URL_, { fetch: unconfigured.fetch })).toBe(false);
-		const down = (async () => {
-			throw new TypeError('fetch failed');
-		}) as typeof fetch;
-		expect(await nodeIsUp(URL_, { fetch: down })).toBe(false);
+		expect(await nodeIsUp(node, { fetch: unconfigured.fetch })).toBe(false);
+		// A web app's fallback page answers 200 to any path; another node answers as itself.
+		expect(await nodeIsUp(node, { fetch: fakeNode(() => undefined, null).fetch })).toBe(false);
+		expect(await nodeIsUp(node, { fetch: fakeNode(() => undefined, OTHER_ID).fetch })).toBe(false);
+		expect(await nodeIsUp(node, { fetch: down })).toBe(false);
 	});
 
-	it('reads a holding, and tells a wiped node from one that is not there', async () => {
-		const held = fakeNode(() => ({ status: 200, body: { version: 3 } }));
-		expect(await holdingOf(URL_, SECRET_ID, { fetch: held.fetch })).toBe(3);
-		expect(held.requests[0].path).toBe(`/shares/${SECRET_ID}`);
-		const wiped = fakeNode(() => ({ status: 404, body: { error: 'no share for this id on this node' } }));
-		expect(await holdingOf(URL_, SECRET_ID, { fetch: wiped.fetch })).toBeNull();
-		const proxy = fakeNode(() => ({ status: 404, text: '<html>Not Found</html>' }));
-		await expect(holdingOf(URL_, SECRET_ID, { fetch: proxy.fetch })).rejects.toBeInstanceOf(NodeError);
-		const down = (async () => {
-			throw new TypeError('fetch failed');
-		}) as typeof fetch;
-		await expect(holdingOf(URL_, SECRET_ID, { fetch: down })).rejects.toMatchObject({ status: 0 });
+	it('gives up on a node that takes the connection and never answers, but leaves a cancellation to the caller', async () => {
+		const hangs = ((...[, init]: Parameters<typeof fetch>) =>
+			new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)))) as typeof fetch;
+		expect(await nodeIsUp(node, { fetch: hangs, timeoutMs: 20 })).toBe(false);
+		const cancel = new AbortController();
+		const pending = nodeIsUp(node, { fetch: hangs, signal: cancel.signal });
+		cancel.abort(new Error('user left'));
+		await expect(pending).rejects.toThrow('user left');
+	});
+
+	it('reads a holding, and tells a wiped or replaced node from one that is not there', async () => {
+		const held = fakeNode(at({ status: 200, body: { version: 3 } }));
+		expect(await holdingOf(node, SECRET_ID, { fetch: held.fetch })).toBe(3);
+		expect(held.requests[1].path).toBe(`/shares/${SECRET_ID}`);
+		const wiped = fakeNode(at({ status: 404, body: { error: 'no share for this id on this node' } }));
+		expect(await holdingOf(node, SECRET_ID, { fetch: wiped.fetch })).toBeNull();
+		// Re-keyed with its store kept: it says it holds, but can never release as the node the set names.
+		const rekeyed = fakeNode(at({ status: 200, body: { version: 3 } }), OTHER_ID);
+		expect(await holdingOf(node, SECRET_ID, { fetch: rekeyed.fetch })).toBeNull();
+		const proxy = fakeNode(at({ status: 404, text: '<html>Not Found</html>' }));
+		await expect(holdingOf(node, SECRET_ID, { fetch: proxy.fetch })).rejects.toBeInstanceOf(NodeError);
+		await expect(holdingOf(node, SECRET_ID, { fetch: fakeNode(() => undefined, null).fetch })).rejects.toBeInstanceOf(NodeError);
+		await expect(holdingOf(node, SECRET_ID, { fetch: down })).rejects.toMatchObject({ status: 0 });
 	});
 });

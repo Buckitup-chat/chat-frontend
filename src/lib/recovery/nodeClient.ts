@@ -15,7 +15,7 @@ import { bytesToHex, concatBytes, hexToBytes, randomBytes, utf8ToBytes } from '@
 import { toBytes } from '@/lib/pq/signature';
 import type { VerifiedCard } from '@/lib/pq/verifyCard';
 import { nodeShareDigest } from 'backitup-secret-recovery-sdk/lib/constants/messages';
-import { deploymentNamespace, type Deployment } from './deployments';
+import type { Deployment } from './deployments';
 import { personalSignHex } from './evmSign';
 import { NodeSetError, parseNodeUrl } from './nodeSet';
 
@@ -55,7 +55,7 @@ export type DescriptorVerdict =
 	| { ok: true; descriptor: NodeDescriptor }
 	| {
 			ok: false;
-			reason: 'malformed' | 'wrong_url' | 'wrong_deployment' | 'bad_node_sig' | 'not_endorsed' | 'operator_unknown' | 'bad_operator_sig';
+			reason: 'malformed' | 'wrong_node' | 'wrong_deployment' | 'bad_node_sig' | 'not_endorsed' | 'operator_unknown' | 'bad_operator_sig';
 	  };
 
 const isDescriptor = (d: unknown): d is NodeDescriptor => {
@@ -85,18 +85,21 @@ const signedByNode = (d: NodeDescriptor, bytes: Uint8Array): boolean => {
  * Checks a descriptor fetched from `url` against the deployment a secret
  * lives on. `operatorCard` is the verified card of `descriptor.operator`, if
  * the client has it; without it the endorsement cannot be checked, and the
- * node is not offered.
+ * node is not offered. `expected.id` is the id a node set names at `url`.
  */
 export const verifyDescriptor = (
 	descriptor: unknown,
-	expected: { url: string; deployment: Pick<Deployment, 'chainId' | 'secretRecovery'> },
+	expected: { url: string; deployment: Pick<Deployment, 'chainId' | 'secretRecovery'>; id?: string },
 	operatorCard: VerifiedCard | null | undefined,
 ): DescriptorVerdict => {
 	if (!isDescriptor(descriptor)) return { ok: false, reason: 'malformed' };
 	const d = descriptor;
 	// Any node can serve another's descriptor: it is public and signed.
-	if (d.url !== expected.url) return { ok: false, reason: 'wrong_url' };
-	if (`${d.chain}:${d.contract}` !== deploymentNamespace(expected.deployment)) return { ok: false, reason: 'wrong_deployment' };
+	// A node named in a set has to be the node the set names: a URL whose node was re-keyed serves another.
+	if (d.url !== expected.url || (expected.id !== undefined && d.id !== expected.id)) return { ok: false, reason: 'wrong_node' };
+	if (d.chain !== `eip155:${expected.deployment.chainId}` || d.contract !== expected.deployment.secretRecovery.toLowerCase()) {
+		return { ok: false, reason: 'wrong_deployment' };
+	}
 	const bytes = descriptorBytes(d);
 	if (!signedByNode(d, bytes)) return { ok: false, reason: 'bad_node_sig' };
 	if (!d.operator_sig) return { ok: false, reason: 'not_endorsed' };
@@ -118,6 +121,9 @@ export const newerDescriptor = (a: NodeDescriptor, b: NodeDescriptor): NodeDescr
  * and not `.local` — the set travels with the shares and has to resolve for
  * years, from anywhere.
  */
+/** Names that resolve only on some network: special-use (RFC 6761, 6762, 8375) and the usual private ones. */
+const PRIVATE_SUFFIXES = ['localhost', 'local', 'home.arpa', 'internal', 'lan', 'intranet', 'corp', 'home', 'private'];
+
 export const isStableNodeUrl = (url: string): boolean => {
 	let host: string;
 	try {
@@ -127,7 +133,8 @@ export const isStableNodeUrl = (url: string): boolean => {
 		throw e;
 	}
 	if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.startsWith('[')) return false;
-	return host.includes('.') && !host.endsWith('.local') && !host.endsWith('.local.');
+	const name = host.replace(/\.$/, '');
+	return name.includes('.') && !PRIVATE_SUFFIXES.some((suffix) => name === suffix || name.endsWith('.' + suffix));
 };
 
 /* ------------------------------- messages ------------------------------- */
@@ -212,17 +219,39 @@ export class NodeError extends Error {
 
 export interface NodeClientOptions {
 	fetch?: typeof fetch;
-	/** Unix seconds; a node refuses a ts ahead of its clock, so the default trails ours a little. */
+	/**
+	 * Unix seconds. A node refuses a ts ahead of its own clock and accepts one
+	 * up to five minutes old, so the default trails ours by a minute: a phone
+	 * running fast is the common skew.
+	 */
 	now?: () => number;
 	signal?: AbortSignal;
+	/** Per request; a node that takes the connection and never answers is down. Default 15 s. */
+	timeoutMs?: number;
 }
 
+/** `signal`, or a timeout, whichever fires first. AbortSignal.any is too new for the Safari this app still serves. */
+const withTimeout = (signal: AbortSignal | undefined, ms: number): { signal: AbortSignal; done: () => void } => {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(new DOMException(`no answer in ${ms} ms`, 'TimeoutError')), ms);
+	const stop = (reason: unknown) => {
+		clearTimeout(timer);
+		controller.abort(reason);
+	};
+	if (signal?.aborted) stop(signal.reason);
+	else signal?.addEventListener('abort', () => stop(signal.reason), { once: true });
+	return { signal: controller.signal, done: () => clearTimeout(timer) };
+};
+
 const call = async (url: string, path: string, init: Parameters<typeof fetch>[1], opts: NodeClientOptions): Promise<{ status: number; body: any }> => {
+	const limit = withTimeout(opts.signal, opts.timeoutMs ?? 15_000);
 	let res: Response;
 	try {
-		res = await (opts.fetch ?? fetch)(url + path, { ...init, signal: opts.signal });
+		res = await (opts.fetch ?? fetch)(url + path, { ...init, signal: limit.signal });
 	} catch (e) {
-		if ((e as Error)?.name === 'AbortError') throw e;
+		limit.done();
+		// The caller's cancellation is theirs; anything else, the timeout included, is the node not answering.
+		if (opts.signal?.aborted) throw e;
 		throw new NodeError(url, 0, `does not answer: ${(e as Error).message}`);
 	}
 	let body: any = null;
@@ -230,6 +259,8 @@ const call = async (url: string, path: string, init: Parameters<typeof fetch>[1]
 		body = await res.json();
 	} catch {
 		// a body that is not JSON reads as no body
+	} finally {
+		limit.done();
 	}
 	return { status: res.status, body };
 };
@@ -239,7 +270,7 @@ const post = (url: string, path: string, body: unknown, opts: NodeClientOptions)
 
 const failed = (url: string, r: { status: number; body: any }) => new NodeError(url, r.status, r.body?.error ?? `answered ${r.status}`);
 
-const nowOf = (opts: NodeClientOptions) => (opts.now ?? (() => Math.floor(Date.now() / 1000) - 5))();
+const nowOf = (opts: NodeClientOptions) => (opts.now ?? (() => Math.floor(Date.now() / 1000) - 60))();
 const newNonce = () => bytesToHex(randomBytes(16));
 
 /** A node answers under the id it was asked by; another id is another node. */
@@ -254,20 +285,29 @@ export const fetchDescriptor = async (url: string, opts: NodeClientOptions = {})
 	return r.body;
 };
 
-/** True when the node answers its health check. */
-export const nodeIsUp = async (url: string, opts: NodeClientOptions = {}): Promise<boolean> => {
+export interface NodeRef {
+	id: string;
+	url: string;
+}
+
+/**
+ * Which node answers at `url`: the id its health check reports, or null when
+ * what answers is not a node (a 200 from a web app's fallback page is not).
+ */
+const nodeAt = async (url: string, opts: NodeClientOptions): Promise<string | null> => {
+	const r = await call(url, '/health', {}, opts);
+	return r.status === 200 && typeof r.body?.nodeId === 'string' ? r.body.nodeId : null;
+};
+
+/** True when `node` itself answers its health check. */
+export const nodeIsUp = async (node: NodeRef, opts: NodeClientOptions = {}): Promise<boolean> => {
 	try {
-		return (await call(url, '/health', {}, opts)).status === 200;
+		return (await nodeAt(node.url, opts)) === node.id;
 	} catch (e) {
 		if (e instanceof NodeError) return false;
 		throw e;
 	}
 };
-
-export interface NodeRef {
-	id: string;
-	url: string;
-}
 
 /**
  * Deposits `share` for secret `id` at `version`, signed by the owner's EVM
@@ -280,6 +320,9 @@ export const depositShare = async (
 	ownerPrivateKeyHex: string,
 	opts: NodeClientOptions = {},
 ): Promise<{ staged: boolean }> => {
+	// The share leaves only for the node chosen: another node at its URL would keep it.
+	const answering = await nodeAt(node.url, opts);
+	if (answering !== node.id) throw new NodeError(node.url, 0, `is ${answering ?? 'no node'}, not ${node.id}`);
 	// The body is what was signed, but the node id: the node supplies its own.
 	const body = { id: deposit.id.toLowerCase(), version: deposit.version, share: deposit.share, nonce: newNonce(), ts: nowOf(opts) };
 	const sig = personalSignHex(ownerPrivateKeyHex, depositMessage({ nodeId: node.id, ...body }));
@@ -320,11 +363,17 @@ export const requestRelease = async (
 };
 
 /**
- * The version a node holds for secret `id`, or null when it holds none — a
- * node that is up but wiped counts as lost. Throws NodeError when the node
- * does not answer, which is not the same as holding nothing.
+ * The version `node` holds for secret `id`, or null when it holds none — a
+ * node that is up but wiped counts as lost, and so does a URL now answered by
+ * another node: a node that loses its key loses its id with its shares.
+ * Throws NodeError when nothing answers, which is not the same as holding
+ * nothing.
  */
-export const holdingOf = async (url: string, id: string, opts: NodeClientOptions = {}): Promise<number | null> => {
+export const holdingOf = async (node: NodeRef, id: string, opts: NodeClientOptions = {}): Promise<number | null> => {
+	const { url } = node;
+	const answering = await nodeAt(url, opts);
+	if (answering === null) throw new NodeError(url, 0, 'is not a node');
+	if (answering !== node.id) return null;
 	const r = await call(url, `/shares/${id.toLowerCase()}`, {}, opts);
 	// The node's own 404 carries its JSON error; a proxy's, for a node that is
 	// not there, does not, and is no evidence the share is gone.

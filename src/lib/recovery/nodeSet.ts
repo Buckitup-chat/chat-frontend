@@ -42,8 +42,9 @@ export const parseNodeUrl = (url: string): URL => {
 	if (parsed.href !== url) throw new NodeSetError(`a node URL is in canonical form: ${url}`);
 	if (parsed.protocol !== 'https:') throw new NodeSetError(`a node URL is https: ${url}`);
 	if (parsed.username || parsed.password) throw new NodeSetError(`a node URL carries no credentials: ${url}`);
-	// Routes are appended to it (`<url>/info`), which a query or fragment would swallow.
-	if (parsed.search || parsed.hash) throw new NodeSetError(`a node URL has no query or fragment: ${url}`);
+	// Routes are appended to it (`<url>/info`): a query or fragment, even an
+	// empty one, would swallow them, and a trailing slash would double it.
+	if (/[?#]/.test(url) || url.endsWith('/')) throw new NodeSetError(`a node URL has no query, fragment or trailing slash: ${url}`);
 	return parsed;
 };
 
