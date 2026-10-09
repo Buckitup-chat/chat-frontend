@@ -1,6 +1,6 @@
 // Invitations in a dialog as each side reads them, and the actions that send
 // them (pq_recovery_shares § Inviting). Real keys and proofs throughout.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { bytesToHex } from '@noble/hashes/utils';
 import { checkInviteReply, inviteProof, metaKeysOf } from '@/lib/recovery/guardianInvite';
 import { inviteViews, judgeInvites, liveInviteId, rosterAnswersDue, type Roster, type ThreadContext, type ThreadMessage } from '@/lib/recovery/inviteThread';
@@ -119,6 +119,12 @@ describe('the guardian’s view of an invitation', () => {
 		expect(asGuardian([invite('m1', OWNER)]).m1).toEqual({ kind: 'received_invite', inviteId: INVITE, deployment: DEPLOYMENT, blocker: null, answer: null });
 	});
 
+	it('is not offered once the owner asked again, since its answers are ignored', () => {
+		const views = asGuardian([invite('dmsg_1', OWNER), invite('dmsg_2', OWNER, NEWER)]);
+		expect(views.dmsg_1).toMatchObject({ blocker: 'superseded' });
+		expect(views.dmsg_2).toMatchObject({ blocker: null });
+	});
+
 	it('can only be declined from an unconfirmed contact or on another deployment', () => {
 		expect(asGuardian([invite('m1', OWNER)], { confirmed: false }).m1).toMatchObject({ blocker: 'not_confirmed' });
 		expect(asGuardian([invite('m1', OWNER)], { reachable: false }).m1).toMatchObject({ blocker: 'unreachable' });
@@ -174,6 +180,14 @@ describe('sending an invitation', () => {
 		expect(sent[0]).toEqual({ peerHash: GUARDIAN, parts: [{ kind: 'recovery_invite', inviteId, deployment: DEPLOYMENT }], messageId: 'dmsg_0199' });
 	});
 
+	it('leaves no roster entry when it could not be sent', async () => {
+		const { deps, slots } = fakeDeps({ myHash: OWNER, sendMessage: async () => { throw new Error('not stored'); } });
+		await expect(sendInvite(deps, GUARDIAN)).rejects.toThrow('not stored');
+		const [added, removed] = slots[ROSTER_SLOT];
+		const [inviteId] = Object.keys(added.invites);
+		expect(removed).toEqual({ invites: { [inviteId]: null } });
+	});
+
 	it('goes only to a contact confirmed in person', async () => {
 		const { deps, log } = fakeDeps({ isConfirmed: () => false });
 		await expect(sendInvite(deps, GUARDIAN)).rejects.toBeInstanceOf(InvitationError);
@@ -197,6 +211,15 @@ describe('answering an invitation', () => {
 		await answerInvite(deps, OWNER, { inviteId: INVITE, deployment: DEPLOYMENT }, true);
 		await answerInvite(deps, OTHER, { inviteId: NEWER, deployment: DEPLOYMENT }, true);
 		expect((sent[0].parts[0] as any).metaAddress).toBe((sent[1].parts[0] as any).metaAddress);
+	});
+
+	it('counts as sent once it is in the dialog, even if its record fails', async () => {
+		const { deps, sent } = fakeDeps({ patchSlotJson: async () => { throw new Error('slot unreadable'); } });
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		await expect(answerInvite(deps, OWNER, { inviteId: INVITE, deployment: DEPLOYMENT }, false)).resolves.toEqual({
+			[INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'decline' },
+		});
+		expect(sent).toHaveLength(1);
 	});
 
 	it('declines with nothing in it', async () => {

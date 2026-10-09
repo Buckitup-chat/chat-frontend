@@ -13,12 +13,11 @@ import { InvitationError } from '@/lib/recovery/invitations';
  * @param {import('vue').Ref<string>} o.peerHash
  * @param {import('vue').Ref<string>} o.dialogHash
  * @param {import('vue').Ref<object[]>} o.messages decrypted dialog entries ({ id, parts, _raw })
- * @param {import('vue').Ref<Record<string, number>>} o.versionCounts archived revisions by message id
  * @param {import('vue').Ref<string>} o.peerName
  * @param {object} o.swal
  * @param {() => boolean} o.isAlive false once the page is gone: no late prompts
  */
-export function useGuardianInvites({ peerHash, dialogHash, messages, versionCounts, peerName, swal, isAlive }) {
+export function useGuardianInvites({ peerHash, dialogHash, messages, peerName, swal, isAlive }) {
 	const $invites = useRecoveryInvitesStore();
 	const $dialogs = useDialogsStore();
 	const $userPQ = userPQStore();
@@ -26,30 +25,37 @@ export function useGuardianInvites({ peerHash, dialogHash, messages, versionCoun
 	const peerConfirmed = computed(() => $invites.isConfirmed(peerHash.value));
 	const hasInvites = computed(() => messages.value.some((m) => (m.parts || []).some((p) => p.kind === 'recovery_invite')));
 
-	watch(hasInvites, (has) => {
-		if (has) $invites.load().catch((e) => console.warn('[chat] guardian records unavailable:', e));
+	// The records are the account's, and another device may have invited
+	// since: read again each time a dialog with invitations opens.
+	watch([hasInvites, dialogHash], ([has]) => {
+		if (has) $invites.load({ refresh: true }).catch((e) => console.warn('[chat] guardian records unavailable:', e));
 	}, { immediate: true });
 
-	// A reply counts as its first revision: an edited or deleted one is read
-	// from its archived revisions. Only dialogs with invitations need it.
-	const firstRevision = ref(new Map());
+	// A reply counts as its first revision: an edited or deleted message (its
+	// row has a parent) is read as the revision it began as. Until that is
+	// known, the message is left out of judging, and nothing is recorded.
+	const edited = computed(() => messages.value.filter((m) => m._raw?.parent_sign_hash).map((m) => m.id));
+	const originals = ref(new Map());
 	let generation = 0;
-	watch([versionCounts, hasInvites, dialogHash], async ([counts, has, dh]) => {
+	watch([edited, hasInvites, dialogHash], async ([ids, has, dh]) => {
 		if (!has || !dh) return;
-		const run = ++generation;
-		const missing = Object.keys(counts).filter((id) => !firstRevision.value.has(id));
+		const missing = ids.filter((id) => !originals.value.get(id));
 		if (!missing.length) return;
-		const found = await Promise.all(missing.map((id) => $dialogs.firstRevisionParts(dh, id).catch(() => null)));
+		const run = ++generation;
+		const found = await $dialogs.firstRevisionsOf(dh, missing).catch(() => new Map());
 		if (run !== generation || !isAlive()) return;
-		const next = new Map(firstRevision.value);
-		missing.forEach((id, i) => found[i] && next.set(id, found[i]));
-		firstRevision.value = next;
+		originals.value = new Map([...originals.value, ...found]);
 	}, { immediate: true });
+	const originalsKnown = computed(() => edited.value.every((id) => originals.value.get(id)));
 
 	const context = computed(() => ({
 		messages: messages.value
 			.filter((m) => m._raw?.sender_hash)
-			.map((m) => ({ id: m.id, senderHash: m._raw.sender_hash, parts: firstRevision.value.get(m.id) ?? m.parts ?? [] })),
+			.map((m) => ({
+				id: m.id,
+				senderHash: m._raw.sender_hash,
+				parts: m._raw.parent_sign_hash ? (originals.value.get(m.id) ?? []) : (m.parts ?? []),
+			})),
 		myHash: $userPQ.currentUserHash,
 		peerHash: peerHash.value,
 		roster: $invites.roster,
@@ -58,12 +64,15 @@ export function useGuardianInvites({ peerHash, dialogHash, messages, versionCoun
 		answers: $invites.answers,
 	}));
 
-	const views = computed(() => (peerHash.value && hasInvites.value ? inviteViews(context.value) : {}));
+	const active = computed(() => !!peerHash.value && hasInvites.value && $invites.loaded);
+	const judged = computed(() => (active.value ? judgeInvites(context.value) : new Map()));
+	const views = computed(() => (active.value ? inviteViews(context.value, judged.value) : {}));
 
 	// The owner's outcomes go to the account's roster, so a second device
-	// offers the same people at backup time.
-	watch(context, (ctx) => {
-		if (hasInvites.value) $invites.recordJudged(judgeInvites(ctx));
+	// offers the same people at backup time — once every reply is read as
+	// its first revision.
+	watch(judged, (j) => {
+		if (active.value && originalsKnown.value && j.size) $invites.recordJudged(j);
 	});
 
 	const statusToast = (what) => (status) => {

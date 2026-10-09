@@ -948,7 +948,7 @@ const handleCreateCheckpoint = async () => {
 
 // Guardian invitations (pq_recovery_shares § Inviting).
 const guardianInvites = useGuardianInvites({
-    peerHash, dialogHash, messages: decryptedMessages, versionCounts: versionCountByMsgId,
+    peerHash, dialogHash, messages: decryptedMessages,
     peerName: chatName, swal: $swal, isAlive: () => pageAlive,
 });
 const { views: inviteViewsByMsgId, peerConfirmed, inviting } = guardianInvites;

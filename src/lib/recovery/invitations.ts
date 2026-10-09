@@ -45,7 +45,14 @@ export const sendInvite = async (
 	const invite: RosterInvite = { contact: peerHash, deployment: deps.deployment, messageId };
 	const roster = await deps.patchSlotJson(ROSTER_SLOT, { invites: { [inviteId]: invite } } satisfies Roster);
 	const part: RecoveryInvitePart = { kind: 'recovery_invite', inviteId, deployment: deps.deployment };
-	await deps.sendMessage(peerHash, [part], onStatus, messageId);
+	try {
+		await deps.sendMessage(peerHash, [part], onStatus, messageId);
+	} catch (e) {
+		// Never captured, so never sent: left in the roster it would be the
+		// newest invitation and supersede the one the contact answered.
+		await deps.patchSlotJson(ROSTER_SLOT, { invites: { [inviteId]: null } }).catch((undo) => console.error('[recovery] an unsent invitation stays in the roster:', inviteId, undo));
+		throw e;
+	}
 	return { inviteId, roster: roster ?? {} };
 };
 
@@ -81,9 +88,16 @@ export const answerInvite = async (
 		part = { kind: 'recovery_invite_reply', inviteId: invite.inviteId, answer: 'decline', metaAddress: '', proofB64: '' };
 	}
 	await deps.sendMessage(peerHash, [part], onStatus);
+	// The answer is in the dialog from here on, and the dialog is what the
+	// owner reads; a record that fails to write is not a failed answer.
 	const answer: GuardianAnswer = { owner: peerHash, deployment: invite.deployment, answer: accept ? 'accept' : 'decline' };
-	const slot = await deps.patchSlotJson(GUARDIAN_SLOT, { answers: { [invite.inviteId]: answer } });
-	return slot?.answers ?? {};
+	try {
+		const slot = await deps.patchSlotJson(GUARDIAN_SLOT, { answers: { [invite.inviteId]: answer } });
+		return slot?.answers ?? {};
+	} catch (e) {
+		console.warn('[recovery] the answer was sent but not recorded:', invite.inviteId, e);
+		return { [invite.inviteId]: answer };
+	}
 };
 
 /** Records the owner's judged outcomes (inviteThread.rosterAnswersDue). */

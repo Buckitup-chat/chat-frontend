@@ -45,7 +45,7 @@ export type InviteView =
 			inviteId: string;
 			deployment: string;
 			/** Why it can only be declined, if it can. */
-			blocker: 'not_confirmed' | 'unreachable' | null;
+			blocker: 'not_confirmed' | 'unreachable' | 'superseded' | null;
 			/** This account's answer, if it gave one. */
 			answer: 'accept' | 'decline' | null;
 	  }
@@ -154,10 +154,10 @@ export const judgeInvites = (ctx: ThreadContext, byInvite = peerReplies(ctx).byI
 };
 
 /** What each invitation and reply in the dialog shows, by message id. */
-export const inviteViews = (ctx: ThreadContext): Record<string, InviteView> => {
+export const inviteViews = (ctx: ThreadContext, judged?: Map<string, JudgedInvite>): Record<string, InviteView> => {
 	const { messages, myHash, peerHash } = ctx;
 	const { byInvite, byMessage } = peerReplies(ctx);
-	const judged = judgeInvites(ctx, byInvite);
+	judged ??= judgeInvites(ctx, byInvite);
 	// This account's own answers to the peer: a decline at any time withdraws.
 	const myAnswers = new Map<string, 'accept' | 'decline'>();
 	for (const m of messages) {
@@ -168,13 +168,23 @@ export const inviteViews = (ctx: ThreadContext): Record<string, InviteView> => {
 		}
 	}
 
+	// The peer's newest invitation per deployment: an older one's replies are
+	// ignored by its owner, so it is not offered for an answer.
+	const newestFromPeer = new Map<string, string>();
+	for (const m of messages) {
+		if (m.senderHash !== peerHash) continue;
+		for (const inv of invitesIn(m)) if ((newestFromPeer.get(inv.deployment) ?? '') < m.id) newestFromPeer.set(inv.deployment, m.id);
+	}
+
 	const out: Record<string, InviteView> = {};
 	for (const m of messages) {
 		for (const inv of invitesIn(m)) {
 			if (m.senderHash === myHash) {
 				out[m.id] = { kind: 'sent_invite', inviteId: inv.inviteId, ...judged.get(inv.inviteId)! };
 			} else if (m.senderHash === peerHash) {
-				const blocker = !ctx.peerConfirmed ? 'not_confirmed' : !ctx.approvesOn(inv.deployment) ? 'unreachable' : null;
+				const blocker = newestFromPeer.get(inv.deployment) !== m.id
+					? 'superseded'
+					: !ctx.peerConfirmed ? 'not_confirmed' : !ctx.approvesOn(inv.deployment) ? 'unreachable' : null;
 				const answer = myAnswers.get(inv.inviteId) ?? ctx.answers?.[inv.inviteId]?.answer ?? null;
 				out[m.id] = { kind: 'received_invite', inviteId: inv.inviteId, deployment: inv.deployment, blocker, answer };
 			}

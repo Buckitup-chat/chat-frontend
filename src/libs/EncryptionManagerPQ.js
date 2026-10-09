@@ -875,7 +875,13 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, keys.evm_skey);
     await userVault.set(`contact_skey`, keys.contact_skey);
-    if (keys.meta_seed) await userVault.set(`meta_seed`, keys.meta_seed);
+    if (keys.meta_seed) {
+      // Owners may hold meta-addresses from the seed already here: replacing
+      // it would leave this device unable to approve for them.
+      const present = existing ? await userVault.get(`meta_seed`) : null;
+      if (!present) await userVault.set(`meta_seed`, keys.meta_seed);
+      else if (present !== keys.meta_seed) console.warn('[vault] the imported guardian seed differs from this device\'s; this device keeps its own');
+    }
 
     identity.vaultId = userVault.id;
     if (existing) {

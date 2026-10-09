@@ -11,7 +11,10 @@
         You would keep a part of their backup. If they ever lose access, you check that it is really them and
         approve their recovery. Approving costs you nothing.
       </div>
-      <div v-if="view.blocker === 'not_confirmed'" class="msg-invite-warn">
+      <div v-if="view.blocker === 'superseded'" class="msg-invite-warn">
+        They asked again since; answer the newer invitation.
+      </div>
+      <div v-else-if="view.blocker === 'not_confirmed'" class="msg-invite-warn">
         You have not confirmed this contact in person, so you can only decline.
       </div>
       <div v-else-if="view.blocker === 'unreachable'" class="msg-invite-warn">
@@ -22,7 +25,7 @@
         <button v-if="!view.answer && !view.blocker" type="button" class="btn btn-sm btn-dark" :disabled="busy"
           @click="answer(true)">Accept</button>
         <!-- A decline at any time withdraws; accepting again takes a new invitation. -->
-        <button v-if="view.answer !== 'decline'" type="button" class="btn btn-sm btn-outline-secondary" :disabled="busy"
+        <button v-if="view.answer !== 'decline' && view.blocker !== 'superseded'" type="button" class="btn btn-sm btn-outline-secondary" :disabled="busy"
           @click="answer(false)">{{ view.answer === 'accept' ? 'Withdraw' : 'Decline' }}</button>
       </div>
     </template>

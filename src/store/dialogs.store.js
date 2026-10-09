@@ -1051,6 +1051,54 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     /**
+     * The original revisions of `messageIds` — the archived row each began
+     * as, whose parent_sign_hash is null — decoded, by message id. Some
+     * content counts as first sent, whatever later edits or a deletion made
+     * of the row: a guardian's reply to an invitation (pq_recovery_shares
+     * § Inviting). A message whose original is not here yet, or not yet
+     * verifiable or decryptable, maps to null and can be asked again; one
+     * whose original is forged maps to no parts. Settled answers are kept: an
+     * original never changes. Cleared with the session.
+     */
+    const firstRevisions = new Map();
+    const firstRevisionsOf = async (dialogHash, messageIds) => {
+        const out = new Map();
+        const wanted = new Set();
+        for (const id of messageIds) {
+            const known = firstRevisions.get(`${dialogHash}|${id}`);
+            if (known) out.set(id, known);
+            else wanted.add(id);
+        }
+        if (!wanted.size) return out;
+        const colls = getDialogCollections(dialogHash);
+        const versionsState = await settled(colls.versions);
+        const live = colls.versions.toArray.filter((v) => wanted.has(v.message_id));
+        const cached = versionsState.state === 'failed'
+            ? (await readDialogRows('dialog_messages_versions', dialogHash)).filter((r) => wanted.has(r.message_id))
+            : [];
+        const originals = mergeLiveWithCached('dialog_messages_versions', live, cached, (r) => `${r.message_id}|${r.sign_hash}`)
+            .filter((r) => !r.parent_sign_hash);
+        for (const id of wanted) {
+            out.set(id, null);
+            const row = originals.find((r) => r.message_id === id);
+            if (!row) continue;
+            const verdict = await verifyReplicatedRow('dialog_messages_versions', row, getVerifiedSignPkey);
+            let parts = null;
+            if (verdict.status === 'invalid') parts = [];
+            else if (verdict.status === 'verified') {
+                const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+                const json = key && row.content_b64 ? await DialogCrypto.decryptContent(key, row.content_b64).catch(() => null) : null;
+                if (json) parts = decodeContent(json);
+            }
+            if (parts) {
+                firstRevisions.set(`${dialogHash}|${id}`, parts);
+                out.set(id, parts);
+            }
+        }
+        return out;
+    };
+
+    /**
      * Version history of a message (§3.1): archived revisions from the
      * versions shape plus the current tip, newest first.
      *
@@ -1061,36 +1109,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * Unverifiable revisions surface as such rather than being dropped:
      * a gap in history is itself information.
      */
-    /**
-     * A message's first revision, decoded: the earliest archived revision
-     * that verifies, or null while it has none that verifies and decrypts
-     * here. Some content counts as first sent — a guardian's reply to an
-     * invitation (pq_recovery_shares § Inviting) — whatever later edits or a
-     * deletion made of the row. Only that one revision is verified and
-     * decrypted, and the answer is kept: a first revision never changes.
-     */
-    const firstRevisions = new Map();
-    const firstRevisionParts = async (dialogHash, messageId) => {
-        const cacheKey = `${dialogHash}|${messageId}`;
-        if (firstRevisions.has(cacheKey)) return firstRevisions.get(cacheKey);
-        const colls = getDialogCollections(dialogHash);
-        const live = colls.versions.toArray.filter((v) => v.message_id === messageId);
-        const cached = (await readDialogRows('dialog_messages_versions', dialogHash)).filter((r) => r.message_id === messageId);
-        const rows = mergeLiveWithCached('dialog_messages_versions', live, cached, (r) => `${r.message_id}|${r.sign_hash}`)
-            .sort((a, b) => a.owner_timestamp - b.owner_timestamp);
-        for (const row of rows) {
-            if ((await verifyReplicatedRow('dialog_messages_versions', row, getVerifiedSignPkey)).status !== 'verified') continue;
-            if (!row.content_b64) return null;
-            const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
-            if (!key) return null; // its key may arrive later; ask again then
-            const json = await DialogCrypto.decryptContent(key, row.content_b64);
-            const parts = json ? decodeContent(json) : [];
-            firstRevisions.set(cacheKey, parts);
-            return parts;
-        }
-        return null;
-    };
-
     const getMessageHistory = async (dialogHash, messageId) => {
         const colls = getDialogCollections(dialogHash);
         let rows;
@@ -1157,6 +1175,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         checkpointAlerts.value = new Map();
         senderMsgKeys.value = {};
         decryptedRefsCache.clear();
+        firstRevisions.clear();
         dialogGates.clear();
         ownSentMessageIds.clear();
         optimisticItems.value = new Map();
@@ -1893,7 +1912,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         getFileAvailability,
         openVideoSource,
         getMessageHistory,
-        firstRevisionParts,
+        firstRevisionsOf,
         createDialogCheckpoint,
         verifyDialogCheckpoint,
         compareDialogCheckpoint,
