@@ -10,6 +10,8 @@
             @show-image="handleShowImage" @play-video="handlePlayVideo" @play-audio="handlePlayAudio"
             :checkpoint-signing="checkpointSigning"
             @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
+            :invites="inviteViewsByMsgId" :can-invite="peerConfirmed" :inviting="inviting"
+            @invite-guardian="guardianInvites.inviteGuardian" @answer-invite="guardianInvites.answerInvite"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge">
@@ -61,6 +63,7 @@ import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
 import { claimPendingEdit, submitPendingEdit, failPendingEdit, awaitPendingEditUnlock, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
 import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
 import { v7 as uuidv7 } from 'uuid';
+import { useGuardianInvites } from '@/composables/useGuardianInvites';
 
 const $route = useRoute();
 const $router = useRouter();
@@ -942,6 +945,13 @@ const handleCreateCheckpoint = async () => {
         checkpointSigning.value = false;
     }
 };
+
+// Guardian invitations (pq_recovery_shares § Inviting).
+const guardianInvites = useGuardianInvites({
+    peerHash, dialogHash, messages: decryptedMessages,
+    peerName: chatName, swal: $swal, isAlive: () => pageAlive,
+});
+const { views: inviteViewsByMsgId, peerConfirmed, inviting } = guardianInvites;
 
 watch(dialogHash, (dh) => {
     if (!dh || !peerHash.value) return;

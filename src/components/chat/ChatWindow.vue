@@ -18,6 +18,9 @@
              without a peer there is no dialog to attest. -->
         <button v-if="peerHash" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Sign a checkpoint of this dialog's history"
           :disabled="checkpointSigning" @click="emit('createCheckpoint')">🔏</button>
+        <!-- Only a contact confirmed in person can be asked (pq_recovery_shares § Inviting). -->
+        <button v-if="peerHash && canInvite" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Ask to be your guardian"
+          :disabled="inviting" @click="emit('inviteGuardian')">🛡</button>
         <div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')">
           <div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>
         </div>
@@ -249,7 +252,9 @@
               class="msg-checkpoint" @click="emit('checkpointInfo', { part: cp, messageId: msg.id })">
               🔏 History checkpoint · tap to compare
             </button>
-            <div v-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
+            <RecoveryInviteCard v-if="invites[msg.id]" :view="invites[msg.id]" :peer-name="title" :busy="inviting"
+              @answer="(answer) => emit('answerInvite', answer)" />
+            <div v-else-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
             <div v-else class="message-text text-break">
               {{ msg.text }}
             </div>
@@ -417,6 +422,7 @@ import { contentToText, quoteSnapshot } from '@/lib/pq/content';
 import { thumbHashToDataURL } from 'thumbhash';
 import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
+import RecoveryInviteCard from './RecoveryInviteCard.vue';
 import { useMenu } from '@/composables/useMenu';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
 import { playableAudioType } from '@/composables/useAudioPlayback';
@@ -449,6 +455,19 @@ const props = defineProps({
   peerHash: {
     type: String,
     default: ''
+  },
+  /** Guardian invitation and reply views by message id (inviteThread.inviteViews). */
+  invites: {
+    type: Object,
+    default: () => ({})
+  },
+  canInvite: {
+    type: Boolean,
+    default: false
+  },
+  inviting: {
+    type: Boolean,
+    default: false
   },
   checkpointSigning: {
     type: Boolean,
@@ -492,7 +511,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo', 'inviteGuardian', 'answerInvite']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);

@@ -431,6 +431,10 @@ export const userPQStore = defineStore('userPQ', () => {
   const exportBackup = async () => {
     if (!em.value) throw new Error('Not signed in.');
     const keys = await em.value.exportVaultKeys();
+    // The guardian seed travels with the other keys: a restored account or a
+    // linked device derives the same guardian keys.
+    const metaSeed = await em.value.guardianMetaSeed();
+    if (metaSeed) keys.meta_seed = metaSeed;
     if (!keys.contact_skey) {
       // A vault restored before contact_skey was carried has none, and an
       // import refuses a backup without it - so refuse here, before it is
