@@ -15,12 +15,15 @@ export interface InvitationDeps {
 	myHash: string;
 	/** Whether `peerHash` is a contact this account confirmed in person. */
 	isConfirmed: (peerHash: string) => boolean;
-	/** The deployment this build approves on, as `eip155:<chainId>:<contract>`. */
+	/** The deployment this build invites for, as `eip155:<chainId>:<contract>`. */
 	deployment: string;
+	/** Whether this build can approve on `deployment` (the same rule the card shows). */
+	approvesOn: (deployment: string) => boolean;
 	newMessageId: () => Promise<string>;
 	/** dialogs.store's sendMessage: captured durably before it resolves. */
 	sendMessage: (peerHash: string, parts: unknown[], onStatus?: (status: string, cause?: unknown) => void, messageId?: string | null) => Promise<string>;
-	patchSlotJson: (name: string, patch: unknown) => Promise<unknown>;
+	/** Resolves to the slot's value as the server accepted it. */
+	patchSlotJson: (name: string, patch: unknown) => Promise<any>;
 	guardianMetaSeed: (opts: { create: boolean }) => Promise<string | null>;
 }
 
@@ -31,15 +34,19 @@ export class InvitationError extends Error {}
  * records the invitation before it is sent, so an answer to it is never one
  * this account cannot place; a newer invitation supersedes this one.
  */
-export const sendInvite = async (deps: InvitationDeps, peerHash: string, onStatus?: (status: string, cause?: unknown) => void): Promise<string> => {
+export const sendInvite = async (
+	deps: InvitationDeps,
+	peerHash: string,
+	onStatus?: (status: string, cause?: unknown) => void,
+): Promise<{ inviteId: string; roster: Roster }> => {
 	if (!deps.isConfirmed(peerHash)) throw new InvitationError('Only a contact confirmed in person can be asked to be a guardian.');
 	const inviteId = newInviteId();
 	const messageId = await deps.newMessageId();
 	const invite: RosterInvite = { contact: peerHash, deployment: deps.deployment, messageId };
-	await deps.patchSlotJson(ROSTER_SLOT, { invites: { [inviteId]: invite } } satisfies Roster);
+	const roster = await deps.patchSlotJson(ROSTER_SLOT, { invites: { [inviteId]: invite } } satisfies Roster);
 	const part: RecoveryInvitePart = { kind: 'recovery_invite', inviteId, deployment: deps.deployment };
 	await deps.sendMessage(peerHash, [part], onStatus, messageId);
-	return inviteId;
+	return { inviteId, roster: roster ?? {} };
 };
 
 /**
@@ -55,11 +62,11 @@ export const answerInvite = async (
 	invite: { inviteId: string; deployment: string },
 	accept: boolean,
 	onStatus?: (status: string, cause?: unknown) => void,
-): Promise<void> => {
+): Promise<Record<string, GuardianAnswer>> => {
 	let part: RecoveryInviteReplyPart;
 	if (accept) {
 		if (!deps.isConfirmed(peerHash)) throw new InvitationError('Only a contact confirmed in person can be accepted.');
-		if (invite.deployment !== deps.deployment) throw new InvitationError('This invitation names a deployment this app cannot approve on.');
+		if (!deps.approvesOn(invite.deployment)) throw new InvitationError('This invitation names a deployment this app cannot approve on.');
 		const seed = await deps.guardianMetaSeed({ create: true });
 		if (!seed) throw new InvitationError('The guardian keys could not be made.');
 		const keys = metaKeysOf(hexToBytes(seed));
@@ -74,11 +81,11 @@ export const answerInvite = async (
 		part = { kind: 'recovery_invite_reply', inviteId: invite.inviteId, answer: 'decline', metaAddress: '', proofB64: '' };
 	}
 	await deps.sendMessage(peerHash, [part], onStatus);
-	const answer: GuardianAnswer = { owner: peerHash, deployment: invite.deployment, answer: part.answer as GuardianAnswer['answer'] };
-	await deps.patchSlotJson(GUARDIAN_SLOT, { answers: { [invite.inviteId]: answer } });
+	const answer: GuardianAnswer = { owner: peerHash, deployment: invite.deployment, answer: accept ? 'accept' : 'decline' };
+	const slot = await deps.patchSlotJson(GUARDIAN_SLOT, { answers: { [invite.inviteId]: answer } });
+	return slot?.answers ?? {};
 };
 
 /** Records the owner's judged outcomes (inviteThread.rosterAnswersDue). */
-export const recordRosterAnswers = async (deps: Pick<InvitationDeps, 'patchSlotJson'>, answers: Record<string, RosterAnswer>): Promise<void> => {
-	if (Object.keys(answers).length) await deps.patchSlotJson(ROSTER_SLOT, { answers } satisfies Roster);
-};
+export const recordRosterAnswers = async (deps: Pick<InvitationDeps, 'patchSlotJson'>, answers: Record<string, RosterAnswer>): Promise<Roster> =>
+	(await deps.patchSlotJson(ROSTER_SLOT, { answers } satisfies Roster)) ?? {};

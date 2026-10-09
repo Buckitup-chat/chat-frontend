@@ -3,7 +3,7 @@
 import { describe, it, expect } from 'vitest';
 import { bytesToHex } from '@noble/hashes/utils';
 import { checkInviteReply, inviteProof, metaKeysOf } from '@/lib/recovery/guardianInvite';
-import { inviteViews, liveInviteId, rosterAnswersDue, type Roster, type ThreadMessage } from '@/lib/recovery/inviteThread';
+import { inviteViews, judgeInvites, liveInviteId, rosterAnswersDue, type Roster, type ThreadContext, type ThreadMessage } from '@/lib/recovery/inviteThread';
 import { GUARDIAN_SLOT, ROSTER_SLOT, InvitationError, answerInvite, sendInvite, type InvitationDeps } from '@/lib/recovery/invitations';
 import type { ContentPart } from '@/lib/pq/content';
 
@@ -36,8 +36,15 @@ const roster = (extra: Roster = {}): Roster => ({
 	answers: extra.answers,
 });
 
-const asOwner = (messages: ThreadMessage[], r: Roster = roster()) =>
-	inviteViews({ messages, myHash: OWNER, peerHash: GUARDIAN, roster: r, peerConfirmed: true, reachable: (d) => d === DEPLOYMENT });
+const ownerContext = (messages: ThreadMessage[], r: Roster = roster()): ThreadContext => ({
+	messages,
+	myHash: OWNER,
+	peerHash: GUARDIAN,
+	roster: r,
+	peerConfirmed: true,
+	approvesOn: (d) => d === DEPLOYMENT,
+});
+const asOwner = (messages: ThreadMessage[], r: Roster = roster()) => inviteViews(ownerContext(messages, r));
 const asGuardian = (messages: ThreadMessage[], opts: { confirmed?: boolean; reachable?: boolean; answers?: Record<string, any> } = {}) =>
 	inviteViews({
 		messages,
@@ -45,7 +52,7 @@ const asGuardian = (messages: ThreadMessage[], opts: { confirmed?: boolean; reac
 		peerHash: OWNER,
 		roster: {},
 		peerConfirmed: opts.confirmed ?? true,
-		reachable: () => opts.reachable ?? true,
+		approvesOn: () => opts.reachable ?? true,
 		answers: opts.answers,
 	});
 
@@ -99,11 +106,11 @@ describe('the owner’s view of an invitation', () => {
 	});
 
 	it('owes the roster each settled outcome once', () => {
-		const views = asOwner([invite('m1', OWNER), accept('m2')]);
-		const due = rosterAnswersDue(views, roster(), GUARDIAN);
+		const judged = judgeInvites(ownerContext([invite('m1', OWNER), accept('m2')]));
+		const due = rosterAnswersDue(judged, roster());
 		expect(due).toEqual({ [INVITE]: { state: 'accepted', contact: GUARDIAN, deployment: DEPLOYMENT, metaAddress: keys.metaAddress } });
-		expect(rosterAnswersDue(views, roster({ answers: due }), GUARDIAN)).toEqual({});
-		expect(rosterAnswersDue(asOwner([invite('m1', OWNER)]), roster(), GUARDIAN)).toEqual({});
+		expect(rosterAnswersDue(judged, roster({ answers: due }))).toEqual({});
+		expect(rosterAnswersDue(judgeInvites(ownerContext([invite('m1', OWNER)])), roster())).toEqual({});
 	});
 });
 
@@ -137,6 +144,7 @@ const fakeDeps = (over: Partial<InvitationDeps> = {}) => {
 		myHash: GUARDIAN,
 		isConfirmed: () => true,
 		deployment: DEPLOYMENT,
+		approvesOn: (d) => d === DEPLOYMENT,
 		newMessageId: async () => 'dmsg_0199',
 		sendMessage: async (peerHash, parts, _onStatus, messageId) => {
 			log.push('send');
@@ -160,7 +168,7 @@ const fakeDeps = (over: Partial<InvitationDeps> = {}) => {
 describe('sending an invitation', () => {
 	it('records it in the roster before it leaves', async () => {
 		const { deps, log, slots, sent } = fakeDeps({ myHash: OWNER });
-		const inviteId = await sendInvite(deps, GUARDIAN);
+		const { inviteId } = await sendInvite(deps, GUARDIAN);
 		expect(log).toEqual([`patch:${ROSTER_SLOT}`, 'send']);
 		expect(slots[ROSTER_SLOT][0]).toEqual({ invites: { [inviteId]: { contact: GUARDIAN, deployment: DEPLOYMENT, messageId: 'dmsg_0199' } } });
 		expect(sent[0]).toEqual({ peerHash: GUARDIAN, parts: [{ kind: 'recovery_invite', inviteId, deployment: DEPLOYMENT }], messageId: 'dmsg_0199' });

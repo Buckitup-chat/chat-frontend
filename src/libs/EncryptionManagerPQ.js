@@ -24,6 +24,7 @@ import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
 import { publishVault } from '@/lib/recovery/vault';
+import { newMetaSeed } from '@/lib/recovery/guardianInvite';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
@@ -117,8 +118,8 @@ export class EncryptionManagerPQ extends EventTarget {
   #slotResolver = null;
   #contactSkey = null;
   #evmSkey = null;
-  // The guardian meta seed (pq_recovery_shares § Inviting, The keys): hex,
-  // created at the first acceptance, null until then.
+  // The guardian meta seed (pq_recovery_shares § Inviting, The keys), hex,
+  // once read or made: guardianMetaSeed.
   #metaSeed = null;
 
   constructor() {
@@ -470,7 +471,6 @@ export class EncryptionManagerPQ extends EventTarget {
     const cryptSkey = this.#normalizeKey(await vault.get('crypt_skey'));
     const evmSkey = await vault.get('evm_skey');
     const contactSkey = await vault.get('contact_skey');
-    const metaSeed = (await vault.get('meta_seed')) ?? null;
 
     if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
 
@@ -479,7 +479,6 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#cryptSkey = cryptSkey;
     this.#evmSkey = evmSkey;
     this.#contactSkey = contactSkey;
-    this.#metaSeed = metaSeed;
     if (!(this.#cryptSkey instanceof Uint8Array)) {
       console.warn('Crypt key not found in vault, avatar encryption will not work');
     }
@@ -817,7 +816,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const make = async () => {
       let seed = (await vault.get('meta_seed')) ?? null;
       if (!seed && create) {
-        seed = bytesToHex(randomBytes(32));
+        seed = bytesToHex(newMetaSeed());
         await vault.set('meta_seed', seed);
       }
       return seed;
@@ -842,9 +841,6 @@ export class EncryptionManagerPQ extends EventTarget {
       crypt_skey: arrayToBase64(this.#cryptSkey),
       evm_skey: this.#evmSkey,
       contact_skey: this.#contactSkey,
-      // Absent until the first acceptance; a backup or a linked device that
-      // carries it derives the same guardian keys.
-      ...(this.#metaSeed ? { meta_seed: this.#metaSeed } : {}),
       sign_pkey: this.#localUserCards.find(u => u.user_hash === this.localStorageOwnerHash).sign_pkey,
       crypt_pkey: this.#localUserCards.find(u => u.user_hash === this.localStorageOwnerHash).crypt_pkey
     };

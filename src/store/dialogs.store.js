@@ -1061,6 +1061,36 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * Unverifiable revisions surface as such rather than being dropped:
      * a gap in history is itself information.
      */
+    /**
+     * A message's first revision, decoded: the earliest archived revision
+     * that verifies, or null while it has none that verifies and decrypts
+     * here. Some content counts as first sent — a guardian's reply to an
+     * invitation (pq_recovery_shares § Inviting) — whatever later edits or a
+     * deletion made of the row. Only that one revision is verified and
+     * decrypted, and the answer is kept: a first revision never changes.
+     */
+    const firstRevisions = new Map();
+    const firstRevisionParts = async (dialogHash, messageId) => {
+        const cacheKey = `${dialogHash}|${messageId}`;
+        if (firstRevisions.has(cacheKey)) return firstRevisions.get(cacheKey);
+        const colls = getDialogCollections(dialogHash);
+        const live = colls.versions.toArray.filter((v) => v.message_id === messageId);
+        const cached = (await readDialogRows('dialog_messages_versions', dialogHash)).filter((r) => r.message_id === messageId);
+        const rows = mergeLiveWithCached('dialog_messages_versions', live, cached, (r) => `${r.message_id}|${r.sign_hash}`)
+            .sort((a, b) => a.owner_timestamp - b.owner_timestamp);
+        for (const row of rows) {
+            if ((await verifyReplicatedRow('dialog_messages_versions', row, getVerifiedSignPkey)).status !== 'verified') continue;
+            if (!row.content_b64) return null;
+            const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+            if (!key) return null; // its key may arrive later; ask again then
+            const json = await DialogCrypto.decryptContent(key, row.content_b64);
+            const parts = json ? decodeContent(json) : [];
+            firstRevisions.set(cacheKey, parts);
+            return parts;
+        }
+        return null;
+    };
+
     const getMessageHistory = async (dialogHash, messageId) => {
         const colls = getDialogCollections(dialogHash);
         let rows;
@@ -1079,15 +1109,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
         for (const row of rows) {
             const verified = (await verifyReplicatedRow('dialog_messages_versions', row, getVerifiedSignPkey)).status === 'verified';
             let text = '';
-            let parts = [];
             let decrypted = false;
             if (verified && row.content_b64) {
                 try {
                     const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
                     if (key) {
                         const json = await DialogCrypto.decryptContent(key, row.content_b64);
-                        parts = json ? decodeContent(json) : [];
-                        text = contentToText(parts);
+                        text = json ? contentToText(decodeContent(json)) : '';
                         decrypted = true;
                     }
                 } catch { /* rendered as undecrypted below */ }
@@ -1098,8 +1126,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 deletedFlag: !!row.deleted_flag,
                 verified,
                 text: verified ? (decrypted ? text : 'Waiting for keys…') : 'Unverifiable revision',
-                parts: decrypted ? parts : null,
-                senderHash: row.sender_hash,
             });
         }
         // Newest first; the current tip is already on screen and is not repeated here.
@@ -1867,6 +1893,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         getFileAvailability,
         openVideoSource,
         getMessageHistory,
+        firstRevisionParts,
         createDialogCheckpoint,
         verifyDialogCheckpoint,
         compareDialogCheckpoint,

@@ -39,15 +39,7 @@ export interface ThreadMessage {
 }
 
 export type InviteView =
-	| {
-			kind: 'sent_invite';
-			inviteId: string;
-			/** `superseded`: a newer invitation to this contact replaced it; `unrecorded`: not in this account's roster. */
-			state: InviteState['state'] | 'superseded' | 'unrecorded';
-			metaAddress?: string;
-			/** Replies ignored, with why — reported, never counted. */
-			problems: string[];
-	  }
+	| ({ kind: 'sent_invite'; inviteId: string } & JudgedInvite)
 	| {
 			kind: 'received_invite';
 			inviteId: string;
@@ -92,97 +84,127 @@ export interface ThreadContext {
 	/** Whether this account confirmed the peer in person. */
 	peerConfirmed: boolean;
 	/** Whether this build can approve on `deployment`. */
-	reachable: (deployment: string) => boolean;
+	approvesOn: (deployment: string) => boolean;
 	/** This account's recorded answers, by invitation id (its `guardian` slot). */
 	answers?: Record<string, GuardianAnswer>;
 }
 
+/** Where the owner's invitation stands, as the roster will record it. */
+export interface JudgedInvite {
+	state: InviteState['state'] | 'superseded' | 'unrecorded';
+	metaAddress?: string;
+	/** Replies ignored, with why — reported, never counted. */
+	problems: string[];
+}
+
+// A proof check recovers a key; a dialog re-renders on every new row. The
+// same reply part, judged for the same pair, is judged once.
+const judgedParts = new WeakMap<RecoveryInviteReplyPart, Map<string, CheckedReply>>();
+const judge = (part: RecoveryInviteReplyPart, ownerHash: string, guardianHash: string): CheckedReply => {
+	const key = `${ownerHash}|${guardianHash}`;
+	let byPair = judgedParts.get(part);
+	if (!byPair) judgedParts.set(part, (byPair = new Map()));
+	let checked = byPair.get(key);
+	if (!checked) byPair.set(key, (checked = checkInviteReply(part, ownerHash, guardianHash)));
+	return checked;
+};
+
+/** The peer's replies, judged, by invitation and by carrying message. */
+const peerReplies = (ctx: ThreadContext) => {
+	const byInvite = new Map<string, CheckedReply[]>();
+	const byMessage = new Map<string, CheckedReply>();
+	for (const m of ctx.messages) {
+		if (m.senderHash !== ctx.peerHash) continue;
+		for (const part of repliesIn(m)) {
+			const checked = judge(part, ctx.myHash, ctx.peerHash);
+			byInvite.set(part.inviteId, [...(byInvite.get(part.inviteId) ?? []), checked]);
+			byMessage.set(m.id, checked);
+		}
+	}
+	return { byInvite, byMessage };
+};
+
+/**
+ * The owner's invitations in this dialog, judged against the roster rather
+ * than dialog history (§ Inviting, step 4), by invitation id.
+ */
+export const judgeInvites = (ctx: ThreadContext, byInvite = peerReplies(ctx).byInvite): Map<string, JudgedInvite> => {
+	const { roster, peerHash } = ctx;
+	const out = new Map<string, JudgedInvite>();
+	for (const m of ctx.messages) {
+		if (m.senderHash !== ctx.myHash) continue;
+		for (const inv of invitesIn(m)) {
+			const replies = byInvite.get(inv.inviteId) ?? [];
+			const problems = replies.flatMap((r) => (r.ok ? [] : [r.reason]));
+			const recorded = roster.invites?.[inv.inviteId];
+			let judged: JudgedInvite;
+			if (!recorded || recorded.contact !== peerHash || recorded.deployment !== inv.deployment) judged = { state: 'unrecorded', problems };
+			else if (liveInviteId(roster, peerHash, inv.deployment) !== inv.inviteId) judged = { state: 'superseded', problems };
+			else {
+				const state = inviteStateOf(replies);
+				const other = state.state === 'accepted' ? heldByAnother(roster, state.metaAddress, peerHash) : null;
+				if (other) judged = { state: 'void', problems: [...problems, `the meta-address is already ${other}'s`] };
+				else if (state.state === 'accepted') judged = { state: 'accepted', metaAddress: state.metaAddress, problems };
+				else judged = { state: state.state, problems: state.state === 'void' ? [...problems, 'two different acceptances'] : problems };
+			}
+			out.set(inv.inviteId, judged);
+		}
+	}
+	return out;
+};
+
 /** What each invitation and reply in the dialog shows, by message id. */
 export const inviteViews = (ctx: ThreadContext): Record<string, InviteView> => {
-	const { messages, myHash, peerHash, roster } = ctx;
-	const out: Record<string, InviteView> = {};
-
-	// Replies by invitation, each judged once. Only the peer answers the
-	// owner's invitations, and only this account answers the peer's.
-	const theirReplies = new Map<string, { messageId: string; part: RecoveryInviteReplyPart; checked: CheckedReply }[]>();
+	const { messages, myHash, peerHash } = ctx;
+	const { byInvite, byMessage } = peerReplies(ctx);
+	const judged = judgeInvites(ctx, byInvite);
+	// This account's own answers to the peer: a decline at any time withdraws.
 	const myAnswers = new Map<string, 'accept' | 'decline'>();
 	for (const m of messages) {
+		if (m.senderHash !== myHash) continue;
 		for (const part of repliesIn(m)) {
-			if (m.senderHash === peerHash) {
-				const checked = checkInviteReply(part, myHash, peerHash);
-				const list = theirReplies.get(part.inviteId) ?? [];
-				list.push({ messageId: m.id, part, checked });
-				theirReplies.set(part.inviteId, list);
-			} else if (m.senderHash === myHash && (part.answer === 'accept' || part.answer === 'decline')) {
-				// A decline at any time withdraws: it wins over an earlier accept.
-				if (myAnswers.get(part.inviteId) !== 'decline') myAnswers.set(part.inviteId, part.answer);
-			}
+			if (part.answer !== 'accept' && part.answer !== 'decline') continue;
+			if (myAnswers.get(part.inviteId) !== 'decline') myAnswers.set(part.inviteId, part.answer);
 		}
 	}
 
+	const out: Record<string, InviteView> = {};
 	for (const m of messages) {
 		for (const inv of invitesIn(m)) {
 			if (m.senderHash === myHash) {
-				const recorded = roster.invites?.[inv.inviteId];
-				const replies = theirReplies.get(inv.inviteId) ?? [];
-				const problems = replies.flatMap((r) => (r.checked.ok ? [] : [r.checked.reason]));
-				if (!recorded || recorded.contact !== peerHash || recorded.deployment !== inv.deployment) {
-					out[m.id] = { kind: 'sent_invite', inviteId: inv.inviteId, state: 'unrecorded', problems };
-					continue;
-				}
-				if (liveInviteId(roster, peerHash, inv.deployment) !== inv.inviteId) {
-					out[m.id] = { kind: 'sent_invite', inviteId: inv.inviteId, state: 'superseded', problems };
-					continue;
-				}
-				const state = inviteStateOf(replies.map((r) => r.checked));
-				if (state.state === 'accepted') {
-					const other = heldByAnother(roster, state.metaAddress, peerHash);
-					if (other) {
-						out[m.id] = { kind: 'sent_invite', inviteId: inv.inviteId, state: 'void', problems: [...problems, `the meta-address is already ${other}'s`] };
-						continue;
-					}
-					out[m.id] = { kind: 'sent_invite', inviteId: inv.inviteId, state: 'accepted', metaAddress: state.metaAddress, problems };
-					continue;
-				}
-				if (state.state === 'void') problems.push('two different acceptances');
-				out[m.id] = { kind: 'sent_invite', inviteId: inv.inviteId, state: state.state, problems };
+				out[m.id] = { kind: 'sent_invite', inviteId: inv.inviteId, ...judged.get(inv.inviteId)! };
 			} else if (m.senderHash === peerHash) {
-				const blocker = !ctx.peerConfirmed ? 'not_confirmed' : !ctx.reachable(inv.deployment) ? 'unreachable' : null;
+				const blocker = !ctx.peerConfirmed ? 'not_confirmed' : !ctx.approvesOn(inv.deployment) ? 'unreachable' : null;
 				const answer = myAnswers.get(inv.inviteId) ?? ctx.answers?.[inv.inviteId]?.answer ?? null;
 				out[m.id] = { kind: 'received_invite', inviteId: inv.inviteId, deployment: inv.deployment, blocker, answer };
 			}
 		}
-	}
-
-	for (const m of messages) {
 		for (const part of repliesIn(m)) {
-			const mine = m.senderHash === myHash;
-			const judged = mine ? null : theirReplies.get(part.inviteId)?.find((r) => r.messageId === m.id)?.checked;
-			out[m.id] = { kind: 'reply', inviteId: part.inviteId, answer: part.answer, mine, problem: judged && !judged.ok ? judged.reason : null };
+			const checked = byMessage.get(m.id);
+			out[m.id] = { kind: 'reply', inviteId: part.inviteId, answer: part.answer, mine: m.senderHash === myHash, problem: checked && !checked.ok ? checked.reason : null };
 		}
 	}
 	return out;
 };
 
 /**
- * The roster answers the owner's client owes for the dialog's live
- * invitations: those whose judged state is settled and differs from the
- * record. Written back, a second device offers the same people.
+ * The roster answers owed for judged invitations: those settled and not yet
+ * recorded as they stand. Written back, a second device offers the same
+ * people.
  */
-export const rosterAnswersDue = (views: Record<string, InviteView>, roster: Roster, peerHash: string): Record<string, RosterAnswer> => {
+export const rosterAnswersDue = (judged: Map<string, JudgedInvite>, roster: Roster): Record<string, RosterAnswer> => {
 	const due: Record<string, RosterAnswer> = {};
-	for (const v of Object.values(views)) {
-		if (v.kind !== 'sent_invite' || !['accepted', 'declined', 'void'].includes(v.state)) continue;
-		const inv = roster.invites?.[v.inviteId];
+	for (const [inviteId, j] of judged) {
+		const inv = roster.invites?.[inviteId];
 		if (!inv) continue;
-		const next: RosterAnswer =
-			v.state === 'accepted'
-				? { state: 'accepted', contact: peerHash, deployment: inv.deployment, metaAddress: v.metaAddress! }
-				: { state: v.state as 'declined' | 'void', contact: peerHash, deployment: inv.deployment };
-		const prev = roster.answers?.[v.inviteId];
+		let next: RosterAnswer;
+		if (j.state === 'accepted') next = { state: 'accepted', contact: inv.contact, deployment: inv.deployment, metaAddress: j.metaAddress! };
+		else if (j.state === 'declined' || j.state === 'void') next = { state: j.state, contact: inv.contact, deployment: inv.deployment };
+		else continue;
+		const prev = roster.answers?.[inviteId];
 		const same = prev?.state === next.state && prev.contact === next.contact && prev.deployment === next.deployment
 			&& (prev.state !== 'accepted' || next.state !== 'accepted' || prev.metaAddress === next.metaAddress);
-		if (!same) due[v.inviteId] = next;
+		if (!same) due[inviteId] = next;
 	}
 	return due;
 };
