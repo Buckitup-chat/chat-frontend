@@ -232,7 +232,7 @@ describe('§1.5 file attachments', () => {
 	// Board screen 02: several files, one composed message, the caption from
 	// the same input.
 	it('attach button emits everything picked with the caption from the input', async () => {
-		const w = renderWith([]);
+		const w = renderWith([], { peerHash: PEER });
 		await w.find('input[type="text"]').setValue('схема и акт');
 		const input = w.find('input[type="file"]');
 		expect(input.attributes('multiple')).toBeDefined();
