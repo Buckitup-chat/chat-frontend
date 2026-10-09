@@ -69,9 +69,8 @@ const $userPQ = userPQStore();
 const $mitt = inject('$mitt');
 const search = ref();
 
-const { selected, excluded } = defineProps({
+const { selected } = defineProps({
 	selected: { type: Array, default: () => [] },
-	excluded: { type: Array, default: () => [] },
 });
 
 const emit = defineEmits(['select']);
@@ -95,11 +94,6 @@ const filteredList = computed(() => {
 	} else {
 		searchTerm = search.value.toLowerCase();
 		list = $userPQ.contacts.filter((c) => [c.name, c.notes].some((value) => value && value.toLowerCase().includes(searchTerm)));
-	}
-
-	// Exclude contacts in the `excluded` list
-	if (excluded?.length) {
-		list = list.filter((item) => !excluded.includes(item.user_hash)); // exclude from excluded)
 	}
 
 	//  Exclude hidden contacts

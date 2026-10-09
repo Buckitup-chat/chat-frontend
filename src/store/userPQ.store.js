@@ -415,19 +415,6 @@ export const userPQStore = defineStore('userPQ', () => {
     return myLocalUsers.value.find(u => u.user_hash === userHash);
   };
 
-  const getEvmPrivateKey = async () => {
-    if (!em.value) return null;
-    return await em.value.getEvmSkey();
-  };
-
-  const getEvmMetaKeys = async () => {
-    const skey = await getEvmPrivateKey();
-    if (!skey) return null;
-    return {
-      privateKey: skey
-    };
-  };
-
   const exportBackup = async () => {
     if (!em.value) throw new Error('Not signed in.');
     const keys = await em.value.exportVaultKeys();
@@ -535,8 +522,6 @@ export const userPQStore = defineStore('userPQ', () => {
     getUserByHash,
     getMyUserByHash,
 
-    getEvmPrivateKey,
-    getEvmMetaKeys,
     exportBackup,
     createRecoveryBackup,
     importBackup,

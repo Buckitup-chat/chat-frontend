@@ -1,5 +1,5 @@
 // TODO: PHASE 4 - DELETE THIS FILE after PQ migration complete
-// This is the Web3/Ethereum-based store being replaced by userPQ.store.js
+// The pre-PQ account store, being replaced by userPQ.store.js
 // Keep commented code for reference during migration
 
 import { defineStore } from 'pinia';
@@ -7,7 +7,6 @@ import * as $enigma from '../libs/enigma';
 import { Wallet } from 'ethers';
 import { ref, watch, reactive, computed } from 'vue';
 import { clearLockKeyCache } from '@lo-fi/local-data-lock';
-import $swal from '../libs/swal';
 import * as Y from 'yjs';
 import { toRaw } from 'vue';
 //import { WebrtcProvider } from 'y-webrtc';
@@ -36,7 +35,6 @@ export const userStore = defineStore('user', () => {
 	const rooms = reactive([]);
 
 	const vaults = ref([]);
-	const isOnline = ref(navigator.onLine);
 
 	const logout = async () => {
 		await encryptionManager.disconnect();
@@ -399,19 +397,6 @@ export const userStore = defineStore('user', () => {
 		});
 	}
 
-	function checkOnline() {
-		if (!isOnline.value) {
-			$swal.fire({
-				icon: 'error',
-				title: 'No connection to Internet',
-				footer: 'Connect to Internet to continue',
-				timer: 15000,
-			});
-			return false;
-		}
-		return true;
-	}
-
 	return {
 		vaults,
 		logout,
@@ -435,8 +420,6 @@ export const userStore = defineStore('user', () => {
 		contactKeys,
 		backupKeys,
 
-		checkOnline,
-		isOnline,
 
 		openStorage,
 	};

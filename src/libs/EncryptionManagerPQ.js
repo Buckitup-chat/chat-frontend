@@ -789,10 +789,6 @@ export class EncryptionManagerPQ extends EventTarget {
     return bytesToHex(signature.toCompactRawBytes());
   }
 
-  async getEvmSkey() {
-    return this.#evmSkey;
-  }
-
   async exportVaultKeys() {
     if (!this.#currentVault) throw new Error('Vault not loaded');
 

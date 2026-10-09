@@ -122,13 +122,6 @@ export const modalRegistry = {
 		modalClass: 'modal-md',
 	},
 
-	contacts: {
-		header: true,
-		component: 'Modal_Contacts',
-		modalClass: 'modal-md',
-		title: 'Verified contacts',
-		icon: '_icon_contacts',
-	},
 	...(SANDBOX_SURFACES ? SANDBOX_MODALS : {}),
 };
 

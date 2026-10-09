@@ -20,12 +20,6 @@ import $mitt from './libs/emitter';
 import { useLoader } from './composables/useLoader';
 import $swal from './libs/swal';
 
-// dayjs
-import dayjs from 'dayjs';
-import relativeTime from 'dayjs/plugin/relativeTime';
-dayjs.locale('en');
-dayjs.extend(relativeTime);
-
 // libs
 import globalFilters from './libs/filters';
 import * as $enigma from './libs/enigma';
@@ -47,9 +41,6 @@ app.config.globalProperties.$breakpoint.init();
 // mitt
 app.provide('$mitt', $mitt);
 app.config.globalProperties.$mitt = $mitt;
-
-app.config.globalProperties.$date = dayjs;
-app.provide('$date', dayjs);
 
 const $isProd = !location.origin.includes('localhost') && !location.origin.includes('192');
 app.provide('$isProd', $isProd);
