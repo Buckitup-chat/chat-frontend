@@ -163,9 +163,9 @@ as-is — it has to be padded with `=` to a multiple of four. This applies to
 producing a signature and to checking one: when verifying a received row the
 payload is assembled from the padded form, or not a single row will verify.
 
-On the sending path we already handle it (`encodeField` in `src/api/client.js`
-pads `_cert`, `_pkey`, `_b64`). On the receiving path there is no signature check
-at all yet — the rule takes effect the moment one appears.
+`encodeField` in `src/lib/pq/signature.ts` pads `_cert`, `_pkey` and `_b64`
+values and each element of a binary array (`files.chunk_sign_hashes`), so the
+payload is the same whether a row is being signed or verified.
 
 ### 6. The server schema is the source of truth for the wire format
 
@@ -179,6 +179,33 @@ a field the schema cannot cast.
 
 **Consequence.** Before adding a field to a mutation, grep the schema. Before
 accepting a review's claim about the backend, open the backend source.
+
+### 6a. A row that fails its signature is refused, visibly
+
+**Since:** 2026-10-09
+
+A replicated row comes from a server or a peer the client does not trust, and
+its check against the author's signature has two ways of not passing. They are
+handled differently, and every reader of a verified relation handles them the
+same way:
+
+- **`unavailable`** — what the check needs has not arrived (the author's card,
+  a file chunk's row) or the vault is locked. The row is not used yet; a later
+  read checks it again.
+- **`invalid`** — the row contradicts its author's signature. It is refused:
+  never used as data, never cached, and never retried as if the network had
+  failed — another attempt gets the same bytes and the same answer. Where the
+  user expects the thing (a message, a file) it is shown as "could not be
+  verified". A row with no place of its own in the UI (a reaction, a receipt)
+  is dropped.
+
+**Why.** A refused row that vanishes looks like data that never came, and one
+retried as a network error spins on a verdict that cannot change.
+
+**Consequence.** `verifyReplicatedRow` returns the two outcomes apart; a caller
+maps them as above. Files: `FileVerificationError` with kind `invalid` is "This
+file could not be verified" (`src/lib/data/fileIntegrity.ts`); messages: the
+dialog gate keeps the reason (`getInvalidReason`).
 
 ---
 

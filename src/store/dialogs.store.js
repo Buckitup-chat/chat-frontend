@@ -46,6 +46,9 @@ const safeBase64Decode = (str, fieldName) => {
     return result;
 };
 
+/** Content parts whose bytes travel as a file (fileTransfer.ts). */
+const MEDIA_KINDS = new Set(['file', 'image', 'video']);
+
 export const useDialogsStore = defineStore('dialogs', () => {
     const $userPQ = userPQStore();
 
@@ -986,11 +989,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
     const openVideoSource = (part, opts) => openVideo(part, opts);
 
     /** How much of an attachment this node can serve (§2.4). */
-    const getFileAvailability = (fileId) => fileAvailability(fileId);
+    const getFileAvailability = (part) => fileAvailability(part.fileId, part.uploaderHash);
 
     /** Downloads and decrypts an attachment; progress in chunks (§2.3). */
     const fetchFile = (filePart, { onProgress, signal } = {}) =>
-        downloadFile({ fileId: filePart.fileId, encSecretB64: filePart.encSecretB64, onProgress, signal });
+        downloadFile({ fileId: filePart.fileId, uploaderHash: filePart.uploaderHash, encSecretB64: filePart.encSecretB64, onProgress, signal });
 
     /**
      * Deletes own message (§3.2): a new revision with deleted_flag and no
@@ -1029,7 +1032,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
             const jsonStr = await DialogCrypto.decryptContent(key, row.content_b64);
             // Deletion tombstones carry empty content by design (07: an empty
             // content_b64 is only valid alongside deleted_flag) — not a format error.
-            const parts = jsonStr ? decodeContent(jsonStr) : [];
+            // A file is its sender's: its manifest and chunks must be signed by
+            // the author of this row (fileIntegrity.ts).
+            const parts = (jsonStr ? decodeContent(jsonStr) : []).map((p) =>
+                (MEDIA_KINDS.has(p.kind) ? { ...p, uploaderHash: row.sender_hash } : p));
 
             return {
                 ...row,

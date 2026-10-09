@@ -23,6 +23,8 @@ interface ChunkRecord {
 	key: string; // `${fileId}:${index}`
 	fileId: string;
 	bytes: ArrayBuffer;
+	/** The chunk's signed data_hash, checked when it was stored: a read compares strings, not SHA3 over 4 MiB. */
+	dataHash: string;
 	size: number;
 	lastUsed: number;
 }
@@ -58,12 +60,13 @@ const reqAsPromise = <T>(request: IDBRequest<T>): Promise<T> =>
 
 const chunkKey = (fileId: string, index: number) => `${fileId}:${index}`;
 
-export const getCachedChunk = async (fileId: string, index: number): Promise<Uint8Array | null> => {
+/** The cached chunk if it is the one with `dataHash`; anything else reads as absent and is overwritten by the next store. */
+export const getCachedChunk = async (fileId: string, index: number, dataHash: string): Promise<Uint8Array | null> => {
 	const db = await openDb();
 	if (!db) return null;
 	try {
 		const rec = await reqAsPromise<ChunkRecord | undefined>(tx(db, 'readonly').get(chunkKey(fileId, index)));
-		if (!rec) return null;
+		if (!rec || rec.dataHash !== dataHash) return null;
 		// LRU touch; fire-and-forget, a failed touch only skews eviction order
 		tx(db, 'readwrite').put({ ...rec, lastUsed: Date.now() });
 		return new Uint8Array(rec.bytes);
@@ -72,7 +75,8 @@ export const getCachedChunk = async (fileId: string, index: number): Promise<Uin
 	}
 };
 
-export const putCachedChunk = async (fileId: string, index: number, bytes: Uint8Array): Promise<void> => {
+/** Stores a chunk whose bytes hash to `dataHash`; the caller has checked that they do. */
+export const putCachedChunk = async (fileId: string, index: number, bytes: Uint8Array, dataHash: string): Promise<void> => {
 	const db = await openDb();
 	if (!db) return;
 	try {
@@ -81,6 +85,7 @@ export const putCachedChunk = async (fileId: string, index: number, bytes: Uint8
 			key: chunkKey(fileId, index),
 			fileId,
 			bytes: buf,
+			dataHash,
 			size: bytes.byteLength,
 			lastUsed: Date.now(),
 		} satisfies ChunkRecord));

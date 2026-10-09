@@ -4,6 +4,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
+import { fileKey } from '@/lib/data/fileKey';
 
 vi.mock('vue-boring-avatars', () => ({ default: { template: '<span />' } }));
 
@@ -217,7 +218,7 @@ describe('§1.5 file attachments', () => {
 
 	it('shows chunk progress while downloading — chunks, not percentages', () => {
 		const w = renderWith([message({ parts: [filePart()], text: '' })], {
-			downloads: { ['f_' + 'a'.repeat(32)]: { status: 'downloading', done: 5, total: 12 } },
+			downloads: { [fileKey({ fileId: 'f_' + 'a'.repeat(32) })]: { status: 'downloading', done: 5, total: 12 } },
 		});
 		expect(w.find('.msg-file-meta').text()).toContain('chunk 5 of 12');
 		expect(w.find('.msg-file-spinner').exists()).toBe(true);
@@ -272,7 +273,7 @@ describe('§1.3 images', () => {
 
 	it('shows chunk progress over the placeholder while fetching', () => {
 		const w = renderWith([message({ parts: [imagePart()], text: '' })], {
-			images: { ['f_' + 'c'.repeat(32)]: { status: 'downloading', done: 3, total: 8 } },
+			images: { [fileKey({ fileId: 'f_' + 'c'.repeat(32) })]: { status: 'downloading', done: 3, total: 8 } },
 		});
 		expect(w.find('.msg-image-progress').text()).toBe('3 / 8 chunks');
 		expect(w.find('.msg-image-full').exists()).toBe(false);
@@ -280,7 +281,7 @@ describe('§1.3 images', () => {
 
 	it('renders the decrypted image once it is there', () => {
 		const w = renderWith([message({ parts: [imagePart()], text: '' })], {
-			images: { ['f_' + 'c'.repeat(32)]: { status: 'done', url: 'blob:x' } },
+			images: { [fileKey({ fileId: 'f_' + 'c'.repeat(32) })]: { status: 'done', url: 'blob:x' } },
 		});
 		const img = w.find('.msg-image-full');
 		expect(img.attributes('src')).toBe('blob:x');
@@ -289,7 +290,7 @@ describe('§1.3 images', () => {
 
 	it('offers a retry when the image failed', () => {
 		const w = renderWith([message({ parts: [imagePart()], text: '' })], {
-			images: { ['f_' + 'c'.repeat(32)]: { status: 'error' } },
+			images: { [fileKey({ fileId: 'f_' + 'c'.repeat(32) })]: { status: 'error' } },
 		});
 		expect(w.find('.msg-image-progress._err').text()).toMatch(/tap to retry/);
 	});
@@ -369,7 +370,7 @@ describe('§1.6 attachment grid and carousel', () => {
 	// "which of these are actually here".
 	it('marks frames that have not arrived in the strip', async () => {
 		const w = renderWith([img(1), img(2)], {
-			images: { [img(1).fileId]: { status: 'done', url: 'blob:a' } },
+			images: { [fileKey(img(1))]: { status: 'done', url: 'blob:a' } },
 		});
 		await w.findAll('.msg-gallery-cell')[0].trigger('click');
 		const thumbs = w.findAll('.lightbox-thumb');
@@ -427,7 +428,7 @@ describe('§2.4 file availability', () => {
 		});
 
 	it('shows a chunk strip with the ones that are here filled', () => {
-		const w = renderWith({ [filePart.fileId]: { present: 5, total: 12, unknown: false, deleted: false } });
+		const w = renderWith({ [fileKey(filePart)]: { present: 5, total: 12, unknown: false, deleted: false } });
 		const chunks = w.findAll('.msg-chunk');
 		expect(chunks).toHaveLength(12);
 		expect(chunks.filter((c) => c.classes().includes('_have'))).toHaveLength(5);
@@ -437,24 +438,24 @@ describe('§2.4 file availability', () => {
 	// Partial availability is progress, not failure: the design forbids red
 	// and warning icons, and words it as "arrives later".
 	it('words partial availability as arriving, not as unavailable', () => {
-		const w = renderWith({ [filePart.fileId]: { present: 5, total: 12, unknown: false, deleted: false } });
+		const w = renderWith({ [fileKey(filePart)]: { present: 5, total: 12, unknown: false, deleted: false } });
 		const note = w.find('.msg-availability-note');
 		expect(note.text()).toMatch(/arrives later/);
 		expect(note.text()).not.toMatch(/unavailable|failed|error/i);
 	});
 
 	it('says nothing when the whole file is here', () => {
-		const w = renderWith({ [filePart.fileId]: { present: 12, total: 12, unknown: false, deleted: false } });
+		const w = renderWith({ [fileKey(filePart)]: { present: 12, total: 12, unknown: false, deleted: false } });
 		expect(w.find('.msg-availability').exists()).toBe(false);
 	});
 
 	it('claims nothing while the manifest is unknown', () => {
-		const w = renderWith({ [filePart.fileId]: { present: 0, total: 0, unknown: true, deleted: false } });
+		const w = renderWith({ [fileKey(filePart)]: { present: 0, total: 0, unknown: true, deleted: false } });
 		expect(w.find('.msg-availability').exists()).toBe(false);
 	});
 
 	it('offers a retry that asks for the file again', async () => {
-		const w = renderWith({ [filePart.fileId]: { present: 5, total: 12, unknown: false, deleted: false } });
+		const w = renderWith({ [fileKey(filePart)]: { present: 5, total: 12, unknown: false, deleted: false } });
 		await w.find('.msg-availability-btn').trigger('click');
 		expect(w.emitted('downloadFile')[0][0]).toMatchObject({ fileId: filePart.fileId });
 	});
@@ -491,7 +492,7 @@ describe('§1.4 video', () => {
 	});
 
 	it('does not re-ask while the source is already opening', async () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'opening' } });
+		const w = renderWith({ [fileKey(videoPart)]: { status: 'opening' } });
 		await w.find('.msg-video-frame').trigger('click');
 		expect(w.emitted('playVideo')).toBeFalsy();
 		expect(w.find('.msg-video-spinner').exists()).toBe(true);
@@ -499,7 +500,7 @@ describe('§1.4 video', () => {
 
 
 	it('mounts the player once the source is ready', () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'ready', url: '/encrypted-video/abc', streaming: true } });
+		const w = renderWith({ [fileKey(videoPart)]: { status: 'ready', url: '/encrypted-video/abc', streaming: true } });
 		const el = w.find('video');
 		expect(el.attributes('src')).toBe('/encrypted-video/abc');
 		expect(w.find('.msg-video-triangle').exists()).toBe(false);
@@ -510,7 +511,7 @@ describe('§1.4 video', () => {
 	// The failure text says "tap to retry", so the frame must actually take
 	// the tap in that state.
 	it('retries on tapping a failed frame', async () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'error' } });
+		const w = renderWith({ [fileKey(videoPart)]: { status: 'error' } });
 		expect(w.find('.msg-image-progress._err').text()).toMatch(/tap to retry/);
 		await w.find('.msg-video-frame').trigger('click');
 		expect(w.emitted('playVideo')[0][0]).toMatchObject({ fileId: videoPart.fileId });
@@ -536,7 +537,7 @@ describe('§1.4 video', () => {
 	});
 
 	it('hides the badge while playing and when the duration is unknown', () => {
-		const playing = renderWith({ [videoPart.fileId]: { status: 'ready', url: '/encrypted-video/abc' } });
+		const playing = renderWith({ [fileKey(videoPart)]: { status: 'ready', url: '/encrypted-video/abc' } });
 		expect(playing.find('.msg-video-duration').exists()).toBe(false);
 
 		const unknown = mount(ChatWindow, {
@@ -747,26 +748,26 @@ describe('§1.4 download progress bar', () => {
 	const barWidth = (w) => w.find('.msg-video-load-fill').attributes('style');
 
 	it('appears at 0% the moment the tap lands', () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'opening' } });
+		const w = renderWith({ [fileKey(videoPart)]: { status: 'opening' } });
 		expect(w.find('.msg-video-load').exists()).toBe(true);
 		expect(barWidth(w)).toContain('width: 0%');
 	});
 
 	it('grows with the chunks, not with playback', () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'opening', done: 5, total: 13 } });
+		const w = renderWith({ [fileKey(videoPart)]: { status: 'opening', done: 5, total: 13 } });
 		expect(barWidth(w)).toContain('width: 38%');
 	});
 
 	// §1.4: play starts on the first chunk; the bar keeps tracking the
 	// DOWNLOAD while the prefix already plays.
 	it('keeps growing behind a playing prefix', () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'ready', url: 'blob:p', partial: true, done: 8, total: 13 } });
+		const w = renderWith({ [fileKey(videoPart)]: { status: 'ready', url: 'blob:p', partial: true, done: 8, total: 13 } });
 		expect(w.find('video').attributes('src')).toBe('blob:p');
 		expect(barWidth(w)).toContain('width: 62%');
 	});
 
 	it('leaves once the whole file is here', () => {
-		const w = renderWith({ [videoPart.fileId]: { status: 'ready', url: 'blob:full', partial: false, done: 13, total: 13 } });
+		const w = renderWith({ [fileKey(videoPart)]: { status: 'ready', url: 'blob:full', partial: false, done: 13, total: 13 } });
 		expect(w.find('.msg-video-load').exists()).toBe(false);
 	});
 });
