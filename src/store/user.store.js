@@ -47,7 +47,6 @@ export const userStore = defineStore('user', () => {
 		for (const key in contactsMap) {
 			delete contactsMap[key];
 		}
-		contacts.length = 0;
 	};
 
 	const yJs = {};

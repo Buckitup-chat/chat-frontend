@@ -59,6 +59,7 @@
 </style>
 
 <script setup>
+import highlightText from '@/utils/highlightText';
 import { userPQStore } from '@/store/userPQ.store';
 
 
@@ -109,11 +110,6 @@ const filteredList = computed(() => {
 	return l;
 });
 
-function highlightText(text, searchTerm) {
-	if (!searchTerm || !text) return text;
-	const regex = new RegExp(`(${searchTerm})`, 'gi');
-	return text.replace(regex, `<span class="_highlight_search_text">$1</span>`); // Wrap matched text with <mark>
-}
 
 onMounted(async () => {
 	filteredList.value;
