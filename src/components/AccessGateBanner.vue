@@ -2,14 +2,21 @@
 	<div v-if="visible" class="access-gate-banner">
 		<span class="access-gate-text">
 			Waiting for approval by the device owner
+			<template v-if="userHash">· <span class="access-gate-hash" :title="userHash">{{ $filters.txHashShort(userHash) }}</span></template>
 		</span>
+		<button v-if="userHash" type="button" class="access-gate-action" @click="copyHash">Copy ID</button>
 		<button type="button" class="access-gate-action" @click="checkAgain">Check again</button>
 	</div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { hasBlockedShapes, onBlockedChange, probeAllBlocked } from '@/lib/data/accessGate';
+import { userPQStore } from '@/store/userPQ.store';
+import copyToClipboard from '@/utils/copyToClipboard';
+
+const $user = userPQStore();
+const userHash = computed(() => $user.currentUserHash);
 
 const visible = ref(hasBlockedShapes());
 
@@ -24,6 +31,7 @@ onUnmounted(() => {
 });
 
 const checkAgain = () => probeAllBlocked();
+const copyHash = () => copyToClipboard(userHash.value);
 </script>
 
 <style lang="scss" scoped>
@@ -47,6 +55,10 @@ const checkAgain = () => probeAllBlocked();
 	white-space: nowrap;
 	font-size: 12px;
 	color: #6a5a1f;
+}
+
+.access-gate-hash {
+	font-family: monospace;
 }
 
 .access-gate-action {

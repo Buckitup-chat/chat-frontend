@@ -24,8 +24,8 @@
 					</button>
 
 
-					<button type="button" class="btn btn-dark rounded-pill _action_btn"
-						@click="$mitt.emit('modal::open', { id: 'account_backup' })">
+					<button type="button" class="btn btn-dark rounded-pill _action_btn" title="Download backup file"
+						@click="$mitt.emit('modal::open', { id: 'account_backup_local' })">
 						<i class="_icon_backups bg-white"></i>
 					</button>
 
@@ -150,9 +150,14 @@ async function saveProfile() {
 			avatarUuid: uuid,
 			avatarDataUrl: draftAccount.value.avatar
 		});
-		// Saved here; the server gets it when the connection is back. Say so
-		// rather than claim it is everywhere already.
-		if (saved?.pending) {
+		
+		if (saved?.awaitingApproval) {
+			$swal.fire({
+				icon: 'info',
+				title: 'Saved on this device',
+				text: 'The change waits for the device owner to approve your account, and goes out then; until then your other devices and contacts see the previous profile.',
+			});
+		} else if (saved?.pending) {
 			$swal.fire({
 				icon: 'info',
 				title: 'Saved on this device',

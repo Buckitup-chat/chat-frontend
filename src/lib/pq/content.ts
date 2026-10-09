@@ -126,9 +126,87 @@ export interface RecoverySharePart {
 	shareIndex: number;
 	/** Every leaf of the split in index order, unpadded base64; empty when the sender sent none, which no check passes. */
 	splitProof: string[];
-	/** Positions past split_proof, from a newer build: kept, so re-encoding loses nothing. */
+	/** The nodes holding the node half and their threshold; null when the sender sent none, which no check passes. */
+	nodeSet: NodeSet | null;
+	/** Positions past node_set, from a newer build: kept, so re-encoding loses nothing. */
 	rest?: unknown[];
 }
+
+/** A guardian's share sent back to a recovering owner's temporary account (07 § recovery_share_return). */
+export interface RecoveryShareReturnPart extends Extensible {
+	kind: 'recovery_share_return';
+	secretRef: string;
+	version: number;
+	splitId: string;
+	threshold: number;
+	total: number;
+	shareIndex: number;
+	/** The contract's recoveryRound this release answers. */
+	round: number;
+	/** The recipient address the guardian approved. */
+	candidate: string;
+	shareB64: string;
+	createdAt: number;
+	splitProof: string[];
+	nodeSet: NodeSet | null;
+}
+
+/** A recovering account's proof that it holds the on-chain candidate key (07 § recovery_binding). */
+export interface RecoveryBindingPart extends Extensible {
+	kind: 'recovery_binding';
+	secretRef: string;
+	candidate: string;
+	/** The sender's own user_hash. */
+	userHash: string;
+	signatureB64: string;
+}
+
+/**
+ * An owner asking a contact to become a guardian (07 § recovery_invite). It
+ * carries no time of its own: an invitation and its reply only travel in a
+ * dialog, whose row's message_id (UUIDv7, signed with the row) says when.
+ */
+export interface RecoveryInvitePart extends Extensible {
+	kind: 'recovery_invite';
+	/** 16 random bytes, lowercase hex. */
+	inviteId: string;
+	/** `eip155:<chainId>:<contract>`, where the guardian would approve. */
+	deployment: string;
+}
+
+/** The contact's answer to an invitation (07 § recovery_invite_reply). */
+export interface RecoveryInviteReplyPart extends Extensible {
+	kind: 'recovery_invite_reply';
+	inviteId: string;
+	/** "accept" or "decline"; any other value is ignored by the owner. */
+	answer: string;
+	/** On accept, the 66-byte stealth meta-address as lowercase 0x hex; empty on decline. */
+	metaAddress: string;
+	/** On accept, the spending key's EIP-191 signature, unpadded base64; empty on decline. */
+	proofB64: string;
+}
+
+/**
+ * The nodes holding a version's node half, as a share envelope names them
+ * (07 § recovery_share, node_set: `[node_threshold, ["<id>@<url>", …]]`).
+ * The codec holds only this shape; the rules a set must obey, and its hash in
+ * the split's root, are lib/recovery/nodeSet's.
+ */
+export interface NodeSet {
+	/** Node shares needed to rebuild the node half. */
+	threshold: number;
+	/** `<id>@<url>` per node, in the order the hash takes them. */
+	nodes: string[];
+}
+
+const nodeSetToWire = (set: NodeSet): unknown[] => [set.threshold, [...set.nodes]];
+
+const nodeSetFromWire = (wire: unknown): NodeSet | null =>
+	// Exactly two elements: the root covers both and nothing else, so a third
+	// would ride along unauthenticated (07 § recovery_share, node_set).
+	Array.isArray(wire) && wire.length === 2 && isInt(wire[0]) && Array.isArray(wire[1]) && wire[1].every((entry: unknown) => typeof entry === 'string')
+		? { threshold: wire[0], nodes: [...(wire[1] as string[])] }
+		: null;
 
 /** A typed value this build does not render yet (e.g. "image" before the
  * file transport lands). Preserved verbatim so re-encoding loses nothing. */
@@ -146,6 +224,10 @@ export type ContentPart =
 	| VideoPart
 	| CheckpointPart
 	| RecoverySharePart
+	| RecoveryShareReturnPart
+	| RecoveryBindingPart
+	| RecoveryInvitePart
+	| RecoveryInviteReplyPart
 	| UnknownPart;
 
 export class ContentDecodeError extends Error {}
@@ -197,7 +279,28 @@ const encodePart = (part: ContentPart): unknown => {
 			return {
 				recovery_share: [
 					part.secretRef, part.version, part.threshold, part.total, part.shareB64,
-					part.createdAt, part.splitId, part.shareIndex, part.splitProof, ...(part.rest ?? []),
+					part.createdAt, part.splitId, part.shareIndex, part.splitProof,
+					...withNodeSet(part.nodeSet, part.rest),
+				],
+			};
+		case 'recovery_share_return':
+			return {
+				recovery_share_return: [
+					part.secretRef, part.version, part.splitId, part.threshold, part.total, part.shareIndex,
+					part.round, part.candidate, part.shareB64, part.createdAt, part.splitProof,
+					...withNodeSet(part.nodeSet, part.rest),
+				],
+			};
+		case 'recovery_binding':
+			return {
+				recovery_binding: [part.secretRef, part.candidate, part.userHash, part.signatureB64, ...(part.rest ?? [])],
+			};
+		case 'recovery_invite':
+			return { recovery_invite: [part.inviteId, part.deployment, ...(part.rest ?? [])] };
+		case 'recovery_invite_reply':
+			return {
+				recovery_invite_reply: [
+					part.inviteId, part.answer, part.metaAddress, part.proofB64, ...(part.rest ?? []),
 				],
 			};
 		case 'unknown':
@@ -205,16 +308,40 @@ const encodePart = (part: ContentPart): unknown => {
 	}
 };
 
-/**
- * What a quote may carry of a part. A recovery share is named, never copied:
- * a reply to the message would otherwise put the share's bytes in a second
- * message, which the share's owner never sent and dropping the share never
- * reaches.
- */
-const quotable = (part: ContentPart): ContentPart =>
-	part.kind === 'recovery_share' ? { kind: 'text', text: RECOVERY_SHARE_LABEL } : part;
+/** A node set as the tail of a share envelope: absent only when nothing follows it. */
+const withNodeSet = (nodeSet: NodeSet | null, rest: unknown[] | undefined): unknown[] =>
+	nodeSet ? [nodeSetToWire(nodeSet), ...(rest ?? [])] : rest?.length ? [null, ...rest] : [];
 
-const RECOVERY_SHARE_LABEL = '🔐 recovery share';
+/** How each recovery message reads in text, previews and quotes. */
+const RECOVERY_LABELS = {
+	recovery_share: '🔐 recovery share',
+	recovery_share_return: '🔐 recovery share returned',
+	recovery_binding: '🔐 recovery binding',
+	recovery_invite: '🛡 guardian invitation',
+	recovery_invite_reply: '🛡 guardian invitation answered',
+} as const;
+
+type RecoveryPart = Extract<ContentPart, { kind: keyof typeof RECOVERY_LABELS }>;
+const isRecoveryPart = (part: ContentPart): part is RecoveryPart => Object.hasOwn(RECOVERY_LABELS, part.kind);
+
+/** What a quote copies as it is; every other part is named by a label. */
+const COPIED_IN_QUOTES = new Set<ContentPart['kind']>(['text', 'quote', 'file', 'image', 'video', 'checkpoint']);
+
+/**
+ * What a quote may carry of a part: the kinds known to be safe to repeat, and
+ * a label for everything else. A recovery message — or a type this build does
+ * not know, which a future recovery type would be — is named, never copied: a
+ * reply would otherwise put a share's bytes, a key or a proof into a second
+ * message its sender never sent.
+ */
+const quotable = (part: ContentPart): ContentPart => {
+	if (COPIED_IN_QUOTES.has(part.kind)) return part;
+	if (isRecoveryPart(part)) return { kind: 'text', text: RECOVERY_LABELS[part.kind] };
+	return { kind: 'text', text: part.kind === 'unknown' ? `[${part.type}]` : `[${part.kind}]` };
+};
+
+/** A reply's snapshot of the message it cites, made safe to keep: see quotable. */
+export const quoteSnapshot = (parts: ContentPart[]): ContentPart[] => parts.map(quotable);
 
 const encodeValue = (parts: ContentPart[]): unknown => {
 	if (parts.length === 1) return encodePart(parts[0]);
@@ -343,6 +470,10 @@ const decodeValue = (value: unknown): ContentPart[] => {
 				}];
 			}
 			if (type === 'recovery_share') return [decodeRecoveryShare(obj.recovery_share)];
+			if (type === 'recovery_share_return') return [decodeRecoveryShareReturn(obj.recovery_share_return)];
+			if (type === 'recovery_binding') return [decodeRecoveryBinding(obj.recovery_binding)];
+			if (type === 'recovery_invite') return [decodeRecoveryInvite(obj.recovery_invite)];
+			if (type === 'recovery_invite_reply') return [decodeRecoveryInviteReply(obj.recovery_invite_reply)];
 			return [{ kind: 'unknown', type, value: obj[type] }];
 		}
 	}
@@ -355,20 +486,37 @@ const tailOf = (arr: unknown[], known: number): Extensible =>
 
 const isInt = (v: unknown): v is number => Number.isInteger(v);
 
+/** Field checks by letter: s string, i integer, n number. */
+const FIELD = { s: (v: unknown) => typeof v === 'string', i: isInt, n: (v: unknown) => typeof v === 'number' } as const;
+
+/** The tuple a field signature spells, so the compiler holds the signature and the fields together. */
+type Spell<S extends string> = S extends `${infer C}${infer R}` ? [C extends 's' ? string : number, ...Spell<R>] : [];
+
+/** An array whose leading fields have the types `sig` spells, one letter each; its length is at least `sig`'s. */
+const head = <S extends string>(r: unknown, sig: S): r is [...Spell<S>, ...unknown[]] =>
+	Array.isArray(r) && r.length >= sig.length && [...sig].every((t, i) => FIELD[t as keyof typeof FIELD](r[i]));
+
+const isLeafList = (v: unknown): v is string[] => Array.isArray(v) && v.every((leaf) => typeof leaf === 'string');
+
 /**
- * Positions 0–7 are required and typed; `split_proof` at 8 may be missing — a
- * share without it is kept and fails its check, rather than taking the whole
- * message down as undecodable. A longer array is accepted and its tail ignored.
+ * The optional proof-and-node-set tail of a share envelope, from `at`. Either
+ * may be missing — a share without them is kept and fails its check, rather
+ * than taking the whole message down as undecodable — but one that is there
+ * must have its shape. A node set's rules are checkNodeSet's, at the check.
  */
+const shareTail = (r: unknown[], at: number, type: string) => {
+	// null is absent, for the proof as for the node set: kept, and it fails its check.
+	const proof = r[at] ?? null;
+	const wire = r[at + 1] ?? null;
+	if (proof !== null && !isLeafList(proof)) throw new ContentDecodeError(`malformed ${type} envelope`);
+	const nodeSet = wire === null ? null : nodeSetFromWire(wire);
+	if (wire !== null && !nodeSet) throw new ContentDecodeError(`malformed ${type} node set`);
+	return { splitProof: proof ?? [], nodeSet, ...tailOf(r, at + 2) };
+};
+
+/** Positions 0–7 are required and typed; split_proof (8) and node_set (9) are shareTail's. */
 const decodeRecoveryShare = (r: unknown): RecoverySharePart => {
-	if (
-		!Array.isArray(r) || r.length < 8 ||
-		typeof r[0] !== 'string' || !isInt(r[1]) || !isInt(r[2]) || !isInt(r[3]) ||
-		typeof r[4] !== 'string' || typeof r[5] !== 'number' || typeof r[6] !== 'string' || !isInt(r[7]) ||
-		(r.length > 8 && !(Array.isArray(r[8]) && r[8].every((leaf: unknown) => typeof leaf === 'string')))
-	) {
-		throw new ContentDecodeError('malformed recovery_share envelope');
-	}
+	if (!head(r, 'siiisnsi')) throw new ContentDecodeError('malformed recovery_share envelope');
 	return {
 		kind: 'recovery_share',
 		secretRef: r[0],
@@ -379,8 +527,48 @@ const decodeRecoveryShare = (r: unknown): RecoverySharePart => {
 		createdAt: r[5],
 		splitId: r[6],
 		shareIndex: r[7],
-		splitProof: r.length > 8 ? (r[8] as string[]) : [],
-		rest: r.slice(9),
+		...shareTail(r, 8, 'recovery_share'),
+	};
+};
+
+/** Positions 0–9 are required and typed; split_proof (10) and node_set (11) are shareTail's. */
+const decodeRecoveryShareReturn = (r: unknown): RecoveryShareReturnPart => {
+	if (!head(r, 'sisiiiissn')) throw new ContentDecodeError('malformed recovery_share_return envelope');
+	return {
+		kind: 'recovery_share_return',
+		secretRef: r[0],
+		version: r[1],
+		splitId: r[2],
+		threshold: r[3],
+		total: r[4],
+		shareIndex: r[5],
+		round: r[6],
+		candidate: r[7],
+		shareB64: r[8],
+		createdAt: r[9],
+		...shareTail(r, 10, 'recovery_share_return'),
+	};
+};
+
+const decodeRecoveryBinding = (r: unknown): RecoveryBindingPart => {
+	if (!head(r, 'ssss')) throw new ContentDecodeError('malformed recovery_binding envelope');
+	return { kind: 'recovery_binding', secretRef: r[0], candidate: r[1], userHash: r[2], signatureB64: r[3], ...tailOf(r, 4) };
+};
+
+const decodeRecoveryInvite = (r: unknown): RecoveryInvitePart => {
+	if (!head(r, 'ss')) throw new ContentDecodeError('malformed recovery_invite envelope');
+	return { kind: 'recovery_invite', inviteId: r[0], deployment: r[1], ...tailOf(r, 2) };
+};
+
+const decodeRecoveryInviteReply = (r: unknown): RecoveryInviteReplyPart => {
+	if (!head(r, 'ssss')) throw new ContentDecodeError('malformed recovery_invite_reply envelope');
+	return {
+		kind: 'recovery_invite_reply',
+		inviteId: r[0],
+		answer: r[1],
+		metaAddress: r[2],
+		proofB64: r[3],
+		...tailOf(r, 4),
 	};
 };
 
@@ -409,7 +597,7 @@ export const contentToText = (parts: ContentPart[]): string =>
 			// here too would print the filename twice under the picture.
 			if (p.kind === 'file' || p.kind === 'image' || p.kind === 'video') return '';
 			if (p.kind === 'checkpoint') return ''; // renders as its own marker
-			if (p.kind === 'recovery_share') return RECOVERY_SHARE_LABEL;
+			if (isRecoveryPart(p)) return RECOVERY_LABELS[p.kind];
 			return `[${p.type}]`;
 		})
 		.filter(Boolean)

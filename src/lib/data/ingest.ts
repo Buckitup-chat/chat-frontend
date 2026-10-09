@@ -14,10 +14,12 @@ import { discoverDependencies, reconcileAccepted } from './coordinator';
 import { OWNER_FIELD } from './writeContracts';
 import { VaultLockedError, AccountMismatchError, resolveSigningKey, type SigningKeySource } from './keyCustody';
 import {
-	enqueue, stopDrainLoop, awaitEntryOutcome, dependencyBlockFor, wakeAccountSender, releaseNetworkBackoffs,
+	enqueue, stopDrainLoop as stopOutboxLoop, awaitEntryOutcome, dependencyBlockFor, wakeAccountSender, releaseNetworkBackoffs,
+	approvalHeldShapes, approvalProbeCandidate, sendApprovalProbe, onApprovalHeldChange, AWAITING_APPROVAL_MESSAGE,
 	awaitDeliveryVerdict, submitEntryToSender, SessionFencedError,
-	type DependencyBlockReason, type DeliveryVerdict, type DiscoveryOutcome, type EntryOutcome, type OutboxEntry,
+	type HeldReason, type DeliveryVerdict, type DiscoveryOutcome, type EntryOutcome, type OutboxEntry,
 } from './outbox';
+import { setWriteProber, syncBlockedWrites } from './accessGate';
 import type { IngestRowResult } from './types';
 
 export class IngestError extends Error {
@@ -31,6 +33,8 @@ export class IngestError extends Error {
 	results: IngestRowResult[] | null;
 	/** true when no answer came back at all: a fact about connectivity, not about this write */
 	network: boolean;
+	approvalBlocked: boolean;
+	blockedIndexes: number[];
 
 	constructor(
 		message: string,
@@ -41,6 +45,8 @@ export class IngestError extends Error {
 			status?: number | null;
 			results?: IngestRowResult[] | null;
 			network?: boolean;
+			approvalBlocked?: boolean;
+			blockedIndexes?: number[];
 		} = {}
 	) {
 		super(message);
@@ -51,8 +57,14 @@ export class IngestError extends Error {
 		this.status = opts.status ?? null;
 		this.results = opts.results ?? null;
 		this.network = opts.network ?? false;
+		this.approvalBlocked = opts.approvalBlocked ?? false;
+		this.blockedIndexes = opts.blockedIndexes ?? [];
 	}
 }
+
+export const NOT_IN_TRUST_CHAIN = 'not_in_trust_chain';
+
+const isApprovalBlocked = (r: IngestRowResult): boolean => r.status === 'error' && r.error === NOT_IN_TRUST_CHAIN;
 
 const isUniqueConflict = (r: IngestRowResult): boolean => {
 	if (r.status === 'ok' || r.error !== 'validation_failed') return false;
@@ -141,6 +153,13 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 	const isResolvedConflict = (r: IngestRowResult): boolean => r.status === 'exists' && r.conflicted === false;
 
 	const failed = results.filter((r) => r.status !== 'ok' && !isResolvedConflict(r));
+	const blockedIndexes = failed.filter(isApprovalBlocked).map((r) => r.index);
+	if (failed.length > 0 && blockedIndexes.length === failed.length) {
+		throw new IngestError(
+			`ingest: ${blockedIndexes.length}/${results.length} rows wait for approval by the device owner (${NOT_IN_TRUST_CHAIN})`,
+			{ permanent: false, approvalBlocked: true, blockedIndexes, status: resp.status, results }
+		);
+	}
 	if (failed.length > 0) {
 		// A 422 row outcome is the server's final verdict — validation or a
 		// business rule (e.g. "cannot react to own message"). Retrying the
@@ -155,7 +174,7 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 		const conflictIndexes = failed.filter(isConflict).map((r) => r.index);
 		throw new IngestError(
 			`ingest rejected ${failed.length}/${results.length} rows: ${JSON.stringify(failed[0]?.details || failed[0]?.error)}`,
-			{ permanent, uniqueConflictOnly, conflictIndexes, status: resp.status, results }
+			{ permanent, uniqueConflictOnly, conflictIndexes, blockedIndexes, status: resp.status, results }
 		);
 	}
 
@@ -229,7 +248,7 @@ export async function sendMutationsWithRetry(
 				});
 			}
 
-			if (e instanceof IngestError && e.permanent) throw e;
+			if (e instanceof IngestError && (e.permanent || e.approvalBlocked)) throw e;
 			if (e instanceof VaultLockedError || e instanceof AccountMismatchError) throw e;
 			if (attempt === retries) break;
 			if (e instanceof IngestError && e.network && attempt >= networkRetries) break;
@@ -274,7 +293,7 @@ export interface DeliveryHandle {
 	phase: 'accepted' | 'queued';
 	result?: SendResult;
 	acceptance: Promise<EntryOutcome>;
-	held?: { reason: DependencyBlockReason | 'state_unconfirmed'; message: string };
+	held?: { reason: HeldReason | 'state_unconfirmed'; message: string };
 }
 
 export interface LiveSendOptions {
@@ -282,6 +301,7 @@ export interface LiveSendOptions {
 	sourceIntentId?: string;
 	excludeFromDependencies?: string[];
 	targeted?: boolean;
+	fileIds?: string[];
 }
 
 export async function sendMutationsAndAwaitShape(
@@ -292,13 +312,14 @@ export async function sendMutationsAndAwaitShape(
 	const owner = ownerOf(mutations);
 	let discovery: DiscoveryOutcome;
 	try {
-		discovery = await discoverDependencies(mutations, owner, opts.excludeFromDependencies);
+		discovery = await discoverDependencies(mutations, owner, opts.excludeFromDependencies, opts.fileIds ? { fileIds: opts.fileIds } : {});
 	} catch (e) {
 		discovery = { kind: 'blocked', block: dependencyBlockFor(e, { kind: 'discovery', observedKeys: null }) };
 	}
+	const fileIds = opts.fileIds?.length ? { fileIds: opts.fileIds } : {};
 	const outboxId = await enqueue(mutations, owner, discovery.kind === 'blocked'
-		? { discoveryBlocked: discovery.block, sourceIntentId: opts.sourceIntentId, observeAttempt: true }
-		: { dependsOn: discovery.dependsOn, sourceIntentId: opts.sourceIntentId, observeAttempt: true });
+		? { discoveryBlocked: discovery.block, sourceIntentId: opts.sourceIntentId, observeAttempt: true, ...fileIds }
+		: { dependsOn: discovery.dependsOn, sourceIntentId: opts.sourceIntentId, observeAttempt: true, ...fileIds });
 	// ADR §11: a write that cannot be stored fails visibly; nothing is sent.
 	if (outboxId === null) throw new DurabilityError();
 	await opts.onDurable?.(outboxId);
@@ -323,6 +344,9 @@ export async function sendMutationsAndAwaitShape(
 		case 'accepted':
 			return { outboxId, phase: 'accepted', result: attempt.result as SendResult, acceptance: awaitEntryOutcome(outboxId, owner) };
 		case 'failed':
+			if (attempt.error instanceof IngestError && attempt.error.approvalBlocked) {
+				return { ...queued(), held: { reason: 'awaiting_approval', message: AWAITING_APPROVAL_MESSAGE } };
+			}
 			throw attempt.error;
 		case 'fenced':
 			throw new SessionFencedError(`sendMutationsAndAwaitShape: the session changed before outbox entry ${outboxId} was sent`);
@@ -352,7 +376,49 @@ const replaySend = (signingKey: SigningKeySource) => async (mutations: unknown[]
 
 const senderHooks = { reconcile: (mutations: unknown[], result?: unknown) => reconcileAccepted(mutations, result), rediscover: (entry: OutboxEntry) => rediscoverDependencies(entry) };
 
+let approvalSession: { userHash: string; signSkey: SigningKeySource } | null = null;
+
+async function syncApprovalHeld(userHash: string): Promise<void> {
+	if (approvalSession?.userHash !== userHash) return;
+	let shapes: Set<string>;
+	try {
+		shapes = await approvalHeldShapes(userHash);
+	} catch {
+		return; // unreadable now: the gate keeps what it showed
+	}
+	if (approvalSession?.userHash === userHash) syncBlockedWrites(userHash, shapes);
+}
+
+async function probeHeldWrite(userHash: string, shape: string): Promise<boolean> {
+	const session = approvalSession;
+	if (session?.userHash !== userHash) return false;
+	const candidate = await approvalProbeCandidate(userHash, shape);
+	if (!candidate || approvalSession !== session) return false;
+	const attempt = await sendApprovalProbe(userHash, candidate.id, replaySend(session.signSkey), senderHooks);
+	if (attempt?.kind !== 'accepted') return false;
+	if (approvalSession === session) wakeSender(userHash, session.signSkey);
+	return true;
+}
+
+let approvalWired = false;
+function wireApproval(): void {
+	if (approvalWired) return;
+	approvalWired = true;
+	onApprovalHeldChange((userHash) => void syncApprovalHeld(userHash));
+	setWriteProber(probeHeldWrite);
+}
+
+export function stopDrainLoop(): void {
+	approvalSession = null;
+	stopOutboxLoop();
+}
+
 function wakeSender(owner: string, signSkey: SigningKeySource, opts: { releaseNetworkBackoffs?: boolean } = {}): void {
+	wireApproval();
+	if (approvalSession?.userHash !== owner || approvalSession.signSkey !== signSkey) {
+		approvalSession = { userHash: owner, signSkey };
+	}
+	void syncApprovalHeld(owner);
 	void (async () => {
 		if (opts.releaseNetworkBackoffs) await releaseNetworkBackoffs(owner);
 		wakeAccountSender(owner, replaySend(signSkey), senderHooks);
@@ -410,6 +476,7 @@ export const rediscoverDependencies = async (entry: OutboxEntry): Promise<Discov
 	}
 	return discoverDependencies(entry.mutations, entry.userHash, [entry.id], {
 		observedKeys: block.observedKeys,
+		...(entry.fileIds?.length ? { fileIds: entry.fileIds } : {}),
 		...(block.kind === 'admission' ? { admission: block.admission ?? { scope: '', generation: null } } : { freshnessChecked: true }),
 	});
 };
@@ -427,5 +494,3 @@ export function drainPendingWrites(userHash: string, signSkey: SigningKeySource)
 	// the connection: every stored retry time stands.
 	wakeSender(userHash, signSkey);
 }
-
-export { stopDrainLoop };

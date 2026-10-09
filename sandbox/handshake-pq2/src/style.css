@@ -1,0 +1,125 @@
+:root {
+	--bg: #241824;
+	--fg: #f4eef4;
+	--muted: #b8a9b8;
+	--card: #332433;
+	--accent: #8e2b77;
+	--ok: #2e7d32;
+	--warn: #b7791f;
+	--bad: #b3261e;
+	font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+	color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+	padding: env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 16px);
+}
+
+header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 10px 0;
+}
+
+.title { font-weight: 600; }
+.who { color: var(--muted); font-size: 13px; }
+
+main { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+
+.stage {
+	font-size: 15px;
+	text-align: center;
+	min-height: 1.4em;
+}
+
+.qr {
+	background: #fff;
+	padding: 6px;
+	border-radius: 12px;
+	border: 6px solid #555;
+	line-height: 0;
+	transition: border-color 0.2s;
+}
+/* As large as the screen allows: B, the densest code, is at the limit of what a camera reads at arm's length. */
+.qr canvas { width: min(94vw, 72vh) !important; height: auto !important; image-rendering: pixelated; }
+.qr[data-stage='A'] { border-color: #666; }
+.qr[data-stage='B'] { border-color: #8e2b77; }
+.qr[data-stage='C'] { border-color: #611e52; }
+.qr[data-stage='D'] { border-color: #1f4e8c; }
+.qr[data-outcome='confirmed'] { border-color: var(--ok); }
+.qr[data-outcome='verified'] { border-color: var(--warn); }
+.qr[data-outcome='expired'] { border-color: var(--bad); }
+
+video {
+	position: fixed;
+	right: 10px;
+	bottom: calc(env(safe-area-inset-bottom) + 10px);
+	width: 96px;
+	height: 128px;
+	object-fit: cover;
+	border-radius: 8px;
+	border: 2px solid var(--accent);
+	transform: scaleX(-1);
+	background: #000;
+}
+video[data-camera='environment'] { transform: none; }
+video[hidden] { display: none; }
+
+#result {
+	width: min(92vw, 480px);
+	border-radius: 12px;
+	padding: 14px;
+	background: var(--card);
+	text-align: center;
+}
+#result.confirmed { border: 2px solid var(--ok); }
+#result.verified { border: 2px solid var(--warn); }
+#result.expired { border: 2px solid var(--bad); }
+#result .headline { font-size: 20px; font-weight: 700; }
+#result .code { font-size: 44px; letter-spacing: 6px; font-variant-numeric: tabular-nums; margin: 8px 0; }
+#result .detail { color: var(--muted); font-size: 14px; }
+
+.row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+button {
+	background: var(--accent);
+	color: #fff;
+	border: 0;
+	border-radius: 10px;
+	padding: 10px 14px;
+	font-size: 15px;
+}
+button.ghost { background: transparent; border: 1px solid var(--muted); color: var(--fg); }
+
+#settings {
+	background: var(--card);
+	border-radius: 12px;
+	padding: 12px;
+	margin-bottom: 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+#settings label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+#settings label.check { flex-direction: row; align-items: center; gap: 8px; }
+#settings input, #settings select {
+	font-size: 16px;
+	padding: 8px;
+	border-radius: 8px;
+	border: 1px solid #555;
+	background: #1c121c;
+	color: var(--fg);
+}
+.hint { color: var(--muted); font-size: 13px; margin: 0; }
+
+details { width: min(92vw, 480px); }
+summary { color: var(--muted); padding: 4px 0; }
+#log { font: 12px/1.4 ui-monospace, Menlo, monospace; padding-left: 28px; margin: 4px 0; word-break: break-word; }
+#timings { font-size: 13px; }

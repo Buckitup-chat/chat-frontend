@@ -27,6 +27,11 @@ const inflight = new Map<string, Promise<ReadSessionEntry | null>>();
 const tableShapes = new Map<string, string>();
 let generation = 0;
 
+type CardRecovery = 'accepted' | 'stale';
+const cardRecoveries = new Map<string, Promise<CardRecovery>>();
+let cardRecoveryEpoch = 0;
+const cardRecoveryEnded = new Map<string, Error | null>();
+
 const RENEW_AHEAD_MS = 60_000;
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -95,10 +100,15 @@ export function clearSessions(): void {
 	sessions.clear();
 	inflight.clear();
 	tableShapes.clear();
+	cardRecoveries.clear();
+	cardRecoveryEnded.clear();
 	generation++;
 }
 
 // ---------- internals ----------
+
+type EncryptionManager = InstanceType<typeof import('@/libs/EncryptionManagerPQ').EncryptionManagerPQ>;
+const UNKNOWN_USER = Symbol('unknown_user');
 
 async function doOpen(shape: string, gen: number): Promise<ReadSessionEntry | null> {
 	const stale = () => gen !== generation;
@@ -109,6 +119,45 @@ async function doOpen(shape: string, gen: number): Promise<ReadSessionEntry | nu
 
 	const userHash = em.currentUserHash as string | null;
 	if (!userHash) return null;
+	const epoch = cardRecoveryEpoch;
+	const first = await requestSession(em, userHash, shape, stale);
+	if (first !== UNKNOWN_USER) return first;
+
+	if (!(await recoverCard(em, userHash, epoch, stale)) || stale()) return null;
+	const retry = await requestSession(em, userHash, shape, stale);
+	if (retry !== UNKNOWN_USER) return retry;
+	if (!stale()) cardRecoveryEnded.set(userHash, null);
+	return null;
+}
+
+async function recoverCard(em: EncryptionManager, userHash: string, epoch: number, stale: () => boolean): Promise<boolean> {
+	if (cardRecoveryEnded.has(userHash)) {
+		const failure = cardRecoveryEnded.get(userHash);
+		if (failure) throw failure;
+		return false;
+	}
+	if (epoch !== cardRecoveryEpoch) return true;
+	let recovery = cardRecoveries.get(userHash);
+	if (!recovery) {
+		recovery = em.recoverOwnCard(userHash) as Promise<CardRecovery>;
+		const running = recovery;
+		cardRecoveries.set(userHash, running);
+		void running.then(
+			(outcome) => { if (outcome === 'accepted' && cardRecoveries.get(userHash) === running) cardRecoveryEpoch++; },
+			(e: unknown) => { if (cardRecoveries.get(userHash) === running) cardRecoveryEnded.set(userHash, e instanceof Error ? e : new Error(String(e))); },
+		).finally(() => { if (cardRecoveries.get(userHash) === running) cardRecoveries.delete(userHash); });
+	}
+	try {
+		return (await recovery) === 'accepted';
+	} catch (e) {
+		if (stale()) return false;
+		throw e;
+	}
+}
+
+async function requestSession(
+	em: EncryptionManager, userHash: string, shape: string, stale: () => boolean,
+): Promise<ReadSessionEntry | null | typeof UNKNOWN_USER> {
 	const challengeResp = await fetchChallenge();
 	if (stale()) return null;
 	const challengeBytes = new TextEncoder().encode(challengeResp.challenge);
@@ -153,7 +202,9 @@ async function doOpen(shape: string, gen: number): Promise<ReadSessionEntry | nu
 	}
 
 	if (resp.status === 401) {
-		return null;
+		const body = await resp.json().catch(() => null) as { error?: string } | null;
+		if (stale()) return null;
+		return body?.error === 'unknown_user' ? UNKNOWN_USER : null;
 	}
 
 	if (resp.status === 400) {

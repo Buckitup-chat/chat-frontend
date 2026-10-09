@@ -11,11 +11,14 @@ import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { drainPendingWrites, resumePendingWrites, stopDrainLoop, deliverStoredWrite, IngestError, DurabilityError } from '@/lib/data/ingest';
 import {
-  storeUserCardIntentUnderLock, storeCardIntentUnderLock, withCardLock, decideCardConstruction,
+  storeUserCardIntentUnderLock, storeCardIntentUnderLock, withCardLock, decideCardConstruction, acceptedCardTimestamp,
   BootstrapCardRejectedError, CardAuthoringBlockedError,
 } from '@/lib/data/userCardIntent';
 import { VaultLockedError } from '@/lib/data/keyCustody';
-import { startLeaderElection, stopLeaderElection, currentSessionUserHash, onOutboxWake, awaitServerAccepted, awaitDeliveryVerdict } from '@/lib/data/outbox';
+import {
+  startLeaderElection, stopLeaderElection, currentSessionUserHash, onOutboxWake, awaitServerAccepted, awaitDeliveryVerdict,
+  currentSessionToken, sameSessionToken,
+} from '@/lib/data/outbox';
 import { recoverIntents, signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch } from '@/lib/data/userStorage';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
@@ -108,6 +111,7 @@ export class EncryptionManagerPQ extends EventTarget {
   #localUserCards = []
   #currentUserHash = null;
   #bootstrapUserHash = null;
+  #sessionEnded = null;
   #signSkey = null;
   #cryptSkey = null;
   #slotResolver = null;
@@ -318,7 +322,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#slotResolver = null;
     resetUserStorageCollection();
     if (this.#currentUserHash !== null && this.#currentUserHash !== userHash) {
-      await this.#clearAccountReadCache();
+      await this.logout();
     }
 
     let identity;
@@ -332,6 +336,8 @@ export class EncryptionManagerPQ extends EventTarget {
         this.#signSkey = null;
         this.#currentUserHash = null;
         this.#bootstrapUserHash = null;
+        this.#sessionEnded?.abort();
+        this.#sessionEnded = null;
         this.#dispatchAuthChange();
       }
       throw e;
@@ -348,23 +354,53 @@ export class EncryptionManagerPQ extends EventTarget {
     return identity;
   }
 
-  async #passBootstrapCard(userHash, { mode, card = null, deferDelivery = false }) {
+  async recoverOwnCard(userHash) {
+    const session = currentSessionToken();
+    const sessionEnded = this.#sessionEnded?.signal;
+    const current = () => this.#currentUserHash === userHash && sameSessionToken(session, currentSessionToken());
+    if (!current() || !this.#signSkey || !sessionEnded) return 'stale';
+    const card = this.#localUserCards.find(u => u.user_hash === userHash);
+    if (!card) throw new Error(`User ${userHash} not found in local identities`);
+    try {
+      const acceptedAfter = await acceptedCardTimestamp(userHash);
+      if (!current()) return 'stale';
+      let storedId = null;
+      const outcome = await this.#passBootstrapCard(userHash, {
+        mode: 'recover', card, deferDelivery: true, acceptedAfter, session, onStored: (id) => { storedId = id; },
+      });
+      if (!current()) return 'stale';
+      if (outcome === 'accepted') return 'accepted';
+      if (!storedId) throw new Error('Your profile card could not be stored for delivery');
+      drainPendingWrites(userHash, this.#signingKeyOf(userHash));
+      const verdict = await awaitServerAccepted(storedId, userHash, { signal: sessionEnded });
+      if (!current()) return 'stale';
+      if (verdict.kind === 'accepted') return 'accepted';
+      throw new BootstrapCardRejectedError(verdict.kind === 'rejected' ? verdict.error : 'discarded');
+    } catch (e) {
+      if (!current()) return 'stale';
+      throw e;
+    }
+  }
+
+  async #passBootstrapCard(userHash, { mode, card = null, deferDelivery = false, acceptedAfter = null, session = null, onStored = null }) {
     const signSkey = this.#signSkey;
     let locked = false;
     try {
-      return await this.#passBootstrapCardLocked(userHash, signSkey, { mode, card, deferDelivery, onLocked: () => { locked = true; } });
+      return await this.#passBootstrapCardLocked(userHash, signSkey, {
+        mode, card, deferDelivery, acceptedAfter, session, onStored, onLocked: () => { locked = true; },
+      });
     } catch (e) {
       if (!locked && mode === 'import') throw new CardNotDurableError(e);
       throw e;
     }
   }
 
-  async #passBootstrapCardLocked(userHash, signSkey, { mode, card, deferDelivery, onLocked }) {
+  async #passBootstrapCardLocked(userHash, signSkey, { mode, card, deferDelivery, acceptedAfter, session, onStored, onLocked }) {
     return withCardLock(userHash, async () => {
       onLocked();
       let target;
       try {
-        const decision = await decideCardConstruction(userHash, mode);
+        const decision = await decideCardConstruction(userHash, mode, { acceptedAfter });
         switch (decision.kind) {
           case 'proven': return 'accepted';
           case 'rejected': throw new BootstrapCardRejectedError(decision.reason);
@@ -381,17 +417,23 @@ export class EncryptionManagerPQ extends EventTarget {
         if (mode === 'import' && !(e instanceof BootstrapCardRejectedError)) throw new CardNotDurableError(e);
         throw e;
       }
-      return this.#deliverBootstrapCard(userHash, target, signSkey, { deferDelivery });
+      return this.#deliverBootstrapCard(userHash, target, signSkey, { deferDelivery, session, onStored });
     });
   }
 
-  async #deliverBootstrapCard(userHash, target, signSkey, { deferDelivery }) {
+  async #deliverBootstrapCard(userHash, target, signSkey, { deferDelivery, session = null, onStored = null }) {
     let outboxId = target.kind === 'stored' ? target.outboxId : null;
+    if (outboxId) onStored?.(outboxId);
     try {
       if (target.kind === 'intent') {
-        const handle = await signAndDispatchIntent(target.intentId, target.intent, signSkey, { bootstrap: true });
+        const handle = await signAndDispatchIntent(target.intentId, target.intent, signSkey, {
+          bootstrap: true,
+          ...(session ? { token: session } : {}),
+          ...(onStored ? { onDurable: (id) => onStored(id) } : {}),
+        });
         if (handle.phase === 'accepted') return 'accepted';
         outboxId = handle.outboxId;
+        onStored?.(outboxId);
       }
       const verdict = deferDelivery
         ? await deliverStoredWrite(outboxId, userHash, signSkey)
@@ -443,6 +485,8 @@ export class EncryptionManagerPQ extends EventTarget {
   #activateSession(userHash, identity) {
     this.#bootstrapUserHash = null;
     this.#currentUserHash = userHash;
+    this.#sessionEnded?.abort();
+    this.#sessionEnded = new AbortController();
 
     setStorageJsonCodec({
       decrypt: (valueB64) => this.#decryptJson(valueB64),
@@ -578,6 +622,8 @@ export class EncryptionManagerPQ extends EventTarget {
 
   async logout() {
     const hadActiveAccount = this.#currentUserHash !== null;
+    this.#sessionEnded?.abort();
+    this.#sessionEnded = null;
     this.#stopOutboxDrain();
     setStorageJsonCodec(null);
     if (this.#signSkey) {
@@ -1096,7 +1142,12 @@ export class EncryptionManagerPQ extends EventTarget {
 
     const cardStatus = cardChanged ? await this.#publishCardOrQueue(updated) : 'synced';
 
-    return { card: updated, pending: rootStatus !== 'synced' || cardStatus !== 'synced', cardPublished: cardChanged };
+    return {
+      card: updated,
+      pending: rootStatus !== 'synced' || cardStatus !== 'synced',
+      awaitingApproval: rootStatus === 'awaiting-approval',
+      cardPublished: cardChanged,
+    };
   }
 
   async loadUserProfile() {

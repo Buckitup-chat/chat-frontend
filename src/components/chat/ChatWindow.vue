@@ -184,12 +184,56 @@
                 </div>
               </div>
               <template v-if="!refusedFile(f)">
+                <template v-if="playableAudioType(f)">
+                  <span v-if="audios[fileKey(f)]?.status === 'loading'" class="msg-file-spinner" title="Loading audio"></span>
+                  <button v-else-if="audios[fileKey(f)]?.status !== 'ready'" type="button"
+                    class="msg-file-action msg-audio-toggle" title="Play" @click="playAudio(f)">
+                    <svg class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9l7-4.5z" /></svg>
+                  </button>
+                </template>
                 <button v-if="downloads[fileKey(f)]?.status !== 'downloading'" type="button"
                   class="msg-file-action" @click="emit('downloadFile', f)"
                   :title="downloads[fileKey(f)]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
                 <span v-else class="msg-file-spinner"></span>
               </template>
             </div>
+
+            <!-- Audio plays from its decrypted bytes, fetched on Play only. -->
+            <template v-if="playableAudioType(f) && !refusedFile(f)">
+              <div v-if="audios[fileKey(f)]?.status === 'loading'" class="msg-audio-note">
+                Loading audio<template v-if="audios[fileKey(f)].total"> · chunk {{ audios[fileKey(f)].done }} of {{ audios[fileKey(f)].total }}</template>
+              </div>
+              <div v-else-if="audios[fileKey(f)]?.status === 'error'" class="msg-audio-note msg-file-err">
+                {{ audios[fileKey(f)].message }}
+              </div>
+              <template v-else-if="audios[fileKey(f)]?.status === 'ready'">
+                <audio :ref="(el) => setAudioElement(fileKey(f), el)" preload="auto" :src="audios[fileKey(f)].url"
+                  @loadedmetadata="trackAudio(fileKey(f), $event)" @durationchange="trackAudio(fileKey(f), $event)"
+                  @timeupdate="trackAudio(fileKey(f), $event)" @play="trackAudio(fileKey(f), $event)"
+                  @pause="trackAudio(fileKey(f), $event)" @ended="trackAudio(fileKey(f), $event)"
+                  @error="audioErrors = { ...audioErrors, [fileKey(f)]: true }"></audio>
+                <div class="msg-audio-player">
+                  <button type="button" class="msg-file-action msg-audio-toggle"
+                    :title="audioPlayback[fileKey(f)]?.playing ? 'Pause' : 'Play'"
+                    @click="toggleAudio(fileKey(f))">
+                    <svg v-if="audioPlayback[fileKey(f)]?.playing" class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.5h2.5v9H4.5zM9 3.5h2.5v9H9z" /></svg>
+                    <svg v-else class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9l7-4.5z" /></svg>
+                  </button>
+                  <input type="range" class="msg-audio-seek" min="0" step="1"
+                    :max="audioPlayback[fileKey(f)]?.duration || 0" :value="audioPlayback[fileKey(f)]?.current || 0"
+                    :disabled="!audioPlayback[fileKey(f)]?.duration"
+                    :aria-label="'Seek in ' + f.name"
+                    :aria-valuetext="fmtTime(audioPlayback[fileKey(f)]?.current) + ' of ' + fmtTime(audioPlayback[fileKey(f)]?.duration)"
+                    @input="seekAudio(fileKey(f), $event.target.value)" />
+                  <span class="msg-audio-time">
+                    {{ fmtTime(audioPlayback[fileKey(f)]?.current) }} / {{ fmtTime(audioPlayback[fileKey(f)]?.duration) }}
+                  </span>
+                </div>
+                <div v-if="audioErrors[fileKey(f)]" class="msg-audio-note msg-file-err">
+                  This browser cannot play this file. Download it instead.
+                </div>
+              </template>
+            </template>
 
             <!-- §2.4 availability. Partial is a normal state in a network with
                  no internet, so: no red, no warning icon, and the wording says
@@ -244,13 +288,15 @@
                  retraction, so saying "delivered" about the message would name
                  the wrong thing. ↻ = durably queued in the outbox, or an
                  intent kept for recovery before it got there; 🔒 = waiting
-                 for the vault; ! only for a permanent rejection. -->
+                 for the vault; ⏳ = waiting for the device owner's approval;
+                 ! only for a permanent rejection. -->
             <!-- a terminal verification failure outranks any transport ✓ -->
             <span v-if="msg._verify === 'blocked' || (msg._verify === 'invalid' && msg._verifyTerminal)" class="sync-status error" title="Delivered, but it failed verification in this conversation">!</span>
             <span v-else-if="msg._syncStatus === 'sending'" class="sync-status local" title="Saved locally">◌</span>
             <span v-else-if="msg._syncStatus === 'syncing'" class="sync-status pending" title="Sending…">✓</span>
             <span v-else-if="msg._syncStatus === 'queued'" class="sync-status local" title="Queued — will retry automatically">↻</span>
             <span v-else-if="msg._syncStatus === 'awaiting_unlock'" class="sync-status local" title="Waiting for unlock">🔒</span>
+            <span v-else-if="msg._syncStatus === 'awaiting_approval'" class="sync-status local" title="Saved on this device — sent once the device owner approves your account">⏳</span>
             <span v-else-if="msg._syncStatus === 'awaiting_recovery'" class="sync-status local" title="Not sent yet — kept on this device, retried on reconnect or next login">↻</span>
             <span v-else-if="msg._syncStatus === 'synced' && msg._deliveredToPeers"
               :class="['sync-status', msg._deleted ? 'tombstone' : 'delivered']"
@@ -265,6 +311,7 @@
                  attempted text as if it had landed. -->
             <span v-if="msg._editStatus === 'syncing' || msg._editStatus === 'awaiting_echo'" class="sync-status pending" title="Saving edit…">✎</span>
             <span v-else-if="msg._editStatus === 'awaiting_unlock'" class="sync-status local" title="Waiting for unlock">🔒</span>
+            <span v-else-if="msg._editStatus === 'awaiting_approval'" class="sync-status local" title="Edit saved on this device — sent once the device owner approves your account">✎⏳</span>
             <span v-else-if="msg._editStatus === 'error'" class="sync-status error" title="Edit not saved — others still see the previous version">✎!</span>
             <!-- Read receipts are irreversible and tied to this exact revision,
                  so they are only ever produced by the explicit action below. -->
@@ -376,12 +423,13 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { fileKey } from '@/lib/data/fileKey';
-import { contentToText } from '@/lib/pq/content';
+import { contentToText, quoteSnapshot } from '@/lib/pq/content';
 import { thumbHashToDataURL } from 'thumbhash';
 import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { useMenu } from '@/composables/useMenu';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
+import { playableAudioType } from '@/composables/useAudioPlayback';
 import Avatar from 'vue-boring-avatars';
 
 const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
@@ -441,6 +489,10 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
+  audios: {
+    type: Object,
+    default: () => ({})
+  },
   messages: {
     type: Array,
     required: true,
@@ -455,7 +507,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -481,7 +533,9 @@ const startReply = (msg) => {
     messageId: msg._raw.message_id,
     signHash: msg._raw.sign_hash,
     authorHash: msg._raw.sender_hash,
-    snapshot: msg.parts && msg.parts.length ? msg.parts : [{ kind: 'text', text: msg.text }],
+    // Safe to keep from the start: a reply's snapshot is persisted with the
+    // outbox intent, and must not be a second copy of a recovery share.
+    snapshot: msg.parts && msg.parts.length ? quoteSnapshot(msg.parts) : [{ kind: 'text', text: msg.text }],
     previewText: msg.text || '…',
   };
   closeContextMenu();
@@ -603,6 +657,62 @@ const toggleQuoteChain = (msg, qi) => {
   expandedQuotes.value = next;
 };
 const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
+
+const audioElements = new Map();
+const playWhenReady = new Set();
+const audioErrors = ref({});
+const setAudioElement = (fileId, el) => {
+  if (el) audioElements.set(fileId, el);
+  else audioElements.delete(fileId);
+};
+const playAudio = (part) => {
+  playWhenReady.add(fileKey(part));
+  audioErrors.value = { ...audioErrors.value, [fileKey(part)]: false };
+  emit('playAudio', part);
+};
+watch(() => props.audios, async (audios) => {
+  for (const id of [...playWhenReady]) {
+    const status = audios[id]?.status;
+    if (status === 'loading') continue;
+    playWhenReady.delete(id);
+    if (status !== 'ready') continue;
+    await nextTick();
+    audioElements.get(id)?.play()?.catch?.(() => {});
+  }
+  if (!Object.keys(audios).length) {
+    if (Object.keys(audioErrors.value).length) audioErrors.value = {};
+    if (Object.keys(audioPlayback.value).length) audioPlayback.value = {};
+  }
+});
+
+const audioPlayback = ref({});
+const trackAudio = (fileId, event) => {
+  const el = event.target;
+  audioPlayback.value = {
+    ...audioPlayback.value,
+    [fileId]: {
+      current: el.currentTime || 0,
+      duration: Number.isFinite(el.duration) ? el.duration : 0,
+      playing: !el.paused && !el.ended,
+    },
+  };
+};
+const toggleAudio = (fileId) => {
+  const el = audioElements.get(fileId);
+  if (!el) return;
+  if (el.paused) el.play()?.catch?.(() => {});
+  else el.pause();
+};
+const seekAudio = (fileId, value) => {
+  const el = audioElements.get(fileId);
+  if (!el) return;
+  el.currentTime = Number(value);
+  audioPlayback.value = { ...audioPlayback.value, [fileId]: { ...audioPlayback.value[fileId], current: el.currentTime } };
+};
+const fmtTime = (seconds) => {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
 const checkpointsOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'checkpoint');
 
 /** Availability only shows while it is genuinely partial — a complete file
@@ -1252,6 +1362,12 @@ watch(() => props.messages, () => {
 .msg-file-meta { font-size: 10px; color: #6b6875; }
 .msg-file-err { color: #dc3545; }
 .msg-file-action { border: none; background: #241824; color: #fff; border-radius: 999px; width: 26px; height: 26px; font-size: 13px; line-height: 1; flex-shrink: 0; }
+.msg-audio-toggle { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.msg-audio-icon { width: 14px; height: 14px; fill: currentColor; display: block; }
+.msg-audio-player { display: flex; align-items: center; gap: 8px; width: 260px; max-width: 100%; margin-top: 6px; }
+.msg-audio-seek { flex: 1; min-width: 0; height: 24px; accent-color: #8e2b77; cursor: pointer; }
+.msg-audio-time { font-size: 12px; color: #6c5a6c; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.msg-audio-note { font-size: 12px; color: #6c5a6c; margin-top: 4px; }
 .msg-file-spinner { width: 16px; height: 16px; border: 2px solid rgba(36,24,36,.2); border-top-color: #8e2b77; border-radius: 50%; flex-shrink: 0; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
