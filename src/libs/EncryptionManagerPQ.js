@@ -259,6 +259,9 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, bytesToHex(evmPrivKey));
     await userVault.set(`contact_skey`, bytesToHex(contactPrivKey));
+    // The guardian meta seed is an account key like the others: made here, it
+    // reaches every device the way they do (pq_recovery_shares § Inviting).
+    await userVault.set(`meta_seed`, bytesToHex(newMetaSeed()));
 
     const identity = {
       user_hash: userHash,
@@ -800,11 +803,10 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   /**
-   * The guardian meta seed, hex, read from the vault — another tab of this
-   * account may have made it since this one opened. With `create` a missing
-   * one is generated and kept there first: it is made at the first
-   * acceptance, and every later one answers with the same keys. Without, null
-   * until then.
+   * The guardian meta seed, hex, read from the vault. Made with the account
+   * (createUserVault), so every device of it holds the same one; with
+   * `create`, an account made before the seed existed makes it here, at its
+   * first acceptance.
    */
   async guardianMetaSeed({ create = false } = {}) {
     if (!this.#currentVault) throw new Error('Vault not loaded');
