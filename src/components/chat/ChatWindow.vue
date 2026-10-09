@@ -1,5 +1,9 @@
 <template>
-  <div class="chat-window d-flex flex-column w-100 h-100">
+  <div class="chat-window d-flex flex-column w-100 h-100"
+    @dragenter="onDragEnter" @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop"
+    @dragstart="onPageDragStart" @dragend="onPageDragEnd">
+    <!-- Files dropped anywhere over the dialog send as the attach button does. -->
+    <div v-if="dropActive" class="drop-overlay">Drop to send to {{ title }}</div>
     <!-- Header -->
     <div class="chat-header d-flex align-items-center justify-content-between px-3 py-2 border-bottom">
       <div class="d-flex align-items-center text-dark">
@@ -332,12 +336,17 @@
         </div>
         <button type="button" class="btn btn-sm btn-light rounded-circle" @click="cancelReply" title="Cancel reply">✕</button>
       </div>
+      <div v-if="dropNotice" class="drop-notice">{{ dropNotice }}</div>
       <form @submit.prevent="submitMessage" class="d-flex align-items-center m-0">
-        <input ref="fileInput" type="file" multiple class="d-none" @change="onFilePicked" />
-        <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
-          style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;" title="Attach a file" @click="fileInput?.click()">📎</button>
+        <template v-if="canSendFiles">
+          <input ref="fileInput" type="file" multiple class="d-none" @change="onFilePicked" />
+          <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
+            style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;" title="Attach a file" @click="fileInput?.click()">
+            <i class="bi bi-paperclip"></i>
+          </button>
+        </template>
         <input type="text" class="form-control me-2 rounded-pill px-3" v-model="newMessage"
-          placeholder="Type a message..." />
+          placeholder="Type a message..." @paste="onPaste" />
         <button type="submit"
           class="btn btn-primary rounded-circle d-flex align-items-center justify-content-center border-0"
           style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;">
@@ -812,17 +821,100 @@ const fmtSize = (n) => {
   return `${n} B`;
 };
 
-const fileInput = ref(null);
-const onFilePicked = (e) => {
-  const files = Array.from(e.target.files || []);
-  e.target.value = '';
+// Only a dialog takes files: a room mounts this window with no peer and no
+// handler, and a file sent there would vanish.
+const canSendFiles = computed(() => !!props.peerHash);
+
+// Everything picked, dropped or pasted at once travels as ONE composed
+// message, captioned by whatever sits in the input (board screen 02: the
+// caption is typed in the same field).
+const sendFiles = (files) => {
   if (!files.length) return;
-  // Everything picked travels as ONE composed message, captioned by whatever
-  // sits in the input (board screen 02: the caption is typed in the same field).
   emit('sendFile', files, newMessage.value.trim());
   newMessage.value = '';
   dropDraft();
 };
+
+const fileInput = ref(null);
+const onFilePicked = (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  sendFiles(files);
+};
+
+// ---------- drag and drop, paste (desktop) ----------
+
+// dragenter/dragleave fire for every child crossed: the overlay shows while
+// the count is above zero.
+const dragDepth = ref(0);
+const dropActive = computed(() => dragDepth.value > 0);
+const dropNotice = ref('');
+let noticeTimer = null;
+
+// A drag that started in the page — a picture in a message, which Chrome
+// drags as a file — is not a file from outside, and dropping it back must
+// not send it.
+let dragFromPage = false;
+const onPageDragStart = () => { dragFromPage = true; };
+const onPageDragEnd = () => { dragFromPage = false; };
+
+/** A drag of files from outside. Text, links and the upload queue carry no 'Files'. */
+const carriesFiles = (e) => !dragFromPage && Array.from(e.dataTransfer?.types || []).includes('Files');
+
+const showDropNotice = (text) => {
+  dropNotice.value = text;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => (dropNotice.value = ''), 5000);
+};
+
+const onDragEnter = (e) => {
+  if (!carriesFiles(e) || !canSendFiles.value) return;
+  e.preventDefault();
+  dragDepth.value++;
+};
+
+// Cancelling dragover is what makes this a drop target; anywhere else the
+// app-wide guard (fileDropGuard.ts) keeps the browser from opening the file.
+const onDragOver = (e) => {
+  if (!carriesFiles(e) || !canSendFiles.value) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+};
+
+const onDragLeave = () => {
+  if (dragDepth.value) dragDepth.value--;
+};
+
+const onDrop = (e) => {
+  if (!carriesFiles(e) || !canSendFiles.value) return;
+  e.preventDefault();
+  dragDepth.value = 0;
+  // A folder arrives as a File with no content; it is named and left out
+  // rather than sent empty or lost without a word.
+  const folders = [];
+  const files = [];
+  // The items list also holds the drag's text entries; only file items line up with files.
+  const items = Array.from(e.dataTransfer.items || []).filter((it) => it.kind === 'file');
+  Array.from(e.dataTransfer.files || []).forEach((file, i) => {
+    if (items[i]?.webkitGetAsEntry?.()?.isDirectory) folders.push(file.name);
+    else files.push(file);
+  });
+  if (folders.length) showDropNotice(`Folders can't be sent — drop the files inside: ${folders.join(', ')}`);
+  sendFiles(files);
+};
+
+// A screenshot pasted into the input sends like a dropped file; pasted text
+// stays text — including a copy from Word or Excel, which carries a picture
+// of the selection beside the text.
+const onPaste = (e) => {
+  const files = Array.from(e.clipboardData?.files || []);
+  const isText = Array.from(e.clipboardData?.types || []).includes('text/plain');
+  if (!files.length || isText || !canSendFiles.value) return;
+  e.preventDefault();
+  sendFiles(files);
+};
+
+onBeforeUnmount(() => clearTimeout(noticeTimer));
 
 // 1:1 dialog: the only two authors are me and the peer the window shows.
 const quoteAuthorName = (hash) => (hash === props.myHash ? 'Me' : props.title);
@@ -1004,7 +1096,21 @@ watch(() => props.messages, () => {
 
 .chat-window {
   background: transparent;
+  position: relative;
 }
+
+/* ---------- drag and drop ---------- */
+.drop-overlay {
+  position: absolute; inset: 8px; z-index: 20;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px dashed #0d6efd; border-radius: 16px;
+  background: rgba(255, 255, 255, .88);
+  font-size: 15px; font-weight: 600; color: #0d6efd;
+  /* the overlay must not swallow the drag events it is shown for */
+  pointer-events: none;
+}
+.drop-notice { margin: 0 4px 6px; font-size: 12px; color: #a15c00; }
+.attach-btn .bi { font-size: 18px; color: #5a5a5a; }
 
 .chat-header {
   background-color: #ffffff;
