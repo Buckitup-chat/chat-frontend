@@ -8,8 +8,9 @@ two phones, including through a TURN relay, and has unit tests and a Chromium
 check. Both come from the branch `sandbox-handshake-pq2` (PR: spec update plus
 sandbox).
 **Backend dependency:** `chat/docs/pq/reqs/pq_turn_relay.proposed.md` — the
-relay credentials endpoint and coturn on the host. It is not built yet. Develop
-against a local coturn (part 4) and switch when it lands.
+relay credentials endpoint, and a relay release on ProcessOne's `stun` library
+next to the chat release. It is not built yet. Develop against any local TURN
+server (part 4) and switch when it lands.
 **Base:** `origin/main` once the `sandbox-handshake-pq2` PR has merged. Until
 then `main` has neither the sandbox nor the spec's §5a, D's session tag or the
 relay, and building from `main` alone builds the old design.
@@ -135,7 +136,8 @@ relay, and building from `main` alone builds the old design.
   screen before the scanner. At session start, use what is cached or wait at
   most 1 s, then go without.
 - **Until the backend endpoint exists:** a dev-only setting
-  (`VITE_HANDSHAKE_TURN_URL`, `…_USER`, `…_PASS`) for a local coturn:
+  (`VITE_HANDSHAKE_TURN_URL`, `…_USER`, `…_PASS`) for a local TURN server with
+  a static user, e.g. coturn:
 
   ```
   docker run --network=host coturn/coturn -n --lt-cred-mech --user=pq2:<password> --realm=buckitup --listening-port=3478 --fingerprint --no-cli
