@@ -413,7 +413,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
-import { contentToText } from '@/lib/pq/content';
+import { contentToText, quoteSnapshot } from '@/lib/pq/content';
 import { thumbHashToDataURL } from 'thumbhash';
 import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
@@ -518,7 +518,9 @@ const startReply = (msg) => {
     messageId: msg._raw.message_id,
     signHash: msg._raw.sign_hash,
     authorHash: msg._raw.sender_hash,
-    snapshot: msg.parts && msg.parts.length ? msg.parts : [{ kind: 'text', text: msg.text }],
+    // Safe to keep from the start: a reply's snapshot is persisted with the
+    // outbox intent, and must not be a second copy of a recovery share.
+    snapshot: msg.parts && msg.parts.length ? quoteSnapshot(msg.parts) : [{ kind: 'text', text: msg.text }],
     previewText: msg.text || '…',
   };
   closeContextMenu();

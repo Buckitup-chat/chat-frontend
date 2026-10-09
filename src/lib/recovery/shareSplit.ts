@@ -9,9 +9,10 @@
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex, concatBytes, hexToBytes, randomBytes } from '@noble/hashes/utils';
 import { shamirCombine, shamirSplit } from '@/lib/shamir';
+import { NodeSetError, nodeSetHash, type NodeSet } from './nodeSet';
 
 const LEAF_TAG = new TextEncoder().encode('buckitup/recovery-share/leaf/v1\n');
-const ROOT_TAG = new TextEncoder().encode('buckitup/recovery-share/root/v1\n');
+const ROOT_TAG = new TextEncoder().encode('buckitup/recovery-share/root/v2\n');
 /** The Shamir library's share header: its field size in bits, then the share's x-coordinate. */
 const SHARE_BITS = 8;
 const HALF_BYTES = 32;
@@ -31,6 +32,8 @@ export interface Split {
 	shares: Uint8Array[];
 	/** `leaves[i - 1]` commits to share `i`; the list is every share's `split_proof`. */
 	leaves: Uint8Array[];
+	/** The nodes holding this version's node half; hashed into the root. */
+	nodeSet: NodeSet;
 	root: Uint8Array;
 }
 
@@ -46,17 +49,28 @@ const shape = (threshold: number, total: number): void => {
 export const leafOf = (splitId: string, index: number, share: Uint8Array): Uint8Array =>
 	sha3_512(concatBytes(LEAF_TAG, hexToBytes(splitId), Uint8Array.of(index), share));
 
-export const rootOf = (threshold: number, total: number, leaves: Uint8Array[]): Uint8Array =>
-	sha3_512(concatBytes(ROOT_TAG, Uint8Array.of(threshold), Uint8Array.of(total), ...leaves));
+/** Over the split's shape, every leaf and the node set: whatever a recovering client acts on. */
+export const rootOf = (threshold: number, total: number, leaves: Uint8Array[], nodeSet: NodeSet): Uint8Array => {
+	let setHash: Uint8Array;
+	try {
+		setHash = nodeSetHash(nodeSet);
+	} catch (e) {
+		if (e instanceof NodeSetError) throw new ShareCheckError(`the node set is not well formed: ${e.message}`);
+		throw e;
+	}
+	return sha3_512(concatBytes(ROOT_TAG, Uint8Array.of(threshold), Uint8Array.of(total), ...leaves, setHash));
+};
 
 /** Splits the friends' half into `total` shares, any `threshold` of which give it back. */
-export const splitFriendsHalf = (half: Uint8Array, total: number, threshold: number): Split => {
+export const splitFriendsHalf = (half: Uint8Array, total: number, threshold: number, nodeSet: NodeSet): Split => {
 	shape(threshold, total);
+	// A copy: the root is computed once, and the caller may keep editing its own list.
+	const set: NodeSet = { threshold: nodeSet.threshold, nodes: [...nodeSet.nodes] };
 	if (half.length !== HALF_BYTES) throw new ShareCheckError('the friends\' half is 32 bytes');
 	const shares = shamirSplit(half, total, threshold);
 	const splitId = bytesToHex(randomBytes(16));
 	const leaves = shares.map((share, i) => leafOf(splitId, i + 1, share));
-	return { splitId, threshold, total, shares, leaves, root: rootOf(threshold, total, leaves) };
+	return { splitId, threshold, total, shares, leaves, nodeSet: set, root: rootOf(threshold, total, leaves, set) };
 };
 
 export interface ShareToCheck {
@@ -68,6 +82,8 @@ export interface ShareToCheck {
 	share: Uint8Array;
 	/** Every leaf of the split, in index order. */
 	proof: Uint8Array[];
+	/** As the share's envelope names it; missing when the sender sent none, which no check passes. */
+	nodeSet: NodeSet | null;
 }
 
 /**
@@ -87,7 +103,10 @@ export const checkShare = (s: ShareToCheck, root: Uint8Array): void => {
 		throw new ShareCheckError('the share is not share number ' + s.index);
 	}
 	if (!sameBytes(leafOf(s.splitId, s.index, s.share), s.proof[s.index - 1])) throw new ShareCheckError('the share does not match its leaf');
-	if (!sameBytes(rootOf(s.threshold, s.total, s.proof), root)) throw new ShareCheckError('the proof does not hash to the split\'s root');
+	if (!s.nodeSet) throw new ShareCheckError('the share names no node set');
+	if (!sameBytes(rootOf(s.threshold, s.total, s.proof, s.nodeSet), root)) {
+		throw new ShareCheckError('the proof and the node set do not hash to the split\'s root');
+	}
 };
 
 /**
