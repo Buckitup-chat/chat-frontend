@@ -13,11 +13,13 @@ import {
 	NodeError,
 	depositMessage,
 	depositShare,
+	fetchDescriptor,
 	descriptorBytes,
 	holdingOf,
 	isStableNodeUrl,
 	newerDescriptor,
 	nodeIdOf,
+	nodeIsUp,
 	openRelease,
 	releaseMessage,
 	requestRelease,
@@ -49,12 +51,15 @@ const unsigned = {
 	operator: operator.userHash,
 	issued_at: 1791200000,
 };
-const endorsed = (d = unsigned): NodeDescriptor => ({
-	...d,
+// Signed once: ML-DSA-87 signing is randomized and slow, and no case edits it.
+const ENDORSED: NodeDescriptor = {
+	...unsigned,
 	node_pubkey: NODE_PUB,
 	node_sig: NODE_SIG,
-	operator_sig: toBase64(ml_dsa87.sign(descriptorBytes(d), operatorKeys.secretKey)),
-});
+	operator_sig: toBase64(ml_dsa87.sign(descriptorBytes(unsigned), operatorKeys.secretKey)),
+};
+const verify = (d: unknown, { card = operator as VerifiedCard | null, url = URL_, dep = deployment } = {}) =>
+	verifyDescriptor(d, { url, deployment: dep }, card);
 
 describe('the node id and descriptor', () => {
 	it('derive as the SDK derives them', () => {
@@ -66,18 +71,16 @@ describe('the node id and descriptor', () => {
 	});
 
 	it('verifies when the node signed it, for this deployment and URL, endorsed by its operator', () => {
-		const d = endorsed();
-		expect(verifyDescriptor(d, { url: URL_, deployment }, operator)).toEqual({ ok: true, descriptor: d });
+		expect(verify(ENDORSED)).toEqual({ ok: true, descriptor: ENDORSED });
 	});
 
 	it('is refused for every field the node did not sign', () => {
-		const d = endorsed();
-		const verdict = (x: unknown, card: VerifiedCard | null = operator, url = URL_) => verifyDescriptor(x, { url, deployment }, card);
-		expect(verdict({ ...d, issued_at: d.issued_at + 1 })).toMatchObject({ reason: 'bad_node_sig' });
-		expect(verdict({ ...d, operator: 'u_' + 'b'.repeat(128) })).toMatchObject({ reason: 'bad_node_sig' });
-		expect(verdict({ ...d, id: 'n_' + '0'.repeat(32) })).toMatchObject({ reason: 'bad_node_sig' });
+		const d = ENDORSED;
+		expect(verify({ ...d, issued_at: d.issued_at + 1 })).toMatchObject({ reason: 'bad_node_sig' });
+		expect(verify({ ...d, operator: 'u_' + 'b'.repeat(128) })).toMatchObject({ reason: 'bad_node_sig' });
+		expect(verify({ ...d, id: 'n_' + '0'.repeat(32) })).toMatchObject({ reason: 'bad_node_sig' });
 		const other = new SigningKey('0x' + '08'.repeat(32));
-		expect(verdict({ ...d, node_pubkey: other.compressedPublicKey })).toMatchObject({ reason: 'bad_node_sig' });
+		expect(verify({ ...d, node_pubkey: other.compressedPublicKey })).toMatchObject({ reason: 'bad_node_sig' });
 	});
 
 	it('refuses the malleated twin of the node signature', () => {
@@ -85,32 +88,31 @@ describe('the node id and descriptor', () => {
 		const s = BigInt('0x' + bytesToHex(sig.slice(32)));
 		const highS = (secp.CURVE.n - s).toString(16).padStart(64, '0');
 		const twin = '0x' + bytesToHex(sig.slice(0, 32)) + highS;
-		expect(verifyDescriptor({ ...endorsed(), node_sig: twin }, { url: URL_, deployment }, operator)).toMatchObject({ reason: 'bad_node_sig' });
+		expect(verify({ ...ENDORSED, node_sig: twin })).toMatchObject({ reason: 'bad_node_sig' });
 	});
 
 	it('is refused when another node serves it, or it names another deployment', () => {
-		expect(verifyDescriptor(endorsed(), { url: 'https://other.example/recovery/node', deployment }, operator)).toMatchObject({ reason: 'wrong_url' });
-		expect(verifyDescriptor(endorsed(), { url: URL_, deployment: { ...deployment, chainId: 10 } }, operator)).toMatchObject({
+		expect(verify(ENDORSED, { url: 'https://other.example/recovery/node' })).toMatchObject({ reason: 'wrong_url' });
+		expect(verify(ENDORSED, { dep: { ...deployment, chainId: 10 } })).toMatchObject({
 			reason: 'wrong_deployment',
 		});
 	});
 
 	it('is not offered without an endorsement its operator’s verified card checks', () => {
-		const check = (d: unknown, card: VerifiedCard | null) => verifyDescriptor(d, { url: URL_, deployment }, card);
-		expect(check({ ...endorsed(), operator_sig: null }, operator)).toMatchObject({ reason: 'not_endorsed' });
-		expect(check(endorsed(), null)).toMatchObject({ reason: 'operator_unknown' });
-		expect(check(endorsed(), { ...operator, userHash: 'u_' + 'c'.repeat(128) })).toMatchObject({ reason: 'operator_unknown' });
-		expect(check(endorsed(), { ...operator, deletedFlag: true })).toMatchObject({ reason: 'operator_unknown' });
+		expect(verify({ ...ENDORSED, operator_sig: null })).toMatchObject({ reason: 'not_endorsed' });
+		expect(verify(ENDORSED, { card: null })).toMatchObject({ reason: 'operator_unknown' });
+		expect(verify(ENDORSED, { card: { ...operator, userHash: 'u_' + 'c'.repeat(128) } })).toMatchObject({ reason: 'operator_unknown' });
+		expect(verify(ENDORSED, { card: { ...operator, deletedFlag: true } })).toMatchObject({ reason: 'operator_unknown' });
 		const stranger = ml_dsa87.keygen(new Uint8Array(32).fill(2));
-		expect(check({ ...endorsed(), operator_sig: toBase64(ml_dsa87.sign(descriptorBytes(unsigned), stranger.secretKey)) }, operator)).toMatchObject({
+		expect(verify({ ...ENDORSED, operator_sig: toBase64(ml_dsa87.sign(descriptorBytes(unsigned), stranger.secretKey)) })).toMatchObject({
 			reason: 'bad_operator_sig',
 		});
-		expect(check({ ...endorsed(), operator_sig: 'not base64!' }, operator)).toMatchObject({ reason: 'bad_operator_sig' });
-		expect(check({ ...endorsed(), issued_at: '1791200000' }, operator)).toMatchObject({ reason: 'malformed' });
+		expect(verify({ ...ENDORSED, operator_sig: 'not base64!' })).toMatchObject({ reason: 'bad_operator_sig' });
+		expect(verify({ ...ENDORSED, issued_at: '1791200000' })).toMatchObject({ reason: 'malformed' });
 	});
 
 	it('is replaced by a newer issue', () => {
-		const a = endorsed();
+		const a = ENDORSED;
 		const b = { ...a, issued_at: a.issued_at + 1 };
 		expect(newerDescriptor(a, b)).toBe(b);
 		expect(newerDescriptor(b, a)).toBe(b);
@@ -125,6 +127,9 @@ describe('the node id and descriptor', () => {
 			'https://buckitup.local/recovery/node',
 			'https://localhost/recovery/node',
 			'https://NODE.example/recovery/node',
+			'https://u:p@node.example/recovery/node',
+			'https://node.example/recovery/node?x=1',
+			'https://node.example/recovery/node#f',
 			'not a url',
 		]) {
 			expect(isStableNodeUrl(url), url).toBe(false);
@@ -202,6 +207,19 @@ describe('the node client', () => {
 		await expect(requestRelease(node, SECRET_ID, RECIPIENT_PRIV, { fetch: notYet.fetch })).rejects.toMatchObject({ status: 403 });
 		const garbled = fakeNode(() => ({ status: 200, body: { nodeId: NODE_ID, version: 4, share_ecies: SHARE_ECIES.replace(/.$/, '0') } }));
 		await expect(requestRelease(node, SECRET_ID, RECIPIENT_PRIV, { fetch: garbled.fetch })).rejects.toThrow(/does not open/);
+	});
+
+	it('fetches a descriptor and a health check, and tells a node that is down', async () => {
+		const up = fakeNode((path) => (path === '/info' ? { status: 200, body: ENDORSED } : { status: 200, body: { nodeId: NODE_ID } }));
+		expect(await fetchDescriptor(URL_, { fetch: up.fetch })).toEqual(ENDORSED);
+		expect(await nodeIsUp(URL_, { fetch: up.fetch })).toBe(true);
+		const unconfigured = fakeNode(() => ({ status: 503, body: { error: 'NODE_URL is not configured' } }));
+		await expect(fetchDescriptor(URL_, { fetch: unconfigured.fetch })).rejects.toThrow(/NODE_URL is not configured/);
+		expect(await nodeIsUp(URL_, { fetch: unconfigured.fetch })).toBe(false);
+		const down = (async () => {
+			throw new TypeError('fetch failed');
+		}) as typeof fetch;
+		expect(await nodeIsUp(URL_, { fetch: down })).toBe(false);
 	});
 
 	it('reads a holding, and tells a wiped node from one that is not there', async () => {

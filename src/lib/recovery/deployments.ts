@@ -69,7 +69,7 @@ export const recoveryDeployment = (env: Record<string, string | undefined> = imp
 };
 
 /** `eip155:<chainId>:<contract>`, lowercase: the namespace part of a `secret_ref` (07 § recovery_share). */
-export const deploymentNamespace = (d: Deployment): string => `eip155:${d.chainId}:${d.secretRecovery.toLowerCase()}`;
+export const deploymentNamespace = (d: Pick<Deployment, 'chainId' | 'secretRecovery'>): string => `eip155:${d.chainId}:${d.secretRecovery.toLowerCase()}`;
 
 /** The contract's `computeId`: `keccak256(abi.encode(owner, label))`. */
 export const secretIdOf = (owner: string, label: string): string =>

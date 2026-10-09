@@ -8,11 +8,12 @@ import { fromBase64, toBase64 } from '@/lib/pq/signature';
 
 const unpadded = (b64: string) => b64.replace(/=+$/, '');
 
+/** The 65-byte `r || s || v` signature, `0x` hex, as an EVM wallet and the nodes take it. */
+export const personalSignHex = (privateKeyHex: string, message: string): string => new SigningKey(privateKeyHex).sign(hashMessage(message)).serialized;
+
 /** The 65-byte `r || s || v` signature, unpadded base64. */
-export const personalSign = (privateKeyHex: string, message: string): string => {
-	const sig = new SigningKey(privateKeyHex).sign(hashMessage(message));
-	return unpadded(toBase64(hexToBytes(sig.serialized.slice(2))));
-};
+export const personalSign = (privateKeyHex: string, message: string): string =>
+	unpadded(toBase64(hexToBytes(personalSignHex(privateKeyHex, message).slice(2))));
 
 /**
  * Who signed `message`: the compressed public key and the address, or null

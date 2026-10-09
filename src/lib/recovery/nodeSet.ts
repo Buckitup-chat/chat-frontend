@@ -24,19 +24,27 @@ export const parseNodeEntry = (entry: string): { id: string; url: string } => {
 	const id = entry.slice(0, at);
 	const url = entry.slice(at + 1);
 	if (at < 0 || !NODE_ID.test(id)) throw new NodeSetError(`not a node id: ${entry}`);
+	parseNodeUrl(url);
+	return { id, url };
+};
+
+/** A node's base URL, parsed; throws NodeSetError unless it is one a set may name and a client may call. */
+export const parseNodeUrl = (url: string): URL => {
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
 	} catch {
-		throw new NodeSetError(`not a URL: ${entry}`);
+		throw new NodeSetError(`not a URL: ${url}`);
 	}
 	// The string is hashed and fetched as it is, so it must already be the URL's
 	// canonical serialization: no case, whitespace, backslash or encoding
 	// variant of the same address, which builds would read differently.
-	if (parsed.href !== url) throw new NodeSetError(`a node URL is in canonical form: ${entry}`);
-	if (parsed.protocol !== 'https:') throw new NodeSetError(`a node URL is https: ${entry}`);
-	if (parsed.username || parsed.password) throw new NodeSetError(`a node URL carries no credentials: ${entry}`);
-	return { id, url };
+	if (parsed.href !== url) throw new NodeSetError(`a node URL is in canonical form: ${url}`);
+	if (parsed.protocol !== 'https:') throw new NodeSetError(`a node URL is https: ${url}`);
+	if (parsed.username || parsed.password) throw new NodeSetError(`a node URL carries no credentials: ${url}`);
+	// Routes are appended to it (`<url>/info`), which a query or fragment would swallow.
+	if (parsed.search || parsed.hash) throw new NodeSetError(`a node URL has no query or fragment: ${url}`);
+	return parsed;
 };
 
 /** Throws NodeSetError unless `set` obeys the wire rules (07 § recovery_share, node_set). */

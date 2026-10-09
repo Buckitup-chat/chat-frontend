@@ -4,7 +4,7 @@
 // and the holding check. The node, the SDK and this client produce the same
 // bytes; the golden vectors in tests/recoveryNodeClient.test.ts come from the
 // SDK.
-import { SigningKey, computeAddress, hashMessage } from 'ethers';
+import { SigningKey, computeAddress } from 'ethers';
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { hmac } from '@noble/hashes/hmac';
@@ -14,13 +14,16 @@ import { sha512 } from '@noble/hashes/sha512';
 import { bytesToHex, concatBytes, hexToBytes, randomBytes, utf8ToBytes } from '@noble/hashes/utils';
 import { toBytes } from '@/lib/pq/signature';
 import type { VerifiedCard } from '@/lib/pq/verifyCard';
-import type { Deployment } from './deployments';
+import { nodeShareDigest } from 'backitup-secret-recovery-sdk/lib/constants/messages';
+import { deploymentNamespace, type Deployment } from './deployments';
+import { personalSignHex } from './evmSign';
+import { NodeSetError, parseNodeUrl } from './nodeSet';
 
 const strip0x = (hex: string) => (hex.startsWith('0x') ? hex.slice(2) : hex);
 
 /** `n_` + lowercase hex of the first 16 bytes of SHA3-256 of the 33-byte compressed node key. */
-export const nodeIdOf = (compressedPublicKey: string): string => {
-	const key = hexToBytes(strip0x(compressedPublicKey));
+export const nodeIdOf = (compressedPublicKey: string | Uint8Array): string => {
+	const key = typeof compressedPublicKey === 'string' ? hexToBytes(strip0x(compressedPublicKey)) : compressedPublicKey;
 	if (key.length !== 33) throw new Error('a node id is derived from the 33-byte compressed public key');
 	return 'n_' + bytesToHex(sha3_256(key).slice(0, 16));
 };
@@ -66,12 +69,13 @@ const isDescriptor = (d: unknown): d is NodeDescriptor => {
 };
 
 /** True when `node_pubkey` hashes to `id` and signs the descriptor bytes: `r || s`, 64 bytes, low-s. */
-const signedByNode = (d: NodeDescriptor): boolean => {
+const signedByNode = (d: NodeDescriptor, bytes: Uint8Array): boolean => {
 	try {
-		if (nodeIdOf(d.node_pubkey) !== d.id) return false;
+		const pub = hexToBytes(strip0x(d.node_pubkey));
+		if (nodeIdOf(pub) !== d.id) return false;
 		const sig = hexToBytes(strip0x(d.node_sig));
 		// noble refuses a high s by default, so a malleated twin does not verify.
-		return sig.length === 64 && secp.verify(sig, sha3_256(descriptorBytes(d)), hexToBytes(strip0x(d.node_pubkey)));
+		return sig.length === 64 && secp.verify(sig, sha3_256(bytes), pub);
 	} catch {
 		return false;
 	}
@@ -92,20 +96,18 @@ export const verifyDescriptor = (
 	const d = descriptor;
 	// Any node can serve another's descriptor: it is public and signed.
 	if (d.url !== expected.url) return { ok: false, reason: 'wrong_url' };
-	if (d.chain !== `eip155:${expected.deployment.chainId}` || d.contract !== expected.deployment.secretRecovery.toLowerCase()) {
-		return { ok: false, reason: 'wrong_deployment' };
-	}
-	if (!signedByNode(d)) return { ok: false, reason: 'bad_node_sig' };
+	if (`${d.chain}:${d.contract}` !== deploymentNamespace(expected.deployment)) return { ok: false, reason: 'wrong_deployment' };
+	const bytes = descriptorBytes(d);
+	if (!signedByNode(d, bytes)) return { ok: false, reason: 'bad_node_sig' };
 	if (!d.operator_sig) return { ok: false, reason: 'not_endorsed' };
 	if (!operatorCard || operatorCard.userHash !== d.operator || operatorCard.deletedFlag) return { ok: false, reason: 'operator_unknown' };
+	let endorsed = false;
 	try {
-		if (!ml_dsa87.verify(toBytes(d.operator_sig), descriptorBytes(d), toBytes(operatorCard.signPkeyB64))) {
-			return { ok: false, reason: 'bad_operator_sig' };
-		}
+		endorsed = ml_dsa87.verify(toBytes(d.operator_sig), bytes, toBytes(operatorCard.signPkeyB64));
 	} catch {
-		return { ok: false, reason: 'bad_operator_sig' };
+		// a malformed signature or key endorses nothing
 	}
-	return { ok: true, descriptor: d };
+	return endorsed ? { ok: true, descriptor: d } : { ok: false, reason: 'bad_operator_sig' };
 };
 
 /** Of two verified descriptors of one node, the one in force: the newer `issued_at`. */
@@ -117,22 +119,18 @@ export const newerDescriptor = (a: NodeDescriptor, b: NodeDescriptor): NodeDescr
  * years, from anywhere.
  */
 export const isStableNodeUrl = (url: string): boolean => {
-	let u: URL;
+	let host: string;
 	try {
-		u = new URL(url);
-	} catch {
-		return false;
+		host = parseNodeUrl(url).hostname;
+	} catch (e) {
+		if (e instanceof NodeSetError) return false;
+		throw e;
 	}
-	const host = u.hostname;
-	if (u.protocol !== 'https:' || u.href !== url) return false;
 	if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.startsWith('[')) return false;
 	return host.includes('.') && !host.endsWith('.local') && !host.endsWith('.local.');
 };
 
 /* ------------------------------- messages ------------------------------- */
-
-/** The share's SHA-256, hex without `0x`: the digest a deposit signs over. */
-export const shareDigest = (share: string): string => bytesToHex(sha256(utf8ToBytes(share)));
 
 export interface DepositFields {
 	nodeId: string;
@@ -150,7 +148,7 @@ export const depositMessage = (m: DepositFields): string =>
 		`node: ${m.nodeId}`,
 		`id: ${m.id.toLowerCase()}`,
 		`version: ${m.version}`,
-		`share: ${shareDigest(m.share)}`,
+		`share: ${nodeShareDigest(m.share)}`,
 		`nonce: ${m.nonce}`,
 		`ts: ${m.ts}`,
 	].join('\n');
@@ -186,13 +184,12 @@ export const openRelease = async (shareEcies: string, privateKeyHex: string): Pr
 	const blob = hexToBytes(strip0x(shareEcies));
 	if (blob.length < 16 + 33 + 32 + 16) throw new Error('release too short');
 	const iv = blob.slice(0, 16);
-	const ephemeral = '0x' + bytesToHex(blob.slice(16, 49));
+	const ephemeral = secp.ProjectivePoint.fromHex(blob.slice(16, 49));
 	const mac = blob.slice(49, 81);
 	const ciphertext = blob.slice(81);
-	const px = hexToBytes(strip0x(new SigningKey(privateKeyHex).computeSharedSecret(ephemeral))).slice(1, 33);
+	const px = secp.getSharedSecret(hexToBytes(strip0x(privateKeyHex)), ephemeral.toRawBytes(true)).slice(1, 33);
 	const hash = sha512(px);
-	const ephemeralFull = hexToBytes(strip0x(SigningKey.computePublicKey(ephemeral, false)));
-	const expected = hmac(sha256, hash.slice(32), concatBytes(iv, ephemeralFull, ciphertext));
+	const expected = hmac(sha256, hash.slice(32), concatBytes(iv, ephemeral.toRawBytes(false), ciphertext));
 	let diff = 0;
 	for (let i = 0; i < 32; i++) diff |= expected[i] ^ mac[i];
 	if (diff !== 0) throw new Error('release MAC does not hold');
@@ -245,7 +242,10 @@ const failed = (url: string, r: { status: number; body: any }) => new NodeError(
 const nowOf = (opts: NodeClientOptions) => (opts.now ?? (() => Math.floor(Date.now() / 1000) - 5))();
 const newNonce = () => bytesToHex(randomBytes(16));
 
-const signPersonal = (privateKeyHex: string, message: string): string => new SigningKey(privateKeyHex).sign(hashMessage(message)).serialized;
+/** A node answers under the id it was asked by; another id is another node. */
+const answeredAs = (node: NodeRef, r: { status: number; body: any }) => {
+	if (r.body?.nodeId !== node.id) throw new NodeError(node.url, r.status, `answered as ${r.body?.nodeId}, not ${node.id}`);
+};
 
 /** The node's descriptor, unverified: `verifyDescriptor` decides what it is worth. */
 export const fetchDescriptor = async (url: string, opts: NodeClientOptions = {}): Promise<unknown> => {
@@ -259,8 +259,8 @@ export const nodeIsUp = async (url: string, opts: NodeClientOptions = {}): Promi
 	try {
 		return (await call(url, '/health', {}, opts)).status === 200;
 	} catch (e) {
-		if ((e as Error)?.name === 'AbortError') throw e;
-		return false;
+		if (e instanceof NodeError) return false;
+		throw e;
 	}
 };
 
@@ -280,11 +280,12 @@ export const depositShare = async (
 	ownerPrivateKeyHex: string,
 	opts: NodeClientOptions = {},
 ): Promise<{ staged: boolean }> => {
-	const fields = { nodeId: node.id, id: deposit.id.toLowerCase(), version: deposit.version, share: deposit.share, nonce: newNonce(), ts: nowOf(opts) };
-	const sig = signPersonal(ownerPrivateKeyHex, depositMessage(fields));
-	const r = await post(node.url, '/shares', { id: fields.id, version: fields.version, share: fields.share, ts: fields.ts, nonce: fields.nonce, sig }, opts);
+	// The body is what was signed, but the node id: the node supplies its own.
+	const body = { id: deposit.id.toLowerCase(), version: deposit.version, share: deposit.share, nonce: newNonce(), ts: nowOf(opts) };
+	const sig = personalSignHex(ownerPrivateKeyHex, depositMessage({ nodeId: node.id, ...body }));
+	const r = await post(node.url, '/shares', { ...body, sig }, opts);
 	if (r.status !== 200) throw failed(node.url, r);
-	if (r.body?.nodeId !== node.id) throw new NodeError(node.url, r.status, `answered as ${r.body?.nodeId}, not ${node.id}`);
+	answeredAs(node, r);
 	return { staged: r.body.staged === true };
 };
 
@@ -300,12 +301,14 @@ export const requestRelease = async (
 	opts: NodeClientOptions = {},
 ): Promise<{ version: number; share: string }> => {
 	const recipient = computeAddress(new SigningKey(candidatePrivateKeyHex).publicKey).toLowerCase();
-	const fields = { nodeId: node.id, id: id.toLowerCase(), recipient, nonce: newNonce(), ts: nowOf(opts) };
-	const sig = signPersonal(candidatePrivateKeyHex, releaseMessage(fields));
-	const r = await post(node.url, `/shares/${fields.id}/release`, { recipient, ts: fields.ts, nonce: fields.nonce, sig }, opts);
+	const secretId = id.toLowerCase();
+	// The body is what was signed, but the node id and the secret id, which the node and the path supply.
+	const body = { recipient, nonce: newNonce(), ts: nowOf(opts) };
+	const sig = personalSignHex(candidatePrivateKeyHex, releaseMessage({ nodeId: node.id, id: secretId, ...body }));
+	const r = await post(node.url, `/shares/${secretId}/release`, { ...body, sig }, opts);
 	if (r.status !== 200) throw failed(node.url, r);
-	const { nodeId, version, share_ecies: shareEcies } = r.body ?? {};
-	if (nodeId !== node.id) throw new NodeError(node.url, r.status, `answered as ${nodeId}, not ${node.id}`);
+	answeredAs(node, r);
+	const { version, share_ecies: shareEcies } = r.body;
 	if (!Number.isSafeInteger(version) || typeof shareEcies !== 'string') throw new NodeError(node.url, r.status, 'malformed release');
 	let share: string;
 	try {
