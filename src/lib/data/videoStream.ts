@@ -16,7 +16,8 @@
 import { fromBase64 } from '@/lib/pq/signature';
 import { CHUNK_SIZE } from '@/lib/pq/fileCrypto';
 import { downloadFile, type DownloadProgress } from './fileTransfer';
-import { isRefusedFile, readVerifiedFile, type ChunkHashes } from './fileIntegrity';
+import { FileVerificationError, isRefusedFile, readVerifiedFile, type ChunkHashes } from './fileIntegrity';
+import { fileKey } from './fileKey';
 import { getCachedMedia, putCachedMedia } from './mediaCache';
 import { bearerFor, openSession } from './readSession';
 
@@ -43,6 +44,7 @@ interface Session {
 	registration: Record<string, unknown> & { chunkHashes: Record<number, string> };
 	hashes: ChunkHashes;
 	onRefused?: (e: unknown) => void;
+	onUnavailable?: (e: unknown) => void;
 }
 
 /** Every live session, keyed by session id. */
@@ -70,9 +72,13 @@ const installListeners = () => {
 				},
 				(e) => {
 					if (isRefusedFile(e)) session.onRefused?.(e);
+					else session.onUnavailable?.(e);
 					post({ type: 'chunk-hash', sessionId, index, hash: null });
 				},
 			);
+		} else if (msg?.type === 'chunk-refused' && session && Number.isInteger(msg.index)) {
+			// The worker held a chunk's bytes to their verified hash and they failed.
+			session.onRefused?.(new FileVerificationError(String(session.registration.fileId), 'invalid', 'its bytes are not the ones the uploader signed', msg.index));
 		} else if (msg?.type === 'need-token' && session) {
 			void openSession('file_chunk').then((token) => {
 				post({ type: 'token', sessionId: msg.sessionId, token: token || '' });
@@ -139,6 +145,8 @@ export const openVideo = async (
 		onPartial?: (url: string) => void;
 		/** Streaming path: a chunk refused after playback started — the video could not be verified. */
 		onRefused?: (e: unknown) => void;
+		/** Streaming path: a chunk that cannot be verified yet; this playback ends, a later one may pass. */
+		onUnavailable?: (e: unknown) => void;
 		signal?: AbortSignal;
 	} = {},
 ): Promise<VideoSource> => {
@@ -165,7 +173,7 @@ export const openVideo = async (
 			token: bearer ? bearer.replace('Bearer ', '') : '',
 			chunkHashes: { 0: first } as Record<number, string>,
 		};
-		active.set(sessionId, { registration, hashes: file.hashes, onRefused: opts.onRefused });
+		active.set(sessionId, { registration, hashes: file.hashes, onRefused: opts.onRefused, onUnavailable: opts.onUnavailable });
 		post(registration);
 		return {
 			url: `/encrypted-video/${sessionId}`,
@@ -181,7 +189,7 @@ export const openVideo = async (
 	// media cache keeps it across dialog switches, and re-entering the chat
 	// replays without downloading again. The cache owns the URL; release is
 	// a no-op on this path.
-	const cached = getCachedMedia(video.fileId);
+	const cached = getCachedMedia(fileKey(video));
 	if (cached) return { url: cached, streaming: false, release: () => {} };
 
 	const prefix: Uint8Array[] = [];
@@ -202,7 +210,7 @@ export const openVideo = async (
 		},
 		signal: opts.signal,
 	});
-	const url = putCachedMedia(video.fileId, bytes, video.mimeType || 'video/mp4');
+	const url = putCachedMedia(fileKey(video), bytes, video.mimeType || 'video/mp4');
 	if (partialUrl) URL.revokeObjectURL(partialUrl);
 	return { url, streaming: false, release: () => {} };
 };

@@ -583,8 +583,10 @@ async function runE2E() {
 			} catch { /* bob's own rows decrypt with his key; skip */ }
 		}
 		expect(filePart).toBeTruthy();
+		// The file is the sender's: Alice sent the message carrying it.
 		const downloaded = await downloadFile({
 			fileId: (filePart as { fileId: string }).fileId,
+			uploaderHash: alice.userHash,
 			encSecretB64: (filePart as { encSecretB64: string }).encSecretB64,
 		});
 		expect(bytesToHex(sha3_512(downloaded))).toBe(bytesToHex(sha3_512(fileBytes)));

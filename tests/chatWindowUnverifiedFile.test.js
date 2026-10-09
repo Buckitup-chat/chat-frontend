@@ -6,13 +6,15 @@ import { describe, it, expect, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
+import { fileKey } from '@/lib/data/fileKey';
 
 vi.mock('vue-boring-avatars', () => ({ default: { template: '<span />' } }));
 
 const PEER = 'u_' + 'b'.repeat(128);
-const FILE = { kind: 'file', fileId: 'f_' + '1'.repeat(32), name: 'report.pdf', size: 2048, mimeType: 'application/pdf' };
-const image = (n) => ({ kind: 'image', fileId: 'f_' + String(n).repeat(32), name: `photo${n}.jpg`, size: 4096, mimeType: 'image/jpeg', widthAspect: 4, heightAspect: 3 });
-const VIDEO = { kind: 'video', fileId: 'f_' + '9'.repeat(32), name: 'clip.mp4', size: 8192, mimeType: 'video/mp4', widthAspect: 16, heightAspect: 9 };
+// Parts as decryptMessageRow stamps them: each with the sender of its message.
+const FILE = { kind: 'file', fileId: 'f_' + '1'.repeat(32), uploaderHash: PEER, name: 'report.pdf', size: 2048, mimeType: 'application/pdf' };
+const image = (n) => ({ kind: 'image', fileId: 'f_' + String(n).repeat(32), uploaderHash: PEER, name: `photo${n}.jpg`, size: 4096, mimeType: 'image/jpeg', widthAspect: 4, heightAspect: 3 });
+const VIDEO = { kind: 'video', fileId: 'f_' + '9'.repeat(32), uploaderHash: PEER, name: 'clip.mp4', size: 8192, mimeType: 'video/mp4', widthAspect: 16, heightAspect: 9 };
 
 const message = (parts) => ({
 	id: 'dmsg_1',
@@ -33,33 +35,40 @@ const render = (parts, props) =>
 
 describe('a file that could not be verified', () => {
 	it('a file row: says so, and offers no download', () => {
-		const w = render([FILE], { refused: { [FILE.fileId]: true } });
+		const w = render([FILE], { refused: { [fileKey(FILE)]: true } });
 		expect(w.find('.msg-file-meta').text()).toContain('This file could not be verified');
 		expect(w.find('.msg-file-action').exists()).toBe(false);
 	});
 
+	it('is the file of its sender only: the same file_id from another sender is not refused with it', () => {
+		const other = { ...FILE, uploaderHash: 'u_' + 'c'.repeat(128) };
+		const w = render([FILE], { refused: { [fileKey(other)]: true } });
+		expect(w.find('.msg-file-meta').text()).not.toContain('could not be verified');
+		expect(w.find('.msg-file-action').exists()).toBe(true);
+	});
+
 	it('a download that failed on the network still offers a retry', () => {
-		const w = render([FILE], { downloads: { [FILE.fileId]: { status: 'error' } } });
+		const w = render([FILE], { downloads: { [fileKey(FILE)]: { status: 'error' } } });
 		expect(w.find('.msg-file-meta').text()).toContain('download failed — tap to retry');
 		expect(w.find('.msg-file-action').exists()).toBe(true);
 	});
 
 	it('a single image: says so in place of the picture', () => {
 		const im = image(2);
-		const w = render([im], { refused: { [im.fileId]: true } });
+		const w = render([im], { refused: { [fileKey(im)]: true } });
 		expect(w.find('.msg-image-progress').text()).toBe('This image could not be verified');
 	});
 
 	it('an image in a grid: says so on its cell', () => {
 		const [a, b] = [image(3), image(4)];
-		const w = render([a, b], { refused: { [b.fileId]: true } });
+		const w = render([a, b], { refused: { [fileKey(b)]: true } });
 		const cells = w.findAll('.msg-gallery-cell');
 		expect(cells[0].find('.msg-image-progress').exists()).toBe(false);
 		expect(cells[1].find('.msg-image-progress').text()).toBe('could not be verified');
 	});
 
 	it('a video: says so, and a tap does not open it again', async () => {
-		const w = render([VIDEO], { refused: { [VIDEO.fileId]: true } });
+		const w = render([VIDEO], { refused: { [fileKey(VIDEO)]: true } });
 		expect(w.find('.msg-video .msg-image-progress').text()).toBe('This video could not be verified');
 		await w.find('.msg-video-frame').trigger('click');
 		expect(w.emitted('playVideo')).toBeUndefined();

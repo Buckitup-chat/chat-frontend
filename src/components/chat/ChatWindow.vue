@@ -90,28 +90,28 @@
                  played over the buffer the browser has actually decrypted. -->
             <div v-for="v in videosOf(msg)" :key="v.fileId" class="msg-video">
               <div class="msg-video-frame" :style="{ aspectRatio: v.widthAspect + ' / ' + v.heightAspect }"
-                :role="videos[v.fileId]?.url ? undefined : 'button'"
-                @click="!refused[v.fileId] && !videos[v.fileId]?.url && videos[v.fileId]?.status !== 'opening' && emit('playVideo', v)">
+                :role="videos[fileKey(v)]?.url ? undefined : 'button'"
+                @click="!refused[fileKey(v)] && !videos[fileKey(v)]?.url && videos[fileKey(v)]?.status !== 'opening' && emit('playVideo', v)">
                 <img v-if="thumbUrl(v)" class="msg-image-blur" :src="thumbUrl(v)" alt="" />
-                <video v-if="videos[v.fileId]?.url" class="msg-video-el"
-                  :src="videos[v.fileId].url" controls playsinline
+                <video v-if="videos[fileKey(v)]?.url" class="msg-video-el"
+                  :src="videos[fileKey(v)].url" controls playsinline
                   @loadedmetadata="restoreVideoPosition(v.fileId, $event)"
                   @timeupdate="onVideoTime(v.fileId, $event)"
                   @progress="onVideoTime(v.fileId, $event)"></video>
-                <div v-else-if="videos[v.fileId]?.status === 'opening'" class="msg-video-play" aria-hidden="true">
+                <div v-else-if="videos[fileKey(v)]?.status === 'opening'" class="msg-video-play" aria-hidden="true">
                   <span class="msg-video-spinner"></span>
                 </div>
                 <div v-else class="msg-video-play" aria-hidden="true">
                   <span class="msg-video-triangle"></span>
                 </div>
-                <div v-if="refused[v.fileId]" class="msg-image-progress _err">This video could not be verified</div>
-                <div v-else-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
+                <div v-if="refused[fileKey(v)]" class="msg-image-progress _err">This video could not be verified</div>
+                <div v-else-if="videos[fileKey(v)]?.status === 'error'" class="msg-image-progress _err">
                   video failed — tap to retry
                 </div>
                 <!-- Duration travels in the envelope (07 §"video" pos 7), so the
                      badge shows before any chunk arrives; while playing the
                      native controls own the timeline. -->
-                <span v-if="!videos[v.fileId]?.url && v.durationSeconds" class="msg-video-duration">
+                <span v-if="!videos[fileKey(v)]?.url && v.durationSeconds" class="msg-video-duration">
                   {{ fmtDuration(v.durationSeconds) }}
                 </span>
               </div>
@@ -119,8 +119,8 @@
                    grows with the chunks regardless of playback (the player's
                    own controls already show the timeline), and leaves at
                    100%. -->
-              <div v-if="downloadingVideo(videos[v.fileId])" class="msg-video-load">
-                <div class="msg-video-load-fill" :style="{ width: loadPercent(videos[v.fileId]) + '%' }"></div>
+              <div v-if="downloadingVideo(videos[fileKey(v)])" class="msg-video-load">
+                <div class="msg-video-load-fill" :style="{ width: loadPercent(videos[fileKey(v)]) + '%' }"></div>
               </div>
             </div>
 
@@ -131,13 +131,13 @@
               :style="{ aspectRatio: imagesOf(msg)[0].widthAspect + ' / ' + imagesOf(msg)[0].heightAspect }"
               @click="openLightbox(msg, 0)">
               <img v-if="thumbUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbUrl(imagesOf(msg)[0])" alt="" />
-              <img v-if="images[imagesOf(msg)[0].fileId]?.url" class="msg-image-full"
-                :src="images[imagesOf(msg)[0].fileId].url" :alt="imagesOf(msg)[0].name" />
-              <div v-if="refused[imagesOf(msg)[0].fileId]" class="msg-image-progress _err">This image could not be verified</div>
-              <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'downloading'" class="msg-image-progress">
-                {{ images[imagesOf(msg)[0].fileId].done }} / {{ images[imagesOf(msg)[0].fileId].total }} chunks
+              <img v-if="images[fileKey(imagesOf(msg)[0])]?.url" class="msg-image-full"
+                :src="images[fileKey(imagesOf(msg)[0])].url" :alt="imagesOf(msg)[0].name" />
+              <div v-if="refused[fileKey(imagesOf(msg)[0])]" class="msg-image-progress _err">This image could not be verified</div>
+              <div v-else-if="images[fileKey(imagesOf(msg)[0])]?.status === 'downloading'" class="msg-image-progress">
+                {{ images[fileKey(imagesOf(msg)[0])].done }} / {{ images[fileKey(imagesOf(msg)[0])].total }} chunks
               </div>
-              <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'error'" class="msg-image-progress _err">
+              <div v-else-if="images[fileKey(imagesOf(msg)[0])]?.status === 'error'" class="msg-image-progress _err">
                 image failed — tap to retry
               </div>
             </div>
@@ -150,8 +150,8 @@
               <div v-for="(im, i) in visibleImages(msg)" :key="im.fileId" class="msg-gallery-cell"
                 @click="openLightbox(msg, i)">
                 <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
-                <img v-if="images[im.fileId]?.url" class="msg-image-full" :src="images[im.fileId].url" :alt="im.name" />
-                <div v-if="refused[im.fileId]" class="msg-image-progress _err">could not be verified</div>
+                <img v-if="images[fileKey(im)]?.url" class="msg-image-full" :src="images[fileKey(im)].url" :alt="im.name" />
+                <div v-if="refused[fileKey(im)]" class="msg-image-progress _err">could not be verified</div>
                 <div v-if="overflowCount(msg) && i === visibleImages(msg).length - 1" class="msg-gallery-more">
                   +{{ overflowCount(msg) }}
                 </div>
@@ -171,22 +171,22 @@
                   <template v-if="refusedFile(f)">
                     {{ fmtSize(f.size) }} · <span class="msg-file-err">This file could not be verified</span>
                   </template>
-                  <template v-else-if="downloads[f.fileId]?.status === 'downloading'">
-                    {{ fmtSize(f.size) }} · chunk {{ downloads[f.fileId].done }} of {{ downloads[f.fileId].total }}
+                  <template v-else-if="downloads[fileKey(f)]?.status === 'downloading'">
+                    {{ fmtSize(f.size) }} · chunk {{ downloads[fileKey(f)].done }} of {{ downloads[fileKey(f)].total }}
                   </template>
-                  <template v-else-if="downloads[f.fileId]?.status === 'error'">
+                  <template v-else-if="downloads[fileKey(f)]?.status === 'error'">
                     {{ fmtSize(f.size) }} · <span class="msg-file-err">download failed — tap to retry</span>
                   </template>
-                  <template v-else-if="downloads[f.fileId]?.status === 'done'">
+                  <template v-else-if="downloads[fileKey(f)]?.status === 'done'">
                     {{ fmtSize(f.size) }} · saved
                   </template>
                   <template v-else>{{ fmtSize(f.size) }}</template>
                 </div>
               </div>
               <template v-if="!refusedFile(f)">
-                <button v-if="downloads[f.fileId]?.status !== 'downloading'" type="button"
+                <button v-if="downloads[fileKey(f)]?.status !== 'downloading'" type="button"
                   class="msg-file-action" @click="emit('downloadFile', f)"
-                  :title="downloads[f.fileId]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
+                  :title="downloads[fileKey(f)]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
                 <span v-else class="msg-file-spinner"></span>
               </template>
             </div>
@@ -318,21 +318,21 @@
       </div>
       <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _prev" @click.stop="stepLightbox(-1)">‹</button>
       <div class="lightbox-frame">
-        <img v-if="images[currentFrame.part.fileId]?.url"
-          :src="images[currentFrame.part.fileId].url" :alt="currentFrame.part.name" />
+        <img v-if="images[fileKey(currentFrame.part)]?.url"
+          :src="images[fileKey(currentFrame.part)].url" :alt="currentFrame.part.name" />
         <img v-else-if="thumbUrl(currentFrame.part)" class="_blur" :src="thumbUrl(currentFrame.part)" alt="" />
-        <div v-if="refused[currentFrame.part.fileId]" class="msg-image-progress _err">This image could not be verified</div>
-        <div v-else-if="images[currentFrame.part.fileId]?.status === 'downloading'" class="msg-image-progress">
-          {{ images[currentFrame.part.fileId].done }} / {{ images[currentFrame.part.fileId].total }} chunks
+        <div v-if="refused[fileKey(currentFrame.part)]" class="msg-image-progress _err">This image could not be verified</div>
+        <div v-else-if="images[fileKey(currentFrame.part)]?.status === 'downloading'" class="msg-image-progress">
+          {{ images[fileKey(currentFrame.part)].done }} / {{ images[fileKey(currentFrame.part)].total }} chunks
         </div>
       </div>
       <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _next" @click.stop="stepLightbox(1)">›</button>
       <div v-if="currentFrame.caption" class="lightbox-caption">{{ currentFrame.caption }}</div>
       <div v-if="allDialogImages.length > 1" class="lightbox-strip">
         <button v-for="(it, i) in allDialogImages" :key="it.part.fileId" type="button"
-          class="lightbox-thumb" :class="{ _active: i === lightbox.index, _pending: !images[it.part.fileId]?.url }"
+          class="lightbox-thumb" :class="{ _active: i === lightbox.index, _pending: !images[fileKey(it.part)]?.url }"
           @click.stop="jumpLightbox(i)">
-          <img v-if="images[it.part.fileId]?.url || thumbUrl(it.part)" :src="images[it.part.fileId]?.url || thumbUrl(it.part)" alt="" />
+          <img v-if="images[fileKey(it.part)]?.url || thumbUrl(it.part)" :src="images[fileKey(it.part)]?.url || thumbUrl(it.part)" alt="" />
         </button>
       </div>
     </div>
@@ -375,6 +375,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { fileKey } from '@/lib/data/fileKey';
 import { contentToText } from '@/lib/pq/content';
 import { thumbHashToDataURL } from 'thumbhash';
 import { fromBase64 } from '@/lib/pq/signature';
@@ -431,7 +432,7 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
-  /** fileId → true for a file whose manifest or chunks contradict the uploader's signatures (docs/invariants.md §6a). */
+  /** fileKey → true for a file whose manifest or chunks contradict the uploader's signatures (docs/invariants.md §6a). */
   refused: {
     type: Object,
     default: () => ({})
@@ -607,13 +608,13 @@ const checkpointsOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'check
 /** Availability only shows while it is genuinely partial — a complete file
  *  needs no explanation, and an unknown manifest is not a claim to make. */
 const partial = (part) => {
-  const a = props.availability[part.fileId];
+  const a = props.availability[fileKey(part)];
   if (!a || a.unknown || a.deleted || !a.total) return null;
   return a.present < a.total ? a : null;
 };
 /** A file whose manifest or chunks contradict the uploader's signatures:
  *  refused, so no download button — another attempt gets the same answer. */
-const refusedFile = (part) => !!props.refused[part.fileId];
+const refusedFile = (part) => !!props.refused[fileKey(part)];
 const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
 const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 

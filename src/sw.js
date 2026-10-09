@@ -99,12 +99,12 @@ const requestToken = async (session, sessionId) => {
 
 // GCM would accept any of this file's chunks at any index. The page verifies
 // the uploader's signatures and answers, per index, the hash its bytes must
-// have; no answer within 3 s and the chunk is not served.
+// have; no answer within 10 s and the chunk is not served.
 const expectedHash = async (session, index, sessionId) => {
 	if (!session.chunkHashes[index]) {
 		const answered = new Promise((wake) => {
 			session.hashWaiters.set(index, [...(session.hashWaiters.get(index) ?? []), wake]);
-			setTimeout(wake, 3000);
+			setTimeout(wake, 10_000);
 		});
 		const clients = await self.clients.matchAll({ type: 'window' });
 		for (const c of clients) c.postMessage({ type: 'need-chunk-hash', sessionId, index });
@@ -137,7 +137,12 @@ const getChunk = async (session, index, sessionId) => {
 	}
 	if (!r.ok) throw new Error(`chunk ${index}: HTTP ${r.status}`);
 	const blob = new Uint8Array(await r.arrayBuffer());
-	if (chunkDataHash(blob) !== expected) throw new Error(`chunk ${index}: could not be verified`);
+	if (chunkDataHash(blob) !== expected) {
+		// The page owns the verdict and the UI: tell it, then end the stream.
+		const clients = await self.clients.matchAll({ type: 'window' });
+		for (const c of clients) c.postMessage({ type: 'chunk-refused', sessionId, index });
+		throw new Error(`chunk ${index}: could not be verified`);
+	}
 	// nonce(12) || ciphertext || tag — the signed bytes of chunk `index`,
 	// decrypted; nothing unverified is ever served.
 	const plain = new Uint8Array(await crypto.subtle.decrypt(

@@ -75,12 +75,14 @@ describe('the video worker holds each chunk to its verified hash', () => {
 		expect(await play(worker, 1)).toEqual({ ok: true, bytes: PLAINS[1] });
 	});
 
-	it('refuses chunk 1\'s bytes served for index 0, though they decrypt', async () => {
+	it('refuses chunk 1\'s bytes served for index 0, though they decrypt, and tells the page', async () => {
 		const { worker, secret, blobs, hashes } = await setup();
 		installBackend([blobs[1], blobs[1]]);
+		addPage(worker, (i) => hashes[i]);
 		register(worker, secret, { 0: hashes[0], 1: hashes[1] });
 		const res = await play(worker, 0);
 		expect(res).toMatchObject({ ok: false, error: expect.stringContaining('chunk 0: could not be verified') });
+		expect(pageInbox).toEqual([{ type: 'chunk-refused', sessionId: SESSION_ID, index: 0 }]);
 	});
 
 	it('asks the page for the hash of a chunk it was not given, and plays with the answer', async () => {
@@ -154,6 +156,23 @@ describe('the page behind a video session', () => {
 			{ type: 'chunk-hash', sessionId, index: 2, hash: null },
 		]);
 		expect(refusedBy).toBeInstanceOf(tab.FileVerificationError);
+	});
+
+	it('reports what the worker refused, and a chunk not verifiable yet as a failure to retry', async () => {
+		const refused: unknown[] = [];
+		const unavailable: unknown[] = [];
+		const tab = await pageSetup(async (i) => {
+			if (i === 0) return 'fd_zero';
+			throw new tab.FileVerificationError(FILE_ID, 'unavailable', 'row not here', i);
+		});
+		const source = await tab.openVideo(video, { onRefused: (e) => refused.push(e), onUnavailable: (e) => unavailable.push(e) });
+		const sessionId = source.url.split('/').pop();
+		tab.fromWorker({ type: 'chunk-refused', sessionId, index: 0 });
+		tab.fromWorker({ type: 'need-chunk-hash', sessionId, index: 1 });
+		await settle();
+		expect(refused).toEqual([expect.objectContaining({ kind: 'invalid', chunkIndex: 0 })]);
+		expect(unavailable).toEqual([expect.objectContaining({ kind: 'unavailable', chunkIndex: 1 })]);
+		expect(tab.toWorker.at(-1)).toEqual({ type: 'chunk-hash', sessionId, index: 1, hash: null });
 	});
 
 	it('refuses at open a file whose first chunk is refused, and registers nothing', async () => {

@@ -127,19 +127,32 @@ export const assertChunkBytes = (fileId: string, index: number, expectedDataHash
 	}
 };
 
+/** Chunk rows replicate one by one; a missing row is looked for again no more often than this. */
+const ROW_REREAD_MS = 2000;
+
 /**
  * Expected chunk hashes of one verified file. Chunk rows replicate after the
  * manifest and one by one: a row missing from those read with the manifest is
- * read for again once. A row is verified the first time it is needed.
+ * read for again — one read at a time, however many indexes wait on it. A row
+ * is verified the first time it is needed.
  */
 export class ChunkHashes {
 	private readonly expectedByIndex = new Map<number, string>();
+	private reread: Promise<void> | null = null;
+	private rowsReadAt = Date.now();
 
 	constructor(
 		readonly manifest: VerifiedManifest,
 		private rows: Map<number, Row>,
 		private readonly signal?: AbortSignal,
 	) {}
+
+	private rereadRows(): Promise<void> {
+		this.reread ??= readChunkRows(this.manifest.fileId, this.signal)
+			.then((rows) => { this.rows = rows; this.rowsReadAt = Date.now(); })
+			.finally(() => { this.reread = null; });
+		return this.reread;
+	}
 
 	/** Chunks here whose row is the one the manifest lists. */
 	listedPresent(): number {
@@ -152,7 +165,7 @@ export class ChunkHashes {
 	async expected(index: number): Promise<string> {
 		const known = this.expectedByIndex.get(index);
 		if (known) return known;
-		if (!this.rows.has(index)) this.rows = await readChunkRows(this.manifest.fileId, this.signal);
+		if (!this.rows.has(index) && (this.reread || Date.now() - this.rowsReadAt >= ROW_REREAD_MS)) await this.rereadRows();
 		const row = this.rows.get(index);
 		if (!row) throw new FileVerificationError(this.manifest.fileId, 'unavailable', 'its signed row has not arrived', index);
 		const hash = verifyChunkRow(this.manifest, index, row);
@@ -161,21 +174,43 @@ export class ChunkHashes {
 	}
 }
 
-/**
- * The file's verified manifest and its chunk rows, read together; null when
- * the manifest has not arrived. Refuses before anything is fetched.
- */
-export const readVerifiedFile = async (
+export type VerifiedFile = { manifest: VerifiedManifest; hashes: ChunkHashes };
+
+const readVerifiedFileNow = async (
 	fileId: string,
 	uploaderHash: string,
-	opts: { signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver } = {},
-): Promise<{ manifest: VerifiedManifest; hashes: ChunkHashes } | null> => {
+	opts: { signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver },
+): Promise<VerifiedFile | null> => {
 	const [manifests, rows] = await Promise.all([
 		readShapeOnce<Row>('files', `file_id='${fileId}'`, opts.signal),
-		readChunkRows(fileId, opts.signal),
+		// Rows that cannot be read now are looked for again when a chunk needs one.
+		readChunkRows(fileId, opts.signal).catch(() => new Map<number, Row>()),
 	]);
 	const row = manifests.find((r) => r.file_id === fileId);
 	if (!row) return null;
 	const manifest = await verifyManifest(fileId, uploaderHash, row, opts.resolveSignPkey);
 	return { manifest, hashes: new ChunkHashes(manifest, rows, opts.signal) };
+};
+
+/** Reads in flight, so an image's availability check and its download verify it once. */
+const inFlight = new Map<string, Promise<VerifiedFile | null>>();
+
+/**
+ * The file's verified manifest and its chunk rows, read together; null when
+ * the manifest has not arrived. Refuses before anything is fetched. Callers
+ * asking at the same time without a signal of their own share one read.
+ */
+export const readVerifiedFile = (
+	fileId: string,
+	uploaderHash: string,
+	opts: { signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver } = {},
+): Promise<VerifiedFile | null> => {
+	if (opts.signal || opts.resolveSignPkey) return readVerifiedFileNow(fileId, uploaderHash, opts);
+	const key = `${uploaderHash}/${fileId}`;
+	let read = inFlight.get(key);
+	if (!read) {
+		read = readVerifiedFileNow(fileId, uploaderHash, opts).finally(() => inFlight.delete(key));
+		inFlight.set(key, read);
+	}
+	return read;
 };

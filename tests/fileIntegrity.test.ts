@@ -12,6 +12,9 @@ import { chunkDataHash, encryptChunk, generateEncSecret } from '@/lib/pq/fileCry
 // The chunk cache as chunkCache.ts keeps it: bytes under the hash they were stored with.
 const cache = new Map<string, { bytes: Uint8Array; dataHash: string }>();
 const cachePuts: string[] = [];
+// The app's own key lookup, for the calls that pass no resolver of their own.
+vi.mock('@/lib/data/cardRegistry', () => ({ getVerifiedSignPkey: async (hash: string) => cards[hash] ?? null }));
+
 vi.mock('@/lib/data/chunkCache', () => ({
 	getCachedChunk: async (fileId: string, i: number, dataHash: string) => {
 		const rec = cache.get(`${fileId}:${i}`);
@@ -25,7 +28,7 @@ vi.mock('@/lib/data/chunkCache', () => ({
 }));
 
 const { downloadFile, fileAvailability } = await import('@/lib/data/fileTransfer');
-const { FileVerificationError, verifyManifest } = await import('@/lib/data/fileIntegrity');
+const { FileVerificationError, readVerifiedFile, verifyManifest } = await import('@/lib/data/fileIntegrity');
 
 const UPLOADER = 'u_' + 'a'.repeat(128);
 const FILE_ID = 'f_' + '0192aaaa00007000800000000000000a'.slice(0, 32);
@@ -71,18 +74,22 @@ const onWire = (row: Row): Row => Object.fromEntries(Object.entries(row).map(([k
 	return [k, v];
 }));
 
-let server: { manifest: Row | null; chunkRows: Row[]; bytes: Uint8Array[] };
+let server: { manifest: Row | null; chunkRows: Row[]; bytes: Uint8Array[]; chunkShapeDown?: boolean };
+let shapeReads: Record<string, number>;
 let chunkRequests: number[];
 
 beforeEach(() => {
 	cache.clear();
 	cachePuts.length = 0;
 	chunkRequests = [];
+	shapeReads = {};
 	globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 		const url = decodeURIComponent(typeof input === 'string' ? input : input.toString());
 		const shape = (rows: Row[]) => new Response(JSON.stringify(rows.map((value) => ({ value }))), { status: 200 });
-		if (url.includes('/shapes?table=files&')) return shape(server.manifest ? [onWire(server.manifest)] : []);
-		if (url.includes('/shapes?table=file_chunks&')) return shape(server.chunkRows.map(onWire));
+		const table = /\/shapes\?table=(\w+)&/.exec(url)?.[1];
+		if (table) shapeReads[table] = (shapeReads[table] ?? 0) + 1;
+		if (table === 'files') return shape(server.manifest ? [onWire(server.manifest)] : []);
+		if (table === 'file_chunks') return server.chunkShapeDown ? new Response(null, { status: 500 }) : shape(server.chunkRows.map(onWire));
 		const m = url.match(/\/file_chunk\/[^/]+\/(\d+)$/);
 		if (m) {
 			const i = Number(m[1]);
@@ -243,5 +250,40 @@ describe('availability', () => {
 		const injected = { ...f.chunkRows[0], chunk_index: 2, sign_b64: f.chunkRows[0].sign_b64 };
 		server = { manifest: f.manifestRow, chunkRows: [f.chunkRows[0], f.chunkRows[1], injected, { ...f.chunkRows[1], chunk_index: 5 }], bytes: f.bytes };
 		expect(await availability()).toEqual({ present: 2, total: 3, unknown: false, deleted: false });
+	});
+});
+
+describe('reading a file', () => {
+	it('keeps the total of the manifest when the chunk rows cannot be read', async () => {
+		const f = await makeFile(['zero', 'one']);
+		server = { manifest: f.manifestRow, chunkRows: f.chunkRows, bytes: f.bytes, chunkShapeDown: true };
+		expect(await availability()).toEqual({ present: 0, total: 2, unknown: false, deleted: false });
+	});
+
+	it('verifies once for callers asking at the same time, as the availability check and the download of an image do', async () => {
+		const f = await makeFile(['zero']);
+		server = { manifest: f.manifestRow, chunkRows: f.chunkRows, bytes: f.bytes };
+		const [a, b] = await Promise.all([fileAvailability(FILE_ID, UPLOADER), fileAvailability(FILE_ID, UPLOADER)]);
+		expect(a).toEqual(b);
+		expect(shapeReads).toEqual({ files: 1, file_chunks: 1 });
+	});
+
+	it('looks for a late chunk row again, once for every index waiting, and not right after the last look', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			const f = await makeFile(['zero', 'one']);
+			server = { manifest: f.manifestRow, chunkRows: [f.chunkRows[0]], bytes: f.bytes };
+			const file = (await readVerifiedFile(FILE_ID, UPLOADER, { resolveSignPkey }))!;
+			await expect(file.hashes.expected(1)).rejects.toMatchObject({ kind: 'unavailable' });
+			expect(shapeReads.file_chunks).toBe(1);
+			server.chunkRows = f.chunkRows;
+			vi.setSystemTime(Date.now() + 2500);
+			const [x, y] = await Promise.all([file.hashes.expected(1), file.hashes.expected(1)]);
+			expect(x).toBe(chunkDataHash(f.bytes[1]));
+			expect(y).toBe(x);
+			expect(shapeReads.file_chunks).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
