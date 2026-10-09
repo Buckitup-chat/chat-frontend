@@ -117,6 +117,9 @@ export class EncryptionManagerPQ extends EventTarget {
   #slotResolver = null;
   #contactSkey = null;
   #evmSkey = null;
+  // The guardian meta seed (pq_recovery_shares § Inviting, The keys): hex,
+  // created at the first acceptance, null until then.
+  #metaSeed = null;
 
   constructor() {
     super();
@@ -467,6 +470,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const cryptSkey = this.#normalizeKey(await vault.get('crypt_skey'));
     const evmSkey = await vault.get('evm_skey');
     const contactSkey = await vault.get('contact_skey');
+    const metaSeed = (await vault.get('meta_seed')) ?? null;
 
     if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
 
@@ -475,6 +479,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#cryptSkey = cryptSkey;
     this.#evmSkey = evmSkey;
     this.#contactSkey = contactSkey;
+    this.#metaSeed = metaSeed;
     if (!(this.#cryptSkey instanceof Uint8Array)) {
       console.warn('Crypt key not found in vault, avatar encryption will not work');
     }
@@ -527,6 +532,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#cryptSkey = null;
     this.#evmSkey = null;
     this.#contactSkey = null;
+    this.#metaSeed = null;
     this.#currentVault = null;
     this.#bootstrapUserHash = null;
   }
@@ -635,6 +641,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#cryptSkey = null;
     }
     this.#evmSkey = null;
+    this.#metaSeed = null;
     this.#currentUserHash = null;
     this.#bootstrapUserHash = null;
     this.#currentVault = null;
@@ -793,6 +800,37 @@ export class EncryptionManagerPQ extends EventTarget {
     return this.#evmSkey;
   }
 
+  /**
+   * The guardian meta seed, hex, read from the vault — another tab of this
+   * account may have made it since this one opened. With `create` a missing
+   * one is generated and kept there first: it is made at the first
+   * acceptance, and every later one answers with the same keys. Without, null
+   * until then.
+   */
+  async guardianMetaSeed({ create = false } = {}) {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+    if (this.#metaSeed) return this.#metaSeed;
+    const vault = this.#currentVault;
+    // One seed per account, ever: a second one would answer some owners with
+    // keys the first never derives. Another tab shares the vault, so the
+    // check is made again, under a lock, against the vault itself.
+    const make = async () => {
+      let seed = (await vault.get('meta_seed')) ?? null;
+      if (!seed && create) {
+        seed = bytesToHex(randomBytes(32));
+        await vault.set('meta_seed', seed);
+      }
+      return seed;
+    };
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    const seed = await (create && locks ? locks.request(`meta_seed:${vault.id}`, make) : make());
+    // A logout or switch while this ran leaves the seed in its own vault and
+    // nothing in this session.
+    if (this.#currentVault !== vault) throw new Error('The account changed while the guardian keys were being read');
+    this.#metaSeed = seed;
+    return seed;
+  }
+
   async exportVaultKeys() {
     if (!this.#currentVault) throw new Error('Vault not loaded');
 
@@ -804,6 +842,9 @@ export class EncryptionManagerPQ extends EventTarget {
       crypt_skey: arrayToBase64(this.#cryptSkey),
       evm_skey: this.#evmSkey,
       contact_skey: this.#contactSkey,
+      // Absent until the first acceptance; a backup or a linked device that
+      // carries it derives the same guardian keys.
+      ...(this.#metaSeed ? { meta_seed: this.#metaSeed } : {}),
       sign_pkey: this.#localUserCards.find(u => u.user_hash === this.localStorageOwnerHash).sign_pkey,
       crypt_pkey: this.#localUserCards.find(u => u.user_hash === this.localStorageOwnerHash).crypt_pkey
     };
@@ -838,6 +879,7 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, keys.evm_skey);
     await userVault.set(`contact_skey`, keys.contact_skey);
+    if (keys.meta_seed) await userVault.set(`meta_seed`, keys.meta_seed);
 
     identity.vaultId = userVault.id;
     if (existing) {

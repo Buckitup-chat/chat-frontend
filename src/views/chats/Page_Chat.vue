@@ -10,6 +10,8 @@
             @show-image="handleShowImage" @play-video="handlePlayVideo" @play-audio="handlePlayAudio"
             :checkpoint-signing="checkpointSigning"
             @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
+            :invites="inviteViewsByMsgId" :can-invite="peerConfirmed" :inviting="inviting"
+            @invite-guardian="handleInviteGuardian" @answer-invite="handleAnswerInvite"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge">
@@ -61,6 +63,10 @@ import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
 import { claimPendingEdit, submitPendingEdit, failPendingEdit, awaitPendingEditUnlock, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
 import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
 import { v7 as uuidv7 } from 'uuid';
+import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
+import { deploymentNamespace, recoveryDeployment } from '@/lib/recovery/deployments';
+import { inviteViews, rosterAnswersDue } from '@/lib/recovery/inviteThread';
+import { GUARDIAN_SLOT, ROSTER_SLOT, InvitationError, answerInvite, recordRosterAnswers, sendInvite } from '@/lib/recovery/invitations';
 
 const $route = useRoute();
 const $router = useRouter();
@@ -942,6 +948,125 @@ const handleCreateCheckpoint = async () => {
         checkpointSigning.value = false;
     }
 };
+
+// --- Guardian invitations (pq_recovery_shares § Inviting) ---
+
+const recoveryNamespace = deploymentNamespace(recoveryDeployment());
+const roster = ref({});
+const guardianAnswers = ref({});
+const inviting = ref(false);
+const peerConfirmed = computed(() => $userPQ.contactsMap?.[peerHash.value]?.confirmed === true);
+
+const loadInviteRecords = async () => {
+    const em = EncryptionManagerPQ.getInstance();
+    const [r, g] = await Promise.all([em.loadSlotJson(ROSTER_SLOT), em.loadSlotJson(GUARDIAN_SLOT)]);
+    if (!pageAlive) return;
+    roster.value = r ?? {};
+    guardianAnswers.value = g?.answers ?? {};
+};
+
+const invitationDeps = () => {
+    const em = EncryptionManagerPQ.getInstance();
+    return {
+        myHash: $userPQ.currentUserHash,
+        isConfirmed: (hash) => $userPQ.contactsMap?.[hash]?.confirmed === true,
+        deployment: recoveryNamespace,
+        newMessageId: async () => 'dmsg_' + uuidv7(),
+        sendMessage: $dialogs.sendMessage,
+        patchSlotJson: (name, patch) => em.patchSlotJson(name, patch),
+        guardianMetaSeed: (opts) => em.guardianMetaSeed(opts),
+    };
+};
+
+// A reply counts as its first revision: an edited or deleted one is read
+// from its archived revisions, which keep the first.
+const firstRevisionParts = ref(new Map());
+const dialogHasInvites = computed(() => decryptedMessages.value.some((m) => (m.parts || []).some((p) => p.kind === 'recovery_invite')));
+watch([versionCountByMsgId, dialogHasInvites], async ([counts, hasInvites]) => {
+    if (!hasInvites || !dialogHash.value) return;
+    const dh = dialogHash.value;
+    const next = new Map(firstRevisionParts.value);
+    for (const id of Object.keys(counts)) {
+        if (next.has(id)) continue;
+        const history = await $dialogs.getMessageHistory(dh, id);
+        const first = history.filter((h) => h.verified && h.parts).sort((a, b) => a.ownerTimestamp - b.ownerTimestamp)[0];
+        if (first) next.set(id, first.parts);
+    }
+    if (pageAlive && dh === dialogHash.value) firstRevisionParts.value = next;
+}, { immediate: true });
+
+const inviteViewsByMsgId = computed(() => {
+    if (!peerHash.value) return {};
+    const messages = decryptedMessages.value
+        .filter((m) => m._raw?.sender_hash)
+        .map((m) => ({ id: m.id, senderHash: m._raw.sender_hash, parts: firstRevisionParts.value.get(m.id) ?? m.parts ?? [] }));
+    return inviteViews({
+        messages,
+        myHash: $userPQ.currentUserHash,
+        peerHash: peerHash.value,
+        roster: roster.value,
+        peerConfirmed: peerConfirmed.value,
+        reachable: (deployment) => deployment === recoveryNamespace,
+        answers: guardianAnswers.value,
+    });
+});
+
+// The owner records what its live invitations came to, so a second device
+// offers the same people at backup time.
+watch(inviteViewsByMsgId, async (views) => {
+    const due = rosterAnswersDue(views, roster.value, peerHash.value);
+    if (!Object.keys(due).length) return;
+    try {
+        await recordRosterAnswers(invitationDeps(), due);
+        await loadInviteRecords();
+    } catch (e) {
+        console.warn('[chat] recording guardian answers failed:', e);
+    }
+});
+
+const inviteStatusToast = (what) => (status) => {
+    if (!pageAlive) return;
+    if (status === 'queued') $swal.fire({ icon: 'info', title: `${what} queued`, text: 'No connection right now — it is stored and sent when the network returns.' });
+    else if (status === 'awaiting_approval') $swal.fire({ icon: 'info', title: `${what} waits for approval`, text: 'It is sent once the device owner approves your account.' });
+};
+
+const handleInviteGuardian = async () => {
+    if (inviting.value) return;
+    const { isConfirmed } = await $swal.fire({
+        icon: 'question',
+        title: `Ask ${chatName.value} to be your guardian?`,
+        text: 'A guardian keeps a part of your backup. If you ever lose access, they check that it is really you and approve your recovery.',
+        showCancelButton: true,
+        confirmButtonText: 'Ask',
+    });
+    if (!isConfirmed) return;
+    inviting.value = true;
+    try {
+        await sendInvite(invitationDeps(), peerHash.value, inviteStatusToast('The invitation'));
+        await loadInviteRecords();
+    } catch (e) {
+        if (pageAlive) $swal.fire({ icon: 'error', title: 'The invitation was not sent', text: e instanceof InvitationError ? e.message : String(e?.message ?? e) });
+    } finally {
+        inviting.value = false;
+    }
+};
+
+const handleAnswerInvite = async ({ inviteId, deployment, accept }) => {
+    if (inviting.value) return;
+    inviting.value = true;
+    try {
+        await answerInvite(invitationDeps(), peerHash.value, { inviteId, deployment }, accept, inviteStatusToast(accept ? 'Your acceptance' : 'Your answer'));
+        await loadInviteRecords();
+    } catch (e) {
+        if (pageAlive) $swal.fire({ icon: 'error', title: 'The answer was not sent', text: e instanceof InvitationError ? e.message : String(e?.message ?? e) });
+    } finally {
+        inviting.value = false;
+    }
+};
+
+watch(dialogHash, (dh) => {
+    if (dh) loadInviteRecords().catch((e) => console.warn('[chat] guardian records unavailable:', e));
+}, { immediate: true });
 
 watch(dialogHash, (dh) => {
     if (!dh || !peerHash.value) return;

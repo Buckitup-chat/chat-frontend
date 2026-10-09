@@ -1079,13 +1079,15 @@ export const useDialogsStore = defineStore('dialogs', () => {
         for (const row of rows) {
             const verified = (await verifyReplicatedRow('dialog_messages_versions', row, getVerifiedSignPkey)).status === 'verified';
             let text = '';
+            let parts = [];
             let decrypted = false;
             if (verified && row.content_b64) {
                 try {
                     const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
                     if (key) {
                         const json = await DialogCrypto.decryptContent(key, row.content_b64);
-                        text = json ? contentToText(decodeContent(json)) : '';
+                        parts = json ? decodeContent(json) : [];
+                        text = contentToText(parts);
                         decrypted = true;
                     }
                 } catch { /* rendered as undecrypted below */ }
@@ -1096,6 +1098,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 deletedFlag: !!row.deleted_flag,
                 verified,
                 text: verified ? (decrypted ? text : 'Waiting for keys…') : 'Unverifiable revision',
+                parts: decrypted ? parts : null,
+                senderHash: row.sender_hash,
             });
         }
         // Newest first; the current tip is already on screen and is not repeated here.

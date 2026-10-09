@@ -430,6 +430,8 @@ export const userPQStore = defineStore('userPQ', () => {
 
   const exportBackup = async () => {
     if (!em.value) throw new Error('Not signed in.');
+    // Read first: a guardian seed another tab made since this one opened goes in too.
+    await em.value.guardianMetaSeed();
     const keys = await em.value.exportVaultKeys();
     if (!keys.contact_skey) {
       // A vault restored before contact_skey was carried has none, and an
