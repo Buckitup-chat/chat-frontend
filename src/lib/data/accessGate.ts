@@ -11,6 +11,11 @@ interface BlockedShape {
 const blocked = new Map<string, BlockedShape>();
 const listeners = new Set<() => void>();
 
+const blockedWrites = new Map<string, BlockedShape>();
+let writeOwner: string | null = null;
+type WriteProber = (userHash: string, shape: string) => Promise<boolean>;
+let writeProber: WriteProber | null = null;
+
 const INITIAL_PROBE_MS = 15_000;
 const MAX_PROBE_MS = 300_000;
 
@@ -45,7 +50,7 @@ export function isShapeBlocked(shape: string): boolean {
 }
 
 export function hasBlockedShapes(): boolean {
-	return blocked.size > 0;
+	return blocked.size > 0 || blockedWrites.size > 0;
 }
 
 export function blockedShapeNames(): string[] {
@@ -71,6 +76,11 @@ export function probeAllBlocked(): void {
 		entry.probeTimer = null;
 		void probeOne(entry, true);
 	}
+	for (const entry of blockedWrites.values()) {
+		if (entry.probeTimer) clearTimeout(entry.probeTimer);
+		entry.probeTimer = null;
+		void probeWrite(entry);
+	}
 }
 
 export function resetGate(): void {
@@ -80,7 +90,44 @@ export function resetGate(): void {
 		for (const resolve of waiters) resolve();
 	}
 	blocked.clear();
+	clearWrites();
 	notifyListeners();
+}
+
+export function setWriteProber(prober: WriteProber | null): void {
+	writeProber = prober;
+}
+
+export function isWriteBlocked(shape: string): boolean {
+	return blockedWrites.has(shape);
+}
+
+export function blockedWriteShapes(): string[] {
+	return [...blockedWrites.keys()];
+}
+
+export function syncBlockedWrites(userHash: string, shapes: Iterable<string>): void {
+	const next = new Set(shapes);
+	let changed = false;
+	if (writeOwner !== userHash) {
+		changed = blockedWrites.size > 0;
+		clearWrites();
+		writeOwner = userHash;
+	}
+	for (const [shape, entry] of blockedWrites) {
+		if (next.has(shape)) continue;
+		if (entry.probeTimer) clearTimeout(entry.probeTimer);
+		blockedWrites.delete(shape);
+		changed = true;
+	}
+	for (const shape of next) {
+		if (blockedWrites.has(shape)) continue;
+		const entry: BlockedShape = { shape, blockedAt: Date.now(), probeInterval: INITIAL_PROBE_MS, probeTimer: null, waiters: [] };
+		blockedWrites.set(shape, entry);
+		scheduleWriteProbe(entry);
+		changed = true;
+	}
+	if (changed) notifyListeners();
 }
 
 // ---------- internals ----------
@@ -114,6 +161,41 @@ async function probeOne(entry: BlockedShape, retryParked = false): Promise<void>
 	if (retryParked) for (const resolve of entry.waiters.splice(0)) resolve();
 	entry.probeInterval = Math.min(entry.probeInterval * 2, MAX_PROBE_MS);
 	scheduleProbe(entry);
+}
+
+function clearWrites(): void {
+	for (const entry of blockedWrites.values()) {
+		if (entry.probeTimer) clearTimeout(entry.probeTimer);
+	}
+	blockedWrites.clear();
+	writeOwner = null;
+}
+
+function scheduleWriteProbe(entry: BlockedShape): void {
+	if (entry.probeTimer) clearTimeout(entry.probeTimer);
+	entry.probeTimer = setTimeout(() => {
+		entry.probeTimer = null;
+		void probeWrite(entry);
+	}, entry.probeInterval);
+}
+
+async function probeWrite(entry: BlockedShape): Promise<void> {
+	const owner = writeOwner;
+	if (!owner || blockedWrites.get(entry.shape) !== entry) return;
+	let released = false;
+	try {
+		released = (await writeProber?.(owner, entry.shape)) === true;
+	} catch {
+		// no verdict on the chain — probe again later
+	}
+	if (writeOwner !== owner || blockedWrites.get(entry.shape) !== entry) return;
+	if (released) {
+		blockedWrites.delete(entry.shape);
+		notifyListeners();
+		return;
+	}
+	entry.probeInterval = Math.min(entry.probeInterval * 2, MAX_PROBE_MS);
+	scheduleWriteProbe(entry);
 }
 
 // Re-probe on network reconnection and tab focus

@@ -12,10 +12,11 @@ export function awaitPendingEditUnlock(map, messageId, token) {
 	map.set(messageId, { ...current, status: 'awaiting_unlock' });
 	return true;
 }
-export function submitPendingEdit(map, messageId, token, targetSignHash, targetOwnerTimestamp) {
+
+export function submitPendingEdit(map, messageId, token, targetSignHash, targetOwnerTimestamp, { awaitingApproval = false } = {}) {
 	const current = map.get(messageId);
 	if (!current || current.token !== token) return false;
-	map.set(messageId, { text: current.text, status: 'awaiting_echo', token, targetSignHash, targetOwnerTimestamp });
+	map.set(messageId, { text: current.text, status: awaitingApproval ? 'awaiting_approval' : 'awaiting_echo', token, targetSignHash, targetOwnerTimestamp });
 	return true;
 }
 
@@ -49,7 +50,7 @@ export function reconcilePendingEditsWithVerifiedRows(map, verifiedRevisions) {
 			}
 			continue;
 		}
-		if (entry.status !== 'awaiting_echo' || !entry.targetSignHash) continue;
+		if ((entry.status !== 'awaiting_echo' && entry.status !== 'awaiting_approval') || !entry.targetSignHash) continue;
 		if (verifiedSignHashByMessageId.get(messageId) === entry.targetSignHash) {
 			map.delete(messageId);
 			cleared.push(messageId);

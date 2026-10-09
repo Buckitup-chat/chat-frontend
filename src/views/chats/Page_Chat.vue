@@ -4,10 +4,10 @@
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :peer-hash="peerHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId"
             :downloads="downloadsByFileId" :images="imagesByFileId"
-            :availability="availabilityByFileId" :videos="videosByFileId"
+            :availability="availabilityByFileId" :videos="videosByFileId" :audios="audiosByFileId"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.discardFailedItem(id)"
-            @show-image="handleShowImage" @play-video="handlePlayVideo"
+            @show-image="handleShowImage" @play-video="handlePlayVideo" @play-audio="handlePlayAudio"
             :checkpoint-signing="checkpointSigning"
             @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
             @sendMessage="handleSendMessage"
@@ -50,6 +50,7 @@ import TransferPanel from '@/components/chat/TransferPanel.vue';
 import { getDialogCollections } from '@/lib/data/collections';
 import { useCollectionRows } from '@/lib/data/useCollection';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
+import { useAudioPlayback } from '@/composables/useAudioPlayback';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
@@ -851,6 +852,11 @@ const handlePlayVideo = async (part) => {
     }
 };
 
+const { audios: audiosByFileId, load: handlePlayAudio } = useAudioPlayback(
+    $dialogs.fetchFile,
+    () => [dialogHash.value, $userPQ.currentUserHash],
+);
+
 // Video state survives dialog switches on purpose: streaming sessions are a
 // map entry in the worker, downloaded videos live in the media cache — both
 // cheap to keep, and re-entering the chat replays without re-fetching.
@@ -913,6 +919,13 @@ const handleCreateCheckpoint = async () => {
         // it WILL be retried and the marker appears when a connection
         // returns. Telling the user it failed outright would be the inverse
         // of the old false "signed" — both misreport the outbox contract.
+        if (e?.message === 'CHECKPOINT_AWAITING_APPROVAL') {
+            $swal.fire({
+                icon: 'info', title: 'Checkpoint waits for approval',
+                text: 'The signed checkpoint is stored on this device and is sent once the device owner approves your account.',
+            });
+            return;
+        }
         const queued = e?.cause && e.cause.name === 'IngestError' && !e.cause.permanent;
         if (queued) {
             $swal.fire({
@@ -1076,7 +1089,7 @@ const handleEditMessage = async (messageId, newText) => {
             if (awaitPendingEditUnlock(pendingEdits.value, messageId, myToken)) pendingEdits.value = new Map(pendingEdits.value);
             return;
         }
-        if (submitPendingEdit(pendingEdits.value, messageId, myToken, signHash, ownerTimestamp)) {
+        if (submitPendingEdit(pendingEdits.value, messageId, myToken, signHash, ownerTimestamp, { awaitingApproval: status === 'awaiting_approval' })) {
             pendingEdits.value = new Map(pendingEdits.value);
             reconcilePendingEdits();
         }

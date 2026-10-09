@@ -9,6 +9,12 @@ const em = vi.hoisted(() => ({
 		this.signed.push(msg);
 		return this.signature;
 	},
+	recoveries: [] as string[],
+	recover: async (_userHash: string): Promise<'accepted' | 'deferred' | 'stale'> => 'accepted',
+	async recoverOwnCard(userHash: string) {
+		this.recoveries.push(userHash);
+		return this.recover(userHash);
+	},
 }));
 
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
@@ -79,6 +85,8 @@ beforeEach(() => {
 	em.currentUserHash = USER_A;
 	em.signed = [];
 	em.signature = new Uint8Array([1, 2, 3, 4]);
+	em.recoveries = [];
+	em.recover = async () => 'accepted';
 });
 
 afterEach(() => {
@@ -186,13 +194,13 @@ describe('A. challenge and session opening', () => {
 		await expect(openSession('no_such_shape')).resolves.toBeNull();
 		expect(bearerFor('no_such_shape')).toBe('');
 		expect(isShapeBlocked('no_such_shape')).toBe(false);
+		expect(em.recoveries).toEqual([]);
 	});
 
 	it.each([
 		['invalid_signature', { error: 'invalid_signature' }],
-		['unknown_user', { error: 'unknown_user' }],
 		['expired challenge', { error: 'Invalid or expired challenge' }],
-	])('A8 401 %s returns no session and does not block the shape', async (_name, body) => {
+	])('A8 401 %s returns no session, does not block the shape and publishes no card', async (_name, body) => {
 		const { openSession, bearerFor, isShapeBlocked } = await load();
 		installFetch((url, rec) => (url.endsWith('/read_session') ? json(401, body) : sessionEndpoints(url, rec)!));
 
@@ -200,6 +208,7 @@ describe('A. challenge and session opening', () => {
 		expect(bearerFor('user_card')).toBe('');
 		expect(isShapeBlocked('user_card')).toBe(false);
 		expect(opens()).toHaveLength(1);
+		expect(em.recoveries).toEqual([]);
 	});
 
 	it('A9 403 not_in_trust_chain returns no session and marks the shape blocked', async () => {
@@ -211,6 +220,7 @@ describe('A. challenge and session opening', () => {
 		expect(bearerFor('file')).toBe('');
 		expect(isShapeBlocked('file')).toBe(true);
 		expect(isShapeBlocked('user_card')).toBe(false);
+		expect(em.recoveries).toEqual([]);
 		resetGate();
 	});
 
@@ -324,6 +334,174 @@ const gatedServer = (opts: { shapeReply?: (table: string, rec: Recorded) => Resp
 };
 
 const shapeReads = (table: string) => requests.filter((r) => r.url.includes(`/shapes?table=${table}&`));
+
+describe('U. 401 unknown_user: card recovery, then one retry', () => {
+	const unknownUserEndpoints = (state: { known: boolean }) => (url: string, rec: Recorded) =>
+		url.endsWith('/read_session') && !state.known ? json(401, { error: 'unknown_user' }) : sessionEndpoints(url, rec)!;
+
+	it('U1 recovers the card once, then retries the same shape with a fresh challenge', async () => {
+		const { openSession, bearerFor } = await load();
+		const server = { known: false };
+		em.recover = async () => { server.known = true; return 'accepted'; };
+		installFetch(unknownUserEndpoints(server));
+
+		const token = await openSession('dialog_messages');
+
+		expect(em.recoveries).toEqual([USER_A]);
+		expect(token).toMatch(/^tok-dialog_messages-/);
+		expect(bearerFor('dialog_messages')).toBe(`Bearer ${token}`);
+		expect(challenges()).toHaveLength(2);
+		expect(opens().map((o) => o.body.shape)).toEqual(['dialog_messages', 'dialog_messages']);
+		expect(opens()[1].body.challenge_id).not.toBe(opens()[0].body.challenge_id);
+		expect(em.signed).toHaveLength(2);
+	});
+
+	it('U2 simultaneous unknown_user for different shapes share one recovery; each shape gets its own token', async () => {
+		const { openSession, bearerFor } = await load();
+		const server = { known: false };
+		const release = deferred<void>();
+		em.recover = async () => { await release.promise; server.known = true; return 'accepted'; };
+		installFetch(unknownUserEndpoints(server));
+		const tick = () => new Promise((r) => setTimeout(r, 0));
+		const messagesP = openSession('dialog_messages');
+		await tick();
+		const fileP = openSession('file');
+		await tick();
+		const opening = Promise.all([messagesP, fileP, openSession('user_storage')]);
+		await vi.waitFor(() => expect(opens()).toHaveLength(3));
+		release.resolve();
+		const [messages, file, storage] = await opening;
+
+		expect(em.recoveries).toEqual([USER_A]);
+		expect(messages).toMatch(/^tok-dialog_messages-/);
+		expect(file).toMatch(/^tok-file-/);
+		expect(storage).toMatch(/^tok-user_storage-/);
+		expect(bearerFor('file')).toBe(`Bearer ${file}`);
+		expect(opens()).toHaveLength(6);
+		expect(new Set(opens().map((o) => o.body.challenge_id)).size).toBe(6);
+	});
+
+	it('U3 a second unknown_user after the retry stops: no third open, and no further card for this identity', async () => {
+		const { openSession, bearerFor } = await load();
+		installFetch(unknownUserEndpoints({ known: false }));
+
+		await expect(openSession('dialog_messages')).resolves.toBeNull();
+		expect(em.recoveries).toEqual([USER_A]);
+		expect(opens()).toHaveLength(2);
+		expect(bearerFor('dialog_messages')).toBe('');
+
+		await expect(openSession('file')).resolves.toBeNull();
+		expect(em.recoveries).toEqual([USER_A]);
+		expect(opens()).toHaveLength(3);
+	});
+
+	it('U4 a failed card write is reported as itself, creates no token and is not repeated', async () => {
+		const { openSession, bearerFor } = await load();
+		const refused = new Error('card refused: validation_failed');
+		em.recover = async () => { throw refused; };
+		installFetch(unknownUserEndpoints({ known: false }));
+
+		await expect(openSession('dialog_messages')).rejects.toBe(refused);
+		expect(bearerFor('dialog_messages')).toBe('');
+		expect(opens()).toHaveLength(1);
+
+		await expect(openSession('file')).rejects.toBe(refused);
+		expect(em.recoveries).toEqual([USER_A]);
+		expect(opens()).toHaveLength(2);
+	});
+
+	it('U5 while the card waits for delivery, opens wait on it: no new challenge per retry, one retry each once accepted', async () => {
+		const { openSession } = await load();
+		const server = { known: false };
+		const delivered = deferred<void>();
+		em.recover = async () => { await delivered.promise; server.known = true; return 'accepted'; };
+		installFetch(unknownUserEndpoints(server));
+		const tick = () => new Promise((r) => setTimeout(r, 0));
+
+		const first = openSession('dialog_messages');
+		await vi.waitFor(() => expect(em.recoveries).toHaveLength(1));
+		const restarts = [];
+		for (let i = 0; i < 5; i++) { restarts.push(openSession('dialog_messages')); await tick(); }
+		const file = openSession('file');
+		await vi.waitFor(() => expect(opens()).toHaveLength(2));
+		await new Promise((r) => setTimeout(r, 20));
+		expect(challenges()).toHaveLength(2);
+
+		delivered.resolve();
+		const tokens = await Promise.all([first, ...restarts, file]);
+		expect(new Set(tokens.slice(0, 6)).size).toBe(1);
+		expect(tokens[0]).toMatch(/^tok-dialog_messages-/);
+		expect(tokens[6]).toMatch(/^tok-file-/);
+		expect(em.recoveries).toEqual([USER_A]);
+		expect(challenges()).toHaveLength(4);
+	});
+
+	it('U6 logout during recovery: the former identity retries nothing and keeps no token', async () => {
+		const { openSession, bearerFor, clearSessions } = await load();
+		const server = { known: false };
+		const release = deferred<void>();
+		em.recover = async () => { await release.promise; server.known = true; return 'accepted'; };
+		installFetch(unknownUserEndpoints(server));
+
+		const opening = openSession('dialog_messages');
+		await vi.waitFor(() => expect(em.recoveries).toHaveLength(1));
+		clearSessions();
+		em.currentUserHash = USER_B;
+		release.resolve();
+
+		await expect(opening).resolves.toBeNull();
+		expect(opens()).toHaveLength(1);
+		expect(bearerFor('dialog_messages')).toBe('');
+	});
+
+	it('U7 account switch during recovery: the next identity runs its own recovery, not the former one\'s', async () => {
+		const { openSession, clearSessions } = await load();
+		const server = { known: false };
+		const releaseA = deferred<void>();
+		em.recover = async (userHash) => {
+			if (userHash === USER_A) { await releaseA.promise; return 'stale'; }
+			server.known = true;
+			return 'accepted';
+		};
+		installFetch(unknownUserEndpoints(server));
+
+		const openingA = openSession('dialog_messages');
+		await vi.waitFor(() => expect(em.recoveries).toEqual([USER_A]));
+		clearSessions();
+		em.currentUserHash = USER_B;
+
+		const tokenB = await openSession('dialog_messages');
+		releaseA.resolve();
+		await expect(openingA).resolves.toBeNull();
+
+		expect(em.recoveries).toEqual([USER_A, USER_B]);
+		expect(tokenB).toMatch(/^tok-dialog_messages-/);
+		expect(opens().map((o) => o.body.user_hash)).toEqual([USER_A, USER_B, USER_B]);
+	});
+
+	it('U8 an open begun before another shape\'s card was accepted retries without publishing again', async () => {
+		const { openSession } = await load();
+		const server = { known: false };
+		const lateResponse = deferred<void>();
+		em.recover = async () => { server.known = true; return 'accepted'; };
+		let fileOpens = 0;
+		installFetch(async (url, rec) => {
+			if (url.endsWith('/read_session') && rec.body.shape === 'file' && ++fileOpens === 1) {
+				await lateResponse.promise;
+				return json(401, { error: 'unknown_user' });
+			}
+			return unknownUserEndpoints(server)(url, rec);
+		});
+
+		const file = openSession('file');
+		await vi.waitFor(() => expect(fileOpens).toBe(1));
+		await expect(openSession('dialog_messages')).resolves.toMatch(/^tok-dialog_messages-/);
+		lateResponse.resolve();
+
+		await expect(file).resolves.toMatch(/^tok-file-/);
+		expect(em.recoveries).toEqual([USER_A]);
+	});
+});
 
 describe('B. canonical table-to-shape association (readShapeOnce)', () => {
 	it.each([

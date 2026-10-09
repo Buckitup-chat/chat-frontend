@@ -27,6 +27,7 @@ export interface ReadyRowIntent {
 	row: Record<string, unknown>;
 	mutationType?: string;
 	purpose?: string;
+	fileIds?: string[];
 }
 
 export interface MessageIntentPayload {
@@ -264,6 +265,7 @@ async function signAndDispatchIntentUnguarded(
 			targeted: opts.bootstrap,
 			sourceIntentId: intentId,
 			excludeFromDependencies: opts.excludeFromDependencies,
+			...(intent.fileIds?.length ? { fileIds: intent.fileIds } : {}),
 			onDurable: async (outboxId) => {
 				if (opts.token && !sameSessionToken(opts.token, currentSessionToken())) {
 					throw new SessionFencedError(`signAndDispatchIntent: the session changed before intent ${intentId} was linked to its outbox entry`);

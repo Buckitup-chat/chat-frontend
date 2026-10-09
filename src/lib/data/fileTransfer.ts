@@ -41,6 +41,7 @@ export interface UploadResult {
 	encSecretB64: string;
 	size: number;
 	chunkCount: number;
+	manifestAwaitingApproval?: Promise<void>;
 }
 
 /**
@@ -194,13 +195,15 @@ export const uploadFile = async (opts: {
 		}],
 		signSkey,
 	);
-	const manifestOutcome = await manifestHandle.acceptance;
-	if (manifestOutcome.kind !== 'accepted') {
-		const reason = manifestOutcome.kind === 'rejected' ? manifestOutcome.error : 'discarded before delivery';
+	const manifestAccepted = manifestHandle.acceptance.then((outcome) => {
+		if (outcome.kind === 'accepted') return;
+		const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
 		throw new Error(`File manifest for ${fileId} was not accepted: ${reason}`);
-	}
-
-	return { fileId, encSecretB64: opts.encSecretB64, size: bytes.length, chunkCount: total };
+	});
+	const result = { fileId, encSecretB64: opts.encSecretB64, size: bytes.length, chunkCount: total };
+	if (manifestHandle.held?.reason === 'awaiting_approval') return { ...result, manifestAwaitingApproval: manifestAccepted };
+	await manifestAccepted;
+	return result;
 };
 
 export interface FileAvailability {
