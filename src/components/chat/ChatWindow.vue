@@ -91,7 +91,7 @@
             <div v-for="v in videosOf(msg)" :key="v.fileId" class="msg-video">
               <div class="msg-video-frame" :style="{ aspectRatio: v.widthAspect + ' / ' + v.heightAspect }"
                 :role="videos[fileKey(v)]?.url ? undefined : 'button'"
-                @click="!refused[fileKey(v)] && !videos[fileKey(v)]?.url && videos[fileKey(v)]?.status !== 'opening' && emit('playVideo', v)">
+                @click="!refusedFile(v) && !videos[fileKey(v)]?.url && videos[fileKey(v)]?.status !== 'opening' && emit('playVideo', v)">
                 <img v-if="thumbUrl(v)" class="msg-image-blur" :src="thumbUrl(v)" alt="" />
                 <video v-if="videos[fileKey(v)]?.url" class="msg-video-el"
                   :src="videos[fileKey(v)].url" controls playsinline
@@ -104,7 +104,7 @@
                 <div v-else class="msg-video-play" aria-hidden="true">
                   <span class="msg-video-triangle"></span>
                 </div>
-                <div v-if="refused[fileKey(v)]" class="msg-image-progress _err">This video could not be verified</div>
+                <div v-if="refusedFile(v)" class="msg-image-progress _err">This video could not be verified</div>
                 <div v-else-if="videos[fileKey(v)]?.status === 'error'" class="msg-image-progress _err">
                   video failed — tap to retry
                 </div>
@@ -133,7 +133,7 @@
               <img v-if="thumbUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbUrl(imagesOf(msg)[0])" alt="" />
               <img v-if="images[fileKey(imagesOf(msg)[0])]?.url" class="msg-image-full"
                 :src="images[fileKey(imagesOf(msg)[0])].url" :alt="imagesOf(msg)[0].name" />
-              <div v-if="refused[fileKey(imagesOf(msg)[0])]" class="msg-image-progress _err">This image could not be verified</div>
+              <div v-if="refusedFile(imagesOf(msg)[0])" class="msg-image-progress _err">This image could not be verified</div>
               <div v-else-if="images[fileKey(imagesOf(msg)[0])]?.status === 'downloading'" class="msg-image-progress">
                 {{ images[fileKey(imagesOf(msg)[0])].done }} / {{ images[fileKey(imagesOf(msg)[0])].total }} chunks
               </div>
@@ -151,7 +151,7 @@
                 @click="openLightbox(msg, i)">
                 <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
                 <img v-if="images[fileKey(im)]?.url" class="msg-image-full" :src="images[fileKey(im)].url" :alt="im.name" />
-                <div v-if="refused[fileKey(im)]" class="msg-image-progress _err">could not be verified</div>
+                <div v-if="refusedFile(im)" class="msg-image-progress _err">could not be verified</div>
                 <div v-if="overflowCount(msg) && i === visibleImages(msg).length - 1" class="msg-gallery-more">
                   +{{ overflowCount(msg) }}
                 </div>
@@ -368,7 +368,7 @@
         <img v-if="images[fileKey(currentFrame.part)]?.url"
           :src="images[fileKey(currentFrame.part)].url" :alt="currentFrame.part.name" />
         <img v-else-if="thumbUrl(currentFrame.part)" class="_blur" :src="thumbUrl(currentFrame.part)" alt="" />
-        <div v-if="refused[fileKey(currentFrame.part)]" class="msg-image-progress _err">This image could not be verified</div>
+        <div v-if="refusedFile(currentFrame.part)" class="msg-image-progress _err">This image could not be verified</div>
         <div v-else-if="images[fileKey(currentFrame.part)]?.status === 'downloading'" class="msg-image-progress">
           {{ images[fileKey(currentFrame.part)].done }} / {{ images[fileKey(currentFrame.part)].total }} chunks
         </div>
@@ -791,7 +791,7 @@ const openLightbox = (msg, localIndex) => {
   const parts = imagesOf(msg);
   if (!parts.length) return;
   const target = parts[Math.min(localIndex, parts.length - 1)];
-  const globalIndex = allDialogImages.value.findIndex((it) => it.part.fileId === target.fileId);
+  const globalIndex = allDialogImages.value.findIndex((it) => it.part === target);
   if (globalIndex < 0) return;
   lightbox.value = { index: globalIndex };
   // The carousel asks for whatever frame it shows: one that never arrived
@@ -815,12 +815,13 @@ const jumpLightbox = (index) => {
 const thumbCache = new Map();
 const thumbUrl = (im) => {
   if (!im.thumbHashB64) return '';
-  if (thumbCache.has(im.fileId)) return thumbCache.get(im.fileId);
+  // By the hash itself: each message carries its own, unverified, blur.
+  if (thumbCache.has(im.thumbHashB64)) return thumbCache.get(im.thumbHashB64);
   let url = '';
   try {
     url = thumbHashToDataURL(fromBase64(im.thumbHashB64));
   } catch { /* a malformed hash just means no blur */ }
-  thumbCache.set(im.fileId, url);
+  thumbCache.set(im.thumbHashB64, url);
   return url;
 };
 

@@ -138,13 +138,13 @@ describe('the page behind a video session', () => {
 	});
 
 	it('registers with chunk 0 verified, answers a later index, and reports a refused one', async () => {
-		let refusedBy: unknown = null;
+		const failed: unknown[] = [];
 		const tab = await pageSetup(async (i) => {
 			if (i === 0) return 'fd_zero';
 			if (i === 1) return 'fd_one';
 			throw new tab.FileVerificationError(FILE_ID, 'invalid', 'forged row', i);
 		});
-		const source = await tab.openVideo(video, { onRefused: (e) => (refusedBy = e) });
+		const source = await tab.openVideo(video, { onFailed: (e) => failed.push(e) });
 		const sessionId = source.url.split('/').pop();
 		expect(tab.toWorker[0]).toMatchObject({ type: 'register', sessionId, chunkHashes: { 0: 'fd_zero' } });
 
@@ -155,23 +155,24 @@ describe('the page behind a video session', () => {
 			{ type: 'chunk-hash', sessionId, index: 1, hash: 'fd_one' },
 			{ type: 'chunk-hash', sessionId, index: 2, hash: null },
 		]);
-		expect(refusedBy).toBeInstanceOf(tab.FileVerificationError);
+		expect(failed).toEqual([expect.objectContaining({ kind: 'invalid', chunkIndex: 2 })]);
 	});
 
 	it('reports what the worker refused, and a chunk not verifiable yet as a failure to retry', async () => {
-		const refused: unknown[] = [];
-		const unavailable: unknown[] = [];
+		const failed: unknown[] = [];
 		const tab = await pageSetup(async (i) => {
 			if (i === 0) return 'fd_zero';
 			throw new tab.FileVerificationError(FILE_ID, 'unavailable', 'row not here', i);
 		});
-		const source = await tab.openVideo(video, { onRefused: (e) => refused.push(e), onUnavailable: (e) => unavailable.push(e) });
+		const source = await tab.openVideo(video, { onFailed: (e) => failed.push(e) });
 		const sessionId = source.url.split('/').pop();
 		tab.fromWorker({ type: 'chunk-refused', sessionId, index: 0 });
 		tab.fromWorker({ type: 'need-chunk-hash', sessionId, index: 1 });
 		await settle();
-		expect(refused).toEqual([expect.objectContaining({ kind: 'invalid', chunkIndex: 0 })]);
-		expect(unavailable).toEqual([expect.objectContaining({ kind: 'unavailable', chunkIndex: 1 })]);
+		expect(failed).toEqual([
+			expect.objectContaining({ kind: 'invalid', chunkIndex: 0 }),
+			expect.objectContaining({ kind: 'unavailable', chunkIndex: 1 }),
+		]);
 		expect(tab.toWorker.at(-1)).toEqual({ type: 'chunk-hash', sessionId, index: 1, hash: null });
 	});
 

@@ -24,6 +24,7 @@ import { toBytes } from '@/lib/pq/signature';
 import { wireBool } from '@/lib/pq/schema';
 import { verifyReplicatedRow, verifyRowWithKey, type SignPkeyResolver } from './rowVerification';
 import { readShapeOnce } from './shapeRead';
+import { fileKey } from './fileKey';
 
 type Row = Record<string, unknown>;
 
@@ -127,13 +128,14 @@ export const assertChunkBytes = (fileId: string, index: number, expectedDataHash
 	}
 };
 
-/** Chunk rows replicate one by one; a missing row is looked for again no more often than this. */
+/** Chunk rows replicate one by one; a missing row is looked for again, no sooner than this after the last look. */
 const ROW_REREAD_MS = 2000;
 
 /**
  * Expected chunk hashes of one verified file. Chunk rows replicate after the
  * manifest and one by one: a row missing from those read with the manifest is
- * read for again — one read at a time, however many indexes wait on it. A row
+ * read for again — one read at a time, however many indexes wait on it, held
+ * back until ROW_REREAD_MS after the last. A row
  * is verified the first time it is needed.
  */
 export class ChunkHashes {
@@ -148,7 +150,9 @@ export class ChunkHashes {
 	) {}
 
 	private rereadRows(): Promise<void> {
-		this.reread ??= readChunkRows(this.manifest.fileId, this.signal)
+		const wait = Math.max(0, this.rowsReadAt + ROW_REREAD_MS - Date.now());
+		this.reread ??= new Promise((r) => setTimeout(r, wait))
+			.then(() => readChunkRows(this.manifest.fileId, this.signal))
 			.then((rows) => { this.rows = rows; this.rowsReadAt = Date.now(); })
 			.finally(() => { this.reread = null; });
 		return this.reread;
@@ -165,7 +169,7 @@ export class ChunkHashes {
 	async expected(index: number): Promise<string> {
 		const known = this.expectedByIndex.get(index);
 		if (known) return known;
-		if (!this.rows.has(index) && (this.reread || Date.now() - this.rowsReadAt >= ROW_REREAD_MS)) await this.rereadRows();
+		if (!this.rows.has(index)) await this.rereadRows();
 		const row = this.rows.get(index);
 		if (!row) throw new FileVerificationError(this.manifest.fileId, 'unavailable', 'its signed row has not arrived', index);
 		const hash = verifyChunkRow(this.manifest, index, row);
@@ -206,7 +210,7 @@ export const readVerifiedFile = (
 	opts: { signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver } = {},
 ): Promise<VerifiedFile | null> => {
 	if (opts.signal || opts.resolveSignPkey) return readVerifiedFileNow(fileId, uploaderHash, opts);
-	const key = `${uploaderHash}/${fileId}`;
+	const key = fileKey({ uploaderHash, fileId });
 	let read = inFlight.get(key);
 	if (!read) {
 		read = readVerifiedFileNow(fileId, uploaderHash, opts).finally(() => inFlight.delete(key));

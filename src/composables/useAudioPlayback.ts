@@ -1,5 +1,4 @@
 import { ref, watch, onScopeDispose, type WatchSource } from 'vue';
-import { isRefusedFile } from '@/lib/data/fileIntegrity';
 import { fileKey } from '@/lib/data/fileKey';
 
 const AUDIO_TYPES: Record<string, string> = {
@@ -40,7 +39,6 @@ export type AudioState =
 type FetchFile = (part: FileRef, opts: { onProgress?: (p: { done: number; total: number }) => void; signal?: AbortSignal }) => Promise<Uint8Array>;
 
 const failureMessage = (e: unknown): string => {
-	if (isRefusedFile(e)) return 'This file could not be verified.';
 	const text = String((e as Error)?.message ?? e);
 	if (/manifest not found/.test(text)) return 'This file is not available here yet.';
 	if (/deleted/.test(text)) return 'This file was deleted by its sender.';
@@ -49,16 +47,8 @@ const failureMessage = (e: unknown): string => {
 	return 'This file could not be loaded.';
 };
 
-/**
- * Audio of the dialog's file parts, by fileKey. `onRefused` hears of a file
- * whose manifest or chunks contradict its sender's signatures, so the page
- * records it with every other refusal (docs/invariants.md §6a).
- */
-export function useAudioPlayback(
-	fetchFile: FetchFile,
-	resetOn: WatchSource<unknown>,
-	opts: { onRefused?: (part: FileRef, e: unknown) => void } = {},
-) {
+/** Audio of the dialog's file parts, by fileKey. */
+export function useAudioPlayback(fetchFile: FetchFile, resetOn: WatchSource<unknown>) {
 	const audios = ref<Record<string, AudioState>>({});
 	let urls: string[] = [];
 	let inFlight = new Map<string, AbortController>();
@@ -99,7 +89,6 @@ export function useAudioPlayback(
 		} catch (e) {
 			if (controller.signal.aborted) return;
 			console.error('Audio load failed:', e);
-			if (isRefusedFile(e)) opts.onRefused?.(part, e);
 			set(id, { status: 'error', message: failureMessage(e) });
 		} finally {
 			owned.delete(id);

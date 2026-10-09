@@ -16,7 +16,7 @@
 import { fromBase64 } from '@/lib/pq/signature';
 import { CHUNK_SIZE } from '@/lib/pq/fileCrypto';
 import { downloadFile, type DownloadProgress } from './fileTransfer';
-import { FileVerificationError, isRefusedFile, readVerifiedFile, type ChunkHashes } from './fileIntegrity';
+import { FileVerificationError, readVerifiedFile, type ChunkHashes } from './fileIntegrity';
 import { fileKey } from './fileKey';
 import { getCachedMedia, putCachedMedia } from './mediaCache';
 import { bearerFor, openSession } from './readSession';
@@ -43,8 +43,7 @@ interface Session {
 	/** What the worker is sent, re-sent after a worker restart; its `chunkHashes` grow as chunks are verified. */
 	registration: Record<string, unknown> & { chunkHashes: Record<number, string> };
 	hashes: ChunkHashes;
-	onRefused?: (e: unknown) => void;
-	onUnavailable?: (e: unknown) => void;
+	onFailed?: (e: unknown) => void;
 }
 
 /** Every live session, keyed by session id. */
@@ -71,14 +70,13 @@ const installListeners = () => {
 					post({ type: 'chunk-hash', sessionId, index, hash });
 				},
 				(e) => {
-					if (isRefusedFile(e)) session.onRefused?.(e);
-					else session.onUnavailable?.(e);
+					session.onFailed?.(e);
 					post({ type: 'chunk-hash', sessionId, index, hash: null });
 				},
 			);
 		} else if (msg?.type === 'chunk-refused' && session && Number.isInteger(msg.index)) {
 			// The worker held a chunk's bytes to their verified hash and they failed.
-			session.onRefused?.(new FileVerificationError(String(session.registration.fileId), 'invalid', 'its bytes are not the ones the uploader signed', msg.index));
+			session.onFailed?.(new FileVerificationError(String(session.registration.fileId), 'invalid', 'its bytes are not the ones the uploader signed', msg.index));
 		} else if (msg?.type === 'need-token' && session) {
 			void openSession('file_chunk').then((token) => {
 				post({ type: 'token', sessionId: msg.sessionId, token: token || '' });
@@ -143,10 +141,12 @@ export const openVideo = async (
 		 * and the resolved full URL replaces it at the end.
 		 */
 		onPartial?: (url: string) => void;
-		/** Streaming path: a chunk refused after playback started — the video could not be verified. */
-		onRefused?: (e: unknown) => void;
-		/** Streaming path: a chunk that cannot be verified yet; this playback ends, a later one may pass. */
-		onUnavailable?: (e: unknown) => void;
+		/**
+		 * Streaming path: a chunk failed after playback started — refused
+		 * (isRefusedFile: the video could not be verified) or not verifiable
+		 * yet (a later playback may pass).
+		 */
+		onFailed?: (e: unknown) => void;
 		signal?: AbortSignal;
 	} = {},
 ): Promise<VideoSource> => {
@@ -173,7 +173,7 @@ export const openVideo = async (
 			token: bearer ? bearer.replace('Bearer ', '') : '',
 			chunkHashes: { 0: first } as Record<number, string>,
 		};
-		active.set(sessionId, { registration, hashes: file.hashes, onRefused: opts.onRefused, onUnavailable: opts.onUnavailable });
+		active.set(sessionId, { registration, hashes: file.hashes, onFailed: opts.onFailed });
 		post(registration);
 		return {
 			url: `/encrypted-video/${sessionId}`,

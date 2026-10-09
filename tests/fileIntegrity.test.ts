@@ -268,22 +268,22 @@ describe('reading a file', () => {
 		expect(shapeReads).toEqual({ files: 1, file_chunks: 1 });
 	});
 
-	it('looks for a late chunk row again, once for every index waiting, and not right after the last look', async () => {
-		vi.useFakeTimers({ toFake: ['Date'] });
+	it('looks for a late chunk row again once for every index waiting, no sooner than 2 s after the last look', async () => {
+		vi.useFakeTimers({ toFake: ['Date', 'setTimeout'] });
 		try {
-			const f = await makeFile(['zero', 'one']);
+			const f = await makeFile(['zero', 'one', 'two']);
 			server = { manifest: f.manifestRow, chunkRows: [f.chunkRows[0]], bytes: f.bytes };
 			const file = (await readVerifiedFile(FILE_ID, UPLOADER, { resolveSignPkey }))!;
-			await expect(file.hashes.expected(1)).rejects.toMatchObject({ kind: 'unavailable' });
-			expect(shapeReads.file_chunks).toBe(1);
 			server.chunkRows = f.chunkRows;
-			vi.setSystemTime(Date.now() + 2500);
-			const [x, y] = await Promise.all([file.hashes.expected(1), file.hashes.expected(1)]);
-			expect(x).toBe(chunkDataHash(f.bytes[1]));
-			expect(y).toBe(x);
+			const waiting = Promise.all([file.hashes.expected(1), file.hashes.expected(2)]);
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(shapeReads.file_chunks).toBe(1);
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(await waiting).toEqual([chunkDataHash(f.bytes[1]), chunkDataHash(f.bytes[2])]);
 			expect(shapeReads.file_chunks).toBe(2);
 		} finally {
 			vi.useRealTimers();
 		}
 	});
+
 });
