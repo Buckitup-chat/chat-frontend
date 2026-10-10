@@ -7,7 +7,7 @@ between the two is owed (CLAUDE.md, "no backward compatibility"). The
 handshake is also the trust root for community backup (a recovery share goes
 to a confirmed contact only, `docs/backup-recovery-overview.md`) and for the
 backend's access gating (an optical-handshake contact is a vouch at chain
-distance 1, `chat/docs/pq/reqs/pq_access_gating.in_progress.md`), so what
+distance 1, `chat/docs/pq/reqs/pq_access_gating.done.md`), so what
 "confirmed" means is decided here.
 
 ## 1. What changes, and why
