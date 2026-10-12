@@ -11,7 +11,7 @@
 		</template>
 		<template #content>
 			<div class="_full_width_block">
-				<Account_Info :account-in="contact" @update="updateContact" />
+				<Account_Info :account-in="contact" :avatar-editable="false" @update="updateContact" />
 
 				<div class="text-danger text-center fw-bold mt-2" v-if="contact.hidden">Contact is hidden in your list of contacts</div>
 

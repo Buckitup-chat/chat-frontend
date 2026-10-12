@@ -1,8 +1,8 @@
 <template>
   <div class="_account">
     <div class="_avatar">
-      <Avatar :name="acc.user_hash" variant="bauhaus" v-if="acc.user_hash && !acc?.avatar" />
-      <img loading="lazy" :src="acc.avatar" v-if="acc?.avatar" @error="(event) => (event.target.src = defaultAvatar)" />
+      <Avatar :name="acc.user_hash" variant="bauhaus" v-if="acc.user_hash && !avatarSrc" />
+      <img loading="lazy" :src="avatarSrc" v-if="avatarSrc" @error="(event) => (event.target.src = defaultAvatar)" />
     </div>
     <div class="_info">
       <div class="d-flex">
@@ -90,6 +90,7 @@ import { userPQStore } from '@/store/userPQ.store';
 
 import Avatar from 'vue-boring-avatars';
 import { computed } from 'vue';
+import { avatarSrcOf } from '@/lib/avatars/display';
 
 const defaultAvatar = '/img/profile.webp';
 const $userPQ = userPQStore();
@@ -102,6 +103,11 @@ const { account, self } = defineProps({
 const acc = computed(() => {
   return self ? { ...$userPQ.currentUser } : account;
 });
+
+// A list of network cards carries no photos: a contact's comes from the
+// cache its dialog left next to the contact.
+const avatarSrc = computed(() =>
+  avatarSrcOf(acc.value?.avatar) || (self ? '' : avatarSrcOf($userPQ.contactsMap?.[acc.value?.user_hash]?.avatar)));
 
 const shortCode = computed(() => {
   if (acc.value.user_hash) return acc.value.user_hash.slice(2, 7);

@@ -5,8 +5,9 @@
 		</template>
 		<template #content>
 			<div class="_full_width_block">
-				<Account_Info :account-in="accountIn" ref="accountInfo" @update="handleUpdate"
-					@avatar-draft="handleAvatarDraft" />
+				<Account_Info :account-in="accountIn" ref="accountInfo" @update="handleUpdate">
+					<template #avatar><OwnAvatarGallery /></template>
+				</Account_Info>
 
 				<div class="mt-3 text-center">
 					<Transition name="slide-fade">
@@ -90,6 +91,7 @@ import { userPQStore } from '@/store/userPQ.store';
 
 import { inject, computed, ref } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
+import OwnAvatarGallery from '@/components/OwnAvatarGallery.vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import copyToClipboard from '@/utils/copyToClipboard';
 
@@ -98,11 +100,8 @@ const $swal = inject('$swal');
 const $swalModal = inject('$swalModal');
 const $router = inject('$router');
 const $mitt = inject('$mitt');
-const $em = inject('$encryptionManagerPQ');
-
 
 const draftAccount = ref(null);
-const draftAvatarBlob = ref(null);
 
 const accountIn = computed(() => {
 	const u = $userPQ.currentUser;
@@ -110,7 +109,6 @@ const accountIn = computed(() => {
 	return {
 		user_hash: u.user_hash,
 		name: u.name,
-		avatarUuid: u.userStorage?.avatarUuid,
 		notes: u.userStorage?.notes,
 		sign_pkey: u.sign_pkey
 	};
@@ -120,35 +118,20 @@ function handleUpdate(acc) {
 	draftAccount.value = acc;
 }
 
-function handleAvatarDraft(blob) {
-	draftAvatarBlob.value = blob;
-}
-
 const hasChanges = computed(() => {
 	if (!accountIn.value || !draftAccount.value) return false;
 	const acc = draftAccount.value;
 	return acc.name !== accountIn.value.name ||
-		acc.notes !== accountIn.value.notes ||
-		acc.avatarUuid !== accountIn.value.avatarUuid ||
-		draftAvatarBlob.value !== null;
+		acc.notes !== accountIn.value.notes;
 });
 
 async function saveProfile() {
 	if (!hasChanges.value) return;
 
 	try {
-		let uuid = draftAccount.value.avatarUuid;
-
-		if (draftAvatarBlob.value) {
-			uuid = await $em.encryptAndStoreAvatar(draftAvatarBlob.value);
-			draftAvatarBlob.value = null;
-		}
-
 		const saved = await $userPQ.updateCurrentUserProfile({
 			name: draftAccount.value.name,
 			notes: draftAccount.value.notes,
-			avatarUuid: uuid,
-			avatarDataUrl: draftAccount.value.avatar
 		});
 		
 		if (saved?.awaitingApproval) {

@@ -8,6 +8,7 @@
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.discardFailedItem(id)"
             @show-image="handleShowImage" @play-video="handlePlayVideo" @play-audio="handlePlayAudio"
+            :avatar-urls="avatarUrlsById" @show-avatar="openAvatarGallery"
             :checkpoint-signing="checkpointSigning"
             @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
             @sendMessage="handleSendMessage"
@@ -32,6 +33,8 @@
             :sent-at="fileState.msg?.timestamp || ''"
             :checking="fileStateChecking"
             @close="fileState = null" @refresh="handleFileStateAction" />
+        <GalleryViewer v-if="avatarViewer && avatarFrames.length" :frames="avatarFrames" :index="avatarViewer.index"
+            count-join="of" @update:index="showAvatarFrame" @close="avatarViewer = null" />
     </div>
 </template>
 
@@ -61,6 +64,12 @@ import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
 import { claimPendingEdit, submitPendingEdit, failPendingEdit, awaitPendingEditUnlock, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
 import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
 import { v7 as uuidv7 } from 'uuid';
+import GalleryViewer from '@/components/GalleryViewer.vue';
+import { useAvatarsStore } from '@/store/avatars.store';
+import { galleryOf } from '@/lib/avatars/gallery';
+import { avatarSrcOf, thumbDataUrl } from '@/lib/avatars/display';
+import { photoToWire } from '@/lib/pq/content';
+import { resizeImageUrl } from '@/utils/imageResize';
 
 const $route = useRoute();
 const $router = useRouter();
@@ -68,6 +77,7 @@ const $swal = inject('$swal');
 const $userPQ = userPQStore();
 const $dialogs = useDialogsStore();
 const $transfers = useTransfersStore();
+const $avatars = useAvatarsStore();
 
 const peerHash = computed(() => $route.params.address);
 const dialogHash = computed(() => $dialogs.getDialogHash(peerHash.value));
@@ -84,11 +94,12 @@ const chatName = computed(() => {
     return address;
 });
 
+// The peer's current photo from this dialog's gallery, or, until the dialog
+// has been read, the one cached next to the contact.
 const avatarUrl = computed(() => {
-    const address = peerHash.value;
-    if (!address) return '';
-    const contact = $userPQ.contacts.find((e) => e.user_hash === address) || $userPQ.getUserByHash(address);
-    return contact?.avatar || '';
+    const current = peerGallery.value[0];
+    const fromDialog = current ? $avatars.photoUrl(current.photo, peerHash.value) : '';
+    return fromDialog || avatarSrcOf($userPQ.contactsMap?.[peerHash.value]?.avatar);
 });
 
 const avatarHash = computed(() => peerHash.value || '');
@@ -103,7 +114,7 @@ const dialogCollections = computed(() => (dialogHash.value ? getDialogCollection
 // fill the gap until the shape catches up — a live row always wins per key,
 // so a working persistence sees no change in behavior. getRowKey mirrors
 // collections.ts's own getKey for this table.
-const { rows: rawMessages } = useCollectionRows(
+const { rows: rawMessages, ready: messagesReady } = useCollectionRows(
     computed(() => dialogCollections.value?.messages ?? null),
     { readCache: { table: 'dialog_messages', dialogHash: () => dialogHash.value, getRowKey: (r) => r.message_id } }
 );
@@ -690,6 +701,103 @@ const handleToggleReaction = async (messageId, emoji) => {
         console.error("Failed to toggle reaction:", e);
     }
 };
+
+// ---------- profile photos (pq_avatars) ----------
+
+// A gallery is the sender's own verified messages in this dialog, at their
+// current revision; deleted ones contribute nothing (lib/avatars/gallery).
+const galleryMessages = computed(() => decryptedMessages.value
+    .filter((m) => m._verify === 'verified' && m._raw?.sender_hash)
+    .map((m) => ({ messageId: m.id, senderHash: m._raw.sender_hash, deleted: !!m._deleted, parts: m.parts || [] })));
+const galleryOfSender = (senderHash) => (senderHash ? galleryOf(galleryMessages.value, senderHash) : []);
+const peerGallery = computed(() => galleryOfSender(peerHash.value));
+
+// The dialog's rows are here and every one is decrypted and placed: only
+// then does an empty gallery mean the peer has no photo, rather than that the
+// dialog is still being read.
+const dialogRead = computed(() => {
+    const rows = rawMessages.value || [];
+    return messagesReady.value && rows.length === decryptedMessages.value.length
+        && decryptedMessages.value.every((m) => m._verify === 'verified' && m._decrypted !== false);
+});
+
+const loadAvatarPhoto = (photo, senderHash) =>
+    $avatars.loadPhoto(photo, senderHash).catch((e) => {
+        console.warn('[chat] profile photo not loaded:', e?.message ?? e);
+        return '';
+    });
+
+// The photo each service line shows, by avatar id; fetched as the lines appear.
+const avatarLinePhotos = computed(() => {
+    const out = [];
+    for (const m of galleryMessages.value) {
+        const shown = m.parts.filter((p) => p.kind === 'avatar').at(-1);
+        if (shown && !m.deleted) out.push({ avatarId: shown.avatarId, photo: shown.photo, senderHash: m.senderHash });
+    }
+    return out;
+});
+watch(avatarLinePhotos, (lines) => {
+    for (const { photo, senderHash } of lines) void loadAvatarPhoto(photo, senderHash);
+});
+const avatarUrlsById = computed(() => Object.fromEntries(avatarLinePhotos.value
+    .map(({ avatarId, photo, senderHash }) => [avatarId, $avatars.photoUrl(photo, senderHash)])
+    .filter(([, url]) => url)));
+
+// The header shows the current one.
+watch(() => peerGallery.value[0], (current) => {
+    if (current) void loadAvatarPhoto(current.photo, peerHash.value);
+}, { immediate: true });
+
+// The reader's cache (pq_avatars § What a reader keeps): the contact list
+// draws the peer's current photo from a small thumbnail kept next to the
+// contact, rebuilt from the dialog whenever its current photo changes.
+const AVATAR_THUMB_SIDE = 96;
+let avatarCacheRun = 0;
+watch([() => peerGallery.value[0]?.avatarId ?? null, dialogRead], async ([currentId, read]) => {
+    const peer = peerHash.value;
+    const current = peerGallery.value[0];
+    const contact = $userPQ.contactsMap?.[peer];
+    if (!peer || !contact) return;
+    if (!current) {
+        if (read && contact.avatar) $userPQ.cacheContactAvatar(peer, null).catch((e) => console.warn('[chat] avatar cache not cleared:', e));
+        return;
+    }
+    if (contact.avatar?.id === currentId) return;
+    const run = ++avatarCacheRun;
+    try {
+        const url = await $avatars.loadPhoto(current.photo, peer);
+        const { dataUrl } = await resizeImageUrl(url, AVATAR_THUMB_SIDE, 0.7);
+        if (run !== avatarCacheRun || peerHash.value !== peer) return;
+        await $userPQ.cacheContactAvatar(peer, { id: currentId, photo: photoToWire(current.photo), thumb: dataUrl });
+    } catch (e) {
+        console.warn('[chat] avatar cache not updated:', e?.message ?? e);
+    }
+}, { immediate: true });
+
+// The gallery viewer: newest first, the way a profile shows it.
+const avatarViewer = ref(null); // { senderHash, index }
+const avatarFrames = computed(() => {
+    const sender = avatarViewer.value?.senderHash;
+    return galleryOfSender(sender).map(({ avatarId, photo }) => ({
+        key: avatarId,
+        src: $avatars.photoUrl(photo, sender),
+        placeholder: thumbDataUrl(photo),
+        alt: 'Profile photo',
+    }));
+});
+const showAvatarFrame = (index) => {
+    if (!avatarViewer.value) return;
+    avatarViewer.value = { ...avatarViewer.value, index };
+    const entry = galleryOfSender(avatarViewer.value.senderHash)[index];
+    if (entry) void loadAvatarPhoto(entry.photo, avatarViewer.value.senderHash);
+};
+const openAvatarGallery = ({ senderHash, avatarId = null }) => {
+    const gallery = galleryOfSender(senderHash);
+    if (!gallery.length) return;
+    avatarViewer.value = { senderHash, index: 0 };
+    showAvatarFrame(Math.max(0, gallery.findIndex((e) => e.avatarId === avatarId)));
+};
+watch(dialogHash, () => { avatarViewer.value = null; });
 
 // ---------- §2.3 downloads ----------
 

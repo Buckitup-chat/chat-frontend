@@ -1,20 +1,26 @@
 <template>
 	<div class=" " v-if="account">
-		<div class="_avatar">
-			<div class="_wrap">
-				<div class="_img_wrap">
-					<Avatar :name="account.user_hash || 'User'" variant="bauhaus" v-if="!avatarDataUrl && !account.avatar" />
+		<!-- The own profile puts its photo gallery here; elsewhere the picture
+		     is one photo, picked for a new account or drawn for a contact. -->
+		<slot name="avatar">
+			<div class="_avatar">
+				<div class="_wrap">
+					<div class="_img_wrap">
+						<Avatar :name="account.user_hash || 'User'" variant="bauhaus" v-if="!avatarSrc" />
 
-					<img loading="lazy" :src="avatarDataUrl || account.avatar" v-if="avatarDataUrl || account.avatar" />
+						<img loading="lazy" :src="avatarSrc" v-if="avatarSrc" />
+					</div>
+
+					<template v-if="avatarEditable">
+						<a href="#" class="btn btn-dark rounded-pill p-2" @click.prevent="$refs.avatarImageInput.click()">
+							<i class="bg-white" :class="[avatarSrc ? '_icon_edit' : '_icon_plus']"></i>
+						</a>
+						<input class="_hidden" ref="avatarImageInput" type="file" :accept="ALLOWED_IMAGE_TYPES.join(',')"
+							@change="handleImage($event)" />
+					</template>
 				</div>
-
-				<a href="#" class="btn btn-dark rounded-pill p-2" @click.prevent="$refs.avatarImageInput.click()">
-					<i class="bg-white" :class="[avatarDataUrl || account.avatar ? '_icon_edit' : '_icon_plus']"></i>
-				</a>
-				<input class="_hidden" ref="avatarImageInput" type="file" :accept="ALLOWED_IMAGE_TYPES.join(',')"
-					@change="handleImage($event)" />
 			</div>
-		</div>
+		</slot>
 
 		<div class="_input_block mt-3">
 			<div class="mb-2">
@@ -96,19 +102,20 @@
 
 <script setup>
 
-import { ref, onMounted, watch, inject } from 'vue';
+import { ref, computed, onMounted, watch, inject } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useLoader } from '@/composables/useLoader';
 import imageResize from '@/utils/imageResize';
 import errorMessage from '@/utils/errorMessage';
 import copyToClipboard from '@/utils/copyToClipboard';
 import Avatar from 'vue-boring-avatars';
+import { avatarSrcOf } from '@/lib/avatars/display';
+import { AVATAR_MAX_SIDE } from '@/lib/avatars/gallery';
 
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');
 const $loader = useLoader();
 const $user = userPQStore();
-const $em = inject('$encryptionManagerPQ');
 
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const maxNameLength = 30;
@@ -117,10 +124,12 @@ const maxNotesLength = 300;
 const emit = defineEmits(['update', 'avatar-draft']);
 const account = ref();
 const avatarDataUrl = ref(null);
-const avatarUuid = ref(null);
+const avatarSrc = computed(() => avatarDataUrl.value || avatarSrcOf(account.value?.avatar));
 
-const { accountIn } = defineProps({
+const { accountIn, avatarEditable } = defineProps({
 	accountIn: { type: Object },
+	/** Whether the default picture offers to pick one (a new account does; a contact's is theirs). */
+	avatarEditable: { type: Boolean, default: true },
 });
 
 let resetFromProp = false;
@@ -128,19 +137,12 @@ let resetFromProp = false;
 onMounted(async () => {
 	account.value = JSON.parse(JSON.stringify(accountIn));
 
-	if (accountIn?.avatarUuid) {
-		await loadAvatarFromStorage(accountIn.avatarUuid);
-	}
-
 	watch(
 		() => accountIn,
-		async (newVal) => {
+		(newVal) => {
 			if (newVal) {
 				resetFromProp = true;
 				account.value = JSON.parse(JSON.stringify(accountIn));
-				if (accountIn?.avatarUuid && accountIn.avatarUuid !== avatarUuid.value) {
-					await loadAvatarFromStorage(accountIn.avatarUuid);
-				}
 			}
 		},
 		{ deep: true },
@@ -165,19 +167,6 @@ onMounted(async () => {
 	}, { deep: true });
 });
 
-async function loadAvatarFromStorage(uuid) {
-	if (!uuid || !$em) return;
-	try {
-		const blob = await $em.loadAvatar(uuid);
-		if (blob) {
-			avatarDataUrl.value = URL.createObjectURL(blob);
-			avatarUuid.value = uuid;
-		}
-	} catch (error) {
-		console.error('Failed to load avatar:', error);
-	}
-}
-
 const reset = () => {
 	account.value = JSON.parse(JSON.stringify(accountIn));
 	avatarDataUrl.value = null; // reset preview
@@ -201,7 +190,7 @@ const handleImage = async (event) => {
 		reader.onload = function (readerEvent) {
 			var image = new Image();
 			image.onload = async function () {
-				const { dataUrl, blobFile } = imageResize(image, 300, 0.8);
+				const { dataUrl, blobFile } = imageResize(image, AVATAR_MAX_SIDE, 0.85);
 				if (dataUrl && blobFile) {
 					avatarDataUrl.value = dataUrl;
 					account.value.avatar = dataUrl; // for comparison in parent

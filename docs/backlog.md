@@ -6,21 +6,6 @@ same item.
 
 ---
 
-## 2. Exchanging avatars between users
-
-There is no mechanism today. `EncryptionManagerPQ.loadAvatar` reads the
-`user_storage` row of **its own** `user_hash` and decrypts it with a key from
-**its own** `crypt_skey` (salt `avatar-encryption`). There is nothing to decrypt
-someone else's avatar with, and `user_cards` has no avatar field at all. A
-contact's avatar is shown only if they are saved in local contacts; otherwise a
-generated placeholder is drawn.
-
-Options: put the avatar in `user_card` in the clear (cards are public anyway),
-or encrypt it with the dialog key instead of a personal one. Needs a product
-decision.
-
----
-
 ## 3. The weight of the `user_cards` shape
 
 Measured 2026-08-14: a 740 KB snapshot over 30 rows (~24 KB per card because of
