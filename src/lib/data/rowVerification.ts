@@ -43,6 +43,7 @@ const VERIFIABLE = new Set([
 	'dialog_messages_versions',
 	'dialog_message_reactions',
 	'dialog_message_receipts',
+	'vouch_tokens',
 ]);
 
 const VERIFIED: RowVerification = { status: 'verified' };
@@ -92,6 +93,7 @@ export function verifyRowWithKey(relation: string, row: Record<string, unknown>,
 		}
 		case 'user_storage':
 		case 'dialog_keys':
+		case 'vouch_tokens':
 			return verifySignedFields(relation, row, authorSignPkey);
 		default:
 			return { status: 'unsupported', reason: 'no_local_verification' };

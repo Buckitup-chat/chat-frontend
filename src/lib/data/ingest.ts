@@ -263,6 +263,7 @@ interface MutationShape {
 	type?: string;
 	modified?: Record<string, unknown>;
 	changes?: Record<string, unknown>;
+	original?: Record<string, unknown>;
 	syncMetadata?: { relation?: string };
 }
 
@@ -276,7 +277,7 @@ const ownerOf = (mutations: unknown[]): string => {
 	if (!relation) return '';
 	const row = first?.modified ?? first?.changes;
 	const field = OWNER_FIELD[relation];
-	const value = field ? row?.[field] : undefined;
+	const value = field ? row?.[field] ?? first?.original?.[field] : undefined;
 	return typeof value === 'string' ? value : '';
 };
 

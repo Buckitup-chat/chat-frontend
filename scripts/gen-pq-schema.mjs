@@ -39,6 +39,7 @@ const SCHEMA_FILES = [
 	'dialog_message_reaction.ex',
 	'dialog_message_receipt.ex',
 	'file.ex',
+	'vouch_token.ex',
 ];
 
 const TYPE_MAP = {

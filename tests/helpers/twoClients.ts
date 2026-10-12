@@ -30,6 +30,7 @@ export interface Server {
 	listeners: Set<RowListener>;
 	held: Map<Relation, Set<string>>;
 	reject: ((relation: Relation, row: Row) => ApplyResult | null | undefined) | null;
+	route: ((url: string, init?: FetchArgs[1]) => Promise<Response | undefined> | Response | undefined) | null;
 	reset(): void;
 	hold(relation: Relation): void;
 	release(relation: Relation): void;
@@ -93,7 +94,8 @@ export const server = (G.server ??= {
 	listeners: new Set(),
 	held: new Map(),
 	reject: null,
-	reset() { this.tables = new Map(); this.posts = []; this.listeners = new Set(); this.held = new Map(); this.reject = null; },
+	route: null,
+	reset() { this.tables = new Map(); this.posts = []; this.listeners = new Set(); this.held = new Map(); this.reject = null; this.route = null; },
 	hold(relation) { if (!this.held.has(relation)) this.held.set(relation, new Set()); },
 	release(relation) {
 		const keys = this.held.get(relation);
@@ -132,9 +134,11 @@ export const server = (G.server ??= {
 		if (result.status === 'ok') for (const l of this.listeners) l(relation, row);
 		return result;
 	},
-	fetch: vi.fn(async (input: FetchArgs[0], init?: FetchArgs[1]) => {
+	fetch: vi.fn(async (input: FetchArgs[0], init?: FetchArgs[1]): Promise<Response> => {
 		const url = String(input);
 		if (net.mode === 'offline') throw new TypeError('Failed to fetch');
+		const routed = await G.server?.route?.(url, init);
+		if (routed) return routed;
 		if (url.endsWith('/challenge')) return Response.json({ challenge: 'c', challenge_id: 'id' });
 		if (!url.endsWith('/ingest_each')) throw new TypeError(`unexpected request ${url}`);
 		const { mutations } = JSON.parse(init!.body as string);

@@ -131,6 +131,7 @@ export interface UpsertJsonPatchOptions {
 	jsonPatch: Record<string, unknown>;
 	signSkey: Uint8Array | null;
 	deletedFlag?: boolean;
+	knownEmpty?: boolean;
 }
 
 interface StorageEdit {
@@ -210,7 +211,7 @@ async function upsertStorageEditLive(
 	edit: StorageEdit,
 	hashB64: string | null,
 	signSkey: Uint8Array | null,
-	opts: { untilQueued?: boolean } = {}
+	opts: { untilQueued?: boolean; knownEmpty?: boolean } = {}
 ): Promise<UpsertResult> {
 	const { userHash, uuid, deletedFlag } = edit;
 	const key = kvKey(userHash, uuid);
@@ -233,9 +234,10 @@ async function upsertStorageEditLive(
 	// known, so a reload before the write reaches the server still shows it.
 	// With no known value there is nothing to merge onto: a record holding
 	// only the patch would hide the rest of it (the slot map, the vault) for
-	// as long as the write waits.
+	// as long as the write waits — unless the caller knows there is no rest.
 	const projectedValue = edit.jsonPatch
-		? await freshestKnownValue(userHash, uuid).then((base) => (base ? projectJsonPatchValue(base, edit.jsonPatch!) : undefined))
+		? await freshestKnownValue(userHash, uuid).then((base) =>
+			(base || opts.knownEmpty ? projectJsonPatchValue(base, edit.jsonPatch!) : undefined))
 		: edit.valueB64;
 	const projected = provisionalRow(userHash, uuid, projectedValue, deletedFlag, local?.row ?? null);
 	// Nothing new to show: the local copy must not outrank the server's — not
@@ -406,8 +408,8 @@ export async function putStorageJsonPatch(opts: UpsertJsonPatchOptions): Promise
 export async function saveStorageJsonPatch(
 	opts: UpsertJsonPatchOptions
 ): Promise<'synced' | 'queued' | 'awaiting-recovery' | 'awaiting-approval'> {
-	const { userHash, uuid, jsonPatch, signSkey, deletedFlag = false } = opts;
-	const write = await upsertStorageEditLive({ userHash, uuid, deletedFlag, jsonPatch }, null, signSkey, { untilQueued: true });
+	const { userHash, uuid, jsonPatch, signSkey, deletedFlag = false, knownEmpty = false } = opts;
+	const write = await upsertStorageEditLive({ userHash, uuid, deletedFlag, jsonPatch }, null, signSkey, { untilQueued: true, knownEmpty });
 	const sync = await write.sync;
 	if (sync.status === 'failed') throw new Error('The change could not be saved', { cause: sync.error });
 	// 'syncing' here means another context holds this intent for signing: it

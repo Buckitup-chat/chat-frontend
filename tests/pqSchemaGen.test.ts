@@ -28,6 +28,7 @@ describe('schema.generated.ts', () => {
 			'dialog_message_reactions',
 			'dialog_message_receipts',
 			'files',
+			'vouch_tokens',
 		]);
 	});
 
