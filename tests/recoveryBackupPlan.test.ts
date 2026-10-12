@@ -1,8 +1,8 @@
 // The setup rules of a community backup and the node set the client suggests
 // (pq_recovery_shares § Issuing; pq_recovery_services § Choosing nodes).
 import { describe, it, expect } from 'vitest';
-import { defaultSettings, durationText, healthOf, neededGuardians, relayerCanTake, settingsProblems, majority } from '@/lib/recovery/backupPlan';
-import { BUCKITUP, defaultNodeSet, dominantOperator, refusalOf, setProblems, type KnownNode } from '@/lib/recovery/nodeChoice';
+import { defaultSettings, durationText, healthOf, neededGuardians, relayerCanTake, settingsProblems, majority, SPARES_BOUNDS } from '@/lib/recovery/backupPlan';
+import { BUCKITUP, defaultNodeSet, dominantOperator, guardianRunning, refusalOf, setProblems, type KnownNode } from '@/lib/recovery/nodeChoice';
 import type { NodeDescriptor } from '@/lib/recovery/nodeClient';
 
 describe('the defaults', () => {
@@ -36,6 +36,9 @@ describe('a setup is refused', () => {
 		expect(settingsProblems({ ...ok, windowSec: 31 * 86400 }, 4, 5)).toEqual([{ field: 'windowSec', reason: 'out_of_range' }]);
 		expect(settingsProblems({ ...ok, nodeThreshold: 6 }, 4, 5)).toEqual([{ field: 'nodeThreshold', reason: 'out_of_range' }]);
 		expect(settingsProblems({ ...ok, spares: 252 }, 4, 5)).toEqual([{ field: 'spares', reason: 'out_of_range' }]);
+		expect(settingsProblems({ ...ok, spares: SPARES_BOUNDS.max }, 4, 5)).toEqual([]);
+		expect(settingsProblems({ ...ok, spares: SPARES_BOUNDS.max + 1 }, 4, 5)).toEqual([{ field: 'spares', reason: 'out_of_range' }]);
+		expect(settingsProblems({ ...ok, spares: -1 }, 4, 5)).toEqual([{ field: 'spares', reason: 'out_of_range' }]);
 	});
 });
 
@@ -80,6 +83,21 @@ describe('choosing nodes', () => {
 		// A guardian who is a BuckitUp account makes every BuckitUp node a guardian's.
 		expect(refusalOf(node('n1', U('b')), [U('c')], BU)).toBe('guardian_operator');
 		expect(refusalOf(node('n1', U('1')), [U('2')], BU)).toBeNull();
+	});
+
+	it('names the guardian who runs a node, online or not', () => {
+		expect(guardianRunning(node('n1', U('2')), [U('1'), U('2')], BU)).toBe(U('2'));
+		expect(guardianRunning(node('n1', U('2'), {}, false), [U('2')], BU)).toBe(U('2'));
+		// Any BuckitUp account runs every BuckitUp node.
+		expect(guardianRunning(node('n1', U('b')), [U('c')], BU)).toBe(U('c'));
+		expect(guardianRunning(node('n1', U('1')), [U('2')], BU)).toBeNull();
+		const refused = setProblems([node('n1', U('2')), node('n2', U('3')), node('n3', U('4'), {}, false)], 2, [U('2')], BU);
+		expect(refused).toEqual(
+			expect.arrayContaining([
+				{ kind: 'refused_node', nodeId: 'n1', reason: 'guardian_operator', guardian: U('2') },
+				{ kind: 'refused_node', nodeId: 'n3', reason: 'offline', guardian: null },
+			]),
+		);
 	});
 
 	it('counts operators, not nodes', () => {

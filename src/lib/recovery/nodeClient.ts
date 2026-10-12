@@ -124,6 +124,13 @@ export const newerDescriptor = (a: NodeDescriptor, b: NodeDescriptor): NodeDescr
 /** Names that resolve only on some network: special-use (RFC 6761, 6762, 8375) and the usual private ones. */
 const PRIVATE_SUFFIXES = ['localhost', 'local', 'home.arpa', 'internal', 'lan', 'intranet', 'corp', 'home', 'private'];
 
+/** A host only some network reaches: a bare IP, a single label, or a private or special-use name. */
+export const isPrivateHost = (hostname: string): boolean => {
+	if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.startsWith('[')) return true;
+	const name = hostname.replace(/\.$/, '');
+	return !name.includes('.') || PRIVATE_SUFFIXES.some((suffix) => name === suffix || name.endsWith('.' + suffix));
+};
+
 export const isStableNodeUrl = (url: string): boolean => {
 	let host: string;
 	try {
@@ -132,9 +139,7 @@ export const isStableNodeUrl = (url: string): boolean => {
 		if (e instanceof NodeSetError) return false;
 		throw e;
 	}
-	if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.startsWith('[')) return false;
-	const name = host.replace(/\.$/, '');
-	return name.includes('.') && !PRIVATE_SUFFIXES.some((suffix) => name === suffix || name.endsWith('.' + suffix));
+	return !isPrivateHost(host);
 };
 
 /* ------------------------------- messages ------------------------------- */

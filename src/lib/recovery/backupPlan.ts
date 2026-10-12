@@ -11,6 +11,8 @@ export const CONTRACT_MAX_GUARDIANS = 50;
 export const RELAYER_MAX_GUARDIANS = 32;
 export const MIN_NODE_OPERATORS = 3;
 export const MAX_DEFAULT_NODES = 5;
+/** Spare pieces kept in the owner's account: none, or a few. */
+export const SPARES_BOUNDS = { min: 0, max: 10 } as const;
 
 export interface BackupSettings {
 	/** Shamir shares needed to rebuild the friends' half. */
@@ -70,7 +72,7 @@ export const settingsProblems = (s: BackupSettings, guardians: number, nodes: nu
 	// never collects enough (§ Issuing, step 3).
 	if (s.approvals < s.threshold) out.push({ field: 'approvals', reason: 'below_threshold' });
 	else if (s.approvals > guardians) out.push({ field: 'approvals', reason: 'above_guardians' });
-	if (!intIn(s.spares, 0, 255 - guardians)) out.push({ field: 'spares', reason: 'out_of_range' });
+	if (!intIn(s.spares, SPARES_BOUNDS.min, Math.min(SPARES_BOUNDS.max, 255 - guardians))) out.push({ field: 'spares', reason: 'out_of_range' });
 	if (!intIn(s.delaySec, DELAY_BOUNDS.min, DELAY_BOUNDS.max)) out.push({ field: 'delaySec', reason: 'out_of_range' });
 	if (!intIn(s.windowSec, WINDOW_BOUNDS.min, WINDOW_BOUNDS.max)) out.push({ field: 'windowSec', reason: 'out_of_range' });
 	if (!intIn(s.nodeThreshold, 2, Math.max(nodes, 2))) out.push({ field: 'nodeThreshold', reason: 'out_of_range' });
@@ -93,9 +95,11 @@ export const healthOf = (holders: number, needed: number): HealthLevel => {
 	return holders - needed === 1 ? 'spare_1' : 'spare_2';
 };
 
+/** "1 guardian", "3 guardians". */
+export const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+
 /** A duration as the screens say it: whole days, else hours, else minutes. */
 export const durationText = (sec: number): string => {
-	const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'}`;
 	if (sec % 86400 === 0) return plural(sec / 86400, 'day');
 	if (sec % 3600 === 0) return plural(sec / 3600, 'hour');
 	return plural(Math.round(sec / 60), 'minute');

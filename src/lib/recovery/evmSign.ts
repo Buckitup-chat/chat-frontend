@@ -4,16 +4,14 @@
 // `personal_sign`, so any EVM tool can check them.
 import { SigningKey, computeAddress, hashMessage } from 'ethers';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
-import { fromBase64, toBase64 } from '@/lib/pq/signature';
-
-const unpadded = (b64: string) => b64.replace(/=+$/, '');
+import { fromBase64, toBase64Unpadded } from '@/lib/pq/signature';
 
 /** The 65-byte `r || s || v` signature, `0x` hex, as an EVM wallet and the nodes take it. */
 export const personalSignHex = (privateKeyHex: string, message: string): string => new SigningKey(privateKeyHex).sign(hashMessage(message)).serialized;
 
 /** The 65-byte `r || s || v` signature, unpadded base64. */
 export const personalSign = (privateKeyHex: string, message: string): string =>
-	unpadded(toBase64(hexToBytes(personalSignHex(privateKeyHex, message).slice(2))));
+	toBase64Unpadded(hexToBytes(personalSignHex(privateKeyHex, message).slice(2)));
 
 /**
  * Who signed `message`: the compressed public key and the address, or null

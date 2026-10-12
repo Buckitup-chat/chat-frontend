@@ -17,6 +17,7 @@ import {
 	descriptorBytes,
 	holdingOf,
 	isStableNodeUrl,
+	isPrivateHost,
 	newerDescriptor,
 	nodeIdOf,
 	nodeIsUp,
@@ -272,5 +273,12 @@ describe('the node client', () => {
 		await expect(holdingOf(node, SECRET_ID, { fetch: proxy.fetch })).rejects.toBeInstanceOf(NodeError);
 		await expect(holdingOf(node, SECRET_ID, { fetch: fakeNode(() => undefined, null).fetch })).rejects.toBeInstanceOf(NodeError);
 		await expect(holdingOf(node, SECRET_ID, { fetch: down })).rejects.toMatchObject({ status: 0 });
+	});
+});
+
+describe('a private host', () => {
+	it('is a bare IP, a single label, or a name under a private suffix', () => {
+		for (const h of ['192.168.1.24', '[::1]', 'localhost', 'nas', 'buckitup.local', 'box.lan', 'nas.home.arpa', 'svc.internal']) expect(isPrivateHost(h), h).toBe(true);
+		for (const h of ['node.example.org', 'bu.gaia-home.net', 'node.example.org.']) expect(isPrivateHost(h), h).toBe(false);
 	});
 });

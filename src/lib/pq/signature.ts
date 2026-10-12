@@ -39,6 +39,9 @@ export const toBase64 = (bytes: Uint8Array): string => {
 	return btoa(binary);
 };
 
+/** Standard alphabet without '=' padding, as binary columns travel in shapes and messages. */
+export const toBase64Unpadded = (bytes: Uint8Array): string => toBase64(bytes).replace(/=+$/, '');
+
 /**
  * Restores stripped '=' padding.
  *

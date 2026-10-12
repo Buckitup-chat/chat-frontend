@@ -41,7 +41,9 @@ describe('checking a node by address', () => {
 	});
 
 	it('refuses a home address, a node that does not answer, an unknown operator or another deployment', async () => {
-		expect(await checkNode('http://192.168.1.24:4000', deps())).toEqual({ state: 'refused', reason: 'not_https' });
+		expect(await checkNode('http://192.168.1.24:4000', deps())).toEqual({ state: 'refused', reason: 'private_address' });
+		expect(await checkNode('https://nas.home.arpa/recovery/node', deps())).toEqual({ state: 'refused', reason: 'private_address' });
+		expect(await checkNode('http://node.example.org/recovery/node', deps())).toEqual({ state: 'refused', reason: 'not_https' });
 		const down = (async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
 		expect(await checkNode(URL_, deps({ fetch: down }))).toEqual({ state: 'refused', reason: 'unreachable' });
 		expect(await checkNode(URL_, deps({ operatorCard: async () => null }))).toEqual({ state: 'refused', reason: 'operator_unknown' });

@@ -18,7 +18,7 @@
 import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
 import { generateStealthAddress } from 'backitup-secret-recovery-sdk/lib/keys/stealth';
 import { newWrapKey, splitIntoHalves } from '@/lib/pq/vaultEnvelope';
-import { toBase64 } from '@/lib/pq/signature';
+import { toBase64Unpadded } from '@/lib/pq/signature';
 import type { RecoverySharePart } from '@/lib/pq/content';
 import { shamirSplit } from '@/lib/shamir';
 import type { BackupContents } from '@/lib/backupContents';
@@ -27,8 +27,6 @@ import type { BackupSettings } from './backupPlan';
 import type { NodeRef } from './nodeClient';
 import type { ShareInput } from './gateway';
 
-const unpadded = (b64: string) => b64.replace(/=+$/, '');
-const b64 = (bytes: Uint8Array) => unpadded(toBase64(bytes));
 
 export type RunStep = 'prepared' | 'published' | 'submitted' | 'registered' | 'done' | 'discarded';
 
@@ -107,13 +105,18 @@ export interface RunInput {
 	now: number;
 }
 
+/** The node set as a share names it: the threshold and each node as `<id>@<url>`. */
+export const nodeSetOf = (threshold: number, nodes: readonly NodeRef[]): { threshold: number; nodes: string[] } => ({
+	threshold,
+	nodes: nodes.map((n) => `${n.id}@${n.url}`),
+});
+
 /** Step 1: S, its halves, both splits — everything later steps send, decided once. */
 export const prepareRun = (input: RunInput): BackupRun => {
 	const { guardians, settings, nodes } = input;
 	const wrapKey = newWrapKey();
 	const { nodeHalf, friendsHalf } = splitIntoHalves(wrapKey);
-	const nodeSet = { threshold: settings.nodeThreshold, nodes: nodes.map((n) => `${n.id}@${n.url}`) };
-	const split = splitFriendsHalf(friendsHalf, guardians.length + settings.spares, settings.threshold, nodeSet);
+	const split = splitFriendsHalf(friendsHalf, guardians.length + settings.spares, settings.threshold, nodeSetOf(settings.nodeThreshold, nodes));
 	return {
 		runId: bytesToHex(randomBytes(16)),
 		label: 'bu-' + bytesToHex(randomBytes(16)),
@@ -125,8 +128,8 @@ export const prepareRun = (input: RunInput): BackupRun => {
 		step: 'prepared',
 		wrapKey: bytesToHex(wrapKey),
 		splitId: split.splitId,
-		shares: split.shares.map(b64),
-		leaves: split.leaves.map(b64),
+		shares: split.shares.map(toBase64Unpadded),
+		leaves: split.leaves.map(toBase64Unpadded),
 		root: bytesToHex(split.root),
 		nodeShares: shamirSplit(nodeHalf, nodes.length, settings.nodeThreshold).map(bytesToHex),
 		nodeOutcomes: {},
@@ -168,7 +171,7 @@ export const sharePartOf = (run: BackupRun, i: number, secretRef: string, now: n
 	splitId: run.splitId,
 	shareIndex: i + 1,
 	splitProof: [...run.leaves],
-	nodeSet: { threshold: run.settings.nodeThreshold, nodes: run.nodes.map((n) => `${n.id}@${n.url}`) },
+	nodeSet: nodeSetOf(run.settings.nodeThreshold, run.nodes),
 });
 
 /** Nodes still owed their share: neither holding it, nor staged, nor skipped. */

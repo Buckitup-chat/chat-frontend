@@ -33,10 +33,14 @@ export type NodeRefusal = 'offline' | 'guardian_operator';
  */
 export const refusalOf = (node: KnownNode, guardians: readonly string[], buckitup: readonly string[] = BUCKITUP_OPERATOR_ACCOUNTS): NodeRefusal | null => {
 	if (!node.online) return 'offline';
-	const op = operatorOf(node.descriptor.operator, buckitup);
-	const guardianOps = new Set(guardians.map((g) => operatorOf(g, buckitup)));
-	if (guardianOps.has(op)) return 'guardian_operator';
+	if (guardianRunning(node, guardians, buckitup)) return 'guardian_operator';
 	return null;
+};
+
+/** The guardian whose operator runs `node` — the same account, or one of BuckitUp's — or null; online or not. */
+export const guardianRunning = (node: KnownNode, guardians: readonly string[], buckitup: readonly string[] = BUCKITUP_OPERATOR_ACCOUNTS): string | null => {
+	const op = operatorOf(node.descriptor.operator, buckitup);
+	return guardians.find((g) => operatorOf(g, buckitup) === op) ?? null;
 };
 
 /** An operator holding `threshold` or more of the set's nodes, which could open the node half alone. */
@@ -53,7 +57,7 @@ export const dominantOperator = (nodes: readonly KnownNode[], threshold: number,
 export type SetProblem =
 	| { kind: 'too_few_operators'; have: number; need: number }
 	| { kind: 'dominant_operator'; operator: string }
-	| { kind: 'refused_node'; nodeId: string; reason: NodeRefusal }
+	| { kind: 'refused_node'; nodeId: string; reason: NodeRefusal; guardian: string | null }
 	| { kind: 'threshold'; threshold: number; nodes: number };
 
 /** Everything wrong with a chosen set of nodes and its threshold, for these guardians. */
@@ -61,7 +65,7 @@ export const setProblems = (nodes: readonly KnownNode[], threshold: number, guar
 	const out: SetProblem[] = [];
 	for (const n of nodes) {
 		const reason = refusalOf(n, guardians, buckitup);
-		if (reason) out.push({ kind: 'refused_node', nodeId: n.descriptor.id, reason });
+		if (reason) out.push({ kind: 'refused_node', nodeId: n.descriptor.id, reason, guardian: guardianRunning(n, guardians, buckitup) });
 	}
 	const operators = new Set(nodes.map((n) => operatorOf(n.descriptor.operator, buckitup)));
 	if (operators.size < MIN_NODE_OPERATORS) out.push({ kind: 'too_few_operators', have: operators.size, need: MIN_NODE_OPERATORS });

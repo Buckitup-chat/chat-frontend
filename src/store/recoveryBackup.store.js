@@ -4,9 +4,10 @@
 // progress and never starts a second one.
 import { defineStore } from 'pinia';
 import { computed, ref, watch } from 'vue';
-import { SigningKey, computeAddress, formatEther } from 'ethers';
+import { formatEther } from 'ethers';
 import { v7 as uuidv7 } from 'uuid';
 import { userPQStore } from '@/store/userPQ.store';
+import errorMessage from '@/utils/errorMessage';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { useRecoveryInvitesStore } from '@/store/recoveryInvites.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
@@ -20,11 +21,15 @@ import { depositShare } from '@/lib/recovery/nodeClient';
 import { liveInviteId } from '@/lib/recovery/inviteThread';
 import { knownNodes, checkNode, syncedServerNode } from '@/lib/recovery/nodeDirectory';
 import { RunStoppedError, advance, prepareRun, skipPendingNodes, canDiscard } from '@/lib/recovery/backupRun';
+import { settingsProblems } from '@/lib/recovery/backupPlan';
+import { setProblems } from '@/lib/recovery/nodeChoice';
 import { listSubscriptions, subscribeWebhook, telegramReply, alertWallet } from '@/lib/recovery/alerts';
 
 export const BACKUP_SLOT = 'recovery_backup';
 export const NODES_SLOT = 'recovery_nodes';
 const DEVICE_KEY = 'buckitup:device-label';
+/** How often a run driven elsewhere — another device or tab — is read again while a screen follows it. */
+const FOLLOW_MS = 15_000;
 
 /** A name for this device, kept locally: the progress screen says which device runs a backup. */
 const deviceLabel = () => {
@@ -62,6 +67,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	const stopped = ref(null);
 
 	watch(() => $userPQ.currentUserHash, () => {
+		ownerAddressOf = null;
 		run.value = null;
 		savedNodeUrls.value = [];
 		loaded.value = false;
@@ -79,8 +85,45 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		loaded.value = true;
 	};
 
+	/** Only the run's slot, for following a run another device or tab drives. */
+	const refreshRun = async () => {
+		const owner = $userPQ.currentUserHash;
+		const backup = await em().loadSlotJson(BACKUP_SLOT);
+		if ($userPQ.currentUserHash !== owner || running.value) return;
+		run.value = backup?.run ?? null;
+	};
+
+	// Screens that show an unfinished run follow it; nothing is read while none does.
+	let followers = 0;
+	let followTimer = null;
+	const follow = () => {
+		followers += 1;
+		followTimer ??= setInterval(() => {
+			const step = run.value?.step;
+			if (running.value || !step || step === 'done' || step === 'discarded') return;
+			refreshRun().catch((e) => console.warn('[recovery] the backup run could not be read:', e));
+		}, FOLLOW_MS);
+	};
+	const unfollow = () => {
+		followers = Math.max(0, followers - 1);
+		if (!followers && followTimer) {
+			clearInterval(followTimer);
+			followTimer = null;
+		}
+	};
+
 	const ownerKey = async () => hexKey((await em().exportVaultKeys()).evm_skey);
-	const ownerAddress = async () => computeAddress(new SigningKey(await ownerKey()).publicKey);
+	/** The owner's EVM address, lowercase, for this account. */
+	let ownerAddressOf = null;
+	const ownerAddress = async () => {
+		const owner = $userPQ.currentUserHash;
+		if (ownerAddressOf?.owner !== owner) ownerAddressOf = { owner, address: alertWallet(await ownerKey()) };
+		return ownerAddressOf.address;
+	};
+
+	let chain = null;
+	/** One chain client for this deployment, made on first use. */
+	const chainOf = () => (chain ??= new RecoveryChain(deployment));
 
 	// --- Guardians -------------------------------------------------------
 
@@ -104,6 +147,8 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 				return { userHash: c.user_hash, name: c.name || '', status, metaAddress: answer?.state === 'accepted' ? answer.metaAddress : null };
 			});
 	});
+	/** The candidates that can be picked: agreed, with the meta-address they agreed under. */
+	const pickable = computed(() => candidates.value.filter((c) => c.status === 'agreed' && c.metaAddress));
 	const hiddenContacts = computed(() => $userPQ.contacts.filter((c) => c.confirmed !== true).length);
 
 	// --- Nodes -------------------------------------------------------------
@@ -145,7 +190,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 
 	/** The owner's address, its balance and a fee estimate for registering `guardians` guardians yourself. */
 	const selfPayQuote = async (guardians) => {
-		const chain = new RecoveryChain(deployment);
+		const chain = chainOf();
 		const address = await ownerAddress();
 		const [balance, fee] = await Promise.all([chain.provider.getBalance(address), chain.provider.getFeeData()]);
 		// addSecret's gas grows with its slots; a generous per-guardian figure, so the estimate errs high.
@@ -170,7 +215,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	};
 
 	const runDeps = (fee) => {
-		const chain = new RecoveryChain(deployment);
+		const chain = chainOf();
 		return {
 			now: () => Math.floor(Date.now() / 1000),
 			save,
@@ -196,23 +241,35 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		};
 	};
 
-	const drive = async (from, fee) => {
+	/** Drives `from` forward, paid as it says; never throws — why it stopped lands in `stopped`. */
+	const drive = async (from) => {
 		running.value = true;
 		stopped.value = null;
 		try {
-			run.value = await advance(from, runDeps(fee), (r) => (run.value = r));
+			run.value = await advance(from, runDeps(from.fee), (r) => (run.value = r));
 		} catch (e) {
-			stopped.value = e instanceof RunStoppedError ? e.reason : String(e?.message ?? e);
+			stopped.value = e instanceof RunStoppedError ? e.reason : errorMessage(e);
 			if (e instanceof RunStoppedError) run.value = e.run;
 		} finally {
 			running.value = false;
 		}
 	};
 
-	/** Starts a backup: step 1 is decided and saved before anything leaves this device. */
+	/**
+	 * Starts a backup: step 1 is decided and saved before anything leaves this
+	 * device. Resolves once it is saved; the run goes on in the background
+	 * (`running`, `run`, `stopped`). Settings or nodes the rules refuse are
+	 * refused here too: the screens are not the only way to this call, and
+	 * what it registers cannot be taken back.
+	 */
 	const start = async ({ guardians, settings, nodes: chosen, fee, alerts }) => {
 		if (!deployment) throw new Error('This app names no network to back up on.');
 		if (run.value && run.value.step !== 'discarded' && run.value.step !== 'done') throw new Error('A backup is already being created.');
+		const problems = [
+			...settingsProblems(settings, guardians.length, chosen.length).map((p) => `${p.field}: ${p.reason}`),
+			...setProblems(chosen, settings.nodeThreshold, guardians.map((g) => g.userHash)).map((p) => p.kind),
+		];
+		if (problems.length) throw new Error(`This backup cannot be created as set up (${problems.join(', ')}).`);
 		const prepared = {
 			...prepareRun({
 				deployment: deploymentNamespace(deployment),
@@ -227,17 +284,17 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 			alerts,
 		};
 		await save(prepared);
-		await drive(prepared, fee);
+		drive(prepared);
 	};
 
 	/** Continues the run from its saved step, on this device. */
-	const resume = () => (run.value ? drive(run.value, run.value.fee) : Promise.resolve());
+	const resume = () => (run.value ? drive(run.value) : Promise.resolve());
 
 	/** Finishes without the nodes still pending, when the rest reach the node threshold. */
 	const finishWithoutPendingNodes = async () => {
 		const next = skipPendingNodes(run.value);
 		await save(next);
-		await drive(next, next.fee);
+		await drive(next);
 	};
 
 	/** Drops a run that has not reached the chain. */
@@ -262,7 +319,11 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		running,
 		stopped,
 		load,
+		refreshRun,
+		follow,
+		unfollow,
 		candidates,
+		pickable,
 		hiddenContacts,
 		nodes,
 		refusedNodes,
