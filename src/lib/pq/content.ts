@@ -72,6 +72,21 @@ export interface ImagePart extends Extensible {
 	encSecretB64: string;
 }
 
+/** Small image carried inside the envelope (07 §"inline_image"): the same
+ * layout metadata as an out-of-band image, and the bytes themselves in place
+ * of the file reference. */
+export interface InlineImagePart extends Extensible {
+	kind: 'inline_image';
+	widthAspect: number;
+	heightAspect: number;
+	thumbHashB64: string;
+	name: string;
+	size: number;
+	mimeType: string;
+	createdAt: number;
+	dataB64: string;
+}
+
 /** Out-of-band video (07 §"video"). Same shape as an image — the preview
  * frame's ThumbHash and the aspect ratio — because the player needs to lay
  * the frame out before it can stream anything, plus the playback duration so
@@ -81,6 +96,28 @@ export interface VideoPart extends Omit<ImagePart, 'kind'> {
 	kind: 'video';
 	/** Whole seconds; 0 when the sender could not determine it. */
 	durationSeconds: number;
+}
+
+/** What a profile photo may be (07 §"avatar", photo). */
+export type AvatarPhoto = ImagePart | InlineImagePart;
+
+/**
+ * One of the sender's profile photos (07 §"avatar"; chat repo
+ * docs/pq/reqs/pq_avatars.proposed.md): puts `avatarId` at the newest
+ * position of the gallery the dialog's messages build. The reducer is
+ * lib/avatars/gallery's.
+ */
+export interface AvatarPart extends Extensible {
+	kind: 'avatar';
+	/** 16 random bytes, lowercase hex; one photo across every message and dialog. */
+	avatarId: string;
+	photo: AvatarPhoto;
+}
+
+/** A photo the sender took out of their gallery (07 §"avatar_removed"). */
+export interface AvatarRemovedPart extends Extensible {
+	kind: 'avatar_removed';
+	avatarId: string;
 }
 
 /**
@@ -221,7 +258,10 @@ export type ContentPart =
 	| QuotePart
 	| FilePart
 	| ImagePart
+	| InlineImagePart
 	| VideoPart
+	| AvatarPart
+	| AvatarRemovedPart
 	| CheckpointPart
 	| RecoverySharePart
 	| RecoveryShareReturnPart
@@ -237,6 +277,9 @@ export class ContentDecodeError extends Error {}
 export const isWireMessageId = (s: string): boolean => FRONTIER_MESSAGE_ID.test(s);
 const FRONTIER_MESSAGE_ID = /^dmsg_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FRONTIER_SIGN_HASH = /^dms_[0-9a-f]{128}$/;
+
+/** 07 §"avatar": avatar_id is 16 bytes as lowercase hex. */
+export const isAvatarId = (s: unknown): s is string => typeof s === 'string' && /^[0-9a-f]{32}$/.test(s);
 
 const encodePart = (part: ContentPart): unknown => {
 	switch (part.kind) {
@@ -260,6 +303,17 @@ const encodePart = (part: ContentPart): unknown => {
 					part.mimeType, part.createdAt, part.fileId, part.encSecretB64, ...(part.rest ?? []),
 				],
 			};
+		case 'inline_image':
+			return {
+				inline_image: [
+					part.widthAspect, part.heightAspect, part.thumbHashB64, part.name, part.size,
+					part.mimeType, part.createdAt, part.dataB64, ...(part.rest ?? []),
+				],
+			};
+		case 'avatar':
+			return { avatar: [part.avatarId, encodePart(part.photo), ...(part.rest ?? [])] };
+		case 'avatar_removed':
+			return { avatar_removed: [part.avatarId, ...(part.rest ?? [])] };
 		case 'video':
 			return {
 				video: [
@@ -324,6 +378,12 @@ const RECOVERY_LABELS = {
 type RecoveryPart = Extract<ContentPart, { kind: keyof typeof RECOVERY_LABELS }>;
 const isRecoveryPart = (part: ContentPart): part is RecoveryPart => Object.hasOwn(RECOVERY_LABELS, part.kind);
 
+/** How profile-photo messages read in text, previews and quotes. */
+const AVATAR_LABELS = {
+	avatar: '🖼 profile photo',
+	avatar_removed: '🖼 profile photo removed',
+} as const;
+
 /** What a quote copies as it is; every other part is named by a label. */
 const COPIED_IN_QUOTES = new Set<ContentPart['kind']>(['text', 'quote', 'file', 'image', 'video', 'checkpoint']);
 
@@ -337,6 +397,10 @@ const COPIED_IN_QUOTES = new Set<ContentPart['kind']>(['text', 'quote', 'file', 
 const quotable = (part: ContentPart): ContentPart => {
 	if (COPIED_IN_QUOTES.has(part.kind)) return part;
 	if (isRecoveryPart(part)) return { kind: 'text', text: RECOVERY_LABELS[part.kind] };
+	// A photo is named, not copied: an inline one would repeat its bytes, and
+	// an avatar part inside a reply is not the replier's photo.
+	if (part.kind === 'avatar' || part.kind === 'avatar_removed') return { kind: 'text', text: AVATAR_LABELS[part.kind] };
+	if (part.kind === 'inline_image') return { kind: 'text', text: `🖼 ${part.name}` };
 	return { kind: 'text', text: part.kind === 'unknown' ? `[${part.type}]` : `[${part.kind}]` };
 };
 
@@ -391,6 +455,19 @@ const decodeValue = (value: unknown): ContentPart[] => {
 					...tailOf(q, 4),
 				}];
 			}
+			if (type === 'avatar') return [decodeAvatar(obj.avatar)];
+			if (type === 'avatar_removed') {
+				const r = obj.avatar_removed;
+				if (!Array.isArray(r) || !isAvatarId(r[0])) return [{ kind: 'unknown', type, value: r }];
+				return [{ kind: 'avatar_removed', avatarId: r[0], ...tailOf(r, 1) }];
+			}
+			if (type === 'inline_image') {
+				const im = obj.inline_image;
+				if (!Array.isArray(im) || im.length < 8 || typeof im[7] !== 'string') {
+					throw new ContentDecodeError('malformed inline_image envelope');
+				}
+				return [{ kind: 'inline_image', ...mediaHead(im), dataB64: im[7], ...tailOf(im, 8) }];
+			}
 			if (type === 'image' || type === 'video') {
 				// positions 0–6 are shared media metadata; the tail is per-type:
 				// image ends [7]=file_id [8]=enc_secret,
@@ -399,15 +476,7 @@ const decodeValue = (value: unknown): ContentPart[] => {
 				if (!Array.isArray(im)) {
 					throw new ContentDecodeError(`malformed ${type} envelope`);
 				}
-				const media = {
-					widthAspect: Number(im[0]) || 1,
-					heightAspect: Number(im[1]) || 1,
-					thumbHashB64: String(im[2] ?? ''),
-					name: String(im[3]),
-					size: Number(im[4]),
-					mimeType: String(im[5]),
-					createdAt: Number(im[6]),
-				};
+				const media = mediaHead(im);
 				if (type === 'video') {
 					if (im.length < 10 || typeof im[8] !== 'string' || typeof im[9] !== 'string') {
 						throw new ContentDecodeError('malformed video envelope');
@@ -479,6 +548,45 @@ const decodeValue = (value: unknown): ContentPart[] => {
 	}
 
 	throw new ContentDecodeError(`unrecognized content shape: ${JSON.stringify(value)?.slice(0, 80)}`);
+};
+
+/** Positions 0–6, shared by every picture type: layout and file metadata. */
+const mediaHead = (im: unknown[]) => ({
+	widthAspect: Number(im[0]) || 1,
+	heightAspect: Number(im[1]) || 1,
+	thumbHashB64: String(im[2] ?? ''),
+	name: String(im[3]),
+	size: Number(im[4]),
+	mimeType: String(im[5]),
+	createdAt: Number(im[6]),
+});
+
+/** A profile photo element (07 §"avatar", position 1), or null when it is anything else. */
+export const photoFromWire = (wire: unknown): AvatarPhoto | null => {
+	// One element and nothing else: a bare string or a composed array is not a photo.
+	if (wire === null || typeof wire !== 'object' || Array.isArray(wire)) return null;
+	try {
+		const parts = decodeValue(wire);
+		const photo = parts.length === 1 ? parts[0] : null;
+		return photo && (photo.kind === 'image' || photo.kind === 'inline_image') ? photo : null;
+	} catch {
+		return null;
+	}
+};
+
+/** The wire element of a profile photo, as photoFromWire reads it. */
+export const photoToWire = (photo: AvatarPhoto): unknown => encodePart(photo);
+
+/**
+ * 07 §"avatar": a photo that is not an image element, or an id that is not
+ * one, makes the part unreadable, and it is ignored — kept verbatim as an
+ * unknown part, so it changes no gallery and the rest of the message still
+ * reads.
+ */
+const decodeAvatar = (r: unknown): AvatarPart | UnknownPart => {
+	const photo = Array.isArray(r) && isAvatarId(r[0]) ? photoFromWire(r[1]) : null;
+	if (!photo || !Array.isArray(r)) return { kind: 'unknown', type: 'avatar', value: r };
+	return { kind: 'avatar', avatarId: r[0] as string, photo, ...tailOf(r, 2) };
 };
 
 const tailOf = (arr: unknown[], known: number): Extensible =>
@@ -598,6 +706,9 @@ export const contentToText = (parts: ContentPart[]): string =>
 			if (p.kind === 'file' || p.kind === 'image' || p.kind === 'video') return '';
 			if (p.kind === 'checkpoint') return ''; // renders as its own marker
 			if (isRecoveryPart(p)) return RECOVERY_LABELS[p.kind];
+			if (p.kind === 'avatar' || p.kind === 'avatar_removed') return AVATAR_LABELS[p.kind];
+			// No bubble draws an inline picture yet, so it is named rather than left blank.
+			if (p.kind === 'inline_image') return `🖼 ${p.name}`;
 			return `[${p.type}]`;
 		})
 		.filter(Boolean)
