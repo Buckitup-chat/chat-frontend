@@ -246,6 +246,12 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		await save({ ...run.value, step: 'discarded' });
 	};
 
+	/** Records the alert channels set up once the backup exists, so its card stops warning. */
+	const setAlerts = async (alerts) => {
+		if (run.value?.step !== 'done') throw new Error('Alerts are recorded on a finished backup.');
+		await save({ ...run.value, alerts });
+	};
+
 	/** Whether this device is the one running the backup (another only shows its progress). */
 	const runsHere = computed(() => !!run.value && run.value.device === deviceLabel());
 
@@ -271,6 +277,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		resume,
 		finishWithoutPendingNodes,
 		discard,
+		setAlerts,
 		runsHere,
 	};
 });
