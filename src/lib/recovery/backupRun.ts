@@ -91,6 +91,10 @@ export interface BackupRun {
 	updatedAt: number;
 	/** The device that runs it; another shows its progress rather than starting a second. */
 	device: string;
+	/** How the registration is paid: the free service (optionally another one), or the owner's own address. */
+	fee?: { kind: 'relayer'; url?: string } | { kind: 'self' };
+	/** The alert channels set up with it, or that the owner skipped them. */
+	alerts?: { channels: ('app' | 'telegram' | 'webhook')[]; skipped: boolean };
 }
 
 export interface RunInput {
