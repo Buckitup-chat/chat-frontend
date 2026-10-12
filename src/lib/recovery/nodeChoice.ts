@@ -69,7 +69,8 @@ export const setProblems = (nodes: readonly KnownNode[], threshold: number, guar
 	}
 	const operators = new Set(nodes.map((n) => operatorOf(n.descriptor.operator, buckitup)));
 	if (operators.size < MIN_NODE_OPERATORS) out.push({ kind: 'too_few_operators', have: operators.size, need: MIN_NODE_OPERATORS });
-	if (!Number.isInteger(threshold) || threshold < 2 || threshold > nodes.length) out.push({ kind: 'threshold', threshold, nodes: nodes.length });
+	// At least 2, and a spare: one node down must not stop a recovery (§ Choosing nodes).
+	if (!Number.isInteger(threshold) || threshold < 2 || threshold >= nodes.length) out.push({ kind: 'threshold', threshold, nodes: nodes.length });
 	const dominant = dominantOperator(nodes, threshold, buckitup);
 	if (dominant) out.push({ kind: 'dominant_operator', operator: dominant });
 	return out;

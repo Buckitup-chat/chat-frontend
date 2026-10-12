@@ -7,7 +7,7 @@
 				<span class="fw-medium">Nodes needed</span>
 				<span class="cb-small">of {{ picked.length }} picked · {{ plural(operatorCount, 'operator') }}</span>
 			</div>
-			<Stepper :model-value="draft.settings.value.nodeThreshold" :min="2" :max="Math.max(picked.length, 2)" @update:model-value="(v) => (draft.state.nodeThreshold = v)" />
+			<Stepper :model-value="draft.settings.value.nodeThreshold" :min="2" :max="Math.max(picked.length - 1, 2)" data-test="node-threshold" @update:model-value="(v) => (draft.state.nodeThreshold = v)" />
 		</div>
 	</div>
 

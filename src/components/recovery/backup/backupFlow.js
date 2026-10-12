@@ -217,7 +217,8 @@ export const createBackupDraft = (store) => {
 	};
 	const setNodes = (ids) => {
 		state.nodeIds = ids;
-		if (state.nodeThreshold !== null) state.nodeThreshold = Math.max(2, Math.min(state.nodeThreshold, ids.length));
+		// A threshold keeps a spare node.
+		if (state.nodeThreshold !== null) state.nodeThreshold = Math.max(2, Math.min(state.nodeThreshold, ids.length - 1));
 	};
 
 	const settings = computed(() => {

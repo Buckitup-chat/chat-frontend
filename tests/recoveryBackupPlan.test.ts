@@ -39,6 +39,12 @@ describe('a setup is refused', () => {
 		expect(settingsProblems({ ...ok, spares: SPARES_BOUNDS.max }, 4, 5)).toEqual([]);
 		expect(settingsProblems({ ...ok, spares: SPARES_BOUNDS.max + 1 }, 4, 5)).toEqual([{ field: 'spares', reason: 'out_of_range' }]);
 		expect(settingsProblems({ ...ok, spares: -1 }, 4, 5)).toEqual([{ field: 'spares', reason: 'out_of_range' }]);
+		// The pieces must outnumber the guardians: at least one spare.
+		expect(SPARES_BOUNDS.min).toBe(1);
+		expect(settingsProblems({ ...ok, spares: 0 }, 4, 5)).toEqual([{ field: 'spares', reason: 'out_of_range' }]);
+		// A node threshold leaves a spare node.
+		expect(settingsProblems({ ...ok, nodeThreshold: 5 }, 4, 5)).toEqual([{ field: 'nodeThreshold', reason: 'out_of_range' }]);
+		expect(settingsProblems({ ...ok, nodeThreshold: 4 }, 4, 5)).toEqual([]);
 	});
 });
 
@@ -108,6 +114,16 @@ describe('choosing nodes', () => {
 		);
 		const fine = [node('n1', U('b')), node('n2', U('1')), node('n3', U('2'))];
 		expect(setProblems(fine, 2, [], BU)).toEqual([]);
+	});
+
+	it('wants a node threshold of at least 2 and a spare node', () => {
+		const three = [node('n1', U('1')), node('n2', U('2')), node('n3', U('3'))];
+		expect(setProblems(three, 3, [], BU)).toEqual([{ kind: 'threshold', threshold: 3, nodes: 3 }]);
+		expect(setProblems(three, 1, [], BU)).toContainEqual({ kind: 'threshold', threshold: 1, nodes: 3 });
+		const suggested = defaultNodeSet(three, [], BU);
+		expect(suggested.threshold).toBe(2);
+		expect(setProblems(suggested.nodes, suggested.threshold, [], BU)).toEqual([]);
+		expect(defaultSettings(4, 3).nodeThreshold).toBe(2);
 	});
 
 	it('suggests one node per operator, BuckitUp first, up to five, a majority needed', () => {

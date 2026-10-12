@@ -11,8 +11,8 @@ export const CONTRACT_MAX_GUARDIANS = 50;
 export const RELAYER_MAX_GUARDIANS = 32;
 export const MIN_NODE_OPERATORS = 3;
 export const MAX_DEFAULT_NODES = 5;
-/** Spare pieces kept in the owner's account: none, or a few. */
-export const SPARES_BOUNDS = { min: 0, max: 10 } as const;
+/** Spare pieces kept in the owner's account: at least one — the pieces must outnumber the guardians (§ Issuing, step 2) — and a few at most. */
+export const SPARES_BOUNDS = { min: 1, max: 10 } as const;
 
 export interface BackupSettings {
 	/** Shamir shares needed to rebuild the friends' half. */
@@ -75,7 +75,7 @@ export const settingsProblems = (s: BackupSettings, guardians: number, nodes: nu
 	if (!intIn(s.spares, SPARES_BOUNDS.min, Math.min(SPARES_BOUNDS.max, 255 - guardians))) out.push({ field: 'spares', reason: 'out_of_range' });
 	if (!intIn(s.delaySec, DELAY_BOUNDS.min, DELAY_BOUNDS.max)) out.push({ field: 'delaySec', reason: 'out_of_range' });
 	if (!intIn(s.windowSec, WINDOW_BOUNDS.min, WINDOW_BOUNDS.max)) out.push({ field: 'windowSec', reason: 'out_of_range' });
-	if (!intIn(s.nodeThreshold, 2, Math.max(nodes, 2))) out.push({ field: 'nodeThreshold', reason: 'out_of_range' });
+	if (!intIn(s.nodeThreshold, 2, Math.max(nodes - 1, 2))) out.push({ field: 'nodeThreshold', reason: 'out_of_range' });
 	return out;
 };
 

@@ -137,6 +137,14 @@ describe('Advanced', () => {
 		expect(nav.back).toHaveBeenCalled();
 	});
 
+	it('keeps at least one spare piece', async () => {
+		const w = render(Screen_Advanced);
+		const spares = w.findAll('.cb-setting').find((r) => r.text().includes('Spare pieces'));
+		await spares.find('[aria-label="Less"]').trigger('click');
+		expect(spares.text()).toContain('1');
+		expect(spares.find('[aria-label="Less"]').attributes('disabled')).toBeDefined();
+	});
+
 	it('stops the pieces stepper at the number of guardians', async () => {
 		const w = render(Screen_Advanced);
 		const more = at(w, 'threshold').find('[aria-label="More"]');
@@ -171,6 +179,19 @@ describe('Nodes', () => {
 		await problem.findAll('button')[1].trigger('click');
 		expect(draft.state.selected).not.toContain(DARIA.userHash);
 		expect(w.find('[data-test="node-problem"]').exists()).toBe(false);
+	});
+
+	it('keeps a spare node: the threshold stops one below the nodes picked', async () => {
+		setup({ nodes: [...threeOperators(), node({ operator: hash('w') })] });
+		const w = render(Screen_Nodes);
+		const stepper = w.find('[data-test="node-threshold"]');
+		expect(stepper.text()).toContain('3');
+		await stepper.find('[aria-label="More"]').trigger('click');
+		expect(draft.settings.value.nodeThreshold).toBe(3);
+		expect(stepper.find('[aria-label="More"]').attributes('disabled')).toBeDefined();
+		await w.findAll('[data-test="node-row"]')[3].trigger('click');
+		expect(draft.nodes.value).toHaveLength(3);
+		expect(draft.settings.value.nodeThreshold).toBe(2);
 	});
 
 	it('an offline node cannot be clicked into the set', async () => {

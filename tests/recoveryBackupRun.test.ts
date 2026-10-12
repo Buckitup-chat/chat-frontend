@@ -12,6 +12,8 @@ import { shamirCombine } from '@/lib/shamir';
 import { checkShare, combineFriendsHalf, rootFromSlots } from '@/lib/recovery/shareSplit';
 import { defaultSettings } from '@/lib/recovery/backupPlan';
 import {
+	REGISTRATION_WAIT_MS,
+	RunAbortedError,
 	RunStoppedError,
 	advance,
 	canDiscard,
@@ -42,7 +44,7 @@ const newRun = (): BackupRun =>
 	});
 
 /** A fake network: what is registered reads back; nodes in `down` refuse. */
-const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number } = {}) => {
+const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number; saveDelay?: (r: BackupRun) => number } = {}) => {
 	const saved: BackupRun[] = [];
 	const registered = new Map<string, { version: number; fields: any }>();
 	const deposits: { node: string; share: string; version: number }[] = [];
@@ -53,6 +55,8 @@ const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number } = {})
 	const deps: RunDeps = {
 		now: () => clock,
 		save: async (r) => {
+			const delay = opts.saveDelay?.(r) ?? 0;
+			if (delay) await new Promise((ok) => setTimeout(ok, delay));
 			saved.push(structuredClone(r));
 		},
 		exportAccount: async () => ACCOUNT,
@@ -85,15 +89,15 @@ const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number } = {})
 		},
 		secretRefOf: (id) => `eip155:11155111:0xd9ff/${id}`,
 	};
-	return { deps, saved, registered, deposits, sent, vaults };
+	return { deps, saved, registered, deposits, sent, vaults, tick: (sec: number) => (clock += sec) };
 };
 
 describe('a prepared run', () => {
 	it('splits S so the guardians’ threshold and the nodes’ threshold give it back', () => {
 		const run = newRun();
 		expect(run.shares).toHaveLength(6); // 4 guardians + 2 spares
-		const friends = combineFriendsHalf(run.shares.slice(1, 4).map((s, i) => ({ index: i + 2, share: fromBase64(s) })), 3);
-		const node = shamirCombine(run.nodeShares.slice(2).map(hexToBytes));
+		const friends = combineFriendsHalf(run.shares.slice(1, 4).map((s, i) => ({ index: i + 2, share: fromBase64(s!) })), 3);
+		const node = shamirCombine(run.nodeShares.slice(2).map((s) => hexToBytes(s!)));
 		expect(bytesToHex(joinHalves(node, friends))).toBe(run.wrapKey);
 		expect(canDiscard(run)).toBe(true);
 		expect(stepNumber(run)).toBe(1);
@@ -141,8 +145,9 @@ describe('advancing a run', () => {
 
 	it('does not register twice when resumed after a submission', async () => {
 		const net = fakeNetwork();
-		const first = await advance(newRun(), net.deps);
-		const resumed = await advance({ ...first, step: 'submitted', sent: {}, nodeOutcomes: {} }, net.deps);
+		await advance(newRun(), net.deps);
+		const atSubmission = net.saved.filter((r) => r.step === 'submitted').at(-1)!;
+		const resumed = await advance(atSubmission, net.deps);
 		expect(net.registered.size).toBe(1);
 		expect(resumed.step).toBe('done');
 	});
@@ -179,5 +184,130 @@ describe('advancing a run', () => {
 		const run = net.saved.at(-1)!;
 		expect(canFinishWithoutPending(run)).toBe(false);
 		expect(() => skipPendingNodes(run)).toThrow();
+	});
+});
+
+describe('secret material in the record', () => {
+	it('drops each node\'s share once it holds it, and every handed-out share at done', async () => {
+		const net = fakeNetwork({ down: [NODES[4].id] });
+		await advance(newRun(), net.deps).catch(() => undefined);
+		const stopped = net.saved.at(-1)!;
+		// Only the share still owed stays.
+		expect(stopped.nodeShares.map((s, i) => (s ? NODES[i].id : null)).filter(Boolean)).toEqual([NODES[4].id]);
+		expect(stopped.shares.every(Boolean)).toBe(true);
+
+		const done = await advance(skipPendingNodes(stopped), net.deps);
+		expect(done.step).toBe('done');
+		const record = net.saved.at(-1)!;
+		expect(record.nodeShares.every((s) => s === null)).toBe(true);
+		expect(record.shares.slice(0, 4)).toEqual([null, null, null, null]);
+		// S and the spares stay in the owner's account.
+		expect(record.shares.slice(4).every((s) => typeof s === 'string' && s.length > 0)).toBe(true);
+		expect(record.wrapKey).toMatch(/^[0-9a-f]{64}$/);
+	});
+});
+
+describe('registering', () => {
+	it('records the submission before it leaves', async () => {
+		const net = fakeNetwork();
+		const register = net.deps.register;
+		let stepAtSubmission: string | undefined;
+		net.deps.register = async (fields) => {
+			stepAtSubmission = net.saved.at(-1)!.step;
+			expect(net.saved.at(-1)!.submittedAt).toBe(1000);
+			return register(fields);
+		};
+		await advance(newRun(), net.deps);
+		expect(stepAtSubmission).toBe('submitted');
+		expect(net.saved.find((r) => r.txHash)?.step).toBe('submitted');
+	});
+
+	it('waits for a fresh submission, and hands a dropped one over again with the same slots', async () => {
+		const net = fakeNetwork();
+		let calls = 0;
+		const register = net.deps.register;
+		net.deps.register = async (fields) => {
+			calls++;
+			// The first one is dropped on the way.
+			if (calls === 1) return { id: net.deps.secretIdOf(OWNER, fields.label), txHash: '0xlost' };
+			return register(fields);
+		};
+		const stopped = await advance(newRun(), net.deps).catch((e) => e);
+		expect(stopped.reason).toBe('registration_pending');
+		const atSubmission = net.saved.at(-1)!;
+
+		// Resumed while it may still land: no second submission.
+		const early = { ...atSubmission, submittedAt: net.deps.now() - 60 };
+		await advance(early, net.deps).catch(() => undefined);
+		expect(calls).toBe(1);
+
+		// Past the wait: the same slots go out again, and the run finishes.
+		const done = await advance(atSubmission, net.deps);
+		expect(calls).toBe(2);
+		expect(done.step).toBe('done');
+		expect([...net.registered.values()][0].fields.shares).toEqual(atSubmission.shareInputs);
+	});
+
+	it('goes on when a resubmission is refused because the secret already exists', async () => {
+		const net = fakeNetwork();
+		await advance(newRun(), net.deps);
+		const atSubmission = net.saved.filter((r) => r.step === 'submitted').at(-1)!;
+		// The chain answers late once: the secret looks absent, and the resubmission reverts.
+		const readVersion = net.deps.readVersion;
+		let lag = 1;
+		net.deps.readVersion = async (id) => (lag-- > 0 ? null : readVersion(id));
+		let calls = 0;
+		net.deps.register = async () => {
+			calls++;
+			throw new Error('execution reverted: secret exists');
+		};
+		net.tick(REGISTRATION_WAIT_MS / 1000 + 1);
+		const resumed = await advance(atSubmission, net.deps);
+		expect(calls).toBe(1);
+		expect(resumed.step).toBe('done');
+	});
+
+	it('lets the next attempt submit at once when the service refused', async () => {
+		const net = fakeNetwork();
+		net.deps.register = async () => {
+			throw new Error('the service refused');
+		};
+		await expect(advance(newRun(), net.deps)).rejects.toThrow('the service refused');
+		expect(net.saved.at(-1)).toMatchObject({ step: 'submitted', submittedAt: 0 });
+	});
+});
+
+describe('node outcomes', () => {
+	it('records every deposit as it ends, none lost when they land together', async () => {
+		// Slow saves: the outcomes queue up behind the guardians' sends.
+		const net = fakeNetwork({ down: [NODES[0].id], saveDelay: (r) => (r.step === 'registered' ? 2 : 0) });
+		await advance(newRun(), net.deps).catch(() => undefined);
+		const record = net.saved.at(-1)!;
+		expect(Object.keys(record.nodeOutcomes).sort()).toEqual(NODES.map((n) => n.id).sort());
+		expect(Object.keys(record.sent)).toHaveLength(4);
+		// Each outcome got its own save.
+		const outcomeSaves = net.saved.filter((r, i) => i > 0 && Object.keys(r.nodeOutcomes).length > Object.keys(net.saved[i - 1].nodeOutcomes).length);
+		expect(outcomeSaves).toHaveLength(5);
+	});
+
+	it('saves the deposits\' outcomes before stopping on a guardian send that failed', async () => {
+		const net = fakeNetwork();
+		net.deps.sendShare = async () => {
+			throw new Error('the dialog is not ready');
+		};
+		const err = await advance(newRun(), net.deps).catch((e) => e);
+		expect(err.message).toBe('the dialog is not ready');
+		const record = net.saved.at(-1)!;
+		expect(Object.values(record.nodeOutcomes).map((o) => o.state)).toEqual(['held', 'held', 'held', 'held', 'held']);
+	});
+
+	it('stops at once on an interruption, rather than recording it as a node that failed', async () => {
+		const net = fakeNetwork();
+		net.deps.deposit = async () => {
+			throw new RunAbortedError();
+		};
+		const err = await advance(newRun(), net.deps).catch((e) => e);
+		expect(err).toBeInstanceOf(RunAbortedError);
+		expect(Object.values(net.saved.at(-1)!.nodeOutcomes).some((o) => o.state === 'failed')).toBe(false);
 	});
 });

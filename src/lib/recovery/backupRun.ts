@@ -15,6 +15,14 @@
 //   5 guardians — and each guardian theirs, in their dialog; neither waits
 //                for the other, so a node that is down holds nobody's share.
 //   6 done     — the run is the backup's record.
+//
+// Secret material and the slot. Until it is delivered, every piece the run
+// hands out lives in the run's record: a resume — after a closed tab, or on
+// another device — must send exactly the pieces of the one split, and nothing
+// else has them. They leave the record as they are delivered: a node's share
+// once that node holds it, and at 'done' every node share and every
+// guardian's share. What stays is S and the spares, which the scheme keeps in
+// the owner's account (§ Issuing), and what is not secret.
 import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
 import { generateStealthAddress } from 'backitup-secret-recovery-sdk/lib/keys/stealth';
 import { newWrapKey, splitIntoHalves } from '@/lib/pq/vaultEnvelope';
@@ -26,7 +34,6 @@ import { deliveryRecord, deliveryTag, splitFriendsHalf } from './shareSplit';
 import type { BackupSettings } from './backupPlan';
 import type { NodeRef } from './nodeClient';
 import type { ShareInput } from './gateway';
-
 
 export type RunStep = 'prepared' | 'published' | 'submitted' | 'registered' | 'done' | 'discarded';
 
@@ -66,20 +73,26 @@ export interface BackupRun {
 	/** S, hex: it opens the vault. */
 	wrapKey: string;
 	splitId: string;
-	/** Shamir shares of the friends' half, unpadded base64; the first `guardians.length` go to guardians, the rest are spares. */
-	shares: string[];
+	/**
+	 * Shamir shares of the friends' half, unpadded base64; the first
+	 * `guardians.length` go to guardians, the rest are spares. A guardian's
+	 * entry is null once the run is done.
+	 */
+	shares: (string | null)[];
 	/** Every share's leaf, unpadded base64: each share's split_proof. */
 	leaves: string[];
 	/** The split's root, hex. */
 	root: string;
-	/** Shares of the node half, hex, one per node in `nodes` order. */
-	nodeShares: string[];
+	/** Shares of the node half, hex, one per node in `nodes` order; null once that node took it, and all null once done. */
+	nodeShares: (string | null)[];
 	vaultUuid?: string;
 	/** Fixed before the first submission, so every resubmission names the same slots. */
 	shareInputs?: ShareInput[];
 	secretId?: string;
 	version?: number;
 	txHash?: string;
+	/** When the registration was last handed to the network, unix seconds; 0 when that attempt failed. */
+	submittedAt?: number;
 	nodeOutcomes: Record<string, NodeOutcome>;
 	/** Nodes the owner chose to finish without. */
 	skippedNodes: string[];
@@ -147,7 +160,7 @@ export const vaultJsonOf = (run: BackupRun, account: BackupContents): string =>
 		...account,
 		community_backup: {
 			split_id: run.splitId,
-			spares: run.shares.slice(run.guardians.length).map((share, i) => ({ index: run.guardians.length + i + 1, share })),
+			spares: run.shares.slice(run.guardians.length).map((share, i) => ({ index: run.guardians.length + i + 1, share: share! })),
 		},
 	});
 
@@ -166,7 +179,7 @@ export const sharePartOf = (run: BackupRun, i: number, secretRef: string, now: n
 	version: run.version!,
 	threshold: run.settings.threshold,
 	total: run.shares.length,
-	shareB64: run.shares[i],
+	shareB64: run.shares[i]!,
 	createdAt: now,
 	splitId: run.splitId,
 	shareIndex: i + 1,
@@ -205,13 +218,7 @@ export interface RunDeps {
 	secretRefOf: (id: string) => string;
 }
 
-const touch = async (run: BackupRun, deps: RunDeps, changes: Partial<BackupRun>): Promise<BackupRun> => {
-	const next = { ...run, ...changes, updatedAt: deps.now() };
-	await deps.save(next);
-	return next;
-};
-
-/** How long a registration is waited for before the run stops and says so. */
+/** How long a registration is waited for before the run stops and says so, and before it is handed over again. */
 export const REGISTRATION_WAIT_MS = 10 * 60_000;
 const POLL_MS = 5_000;
 
@@ -221,15 +228,48 @@ export class RunStoppedError extends Error {
 	}
 }
 
+/** The run cannot go on here, and nothing more may be written for it: stop without a word to the slot. */
+export class RunInterruptedError extends Error {}
+/** The account this run belongs to is no longer the one signed in. */
+export class RunAbortedError extends RunInterruptedError {
+	constructor() {
+		super('The account changed while the backup was being created.');
+	}
+}
+/** Another device continued the run. */
+export class RunTakenOverError extends RunInterruptedError {
+	constructor() {
+		super('Another device continued this backup.');
+	}
+}
+
+/** The record once every piece is out: S and the spares stay, the guardians' and nodes' shares go. */
+const scrubbed = (run: BackupRun): Partial<BackupRun> => ({
+	shares: run.shares.map((share, i) => (i < run.guardians.length ? null : share)),
+	nodeShares: run.nodeShares.map(() => null),
+});
+
+type Change = Partial<BackupRun> | ((run: BackupRun) => Partial<BackupRun>);
+
 /**
  * Runs `run` forward from its step until it is done or a step cannot finish:
  * a registration not on chain in time, or nodes that refused. Each step is
- * saved before the next begins; a throw leaves the run where it stood.
+ * saved before the next begins; a throw leaves the run where it stood. Saves
+ * go one at a time, each applied to the record as the previous one left it,
+ * so outcomes recorded side by side never drop each other.
  */
 export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: BackupRun) => void): Promise<BackupRun> => {
-	const step = async (changes: Partial<BackupRun>) => {
-		run = await touch(run, deps, changes);
-		onStep?.(run);
+	let queue: Promise<void> = Promise.resolve();
+	const step = (change: Change): Promise<void> => {
+		const next = queue.then(async () => {
+			const changes = typeof change === 'function' ? change(run) : change;
+			const updated = { ...run, ...changes, updatedAt: deps.now() };
+			await deps.save(updated);
+			run = updated;
+			onStep?.(run);
+		});
+		queue = next.catch(() => undefined);
+		return next;
 	};
 
 	if (run.step === 'prepared') {
@@ -240,17 +280,33 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 	if (run.step === 'published' || run.step === 'submitted') {
 		const id = deps.secretIdOf(run.owner, run.label);
 		let version = await deps.readVersion(id);
-		if (version === null && run.step === 'published') {
-			// Decided and saved before the first submission: a resubmission names the same slots.
+		// The step and its time are saved before the registration leaves: a run
+		// that stops after the broadcast waits for it rather than sending again
+		// blindly. One not on chain after REGISTRATION_WAIT_MS is handed over
+		// again with the same slots — a duplicate is dropped by the service or
+		// reverts because the secret exists, and the chain then shows it.
+		const stale = run.step === 'submitted' && deps.now() - (run.submittedAt ?? 0) > REGISTRATION_WAIT_MS / 1000;
+		if (version === null && (run.step === 'published' || stale)) {
 			if (!run.shareInputs) await step({ shareInputs: shareInputsOf(run) });
-			const { txHash } = await deps.register({
-				label: run.label,
-				shares: run.shareInputs!,
-				threshold: BigInt(run.settings.approvals),
-				recoveryDelay: BigInt(run.settings.delaySec),
-				recoveryWindow: BigInt(run.settings.windowSec),
-			});
-			await step({ step: 'submitted', secretId: id, txHash });
+			await step({ step: 'submitted', secretId: id, submittedAt: deps.now() });
+			try {
+				const { txHash } = await deps.register({
+					label: run.label,
+					shares: run.shareInputs!,
+					threshold: BigInt(run.settings.approvals),
+					recoveryDelay: BigInt(run.settings.delaySec),
+					recoveryWindow: BigInt(run.settings.windowSec),
+				});
+				await step({ txHash });
+			} catch (e) {
+				if (e instanceof RunInterruptedError) throw e;
+				version = await deps.readVersion(id);
+				if (version === null) {
+					// Not handed over: the next attempt may submit at once.
+					await step({ submittedAt: 0 });
+					throw e;
+				}
+			}
 		}
 		const deadline = deps.now() * 1000 + REGISTRATION_WAIT_MS;
 		while (version === null) {
@@ -266,29 +322,43 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 
 	if (run.step === 'registered') {
 		const ref = deps.secretRefOf(run.secretId!);
-		const outcomes: Record<string, NodeOutcome> = {};
-		const deposits = Promise.all(
-			nodesPending(run).map(async (node) => {
-				const share = run.nodeShares[run.nodes.findIndex((n) => n.id === node.id)];
-				try {
-					const { staged } = await deps.deposit(node, { id: run.secretId!, version: run.version!, share });
-					outcomes[node.id] = staged ? { state: 'staged' } : { state: 'held' };
-				} catch (e) {
-					outcomes[node.id] = { state: 'failed', error: (e as Error).message, at: deps.now() };
-				}
-			}),
-		);
+		// Each deposit is recorded as it ends; a node that took its share has it dropped from the record.
+		const deposits = nodesPending(run).map(async (node) => {
+			const at = run.nodes.findIndex((n) => n.id === node.id);
+			let outcome: NodeOutcome;
+			try {
+				const share = run.nodeShares[at];
+				if (!share) throw new Error('This node\'s share is no longer in the record.');
+				const { staged } = await deps.deposit(node, { id: run.secretId!, version: run.version!, share });
+				outcome = staged ? { state: 'staged' } : { state: 'held' };
+			} catch (e) {
+				if (e instanceof RunInterruptedError) throw e;
+				outcome = { state: 'failed', error: (e as Error).message, at: deps.now() };
+			}
+			await step((r) => ({
+				nodeOutcomes: { ...r.nodeOutcomes, [node.id]: outcome },
+				...(outcome.state === 'failed' ? {} : { nodeShares: r.nodeShares.map((s, i) => (i === at ? null : s)) }),
+			}));
+		});
 		// Shares go out one at a time, each recorded as it is captured; the
-		// deposits run alongside and are recorded together.
-		for (const [i, g] of run.guardians.entries()) {
-			if (run.sent[g.userHash]) continue;
-			const messageId = await deps.sendShare(g.userHash, sharePartOf(run, i, ref, deps.now()));
-			await step({ sent: { ...run.sent, [g.userHash]: { messageId, shareIndex: i + 1 } } });
+		// deposits run alongside. A send that fails still lets them land and be
+		// recorded before the run stops.
+		let sendError: unknown = null;
+		try {
+			for (const [i, g] of run.guardians.entries()) {
+				if (run.sent[g.userHash]) continue;
+				const messageId = await deps.sendShare(g.userHash, sharePartOf(run, i, ref, deps.now()));
+				await step((r) => ({ sent: { ...r.sent, [g.userHash]: { messageId, shareIndex: i + 1 } } }));
+			}
+		} catch (e) {
+			sendError = e;
 		}
-		await deposits;
-		await step({ nodeOutcomes: { ...run.nodeOutcomes, ...outcomes } });
+		const settled = await Promise.allSettled(deposits);
+		if (sendError) throw sendError;
+		const failed = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
+		if (failed) throw failed.reason;
 		if (nodesPending(run).length) throw new RunStoppedError(run, 'nodes_failed', 'Some nodes did not take their part.');
-		await step({ step: 'done' });
+		await step((r) => ({ step: 'done', ...scrubbed(r) }));
 	}
 	return run;
 };
