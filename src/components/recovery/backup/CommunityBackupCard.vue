@@ -12,37 +12,35 @@
 			<!-- No network to back up on in this build -->
 			<template v-if="state === 'unavailable'">
 				<p class="card-text text-secondary mb-0">{{ ABOUT }}</p>
-				<div class="cb-card-note">Not available in this version of the app.</div>
+				<div class="cb-muted">Not available in this version of the app.</div>
 			</template>
 
 			<template v-else-if="state === 'loading'">
 				<p class="card-text text-secondary mb-0">{{ ABOUT }}</p>
-				<div v-if="loadError" class="cb-card-note">
+				<div v-if="loadError" class="cb-muted">
 					Could not read your backup: {{ loadError }}
 					<button class="btn btn-link btn-sm p-0 ms-1 align-baseline" @click="load">Try again</button>
 				</div>
-				<div v-else class="cb-card-note"><span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Loading…</div>
+				<div v-else class="cb-muted"><span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Loading…</div>
 			</template>
 
 			<!-- 1.2: a run that has not finished -->
 			<template v-else-if="state === 'unfinished'">
-				<div class="cb-card-warn" data-test="unfinished">
+				<div class="cb-warn" data-test="unfinished">
 					<div class="fw-semibold">{{ unfinishedTitle }}</div>
-					<div class="text-secondary small">{{ unfinishedText }}</div>
+					<div class="text-secondary">{{ unfinishedText }}</div>
 				</div>
 				<div class="d-flex gap-2">
 					<button v-if="showDiscard" class="btn btn-outline-dark flex-fill" :disabled="busy" data-test="discard" @click="discard">Discard</button>
 					<button class="btn btn-dark flex-fill" :disabled="busy" data-test="continue" @click="cont">{{ continueLabel }}</button>
 				</div>
-				<div v-if="actionError" class="cb-card-error">{{ actionError }}</div>
+				<div v-if="actionError" class="cb-field-error">{{ actionError }}</div>
 			</template>
 
 			<!-- 1.0 / 1.3: the backup exists -->
 			<template v-else-if="state === 'done'">
-				<HealthLine :view="health" guardians-word :extra="healthExtra" />
-				<div v-if="!outsideAlerts" class="cb-card-warn" data-test="no-alerts">
-					<div class="small">No alerts. You may not learn about an attempt in time to stop it.</div>
-				</div>
+				<HealthLine :view="health" :extra="healthExtra" />
+				<div v-if="!outsideAlerts" class="cb-warn" data-test="no-alerts">No alerts. You may not learn about an attempt in time to stop it.</div>
 				<div class="d-flex gap-2">
 					<button v-if="!outsideAlerts" class="btn btn-outline-dark flex-fill" @click="open('alerts')">Set up alerts</button>
 					<button class="btn btn-dark flex-fill" @click="open('done')">Manage</button>
@@ -54,7 +52,7 @@
 				<p class="card-text text-secondary mb-0">{{ ABOUT }}</p>
 				<div class="d-flex align-items-center gap-2">
 					<div class="d-flex cb-card-faces">
-						<Initials v-for="c in agreed.slice(0, 3)" :key="c.userHash" :name="c.name" :hash="c.userHash" small />
+						<ContactAvatar v-for="c in agreed.slice(0, 3)" :key="c.userHash" :hash="c.userHash" small />
 						<span v-for="i in Math.max(0, 2 - agreed.length)" :key="`p${i}`" class="cb-card-slot"></span>
 					</div>
 					<span class="small fw-medium" data-test="agreed">{{ agreedText }}</span>
@@ -70,12 +68,14 @@
 </template>
 
 <script setup>
-import { computed, inject, onMounted, ref } from 'vue';
+import { computed, inject, onMounted, onUnmounted, ref } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { canDiscard, stepNumber } from '@/lib/recovery/backupRun';
 import HealthLine from './HealthLine.vue';
-import Initials from './Initials.vue';
-import { STEP_LABELS, alertsText, hasOutsideAlerts, healthView, plural } from './backupFlow';
+import ContactAvatar from './ContactAvatar.vue';
+import errorMessage from '@/utils/errorMessage';
+import { plural } from '@/lib/recovery/backupPlan';
+import { STEP_LABELS, alertsText, hasOutsideAlerts, healthView } from './backupFlow';
 
 const ABOUT = 'Your keys are split between contacts you trust and a few independent nodes. Nobody can open your account alone.';
 
@@ -91,11 +91,17 @@ const load = async () => {
 	try {
 		await store.load();
 	} catch (e) {
-		loadError.value = e?.message ?? String(e);
+		loadError.value = errorMessage(e);
 	}
 };
+// An unfinished run may be driven by another device or tab: the card follows it.
 onMounted(() => {
-	if (store.deployment) load();
+	if (!store.deployment) return;
+	load();
+	store.follow();
+});
+onUnmounted(() => {
+	if (store.deployment) store.unfollow();
 });
 
 const run = computed(() => store.run);
@@ -110,15 +116,14 @@ const state = computed(() => {
 
 // --- No backup -------------------------------------------------------------
 
-const agreed = computed(() => store.candidates.filter((c) => c.status === 'agreed'));
+const agreed = computed(() => store.pickable);
 const agreedText = computed(() => {
 	const n = agreed.value.length;
-	if (!n) return 'No guardian has agreed yet';
-	return n === 1 ? '1 guardian has agreed' : `${n} guardians have agreed`;
+	return n ? `${plural(n, 'guardian')} ${n === 1 ? 'has' : 'have'} agreed` : 'No guardian has agreed yet';
 });
 const createBlocked = computed(() => {
 	const n = agreed.value.length;
-	return n >= 2 ? null : `Create backup needs 2 guardians who agreed. ${n === 0 ? '2 more' : '1 more'} to go.`;
+	return n >= 2 ? null : `Create backup needs 2 guardians who agreed. ${2 - n} more to go.`;
 });
 
 // --- Unfinished --------------------------------------------------------------
@@ -150,7 +155,7 @@ const discard = async () => {
 	try {
 		await store.discard();
 	} catch (e) {
-		actionError.value = e?.message ?? String(e);
+		actionError.value = errorMessage(e);
 	} finally {
 		busy.value = false;
 	}
@@ -171,22 +176,16 @@ const open = (start) => {
 </script>
 
 <style lang="scss" scoped>
+@import './tokens';
+@include cb-tokens;
+
 .cb-card {
 	background-color: #f8f9fa;
 	border-radius: 12px;
 }
-.cb-card-warn {
-	background: #fff4e3;
-	border-radius: 10px;
+.cb-warn {
 	padding: 10px 12px;
-}
-.cb-card-error {
-	color: #b02a37;
-	font-size: 13px;
-}
-.cb-card-note {
-	font-size: 13px;
-	color: #6c757d;
+	gap: 2px;
 }
 .cb-card-faces > * + * {
 	margin-left: -6px;

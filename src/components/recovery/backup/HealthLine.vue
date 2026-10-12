@@ -2,7 +2,7 @@
 	<div class="health" :class="`health-${view.level}`">
 		<div class="health-head">
 			<span class="health-count">{{ view.holders }} of {{ view.total }}</span>
-			<span class="health-label">{{ guardiansWord ? 'guardians hold a piece' : 'hold a piece' }}</span>
+			<span class="health-label">guardians hold a piece</span>
 		</div>
 		<div class="health-bar" aria-hidden="true">
 			<template v-for="(seg, i) in segments" :key="i">
@@ -24,8 +24,6 @@ import { computed } from 'vue';
 const props = defineProps({
 	/** backupFlow.healthView(run). */
 	view: { type: Object, required: true },
-	/** Say "guardians hold a piece", as on the card. */
-	guardiansWord: { type: Boolean, default: false },
 	/** Appended to the detail line, as on the card: "2 spare pieces · alerts: app". */
 	extra: { type: String, default: '' },
 });

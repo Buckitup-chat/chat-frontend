@@ -78,6 +78,7 @@ onMounted(() => {
 
 <style lang="scss">
 @import '@/scss/variables.scss';
+@import '@/components/recovery/backup/tokens';
 
 // Shared by every screen of the flow (design: white modal, grey blocks
 // #f2f2f2, the picked row #F7E0F7 with a $primary border).
@@ -87,6 +88,8 @@ onMounted(() => {
 	gap: 14px;
 	padding: 4px;
 	font-size: 14px;
+
+	@include cb-tokens;
 
 	.cb-head {
 		display: flex;
@@ -139,15 +142,6 @@ onMounted(() => {
 		font-weight: 700;
 		font-size: 20px;
 		line-height: 1.25;
-	}
-	.cb-muted {
-		font-size: 13px;
-		line-height: 1.45;
-		color: #6c757d;
-	}
-	.cb-small {
-		font-size: 12px;
-		color: #6c757d;
 	}
 	.cb-section {
 		font-weight: 600;
@@ -227,33 +221,6 @@ onMounted(() => {
 		font-size: 12px;
 		color: $grey_dark;
 	}
-	.cb-warn,
-	.cb-error,
-	.cb-ok {
-		border-radius: 12px;
-		padding: 12px;
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		font-size: 13px;
-		line-height: 1.45;
-	}
-	.cb-warn {
-		background: #fff4e3;
-		color: #5c3606;
-	}
-	.cb-error {
-		background: #fdecee;
-		color: #b02a37;
-	}
-	.cb-ok {
-		background: #e7f6e5;
-		color: #1f5e18;
-	}
-	.cb-field-error {
-		font-size: 12px;
-		color: #b02a37;
-	}
 	.cb-tile {
 		background: #f2f2f2;
 		border: 1px solid transparent;
@@ -316,68 +283,6 @@ onMounted(() => {
 		padding: 10px 0;
 		&.link {
 			cursor: pointer;
-		}
-	}
-	.cb-stepper {
-		display: flex;
-		align-items: center;
-		background: #fff;
-		border-radius: 999px;
-		border: 1px solid $light_grey2;
-		&.invalid {
-			border-color: #dc3545;
-		}
-		button {
-			width: 32px;
-			height: 30px;
-			border: 0;
-			background: transparent;
-			font-size: 18px;
-			line-height: 1;
-			&:disabled {
-				color: #c9c9cc;
-			}
-		}
-		.cb-stepper-value {
-			min-width: 26px;
-			text-align: center;
-			font-weight: 700;
-			font-size: 15px;
-		}
-	}
-	.cb-duration {
-		display: flex;
-		gap: 6px;
-		input {
-			width: 4.5rem;
-		}
-		select {
-			width: 7rem;
-		}
-		&.invalid input {
-			border-color: #dc3545;
-		}
-	}
-	.cb-copy {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-height: 38px;
-		border: 1px solid $light_grey2;
-		border-radius: 8px;
-		padding: 4px 6px 4px 12px;
-		background: #fff;
-		.cb-copy-text {
-			flex: 1;
-			font-family: ui-monospace, monospace;
-			font-size: 13px;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			white-space: nowrap;
-			&.wrap {
-				white-space: normal;
-				word-break: break-all;
-			}
 		}
 	}
 	.cb-divider {

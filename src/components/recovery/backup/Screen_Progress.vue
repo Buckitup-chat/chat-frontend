@@ -7,7 +7,7 @@
 		<div class="d-flex flex-column">
 			<template v-if="collapsed">
 				<div class="pg-step">
-					<span class="pg-dot done"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg></span>
+					<span class="pg-dot done"><Check :size="12" /></span>
 					<span class="pg-label done">Steps 1–3 done</span>
 				</div>
 			</template>
@@ -15,7 +15,7 @@
 				<div v-if="s.n === 3 && !collapsed" class="cb-divider py-1">from here the backup exists</div>
 				<div class="pg-step" :data-test="`step-${s.n}`">
 					<span class="pg-dot" :class="s.state">
-						<svg v-if="s.state === 'done'" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg>
+						<Check v-if="s.state === 'done'" :size="12" />
 						<span v-else-if="s.state === 'warn'">!</span>
 						<span v-else-if="s.state === 'active' && store.running" class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
 					</span>
@@ -83,10 +83,10 @@ import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { userPQStore } from '@/store/userPQ.store';
 import { canDiscard, canFinishWithoutPending, nodesDone, nodesPending, stepNumber } from '@/lib/recovery/backupRun';
+import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
-import { DRAFT, NAV, STEP_LABELS, agoText, guardianDelivery, hostOf, operatorLabel } from './backupFlow';
-
-const OTHER_DEVICE_POLL_MS = 15_000;
+import Check from './Check.vue';
+import { DRAFT, NAV, STEP_LABELS, agoText, guardianDelivery, guardianName, hostOf, nodeOwnerName } from './backupFlow';
 const TICKS = { waiting: 0, sent: 1, delivered: 2, stored: 3 };
 
 const draft = inject(DRAFT);
@@ -140,7 +140,7 @@ const shownSteps = computed(() =>
 const nodeName = (ref) => {
 	const known = store.nodes.find((n) => n.descriptor.id === ref.id);
 	if (!known) return hostOf(ref.url);
-	return operatorLabel(known.descriptor.operator, { contactsMap: $userPQ.contactsMap, me: $userPQ.currentUserHash, url: ref.url });
+	return nodeOwnerName(known.descriptor, $userPQ);
 };
 const nodeRows = computed(() =>
 	(run.value?.nodes ?? []).map((n) => {
@@ -162,12 +162,10 @@ const nodesFailedText = computed(() => {
 	return `${head}, so you can finish without ${names}'s node${pendingNames.value.length > 1 ? 's' : ''}.`;
 });
 
-const guardianName = (userHash) =>
-	store.candidates.find((c) => c.userHash === userHash)?.name || $userPQ.contactsMap?.[userHash]?.name || 'Guardian';
 const guardianRows = computed(() =>
 	(run.value?.guardians ?? []).map((g) => {
 		const state = guardianDelivery(run.value, g.userHash);
-		return { userHash: g.userHash, name: guardianName(g.userHash), state, ticks: TICKS[state] };
+		return { userHash: g.userHash, name: guardianName(g.userHash, store.candidates, $userPQ), state, ticks: TICKS[state] };
 	}),
 );
 
@@ -180,7 +178,7 @@ const act = async (fn) => {
 	try {
 		await fn();
 	} catch (e) {
-		actionError.value = e?.message ?? String(e);
+		actionError.value = errorMessage(e);
 	}
 };
 const retry = () => act(() => store.resume());
@@ -206,14 +204,9 @@ watch(
 	{ immediate: true },
 );
 
-// Another device drives the run: follow it from the account's record.
-let timer = null;
-onMounted(() => {
-	timer = setInterval(() => {
-		if (run.value && !store.runsHere && !isDone.value) store.load().catch(() => {});
-	}, OTHER_DEVICE_POLL_MS);
-});
-onBeforeUnmount(() => clearInterval(timer));
+// Another device or tab may drive the run: follow it from the account's record.
+onMounted(() => store.follow());
+onBeforeUnmount(() => store.unfollow());
 </script>
 
 <style lang="scss" scoped>

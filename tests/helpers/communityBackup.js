@@ -72,11 +72,18 @@ export const fakeBackupStore = (over = {}) =>
 		running: false,
 		stopped: null,
 		candidates: [],
+		// As the store: agreed, with the meta-address they agreed under.
+		get pickable() {
+			return this.candidates.filter((c) => c.status === 'agreed' && c.metaAddress);
+		},
 		hiddenContacts: 0,
 		nodes: [],
 		refusedNodes: {},
 		runsHere: true,
 		load: vi.fn(async () => {}),
+		refreshRun: vi.fn(async () => {}),
+		follow: vi.fn(),
+		unfollow: vi.fn(),
 		refreshNodes: vi.fn(async () => {}),
 		addNodeUrl: vi.fn(),
 		selfPayQuote: vi.fn(async () => ({ address: '0x7a3F' + '0'.repeat(32) + 'c91E', balance: '0.84', estimate: '0.02', enough: true })),

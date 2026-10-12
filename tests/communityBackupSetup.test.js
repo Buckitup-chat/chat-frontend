@@ -189,7 +189,7 @@ describe('Fee', () => {
 			candidates: many,
 			selfPayQuote: vi.fn(async () => ({ address: '0x7a3F' + '0'.repeat(32) + 'c91E', balance: '0.003', estimate: '0.05', enough: false })),
 		});
-		expect(draft.feePayload.value).toEqual({ kind: 'self' });
+		expect(draft.startPayload().fee).toEqual({ kind: 'self' });
 		const w = render(Screen_Fee);
 		await flushPromises();
 		expect(at(w, 'too-big').text()).toBe('This backup has 33 guardians. The free service takes up to 32, so it is paid from your address.');
@@ -209,7 +209,7 @@ describe('Fee', () => {
 
 	it('within the limit stays free', () => {
 		setup();
-		expect(draft.feePayload.value).toEqual({ kind: 'relayer' });
+		expect(draft.startPayload().fee).toEqual({ kind: 'relayer' });
 		const w = render(Screen_Fee);
 		expect(at(w, 'too-big').exists()).toBe(false);
 		expect(at(w, 'tile-buckitup').classes()).toContain('picked');

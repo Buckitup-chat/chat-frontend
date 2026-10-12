@@ -3,7 +3,7 @@
 // wording the card, the progress screen and the summary all say the same way.
 // The rules themselves live in src/lib/recovery; this only asks them.
 import { computed, reactive, watch } from 'vue';
-import { defaultSettings, settingsProblems, neededGuardians, relayerCanTake, healthOf, durationText } from '@/lib/recovery/backupPlan';
+import { defaultSettings, settingsProblems, neededGuardians, relayerCanTake, healthOf, durationText, plural } from '@/lib/recovery/backupPlan';
 import { defaultNodeSet, setProblems, operatorOf, BUCKITUP } from '@/lib/recovery/nodeChoice';
 
 export const DRAFT = Symbol('communityBackupDraft');
@@ -21,31 +21,6 @@ export const STEP_LABELS = [
 
 export const SPARES_CAPTION = 'kept in your account — for an existing guardian, or a later reshare';
 
-const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-export { plural };
-
-/** "Daria Kim" → "DK", "Milo" → "MI". */
-export const initials = (name) => {
-	const words = String(name || '?').trim().split(/\s+/).filter(Boolean);
-	if (words.length > 1) return (words[0][0] + words[1][0]).toUpperCase();
-	return (words[0] || '?').slice(0, 2).toUpperCase();
-};
-
-const AVATAR_TONES = [
-	['#e9d5f0', '#8e2b77'],
-	['#dbe7f5', '#2c4f8a'],
-	['#e0efd9', '#3c6b2c'],
-	['#f6e3d3', '#8a4b1d'],
-	['#e5e3f6', '#4b3f8a'],
-];
-/** A stable colour pair for a contact's initials. */
-export const avatarTone = (key) => {
-	let h = 0;
-	for (const ch of String(key || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-	const [background, color] = AVATAR_TONES[h % AVATAR_TONES.length];
-	return { background, color };
-};
-
 /** "0x7a3F…c91E". */
 export const shortAddress = (a) => (a && a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a || '');
 
@@ -56,6 +31,9 @@ export const hostOf = (url) => {
 		return url;
 	}
 };
+
+/** An https address with a dotted host: what a service or a webhook is typed as. */
+export const isHttpsUrl = (url) => /^https:\/\/[^\s/]+\.[^\s]+$/i.test(String(url ?? '').trim());
 
 /** "3 days" → "3-day", as in "3-day wait". */
 export const durationAdjective = (sec) => durationText(sec).replace(/s$/, '').replace(' ', '-');
@@ -69,20 +47,61 @@ export const agoText = (sec, now = Math.floor(Date.now() / 1000)) => {
 	return `${plural(Math.floor(d / 86400), 'day')} ago`;
 };
 
+// --- Names -----------------------------------------------------------------------
+
 /** Who runs a node, as a person reads it: BuckitUp, a contact's name, you, or its address. */
-export const operatorLabel = (operatorHash, { contactsMap = {}, me = null, url = '' } = {}) => {
-	if (operatorOf(operatorHash) === BUCKITUP) return 'BuckitUp';
-	if (me && operatorHash === me) return 'You';
-	const name = contactsMap?.[operatorHash]?.name;
-	if (name) return name;
-	return url ? hostOf(url) : 'Unknown operator';
+export const nodeOwnerName = (descriptor, $userPQ) => {
+	const operator = descriptor.operator;
+	if (operatorOf(operator) === BUCKITUP) return 'BuckitUp';
+	if ($userPQ?.currentUserHash && operator === $userPQ.currentUserHash) return 'You';
+	return $userPQ?.contactsMap?.[operator]?.name || hostOf(descriptor.url);
 };
 
-export const ALERT_NAMES = { app: 'app', telegram: 'Telegram', webhook: 'webhook' };
-/** "app, Telegram". */
-export const alertsText = (channels = ['app']) => channels.map((c) => ALERT_NAMES[c] ?? c).join(', ');
+/** A guardian's name: as a candidate, else as a contact. */
+export const guardianName = (userHash, candidates, $userPQ) =>
+	candidates?.find((c) => c.userHash === userHash)?.name || $userPQ?.contactsMap?.[userHash]?.name || 'Guardian';
+
+// --- Fee -----------------------------------------------------------------------------
+
+/** The deployment's chain pays in ether. */
+export const CURRENCY = 'ETH';
+
+/** An ether amount at three significant digits: "0.84", "0.0215". */
+export const amount = (eth) => {
+	const n = Number(eth);
+	if (!Number.isFinite(n)) return eth;
+	return n === 0 ? '0' : n < 0.0001 ? '< 0.0001' : String(Number(n.toPrecision(3)));
+};
+
+const FEE_TEXT = {
+	short: { buckitup: 'free', other: 'another service', self: 'paid from your address' },
+	row: { buckitup: 'BuckitUp · free', other: 'another service', self: 'paid from your address' },
+};
+/** How the fee is paid, as the summary ('short') or a settings row ('row') says it. */
+export const feeText = (choice, variant = 'short') => FEE_TEXT[variant][choice];
+
+/** Why a fee choice cannot be used, or null; `quote` is the last self-pay quote, null while it is read. */
+export const feeProblem = (choice, url, quote) => {
+	if (choice === 'other' && !isHttpsUrl(url)) return 'Type the https address of the service that pays the fee.';
+	if (choice === 'self') {
+		if (!quote) return 'Reading the balance…';
+		if (!quote.enough) return 'Balance is too low for the fee.';
+	}
+	return null;
+};
+
+// --- Alerts --------------------------------------------------------------------------
+
+const ALERT_NAMES = { app: 'app', telegram: 'Telegram', webhook: 'webhook' };
+/** "app, Telegram"; as a title, "App · Telegram". */
+export const alertsText = (channels = ['app'], { title = false } = {}) => {
+	const names = channels.map((c) => ALERT_NAMES[c] ?? c);
+	return title ? names.map((n) => n[0].toUpperCase() + n.slice(1)).join(' · ') : names.join(', ');
+};
 /** Whether a channel outside the app is on: the app alone can be lost with the phone. */
 export const hasOutsideAlerts = (alerts) => !!alerts?.channels?.some((c) => c !== 'app');
+
+// --- Delivery and health ----------------------------------------------------------
 
 /**
  * Where guardian `userHash`'s piece stands: 'waiting' | 'sent' | 'delivered' | 'stored'.
@@ -93,18 +112,18 @@ export const hasOutsideAlerts = (alerts) => !!alerts?.channels?.some((c) => c !=
  */
 export const guardianDelivery = (run, userHash, receipts = {}) => receipts[userHash] ?? (run?.sent?.[userHash] ? 'sent' : 'waiting');
 
-/** Guardians holding a piece: 'stored' only, which phase 7.3 reports. */
-export const holdersOf = (run, receipts = {}) => (run?.guardians ?? []).filter((g) => guardianDelivery(run, g.userHash, receipts) === 'stored').length;
-
 /**
- * The health line of a finished backup. Pieces sent but not yet stored are
- * "on the way": a fresh backup reads as arriving, not as broken.
+ * The health line of a finished backup: holders are the guardians whose piece
+ * is 'stored'. Pieces sent but not yet stored are "on the way": a fresh backup
+ * reads as arriving, not as broken.
  */
 export const healthView = (run, receipts = {}) => {
-	const total = run?.guardians?.length ?? 0;
+	const guardians = run?.guardians ?? [];
+	const total = guardians.length;
 	const needed = run ? neededGuardians(run.settings) : 0;
-	const holders = holdersOf(run, receipts);
-	const onTheWay = (run?.guardians ?? []).filter((g) => ['sent', 'delivered'].includes(guardianDelivery(run, g.userHash, receipts))).length;
+	const states = guardians.map((g) => guardianDelivery(run, g.userHash, receipts));
+	const holders = states.filter((s) => s === 'stored').length;
+	const onTheWay = states.filter((s) => s === 'sent' || s === 'delivered').length;
 	let level = healthOf(holders, needed);
 	if (level !== 'spare_2' && level !== 'spare_1' && onTheWay > 0 && holders + onTheWay >= needed) level = 'pending';
 	let detail = `${needed} needed`;
@@ -114,42 +133,27 @@ export const healthView = (run, receipts = {}) => {
 	return { total, needed, holders, onTheWay, level, detail };
 };
 
-const HOME_SUFFIXES = ['localhost', 'local', 'home.arpa', 'internal', 'lan', 'intranet', 'corp', 'home', 'private'];
-/** An address only a home or office network reaches: a bare IP, or a local name. */
-const isHomeAddress = (url) => {
-	let host;
-	try {
-		host = new URL(url).hostname.replace(/\.$/, '');
-	} catch {
-		return false;
-	}
-	if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.startsWith('[')) return true;
-	return !host.includes('.') || HOME_SUFFIXES.some((s) => host === s || host.endsWith('.' + s));
-};
+// --- Nodes -----------------------------------------------------------------------------
 
+const STABLE = 'A backup has to work for years and from anywhere, so a node needs a stable https address.';
 /** Why a node refused at the address check, in words (design 5.3). */
-export const nodeCheckText = (reason, url = '') => {
-	switch (reason) {
-		case 'not_https':
-			return isHomeAddress(url)
-				? 'This is a home network address. A backup has to work for years and from anywhere, so a node needs a stable https address.'
-				: 'Not https. A backup has to work for years and from anywhere, so a node needs a stable https address.';
-		case 'unreachable':
-			return 'No node answers at this address.';
-		case 'not_endorsed':
-			return 'The operator has not signed this node yet.';
-		case 'operator_unknown':
-			return 'The operator of this node is not someone this app can check.';
-		case 'wrong_deployment':
-			return 'This node serves another network.';
-		default:
-			return 'This node\'s signature does not check out.';
-	}
-};
+export const nodeCheckText = (reason) =>
+	({
+		private_address: `This is a home network address. ${STABLE}`,
+		not_https: `This is not a stable https address of a node. ${STABLE}`,
+		unreachable: 'No node answers at this address.',
+		not_endorsed: 'The operator has not signed this node yet.',
+		operator_unknown: 'The operator of this node is not someone this app can check.',
+		wrong_deployment: 'This node serves another network.',
+	})[reason] ?? 'This node\'s signature does not check out.';
 
 /** A known node's address that did not verify, as its list row says it. */
 export const refusedNodeStatus = (reason) =>
-	({ not_endorsed: 'not ready', unreachable: 'not answering', not_https: 'not https', wrong_deployment: 'another network' })[reason] ?? 'does not verify';
+	({ not_endorsed: 'not ready', unreachable: 'not answering', private_address: 'home network', not_https: 'not https', wrong_deployment: 'another network' })[
+		reason
+	] ?? 'does not verify';
+
+// --- The draft ---------------------------------------------------------------------------
 
 /**
  * The backup being set up. `store` is the recovery backup store; the draft
@@ -179,16 +183,15 @@ export const createBackupDraft = (store) => {
 		justFinished: false,
 	});
 
-	const agreed = computed(() => store.candidates.filter((c) => c.status === 'agreed' && c.metaAddress));
-	const guardians = computed(() => agreed.value.filter((c) => state.selected.includes(c.userHash)));
+	const guardians = computed(() => store.pickable.filter((c) => state.selected.includes(c.userHash)));
 	const guardianHashes = computed(() => guardians.value.map((g) => g.userHash));
 
 	// Every agreed contact is picked until the owner changes the selection.
 	watch(
-		() => agreed.value.map((c) => c.userHash).join(),
+		() => store.pickable.map((c) => c.userHash).join(),
 		() => {
-			if (!state.touched) state.selected = agreed.value.map((c) => c.userHash);
-			else state.selected = state.selected.filter((h) => agreed.value.some((c) => c.userHash === h));
+			const hashes = store.pickable.map((c) => c.userHash);
+			state.selected = state.touched ? state.selected.filter((h) => hashes.includes(h)) : hashes;
 		},
 		{ immediate: true },
 	);
@@ -221,24 +224,12 @@ export const createBackupDraft = (store) => {
 		const base = defaultSettings(guardians.value.length, nodes.value.length);
 		return { ...base, ...state.custom, nodeThreshold: state.nodeThreshold ?? base.nodeThreshold };
 	});
-	const settingsIssues = computed(() => settingsProblems(settings.value, guardians.value.length, nodes.value.length));
 	const nodeIssues = computed(() => setProblems(nodes.value, settings.value.nodeThreshold, guardianHashes.value));
 	const operatorShortfall = computed(() => nodeIssues.value.find((p) => p.kind === 'too_few_operators') ?? null);
 
 	/** The fee as it will be paid: past the free service's limit it is the owner's own. */
 	const freeTooSmall = computed(() => !relayerCanTake(guardians.value.length));
 	const feeChoice = computed(() => (state.fee.choice === 'buckitup' && freeTooSmall.value ? 'self' : state.fee.choice));
-	const feePayload = computed(() => {
-		if (feeChoice.value === 'self') return { kind: 'self' };
-		if (feeChoice.value === 'other') return { kind: 'relayer', url: state.fee.url.trim() };
-		return { kind: 'relayer' };
-	});
-	const feeText = computed(() => ({ buckitup: 'free', other: 'another service', self: 'paid from your address' })[feeChoice.value]);
-	const feeIssue = computed(() => {
-		if (feeChoice.value === 'other' && !/^https:\/\/[^\s/]+\.[^\s]+$/i.test(state.fee.url.trim())) return 'Type the https address of the service that pays the fee.';
-		if (feeChoice.value === 'self' && state.quote && !state.quote.enough) return 'Balance is too low for the fee.';
-		return null;
-	});
 
 	const alertChannels = computed(() => ['app', ...(state.alerts.telegram ? ['telegram'] : []), ...(state.alerts.webhook ? ['webhook'] : [])]);
 	const alertsConnected = computed(() => state.alerts.telegram || state.alerts.webhook);
@@ -253,43 +244,42 @@ export const createBackupDraft = (store) => {
 		const short = operatorShortfall.value;
 		if (short) return `Add ${plural(short.need - short.have, 'more node operator')} to continue.`;
 		if (nodeIssues.value.length) return 'The nodes need attention: open Change settings, then Nodes.';
-		if (settingsIssues.value.length) return 'Some settings are out of bounds: open Change settings.';
-		return feeIssue.value;
+		if (settingsProblems(settings.value, m, nodes.value.length).length) return 'Some settings are out of bounds: open Change settings.';
+		// The balance is read on the Fee and Review screens: not having read it yet is no reason to stop here.
+		if (feeChoice.value === 'self' && !state.quote) return null;
+		return feeProblem(feeChoice.value, state.fee.url, state.quote);
 	});
 
 	const summaryLine = computed(() => {
 		const s = settings.value;
-		return `${plural(s.spares, 'spare piece')} · ${s.nodeThreshold} of ${nodes.value.length} nodes · ${durationAdjective(s.delaySec)} wait · ${feeText.value}`;
+		return `${plural(s.spares, 'spare piece')} · ${s.nodeThreshold} of ${nodes.value.length} nodes · ${durationAdjective(s.delaySec)} wait · ${feeText(feeChoice.value)}`;
 	});
 
 	/** What store.start takes. */
-	const startPayload = () => ({
-		guardians: guardians.value.map((g) => ({ userHash: g.userHash, metaAddress: g.metaAddress })),
-		settings: { ...settings.value },
-		nodes: [...nodes.value],
-		fee: { ...feePayload.value },
-		alerts: { channels: [...alertChannels.value], skipped: !alertsConnected.value && state.alerts.skipped },
-	});
+	const startPayload = () => {
+		const choice = feeChoice.value;
+		return {
+			guardians: guardians.value.map((g) => ({ userHash: g.userHash, metaAddress: g.metaAddress })),
+			settings: { ...settings.value },
+			nodes: [...nodes.value],
+			fee: choice === 'self' ? { kind: 'self' } : choice === 'other' ? { kind: 'relayer', url: state.fee.url.trim() } : { kind: 'relayer' },
+			alerts: { channels: [...alertChannels.value], skipped: !alertsConnected.value && state.alerts.skipped },
+		};
+	};
 
 	return {
 		state,
-		agreed,
 		guardians,
 		guardianHashes,
 		toggle,
-		suggested,
 		nodes,
 		pinNodes,
 		setNodes,
 		settings,
-		settingsIssues,
 		nodeIssues,
 		operatorShortfall,
 		freeTooSmall,
 		feeChoice,
-		feePayload,
-		feeText,
-		feeIssue,
 		alertChannels,
 		alertsConnected,
 		blockReason,

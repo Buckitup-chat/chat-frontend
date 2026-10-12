@@ -3,18 +3,18 @@
 
 	<div class="cb-block">
 		<div class="d-flex review-faces">
-			<Initials v-for="g in draft.guardians.value" :key="g.userHash" :name="g.name" :hash="g.userHash" />
+			<ContactAvatar v-for="g in draft.guardians.value" :key="g.userHash" :hash="g.userHash" />
 		</div>
 		<div class="cb-headline" data-test="review-headline">any {{ needed }} of {{ draft.guardians.value.length }}</div>
 		<div class="cb-muted">
 			{{ plural(s.spares, 'spare piece') }} · {{ s.nodeThreshold }} of {{ draft.nodes.value.length }} nodes<br />
 			{{ durationAdjective(s.delaySec) }} wait · alerts: {{ draft.state.alerts.skipped && !draft.alertsConnected.value ? 'none' : alertsText(draft.alertChannels.value) }}<br />
-			Network fee: {{ draft.feeText.value }}
+			Network fee: {{ feeText(draft.feeChoice.value) }}
 		</div>
 	</div>
 
 	<div v-if="draft.feeChoice.value === 'self' && draft.state.quote" class="cb-small">
-		Estimated fee ≈ {{ draft.state.quote.estimate }} ETH, from your address {{ shortAddress(draft.state.quote.address) }}.
+		Estimated fee ≈ {{ amount(draft.state.quote.estimate) }} {{ CURRENCY }}, from your address {{ shortAddress(draft.state.quote.address) }}.
 	</div>
 	<div class="cb-muted">If fewer than {{ needed }} guardians keep their piece, the backup stops working. You will see it here.</div>
 
@@ -28,12 +28,13 @@
 </template>
 
 <script setup>
-import { computed, inject, onMounted, ref, watch } from 'vue';
+import { computed, inject, onMounted, ref } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
-import { neededGuardians } from '@/lib/recovery/backupPlan';
+import { neededGuardians, plural } from '@/lib/recovery/backupPlan';
+import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
-import Initials from './Initials.vue';
-import { DRAFT, NAV, alertsText, durationAdjective, plural, shortAddress } from './backupFlow';
+import ContactAvatar from './ContactAvatar.vue';
+import { CURRENCY, DRAFT, NAV, alertsText, amount, durationAdjective, feeText, shortAddress } from './backupFlow';
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
@@ -61,27 +62,19 @@ const blocked = computed(() => {
 
 const creating = ref(false);
 const error = ref(null);
-const create = () => {
+// start resolves once the run is saved, before anything leaves this device;
+// the progress screen follows it from there.
+const create = async () => {
 	creating.value = true;
 	error.value = null;
-	const before = store.run?.runId ?? null;
-	// The run is saved before anything leaves this device; the progress screen
-	// follows it from there, while store.start keeps driving it.
-	const stop = watch(
-		() => store.run?.runId,
-		(id) => {
-			if (id && id !== before) {
-				stop();
-				nav.reset('progress');
-			}
-		},
-	);
-	store.start(draft.startPayload()).catch((e) => {
-		stop();
-		if ((store.run?.runId ?? null) !== before) return;
+	try {
+		await store.start(draft.startPayload());
+		nav.reset('progress');
+	} catch (e) {
+		error.value = errorMessage(e);
+	} finally {
 		creating.value = false;
-		error.value = e?.message ?? String(e);
-	});
+	}
 };
 </script>
 

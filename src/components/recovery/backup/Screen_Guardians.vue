@@ -2,9 +2,9 @@
 	<ScreenHeader title="Community backup" :step="1" step-label="Guardians" />
 
 	<!-- 2.1: nobody has agreed yet -->
-	<template v-if="!draft.agreed.value.length">
+	<template v-if="!store.pickable.length">
 		<div class="cb-block" data-test="empty">
-			<div class="cb-headline fs-6">Ask {{ askCount }} people you trust to be guardians</div>
+			<div class="cb-headline fs-6">Ask 3 people you trust to be guardians</div>
 			<div class="cb-muted">A guardian cannot open your account alone — they hold one piece of N. They help only when you ask them on a call.</div>
 		</div>
 	</template>
@@ -18,7 +18,7 @@
 		<div v-if="others.length" class="cb-section">Agreed · can be picked</div>
 		<div class="cb-list">
 			<div
-				v-for="c in draft.agreed.value"
+				v-for="c in store.pickable"
 				:key="c.userHash"
 				class="cb-row pickable"
 				:class="{ picked: isPicked(c) }"
@@ -28,9 +28,9 @@
 				@click="draft.toggle(c.userHash)"
 			>
 				<span class="cb-check" :class="{ on: isPicked(c) }">
-					<svg v-if="isPicked(c)" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg>
+					<Check v-if="isPicked(c)" />
 				</span>
-				<Initials :name="c.name" :hash="c.userHash" />
+				<ContactAvatar :hash="c.userHash" />
 				<span class="cb-row-main"><span class="cb-row-name">{{ c.name || 'Unnamed contact' }}</span></span>
 				<span class="cb-status-ok">agreed</span>
 			</div>
@@ -39,11 +39,11 @@
 
 	<!-- 2.2: everyone else, with why not and what to do -->
 	<template v-if="others.length">
-		<div class="cb-section">{{ draft.agreed.value.length ? 'Not available yet' : 'Confirmed in person' }}</div>
+		<div class="cb-section">{{ store.pickable.length ? 'Not available yet' : 'Confirmed in person' }}</div>
 		<div class="cb-list">
 			<div v-for="c in others" :key="c.userHash" class="cb-row dim" data-test="other-row">
 				<span class="cb-check none"></span>
-				<Initials :name="c.name" :hash="c.userHash" muted />
+				<ContactAvatar :hash="c.userHash" muted />
 				<span class="cb-row-main">
 					<span class="cb-row-name">{{ c.name || 'Unnamed contact' }}</span>
 					<span class="cb-row-sub">{{ STATUS_TEXT[c.status] }}</span>
@@ -61,7 +61,7 @@
 		Only contacts confirmed in person can be guardians. {{ plural(store.hiddenContacts, 'other contact') }} {{ store.hiddenContacts === 1 ? 'is' : 'are' }} not shown.
 	</div>
 
-	<template v-if="draft.agreed.value.length">
+	<template v-if="store.pickable.length">
 		<!-- 3.1: two guardians are allowed, once the owner says they understand -->
 		<div v-if="count === 2" class="cb-warn" data-test="two-warning">
 			<span>If you lose either of them, the backup cannot be used.</span>
@@ -94,7 +94,7 @@
 				<div>{{ plural(settings.spares, 'spare piece') }} kept in your account</div>
 				<div>{{ settings.nodeThreshold }} of {{ draft.nodes.value.length }} nodes needed</div>
 				<div>you have {{ durationText(settings.delaySec) }} to stop an attempt that is not yours</div>
-				<div>Network fee: {{ draft.feeText.value }}</div>
+				<div>Network fee: {{ feeText(draft.feeChoice.value) }}</div>
 				<div><button class="btn btn-sm btn-outline-dark" @click="nav.go('advanced')">Change settings</button></div>
 			</div>
 		</div>
@@ -111,10 +111,12 @@ import { computed, inject, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { useRecoveryInvitesStore } from '@/store/recoveryInvites.store';
-import { durationText, neededGuardians } from '@/lib/recovery/backupPlan';
+import { durationText, neededGuardians, plural } from '@/lib/recovery/backupPlan';
+import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
-import Initials from './Initials.vue';
-import { DRAFT, NAV, plural } from './backupFlow';
+import ContactAvatar from './ContactAvatar.vue';
+import Check from './Check.vue';
+import { DRAFT, NAV, feeText } from './backupFlow';
 
 const STATUS_TEXT = { waiting: 'waiting for answer', declined: 'declined', not_asked: 'not asked' };
 
@@ -125,14 +127,13 @@ const invites = useRecoveryInvitesStore();
 const router = useRouter();
 
 const open = ref(false);
-const others = computed(() => store.candidates.filter((c) => c.status !== 'agreed' || !c.metaAddress));
-const askCount = computed(() => Math.max(2, 3 - draft.agreed.value.length));
+const others = computed(() => store.candidates.filter((c) => !store.pickable.includes(c)));
 const count = computed(() => draft.guardians.value.length);
 const settings = computed(() => draft.settings.value);
 const shortfall = computed(() => (draft.state.nodesLoading ? null : draft.operatorShortfall.value));
 const isPicked = (c) => draft.state.selected.includes(c.userHash);
 
-const headline = computed(() => (count.value === 1 ? '1 guardian' : `${count.value} guardians`));
+const headline = computed(() => plural(count.value, 'guardian'));
 const subline = computed(() => (count.value >= 2 ? `any ${neededGuardians(settings.value)} of them can help you back in` : 'Pick at least 2. 3 or more is safer.'));
 
 const asking = reactive({});
@@ -143,7 +144,7 @@ const ask = async (c) => {
 	try {
 		await invites.invite(c.userHash);
 	} catch (e) {
-		askErrors[c.userHash] = e?.message ?? String(e);
+		askErrors[c.userHash] = errorMessage(e);
 	} finally {
 		asking[c.userHash] = false;
 	}

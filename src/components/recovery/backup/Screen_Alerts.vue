@@ -17,7 +17,7 @@
 		<div class="cb-tile">
 			<div class="cb-tile-head">
 				<span class="cb-check on">
-					<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg>
+					<Check />
 				</span>
 				<div class="flex-grow-1 d-flex flex-column gap-1">
 					<span class="cb-tile-title">In the app</span>
@@ -29,7 +29,7 @@
 		<div class="cb-tile pickable" :class="{ picked: a.telegram }" data-test="tile-telegram" @click="!a.telegram && nav.go('telegram')">
 			<div class="cb-tile-head">
 				<span class="cb-check" :class="{ on: a.telegram }">
-					<svg v-if="a.telegram" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg>
+					<Check v-if="a.telegram" />
 				</span>
 				<div class="flex-grow-1 d-flex flex-column gap-1">
 					<span class="cb-tile-title">Telegram</span>
@@ -43,7 +43,7 @@
 		<div class="cb-tile pickable" :class="{ picked: a.webhook || webhookOpen }" data-test="tile-webhook" @click="!a.webhook && (webhookOpen = !webhookOpen)">
 			<div class="cb-tile-head">
 				<span class="cb-check" :class="{ on: a.webhook }">
-					<svg v-if="a.webhook" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg>
+					<Check v-if="a.webhook" />
 				</span>
 				<div class="flex-grow-1 d-flex flex-column gap-1">
 					<span class="cb-tile-title">Webhook</span>
@@ -80,9 +80,11 @@
 import { computed, inject, onMounted, ref } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { durationText } from '@/lib/recovery/backupPlan';
+import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
+import Check from './Check.vue';
 import CopyField from './CopyField.vue';
-import { DRAFT, NAV } from './backupFlow';
+import { DRAFT, NAV, isHttpsUrl } from './backupFlow';
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
@@ -107,7 +109,7 @@ onMounted(async () => {
 
 const webhookOpen = ref(false);
 const webhookUrl = ref('');
-const webhookOk = computed(() => /^https:\/\/[^\s/]+\.[^\s]+$/i.test(webhookUrl.value.trim()));
+const webhookOk = computed(() => isHttpsUrl(webhookUrl.value));
 const webhookSecret = ref(null);
 const webhookError = ref(null);
 const connecting = ref(false);
@@ -119,7 +121,7 @@ const connectWebhook = async () => {
 		webhookSecret.value = secret;
 		a.webhook = true;
 	} catch (e) {
-		webhookError.value = e?.message ?? String(e);
+		webhookError.value = errorMessage(e);
 	} finally {
 		connecting.value = false;
 	}
@@ -145,7 +147,7 @@ const saveAlerts = async () => {
 		await store.setAlerts({ channels: [...draft.alertChannels.value], skipped: false });
 		nav.close();
 	} catch (e) {
-		saveError.value = e?.message ?? String(e);
+		saveError.value = errorMessage(e);
 	} finally {
 		saving.value = false;
 	}

@@ -36,7 +36,7 @@
 				data-test="contact-node"
 				@click="r.selectable && (chosen = r.id)"
 			>
-				<Initials :name="r.name" :hash="r.operator" :muted="!r.selectable" />
+				<ContactAvatar :hash="r.operator" :muted="!r.selectable" />
 				<span class="cb-row-main">
 					<span class="cb-row-name">{{ r.name }}</span>
 					<span class="cb-row-sub">{{ r.guardian ? 'is your guardian' : r.host }}</span>
@@ -78,10 +78,11 @@
 import { computed, inject, ref } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { userPQStore } from '@/store/userPQ.store';
-import { refusalOf, operatorOf, BUCKITUP } from '@/lib/recovery/nodeChoice';
+import { guardianRunning, operatorOf, BUCKITUP } from '@/lib/recovery/nodeChoice';
+import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
-import Initials from './Initials.vue';
-import { DRAFT, NAV, hostOf, nodeCheckText, operatorLabel } from './backupFlow';
+import ContactAvatar from './ContactAvatar.vue';
+import { DRAFT, NAV, hostOf, nodeCheckText, nodeOwnerName } from './backupFlow';
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
@@ -96,11 +97,11 @@ const contactNodes = computed(() =>
 	store.nodes
 		.filter((n) => operatorOf(n.descriptor.operator) !== BUCKITUP && $userPQ.contactsMap?.[n.descriptor.operator] && !pickedIds.value.includes(n.descriptor.id))
 		.map((n) => {
-			const guardian = refusalOf({ ...n, online: true }, draft.guardianHashes.value) === 'guardian_operator';
+			const guardian = !!guardianRunning(n, draft.guardianHashes.value);
 			return {
 				id: n.descriptor.id,
 				operator: n.descriptor.operator,
-				name: $userPQ.contactsMap[n.descriptor.operator].name || hostOf(n.descriptor.url),
+				name: nodeOwnerName(n.descriptor, $userPQ),
 				host: hostOf(n.descriptor.url),
 				online: n.online,
 				guardian,
@@ -124,20 +125,15 @@ const checkUrl = async () => {
 		check.value = await store.addNodeUrl(typed);
 	} catch (e) {
 		check.value = null;
-		checkError.value = e?.message ?? String(e);
+		checkError.value = errorMessage(e);
 	}
 };
-const refusedText = computed(() => (check.value?.state === 'refused' ? nodeCheckText(check.value.reason, url.value.trim()) : ''));
-const readyName = computed(() =>
-	check.value?.state === 'ready'
-		? operatorLabel(check.value.node.descriptor.operator, { contactsMap: $userPQ.contactsMap, me: $userPQ.currentUserHash, url: check.value.node.descriptor.url })
-		: '',
-);
+const refusedText = computed(() => (check.value?.state === 'refused' ? nodeCheckText(check.value.reason) : ''));
+const readyName = computed(() => (check.value?.state === 'ready' ? nodeOwnerName(check.value.node.descriptor, $userPQ) : ''));
 const readyRefusal = computed(() => {
 	if (check.value?.state !== 'ready') return null;
-	const reason = refusalOf(check.value.node, draft.guardianHashes.value);
-	if (reason === 'guardian_operator') return `${readyName.value} is a guardian. One person would hold both halves.`;
-	if (reason === 'offline') return 'The node is offline. Add it when it answers again.';
+	if (guardianRunning(check.value.node, draft.guardianHashes.value)) return `${readyName.value} is a guardian. One person would hold both halves.`;
+	if (!check.value.node.online) return 'The node is offline. Add it when it answers again.';
 	if (pickedIds.value.includes(check.value.node.descriptor.id)) return 'This node is already picked.';
 	return null;
 });

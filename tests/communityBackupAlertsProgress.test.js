@@ -230,11 +230,11 @@ describe('Progress', () => {
 describe('Review', () => {
 	beforeEach(() => setup());
 
-	it('starts the backup with the drafted setup and follows it to the progress screen', async () => {
+	it('starts the backup with the drafted setup and, once it is saved, shows its progress', async () => {
 		const { default: Screen_Review } = await import('@/components/recovery/backup/Screen_Review.vue');
 		draft.state.alerts.telegram = true;
-		let finish;
-		H.store.start = vi.fn(() => new Promise((r) => (finish = r)));
+		let saved;
+		H.store.start = vi.fn(() => new Promise((r) => (saved = r)));
 		const w = render(Screen_Review);
 		expect(at(w, 'review-headline').text()).toBe('any 2 of 3');
 		expect(w.text()).toContain('If fewer than 2 guardians keep their piece, the backup stops working. You will see it here.');
@@ -248,11 +248,10 @@ describe('Review', () => {
 		expect(payload.alerts).toEqual({ channels: ['app', 'telegram'], skipped: false });
 		expect(nav.reset).not.toHaveBeenCalled();
 
-		// The run is saved before anything leaves: from then on the progress screen shows it.
-		H.store.run = makeRun({ runId: 'fresh' });
-		await nextTick();
+		// start resolves once the run is saved, before anything leaves: from then on the progress screen shows it.
+		saved();
+		await flushPromises();
 		expect(nav.reset).toHaveBeenCalledWith('progress');
-		finish();
 		w.unmount();
 	});
 

@@ -8,6 +8,7 @@ import { candidate, fakeBackupStore, makeRun } from './helpers/communityBackup';
 
 const H = vi.hoisted(() => ({ store: null }));
 vi.mock('@/store/recoveryBackup.store', () => ({ useRecoveryBackupStore: () => H.store }));
+vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => ({ contactsMap: {} }) }));
 
 const { default: Card } = await import('@/components/recovery/backup/CommunityBackupCard.vue');
 
@@ -43,9 +44,12 @@ describe('with no backup', () => {
 		expect(opened).toEqual([{ id: 'community_backup', start: 'guardians' }]);
 	});
 
-	it('reads the backup when shown, and says when this build has no network', async () => {
-		render();
+	it('reads the backup when shown and follows it while shown, and says when this build has no network', async () => {
+		const shown = render();
 		expect(H.store.load).toHaveBeenCalledTimes(1);
+		expect(H.store.follow).toHaveBeenCalledTimes(1);
+		shown.unmount();
+		expect(H.store.unfollow).toHaveBeenCalledTimes(1);
 		H.store = fakeBackupStore({ deployment: null });
 		const w = render();
 		expect(w.text()).toContain('Not available in this version of the app.');

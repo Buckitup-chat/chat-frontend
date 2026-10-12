@@ -25,7 +25,7 @@
 				<span class="fw-medium">Spare pieces</span>
 				<span class="cb-small">{{ SPARES_CAPTION }}</span>
 			</div>
-			<Stepper v-model="w.spares" :min="0" :max="MAX_SPARES" />
+			<Stepper v-model="w.spares" :min="SPARES_BOUNDS.min" :max="SPARES_BOUNDS.max" />
 		</div>
 	</div>
 
@@ -34,14 +34,14 @@
 		<div class="cb-setting flex-wrap">
 			<div class="flex-grow-1 d-flex flex-column gap-1">
 				<span class="fw-medium">Waiting period</span>
-				<span class="cb-small">10 min … 365 days</span>
+				<span class="cb-small">{{ boundsText(DELAY_BOUNDS) }}</span>
 			</div>
 			<DurationInput v-model="w.delaySec" label="Waiting period" :invalid="bad('delaySec')" />
 		</div>
 		<div class="cb-setting flex-wrap">
 			<div class="flex-grow-1 d-flex flex-column gap-1">
 				<span class="fw-medium">Time to finish after the wait</span>
-				<span class="cb-small">1 h … 30 days</span>
+				<span class="cb-small">{{ boundsText(WINDOW_BOUNDS) }}</span>
 			</div>
 			<DurationInput v-model="w.windowSec" label="Time to finish" :invalid="bad('windowSec')" />
 		</div>
@@ -57,7 +57,7 @@
 		</div>
 		<div class="cb-setting link" role="button" @click="nav.go('fee')">
 			<span class="flex-grow-1 fw-medium">Network fee</span>
-			<span class="cb-small">{{ feeRow }}</span>
+			<span class="cb-small">{{ feeText(draft.feeChoice.value, 'row') }}</span>
 			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 7l5 5-5 5"></path></svg>
 		</div>
 	</div>
@@ -72,13 +72,12 @@
 
 <script setup>
 import { computed, inject } from 'vue';
-import { DELAY_BOUNDS, defaultSettings, durationText, settingsProblems } from '@/lib/recovery/backupPlan';
+import { DELAY_BOUNDS, WINDOW_BOUNDS, SPARES_BOUNDS, defaultSettings, durationText, plural, settingsProblems } from '@/lib/recovery/backupPlan';
 import ScreenHeader from './ScreenHeader.vue';
 import Stepper from './Stepper.vue';
 import DurationInput from './DurationInput.vue';
-import { DRAFT, NAV, SPARES_CAPTION, plural } from './backupFlow';
+import { DRAFT, NAV, SPARES_CAPTION, feeText } from './backupFlow';
 
-const MAX_SPARES = 10;
 const FIELDS = ['threshold', 'approvals', 'spares', 'delaySec', 'windowSec'];
 
 const draft = inject(DRAFT);
@@ -106,7 +105,7 @@ const approvalsError = computed(() => {
 const delayWords = computed(() =>
 	w.delaySec >= DELAY_BOUNDS.min && w.delaySec <= DELAY_BOUNDS.max ? durationText(w.delaySec) : 'the waiting period',
 );
-const feeRow = computed(() => ({ buckitup: 'BuckitUp · free', other: 'another service', self: 'paid from your address' })[draft.feeChoice.value]);
+const boundsText = (b) => `${durationText(b.min)} … ${durationText(b.max)}`;
 
 const reset = () => Object.assign(w, pick(defaultSettings(guardianCount.value, draft.nodes.value.length)));
 const save = () => {

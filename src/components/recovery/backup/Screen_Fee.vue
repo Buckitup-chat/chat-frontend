@@ -66,12 +66,11 @@
 import { computed, inject, onBeforeUnmount, ref, watch } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { RELAYER_MAX_GUARDIANS } from '@/lib/recovery/backupPlan';
+import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
 import CopyField from './CopyField.vue';
-import { DRAFT, NAV, shortAddress } from './backupFlow';
+import { CURRENCY, DRAFT, NAV, amount, feeProblem, shortAddress } from './backupFlow';
 
-/** The deployment's chain pays in ether. */
-const CURRENCY = 'ETH';
 const QUOTE_EVERY_MS = 20_000;
 
 const draft = inject(DRAFT);
@@ -84,16 +83,16 @@ const tooBig = computed(() => draft.freeTooSmall.value);
 const choice = ref(draft.feeChoice.value);
 const url = ref(draft.state.fee.url);
 
-const quote = ref(draft.state.quote);
+/** The last quote, kept in the draft so Review shows the same figures. */
+const quote = computed(() => draft.state.quote);
 const quoteError = ref(null);
 let timer = null;
 const readQuote = async () => {
 	try {
-		quote.value = await store.selfPayQuote(guardianCount.value);
-		draft.state.quote = quote.value;
+		draft.state.quote = await store.selfPayQuote(guardianCount.value);
 		quoteError.value = null;
 	} catch (e) {
-		quoteError.value = e?.message ?? String(e);
+		quoteError.value = errorMessage(e);
 	}
 };
 watch(
@@ -110,21 +109,9 @@ watch(
 );
 onBeforeUnmount(() => clearInterval(timer));
 
-const amount = (eth) => {
-	const n = Number(eth);
-	if (!Number.isFinite(n)) return eth;
-	return n === 0 ? '0' : n < 0.0001 ? '< 0.0001' : String(Number(n.toPrecision(3)));
-};
-
-const saveBlock = computed(() => {
-	if (choice.value === 'other' && !/^https:\/\/[^\s/]+\.[^\s]+$/i.test(url.value.trim())) return 'Type the https address of the service that pays the fee.';
-	if (choice.value === 'self') {
-		if (quoteError.value) return 'The balance could not be read.';
-		if (!quote.value) return 'Reading the balance…';
-		if (!quote.value.enough) return 'Balance is too low for the fee.';
-	}
-	return null;
-});
+const saveBlock = computed(() =>
+	choice.value === 'self' && quoteError.value ? 'The balance could not be read.' : feeProblem(choice.value, url.value, quote.value),
+);
 
 const save = () => {
 	draft.state.fee = { choice: choice.value, url: url.value.trim() };

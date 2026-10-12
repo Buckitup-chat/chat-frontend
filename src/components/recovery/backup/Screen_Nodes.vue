@@ -24,7 +24,7 @@
 			@click="r.selectable && toggle(r.id)"
 		>
 			<span v-if="r.selectable" class="cb-check" :class="{ on: r.picked }" data-test="node-check">
-				<svg v-if="r.picked" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg>
+				<Check v-if="r.picked" />
 			</span>
 			<span v-else class="cb-check none"></span>
 			<span class="cb-row-main">
@@ -58,10 +58,12 @@
 import { computed, inject } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { userPQStore } from '@/store/userPQ.store';
-import { refusalOf, operatorOf } from '@/lib/recovery/nodeChoice';
+import { guardianRunning, operatorOf } from '@/lib/recovery/nodeChoice';
+import { plural } from '@/lib/recovery/backupPlan';
 import ScreenHeader from './ScreenHeader.vue';
 import Stepper from './Stepper.vue';
-import { DRAFT, NAV, hostOf, operatorLabel, plural, refusedNodeStatus } from './backupFlow';
+import Check from './Check.vue';
+import { DRAFT, NAV, guardianName, hostOf, nodeOwnerName, refusedNodeStatus } from './backupFlow';
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
@@ -70,12 +72,12 @@ const $userPQ = userPQStore();
 
 const picked = computed(() => draft.nodes.value);
 const operatorCount = computed(() => new Set(picked.value.map((n) => operatorOf(n.descriptor.operator))).size);
-const nameOf = (n) => operatorLabel(n.descriptor.operator, { contactsMap: $userPQ.contactsMap, me: $userPQ.currentUserHash, url: n.descriptor.url });
+const nameOf = (n) => nodeOwnerName(n.descriptor, $userPQ);
 
 const rows = computed(() => {
 	const ids = picked.value.map((n) => n.descriptor.id);
 	const known = store.nodes.map((n) => {
-		const refusal = refusalOf(n, draft.guardianHashes.value);
+		const guardian = guardianRunning(n, draft.guardianHashes.value);
 		return {
 			key: n.descriptor.id,
 			id: n.descriptor.id,
@@ -84,7 +86,7 @@ const rows = computed(() => {
 			picked: ids.includes(n.descriptor.id),
 			// An offline node is not offered, as one that is not ready.
 			selectable: n.online,
-			status: !n.online ? 'offline' : refusal === 'guardian_operator' ? 'online · your guardian' : 'online',
+			status: !n.online ? 'offline' : guardian ? 'online · your guardian' : 'online',
 			statusClass: n.online ? 'cb-status-ok' : 'cb-status-warn',
 		};
 	});
@@ -115,12 +117,12 @@ const messages = computed(() =>
 				if (!node) return null;
 				const name = nameOf(node);
 				if (p.reason === 'guardian_operator') {
-					const guardian = draft.guardians.value.find((g) => operatorOf(g.userHash) === operatorOf(node.descriptor.operator));
+					const who = guardianName(p.guardian, store.candidates, $userPQ);
 					return {
 						key: `g${p.nodeId}`,
-						text: `${guardian?.name || name} is a guardian and also runs this node. One person would hold both halves.`,
+						text: `${who} is a guardian and also runs this node. One person would hold both halves.`,
 						removeNode: p.nodeId,
-						removeGuardian: guardian ? { userHash: guardian.userHash, name: guardian.name || 'them' } : null,
+						removeGuardian: { userHash: p.guardian, name: who },
 					};
 				}
 				return { key: `o${p.nodeId}`, text: `${name}'s node at ${hostOf(node.descriptor.url)} is offline.`, removeNode: p.nodeId };

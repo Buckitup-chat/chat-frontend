@@ -20,3 +20,30 @@ const copy = async () => {
 	copied.value = !!(await copyToClipboard(props.value, false));
 };
 </script>
+
+<style lang="scss" scoped>
+@import '@/scss/variables.scss';
+
+.cb-copy {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 38px;
+	border: 1px solid $light_grey2;
+	border-radius: 8px;
+	padding: 4px 6px 4px 12px;
+	background: #fff;
+}
+.cb-copy-text {
+	flex: 1;
+	font-family: ui-monospace, monospace;
+	font-size: 13px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	&.wrap {
+		white-space: normal;
+		word-break: break-all;
+	}
+}
+</style>

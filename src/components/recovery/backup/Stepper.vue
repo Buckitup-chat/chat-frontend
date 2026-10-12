@@ -15,3 +15,35 @@ defineProps({
 });
 const emit = defineEmits(['update:modelValue']);
 </script>
+
+<style lang="scss" scoped>
+@import '@/scss/variables.scss';
+
+.cb-stepper {
+	display: flex;
+	align-items: center;
+	background: #fff;
+	border-radius: 999px;
+	border: 1px solid $light_grey2;
+	&.invalid {
+		border-color: $red;
+	}
+	button {
+		width: 32px;
+		height: 30px;
+		border: 0;
+		background: transparent;
+		font-size: 18px;
+		line-height: 1;
+		&:disabled {
+			color: #c9c9cc;
+		}
+	}
+}
+.cb-stepper-value {
+	min-width: 26px;
+	text-align: center;
+	font-weight: 700;
+	font-size: 15px;
+}
+</style>

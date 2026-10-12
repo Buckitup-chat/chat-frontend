@@ -39,3 +39,19 @@ watch(
 	},
 );
 </script>
+
+<style lang="scss" scoped>
+.cb-duration {
+	display: flex;
+	gap: 6px;
+	input {
+		width: 4.5rem;
+	}
+	select {
+		width: 7rem;
+	}
+	&.invalid input {
+		border-color: #dc3545;
+	}
+}
+</style>
