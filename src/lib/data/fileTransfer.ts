@@ -256,14 +256,17 @@ export const downloadFile = async (opts: {
 	/** Each decrypted chunk as it lands — lets a consumer start before the end. */
 	onChunk?: (index: number, plain: Uint8Array) => void;
 	signal?: AbortSignal;
+	/** Who must have uploaded the file: a reference only counts as its sender's own upload. */
+	uploaderHash?: string;
 }): Promise<Uint8Array> => {
-	const { fileId, encSecretB64, onProgress, signal } = opts;
+	const { fileId, encSecretB64, onProgress, signal, uploaderHash } = opts;
 	const secret = fromBase64(encSecretB64);
 
 	const manifests = await readShapeOnce<Record<string, unknown>>('files', `file_id='${fileId}'`, signal);
 	const manifest = manifests.find((v) => v.file_id === fileId);
 	if (!manifest) throw new Error('file manifest not found');
 	if (wireBool(manifest.deleted_flag)) throw new Error('file was deleted by its uploader');
+	if (uploaderHash !== undefined && manifest.uploader_hash !== uploaderHash) throw new Error('file was uploaded by someone other than its sender');
 	const total = Number(manifest.chunk_count);
 
 	requestPersistentStorage();

@@ -699,7 +699,23 @@ export const useDialogsStore = defineStore('dialogs', () => {
             throw notStored();
         }
         trackOwnSentMessage(dialogHash, messageId);
+        for (const listener of ownSendListeners) {
+            try {
+                listener(peerHash, parts);
+            } catch (e) {
+                console.warn('[dialogs] own-send listener failed:', e);
+            }
+        }
         return { intentId, payload, token };
+    };
+
+    // Told of every message this account stores for sending, after it is
+    // durable — the avatars store sends its gallery into a dialog from here
+    // (pq_avatars § Delivery, rule 2). Returns the unsubscribe.
+    const ownSendListeners = new Set();
+    const onOwnSend = (listener) => {
+        ownSendListeners.add(listener);
+        return () => ownSendListeners.delete(listener);
     };
 
     const intentAwaitsRecovery = async (intentId, ownerHash) => {
@@ -988,9 +1004,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
     /** How much of an attachment this node can serve (§2.4). */
     const getFileAvailability = (fileId) => fileAvailability(fileId);
 
-    /** Downloads and decrypts an attachment; progress in chunks (§2.3). */
-    const fetchFile = (filePart, { onProgress, signal } = {}) =>
-        downloadFile({ fileId: filePart.fileId, encSecretB64: filePart.encSecretB64, onProgress, signal });
+    /**
+     * Downloads and decrypts an attachment; progress in chunks (§2.3).
+     * `uploaderHash` refuses a file someone else uploaded.
+     */
+    const fetchFile = (filePart, { onProgress, signal, uploaderHash } = {}) =>
+        downloadFile({ fileId: filePart.fileId, encSecretB64: filePart.encSecretB64, onProgress, signal, uploaderHash });
 
     /**
      * Deletes own message (§3.2): a new revision with deleted_flag and no
@@ -1016,6 +1035,55 @@ export const useDialogsStore = defineStore('dialogs', () => {
             return id;
         });
         return { messageId, status: await revisionOutcome(chainKey, intentId, token) };
+    };
+
+    // A cold shape's first sync can stall; a background read gives up on it
+    // and is asked again later rather than holding its caller.
+    const BACKGROUND_READ_MS = 10_000;
+    const withinBudget = (promise) => {
+        let timer;
+        return Promise.race([
+            promise,
+            new Promise((resolve) => { timer = setTimeout(() => resolve({ state: 'failed' }), BACKGROUND_READ_MS); }),
+        ]).finally(() => clearTimeout(timer));
+    };
+
+    /**
+     * Whether this account has sent in the dialog with a peer — its own key
+     * row is there. null when the dialog could not be read.
+     */
+    const hasOwnDialogKey = async (peerHash) => {
+        const me = $userPQ.currentUserHash;
+        const dialogHash = getDialogHash(peerHash);
+        if (!dialogHash) return null;
+        if (senderMsgKeys.value[`${dialogHash}_${me}`]) return true;
+        return withDialogCollections(dialogHash, async (colls) => {
+            if ((await withinBudget(settled(colls.keys))).state !== 'live') return null;
+            return !!colls.keys.get(`${dialogHash}|${me}`);
+        });
+    };
+
+    /**
+     * This account's live messages in the dialog with a peer, decrypted, as
+     * { messageId, senderHash, parts }. null when the dialog could not be
+     * read or one of them could not be decrypted: a partial answer would read
+     * as "absent".
+     */
+    const ownMessagesIn = async (peerHash) => {
+        const me = $userPQ.currentUserHash;
+        const dialogHash = getDialogHash(peerHash);
+        if (!dialogHash) return null;
+        return withDialogCollections(dialogHash, async (colls) => {
+            if ((await withinBudget(settled(colls.messages))).state !== 'live') return null;
+            const rows = colls.messages.toArray.filter((r) => r.sender_hash === me && r.sign_hash && !r.deleted_flag);
+            const out = [];
+            for (const row of rows) {
+                const decrypted = await decryptMessageRow(row, colls);
+                if (!decrypted.decrypted) return null;
+                out.push({ messageId: row.message_id, senderHash: me, parts: decrypted.parts });
+            }
+            return out;
+        });
     };
 
     /**
@@ -1854,6 +1922,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
         getSenderMsgKey,
         sendMessage,
         captureMessageIntent,
+        onOwnSend,
+        hasOwnDialogKey,
+        ownMessagesIn,
         dispatchMessageIntent,
         editMessage,
         decryptMessageRow,

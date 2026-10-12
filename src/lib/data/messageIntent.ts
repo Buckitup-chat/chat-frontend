@@ -191,9 +191,11 @@ export async function trustedRowBase(
 	return freshestOf(verified, own);
 }
 
+// A profile photo's file sits inside its avatar part (07 §"avatar").
 const fileIdsOf = (parts: unknown[] | undefined): string[] =>
 	(parts ?? []).flatMap((part) => {
-		const fileId = (part as { fileId?: unknown } | null)?.fileId;
+		const p = part as { fileId?: unknown; photo?: { fileId?: unknown } } | null;
+		const fileId = p?.fileId ?? p?.photo?.fileId;
 		return typeof fileId === 'string' && fileId ? [fileId] : [];
 	});
 
