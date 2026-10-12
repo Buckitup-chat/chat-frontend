@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { loadOwed, updateOwed } from '@/lib/avatars/localStore';
+import { useMemoryAvatarStore } from './helpers/avatarLocalStore';
 import { createAvatarDelivery, changeMessage, NO_KEY_TTL_MS, PROBE_CONCURRENCY, type DeliveryDeps } from '@/lib/avatars/delivery';
 import { galleryOf, type GalleryEntry, type GalleryMessage } from '@/lib/avatars/gallery';
 import type { AvatarPhoto, ContentPart } from '@/lib/pq/content';
@@ -14,15 +16,27 @@ const photo = (n: number): AvatarPhoto => ({
 });
 const entry = (c: string, n = 1): GalleryEntry => ({ avatarId: id(c), photo: photo(n) });
 
+beforeEach(() => { useMemoryAvatarStore(); });
+
 const world = (opts: { gallery?: GalleryEntry[]; contacts?: string[]; sentTo?: string[]; unreadable?: string[] } = {}) => {
 	const dialogs = new Map<string, GalleryMessage[]>();
 	for (const peer of opts.sentTo ?? []) dialogs.set(peer, [{ messageId: 'dmsg_0000', senderHash: ME, parts: [{ kind: 'text', text: 'hi' }] }]);
 	const sends: { peer: string; parts: ContentPart[] }[] = [];
-	const state = { gallery: opts.gallery ?? [], probes: [] as string[], clock: 1000, inProbe: 0, maxInProbe: 0 };
+	const state = {
+		gallery: opts.gallery ?? [], probes: [] as string[], clock: 1000, inProbe: 0, maxInProbe: 0,
+		// The slot as another device may have changed it; `gallery` is this device's last read of it.
+		slot: null as GalleryEntry[] | null, freshReads: 0, unreadable: new Set(opts.unreadable ?? []),
+	};
 	let seq = 1;
 	const contacts = opts.contacts ?? [];
 	const deps: DeliveryDeps = {
-		gallery: async () => state.gallery,
+		gallery: async ({ fresh = false } = {}) => {
+			if (fresh) {
+				state.freshReads++;
+				if (state.slot) state.gallery = state.slot;
+			}
+			return state.gallery;
+		},
 		contacts: () => contacts,
 		isTarget: (p) => contacts.includes(p),
 		probe: async (p, { requireOwnKey }) => {
@@ -31,7 +45,7 @@ const world = (opts: { gallery?: GalleryEntry[]; contacts?: string[]; sentTo?: s
 			state.maxInProbe = Math.max(state.maxInProbe, state.inProbe);
 			await new Promise((r) => setTimeout(r, 1));
 			state.inProbe--;
-			if (opts.unreadable?.includes(p)) return { ownKey: requireOwnKey ? true : undefined, carries: null };
+			if (state.unreadable.has(p)) return { ownKey: requireOwnKey ? null : undefined, carries: null };
 			const ownKey = dialogs.has(p);
 			if (requireOwnKey && !ownKey) return { ownKey, carries: null };
 			return { ownKey, carries: (dialogs.get(p) ?? []).some((m) => m.parts.some((x) => x.kind === 'avatar')) };
@@ -43,6 +57,7 @@ const world = (opts: { gallery?: GalleryEntry[]; contacts?: string[]; sentTo?: s
 			dialogs.set(p, list);
 		},
 		now: () => state.clock,
+		owed: { load: () => loadOwed(ME), update: (change) => updateOwed(ME, change) },
 	};
 	const readerGallery = (peer: string) => galleryOf(dialogs.get(peer) ?? [], ME).map((e) => e.avatarId[0]);
 	return { deps, sends, state, dialogs, readerGallery, delivery: createAvatarDelivery(deps) };
@@ -58,7 +73,7 @@ describe('rule 1: a change goes to every dialog the account has', () => {
 		await sendAvatar(w, 'P2', 'a');
 		w.sends.length = 0;
 		const result = await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('b'), photo: photo(1) });
-		expect(result).toEqual({ sent: ['P1', 'P2'], failed: [] });
+		expect(result).toEqual({ sent: ['P1', 'P2'], failed: [], pending: [] });
 		expect(w.sends.map((s) => kinds(s.parts))).toEqual([['avatar:b'], ['avatar:b']]);
 	});
 
@@ -190,5 +205,89 @@ describe('rule 2: the first message in a dialog brings the gallery', () => {
 		]);
 		expect(w.sends.filter((s) => s.parts.length > 1)).toHaveLength(1);
 		expect(w.readerGallery('P1')).toEqual(['b', 'a']);
+	});
+});
+
+describe('the gallery a snapshot carries is the slot\'s as it is now', () => {
+	it('a photo removed on another device never goes to a new contact', async () => {
+		const w = world({ gallery: [entry('b'), entry('a')], contacts: ['P1'] });
+		// another device took 'a' out; this device's last read still has it
+		w.state.slot = [entry('b')];
+		expect(await w.delivery.onOwnSend('P1', [{ kind: 'text', text: 'hello' }])).toBe('sent');
+		expect(kinds(w.sends[0].parts)).toEqual(['avatar:b']);
+	});
+});
+
+describe('nothing owed is dropped', () => {
+	const text: ContentPart[] = [{ kind: 'text', text: 'hello' }];
+
+	it('a change records every dialog as owed before sending into any', async () => {
+		const w = world({ gallery: [entry('a')], contacts: ['P1', 'P2'], sentTo: ['P1', 'P2'] });
+		const seenOwed: string[][] = [];
+		const probe = w.deps.probe;
+		w.deps.probe = async (p, o) => {
+			seenOwed.push(Object.keys(await loadOwed(ME)).sort());
+			return probe(p, o);
+		};
+		await createAvatarDelivery(w.deps).deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
+		expect(seenOwed[0]).toEqual(['P1', 'P2']);
+		expect(await loadOwed(ME)).toEqual({});
+	});
+
+	it('a dialog that could not be read stays owed, is reported pending, and is caught up once it can be read', async () => {
+		const w = world({ gallery: [entry('a')], contacts: ['P1'], sentTo: ['P1'], unreadable: ['P1'] });
+		await sendAvatar(w, 'P1', 'z');
+		w.sends.length = 0;
+		const result = await w.delivery.deliverChange({ kind: 'avatar_removed', avatarId: id('z') });
+		expect(result).toEqual({ sent: [], failed: [], pending: ['P1'] });
+		expect(w.sends).toEqual([]);
+		expect(await loadOwed(ME)).toEqual({ P1: { change: true, removed: [id('z')] } });
+
+		w.state.unreadable.clear();
+		const retried = await w.delivery.retryOwed();
+		expect(retried.sent).toEqual(['P1']);
+		expect(kinds(w.sends[0].parts)).toEqual(['avatar:a', 'avatar_removed:z']);
+		expect(w.readerGallery('P1')).toEqual(['a']);
+		expect(await loadOwed(ME)).toEqual({});
+	});
+
+	it('a send that was not stored stays owed, and goes out at the next message into that dialog', async () => {
+		const w = world({ gallery: [entry('b'), entry('a')], contacts: ['P1'], sentTo: ['P1'] });
+		const send = w.deps.send;
+		w.deps.send = async () => { throw new Error('not stored'); };
+		const delivery = createAvatarDelivery(w.deps);
+		const result = await delivery.deliverChange({ kind: 'avatar', avatarId: id('b'), photo: photo(1) });
+		expect(result.failed.map((f) => f.peerHash)).toEqual(['P1']);
+		expect(Object.keys(await loadOwed(ME))).toEqual(['P1']);
+
+		w.deps.send = send;
+		expect(await delivery.onOwnSend('P1', text)).toBe('caught-up');
+		expect(w.readerGallery('P1')).toEqual(['b', 'a']);
+		expect(await loadOwed(ME)).toEqual({});
+	});
+
+	it('a first message whose dialog could not be read is owed the gallery, sent once it can be', async () => {
+		const w = world({ gallery: [entry('a')], contacts: ['P1'], unreadable: ['P1'] });
+		expect(await w.delivery.onOwnSend('P1', text)).toBe('unknown');
+		expect(await loadOwed(ME)).toEqual({ P1: { first: true, removed: [] } });
+		expect(await w.delivery.onOwnSend('P1', text)).toBe('owed');
+		w.state.unreadable.clear();
+		expect((await w.delivery.retryOwed()).sent).toEqual(['P1']);
+		expect(kinds(w.sends[0].parts)).toEqual(['avatar:a']);
+		expect(await loadOwed(ME)).toEqual({});
+	});
+
+	it('what is owed to someone not (yet) a contact is kept, not sent and not dropped', async () => {
+		const w = world({ gallery: [entry('a')], contacts: [] });
+		await updateOwed(ME, (o) => { o.P9 = { first: true }; });
+		const result = await w.delivery.retryOwed();
+		expect(result).toEqual({ sent: [], failed: [], pending: [] });
+		expect(Object.keys(await loadOwed(ME))).toEqual(['P9']);
+	});
+
+	it('a dialog the account has not sent in is owed nothing', async () => {
+		const w = world({ gallery: [entry('a')], contacts: ['P2'] });
+		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
+		expect(await loadOwed(ME)).toEqual({});
 	});
 });

@@ -817,12 +817,16 @@ const lightboxFrames = computed(() =>
 
 // ---------- profile-photo messages (pq_avatars) ----------
 
-/** The service line of each profile-photo message, by message id; other messages have none. */
+/**
+ * The service line of each profile-photo message, by message id; other
+ * messages have none. Only a verified message is a photo change — the same
+ * ones the gallery counts; any other keeps its bubble and fetches nothing.
+ */
 const avatarLines = computed(() => {
   const lines = new Map();
   for (const msg of props.messages) {
     const parts = msg.parts || [];
-    if (msg._deleted || !parts.length || !parts.every(isAvatarPart)) continue;
+    if (msg._verify !== 'verified' || msg._deleted || !parts.length || !parts.every(isAvatarPart)) continue;
     const photos = parts.filter((p) => p.kind === 'avatar');
     const who = msg.isMine ? 'You' : props.title;
     const shown = photos.at(-1);

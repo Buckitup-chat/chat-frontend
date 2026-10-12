@@ -7,17 +7,34 @@ import { isAvatarPart, photoToWire } from '@/lib/pq/content';
 import { useGalleryViewer } from '@/composables/useGalleryViewer';
 
 /**
+ * Whether a dialog has been read whole: the live set is confirmed and every
+ * row has come to a final state — shown, deleted, or refused for good (failed
+ * verification for good, blocked behind such a row, or content that will not
+ * decode). A row still waiting on a dependency, a card or its key is not
+ * final. Only a dialog read whole can say its sender has no photo.
+ */
+export const isDialogRead = (live, rows, entries) => {
+	if (!live || entries.length !== rows.length) return false;
+	return entries.every((m) => {
+		if (m._deleted || m._verify === 'blocked') return true;
+		if (m._verify === 'invalid') return m._verifyTerminal === true;
+		if (m._verify !== 'verified') return false;
+		return m._decrypted !== false || m._awaitingKey !== true;
+	});
+};
+
+/**
  * A dialog's profile photos as its reader sees them (pq_avatars § The
  * gallery a reader sees): each sender's gallery from their own verified
  * messages at their current revision, the peer's current photo, the gallery
  * viewer, and the copy of the peer's current photo kept next to the contact
  * (§ What a reader keeps) so the lists draw it without reading the dialog.
  *
- * `messages`: the page's decrypted messages. `ready`: every row of the
- * dialog is here and read — only then does an empty gallery mean the peer
- * has no photo, rather than that the dialog is still being read.
+ * `messages`: the page's decrypted messages, one per row of `rows` that has
+ * been processed. `live`: the server's set of rows is confirmed (not a disk
+ * copy shown while it loads).
  */
-export function usePeerGallery({ peerHash, messages, ready }) {
+export function usePeerGallery({ peerHash, messages, rows, live }) {
 	const $userPQ = userPQStore();
 	const $avatars = useAvatarsStore();
 
@@ -37,17 +54,21 @@ export function usePeerGallery({ peerHash, messages, ready }) {
 			|| $avatars.contactAvatarSrc($userPQ.contactsMap?.[peerHash.value]?.avatar, peerHash.value);
 	});
 
-	// The contact's cached photo follows the dialog's current one: written
-	// when it differs, cleared once the read dialog has none. Keyed on the
-	// ids, so a message tick that changes neither writes nothing; a write
-	// shows in contactsMap at once (userPQ writeContacts), so the next tick
-	// finds it done.
-	watch([peerHash, currentId, () => ready.value === true], ([peer, id, read]) => {
+	const read = computed(() => isDialogRead(live.value === true, rows.value || [], messages.value || []));
+
+	// The contact's cached photo follows the dialog's current one, from a
+	// dialog read whole only: a disk copy or a half-read dialog may show an
+	// older photo, or none, and must not overwrite what the contact has.
+	// Keyed on the ids, so a message tick that changes neither writes
+	// nothing; a write shows in contactsMap at once (userPQ writeContacts), so
+	// the next tick finds it done.
+	watch([peerHash, currentId, read], ([peer, id, whole]) => {
 		const contact = $userPQ.contactsMap?.[peer];
-		if (!peer || !contact) return;
+		if (!peer || !contact || !whole) return;
 		const cachedId = cachedPhotoOf(contact.avatar)?.avatarId ?? null;
-		if (id === cachedId || (!id && (!read || !contact.avatar))) return;
+		if (id === cachedId || (!id && !contact.avatar)) return;
 		const value = id ? { id, photo: photoToWire(peerGallery.value[0].photo) } : null;
+		if (!id) $avatars.forgetContactThumb(peer);
 		$userPQ.cacheContactAvatar(peer, value).catch((e) => console.warn('[chat] avatar cache not updated:', e?.message ?? e));
 	}, { immediate: true });
 

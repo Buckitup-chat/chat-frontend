@@ -17,13 +17,17 @@ const STRANGER = 'u_' + 'd'.repeat(128);
 let user;
 let dialogs;
 let slot;
+let slotUnreadable;
 
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 vi.mock('@/store/dialogs.store', () => ({ useDialogsStore: () => dialogs }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
 		getInstance: () => ({
-			loadSlotJson: async () => slot,
+			loadSlotJson: async (_name, { strict } = {}) => {
+				if (slotUnreadable && strict) throw new Error('The avatars slot on the server cannot be read');
+				return slotUnreadable ? null : slot;
+			},
 			patchSlotJson: async (_name, patch) => {
 				slot = stripPatchDirectives(mergeJsonPatch(slot, patch));
 				return slot;
@@ -38,6 +42,8 @@ vi.mock('@/utils/imageResize', () => ({
 }));
 
 const { useAvatarsStore, PHOTO_RETRY_AFTER_MS } = await import('@/store/avatars.store');
+const { useMemoryAvatarStore } = await import('./helpers/avatarLocalStore');
+const { getThumb, loadOwed, updateOwed } = await import('@/lib/avatars/localStore');
 
 const fakeDialogs = () => {
 	const messages = new Map(); // peer -> [{ messageId, senderHash, parts }]
@@ -49,6 +55,8 @@ const fakeDialogs = () => {
 		uploads: 0,
 		getDialogHash: (peer) => `di_${peer}`,
 		onOwnSend: (fn) => { hook = fn; },
+		/** The hook as dialogs.store calls it, for a message stored by `owner`. */
+		stored: (peer, parts, owner) => hook?.(peer, parts, owner),
 		async uploadAttachment({ name, mimeType, bytes }) {
 			this.uploads++;
 			return {
@@ -61,7 +69,7 @@ const fakeDialogs = () => {
 			const list = messages.get(peer) ?? [];
 			list.push({ messageId: `dmsg_${String(++seq).padStart(4, '0')}`, senderHash: user.currentUserHash, parts });
 			messages.set(peer, list);
-			hook?.(peer, parts);
+			hook?.(peer, parts, user.currentUserHash);
 		},
 		probes: 0,
 		async ownDialogCarriesAvatar(peer, { requireOwnKey } = {}) {
@@ -85,6 +93,8 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 const kindsSentTo = (peer) => dialogs.sent.filter((s) => s.peer === peer).map((s) => s.parts.map((p) => p.kind).join('+'));
 
 beforeEach(() => {
+	useMemoryAvatarStore();
+	slotUnreadable = false;
 	const storage = new Map();
 	globalThis.localStorage = {
 		getItem: (k) => storage.get(k) ?? null,
@@ -181,6 +191,47 @@ describe('avatars store', () => {
 		expect(dialogs.probes).toBe(0);
 		expect(kindsSentTo(SILENT)).toEqual(['text']);
 	});
+
+	it('the own-send hook acts only for the account signed in now', async () => {
+		const store = useAvatarsStore();
+		await store.addPhoto(photoBlob());
+		dialogs.sent.length = 0;
+		dialogs.probes = 0;
+		dialogs.stored(SILENT, [{ kind: 'text', text: 'from a session that ended' }], OTHER_ACCOUNT);
+		await settle();
+		expect(dialogs.probes).toBe(0);
+		expect(dialogs.sent).toEqual([]);
+	});
+
+	it('what was owed goes out once the contacts it is owed to have loaded', async () => {
+		await updateOwed(ME, (o) => { o[SILENT] = { first: true }; });
+		slot = { avatars: { ['a'.repeat(32)]: { photo: { image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_1', 'k'] }, at: 1 } } };
+		const contacts = user.contactsMap;
+		user.contactsMap = {};
+		useAvatarsStore();
+		await settle();
+		expect(dialogs.sent).toEqual([]);
+		user.contactsMap = contacts;
+		await vi.waitFor(() => expect(kindsSentTo(SILENT)).toEqual(['avatar']));
+		await vi.waitFor(async () => expect(await loadOwed(ME)).toEqual({}));
+	});
+});
+
+describe('the own picture', () => {
+	it('a picture kept from before the gallery is cleared when the account has no gallery', async () => {
+		user.currentUser = { user_hash: ME, avatar: 'data:image/jpeg;base64,LEGACY', avatarId: null };
+		useAvatarsStore();
+		await vi.waitFor(() => expect(user.currentUser.avatar).toBeNull());
+	});
+
+	it('is kept when the gallery slot is there and cannot be read', async () => {
+		slotUnreadable = true;
+		user.currentUser = { user_hash: ME, avatar: 'data:image/jpeg;base64,KEPT', avatarId: 'f'.repeat(32) };
+		useAvatarsStore();
+		await settle();
+		await settle();
+		expect(user.currentUser.avatar).toBe('data:image/jpeg;base64,KEPT');
+	});
 });
 
 describe('photos as the screens draw them', () => {
@@ -219,5 +270,15 @@ describe('photos as the screens draw them', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it('a contact\'s thumbnail is made once and kept sealed for this account; forgetting it removes it', async () => {
+		const store = useAvatarsStore();
+		const cached = { id: 'c'.repeat(32), photo: { image: [1, 1, '', 'c.jpg', 1, 'image/jpeg', 0, 'f_' + '7'.repeat(32), 'k'] } };
+		store.contactAvatarSrc(cached, PEER);
+		await vi.waitFor(async () => expect((await getThumb(ME, PEER))?.avatarId).toBe('c'.repeat(32)));
+		await vi.waitFor(() => expect(store.contactAvatarSrc(cached, PEER)).toMatch(/^resized\(96\):blob:/));
+		store.forgetContactThumb(PEER);
+		await vi.waitFor(async () => expect(await getThumb(ME, PEER)).toBeNull());
 	});
 });

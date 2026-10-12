@@ -51,6 +51,17 @@ describe('profile-photo messages render as a service line', () => {
 		expect(w.find('.msg-avatar-thumb').exists()).toBe(false);
 	});
 
+	it('only a verified message is a photo line: any other keeps its bubble and fetches nothing', () => {
+		const asked = [];
+		const avatarSrc = (p) => { asked.push(p); return 'blob:x'; };
+		for (const state of ['waiting', 'blocked', 'invalid']) {
+			const w = render([message([avatar('a')], { _verify: state })], { avatarSrc });
+			expect(w.find('.msg-avatar-line').exists()).toBe(false);
+			expect(w.find('.message-bubble').text()).toContain('🖼 profile photo');
+		}
+		expect(asked).toEqual([]);
+	});
+
 	it('a tap opens the sender\'s gallery at that photo', async () => {
 		const w = render([message([avatar('a')])]);
 		await w.find('.msg-avatar-chip').trigger('click');

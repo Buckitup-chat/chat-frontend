@@ -107,7 +107,7 @@ const dialogCollections = computed(() => (dialogHash.value ? getDialogCollection
 // fill the gap until the shape catches up — a live row always wins per key,
 // so a working persistence sees no change in behavior. getRowKey mirrors
 // collections.ts's own getKey for this table.
-const { rows: rawMessages, ready: messagesReady } = useCollectionRows(
+const { rows: rawMessages, live: messagesLive } = useCollectionRows(
     computed(() => dialogCollections.value?.messages ?? null),
     { readCache: { table: 'dialog_messages', dialogHash: () => dialogHash.value, getRowKey: (r) => r.message_id } }
 );
@@ -264,6 +264,7 @@ const scheduleDecrypt = (newRows) => {
                     parts: decrypted.parts || [],
                     authorName: decrypted.isMine ? 'Me' : name,
                     _decrypted: decrypted.decrypted === true,
+                    _awaitingKey: decrypted.awaitingKey === true,
                 }];
                 })(row));
             }
@@ -697,16 +698,9 @@ const handleToggleReaction = async (messageId, emoji) => {
 
 // ---------- profile photos (pq_avatars) ----------
 
-// The dialog's rows are here and every one is decrypted and placed: only
-// then does an empty gallery mean the peer has no photo, rather than that the
-// dialog is still being read.
-const dialogRead = computed(() => {
-    const rows = rawMessages.value || [];
-    return messagesReady.value && rows.length === decryptedMessages.value.length
-        && decryptedMessages.value.every((m) => m._verify === 'verified' && m._decrypted !== false);
+const { avatarUrl, viewer, openGallery } = usePeerGallery({
+    peerHash, messages: decryptedMessages, rows: rawMessages, live: messagesLive,
 });
-
-const { avatarUrl, viewer, openGallery } = usePeerGallery({ peerHash, messages: decryptedMessages, ready: dialogRead });
 
 // ---------- §2.3 downloads ----------
 

@@ -106,6 +106,26 @@ describe('useCollectionRows: IndexedDB read-cache fallback', () => {
 		expect(result.rows.value).toEqual([{ message_id: 'a', dialog_hash: 'd1', content_b64: 'fresh' }]);
 	});
 
+	// `ready` flips as soon as the disk copy shows; a reader that must not
+	// act on a stale view (the contact photo cache) waits for `live`.
+	it('live says the server\'s set is confirmed, which a disk copy is not', async () => {
+		vi.useFakeTimers();
+		await setDialogCacheRow('dialog_messages', 'a', { message_id: 'a', dialog_hash: 'd1' });
+		const rejectPreload = { value: true };
+		const coll = makeFlakyCollection(rejectPreload);
+		const result = withScope(() =>
+			useCollectionRows(ref(coll), { readCache: { table: 'dialog_messages', dialogHash: () => 'd1', getRowKey: byMessageId } })
+		);
+		await flushAsync();
+		expect(result.ready.value).toBe(true);
+		expect(result.live.value).toBe(false);
+
+		rejectPreload.value = false;
+		await vi.advanceTimersByTimeAsync(1000);
+		await flushAsync();
+		expect(result.live.value).toBe(true);
+	});
+
 	it('a cached row disappears for good once a successful retry loads the canonical set without it', async () => {
 		vi.useFakeTimers();
 		await setDialogCacheRow('dialog_messages', 'gone', { message_id: 'gone', dialog_hash: 'd1', content_b64: 'stale' });

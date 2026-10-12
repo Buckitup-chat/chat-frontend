@@ -27,6 +27,7 @@ import { publishVault } from '@/lib/recovery/vault';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
+import { forgetAccountAvatars } from '@/lib/avatars/localStore';
 import { clearSessions } from '@/lib/data/readSession';
 import { resetGate } from '@/lib/data/accessGate';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
@@ -670,6 +671,8 @@ export class EncryptionManagerPQ extends EventTarget {
     } catch (e) {
       console.warn('Could not delete from local-vault', e);
     }
+    // Contacts' thumbnails and the dialogs owed a photo leave with the account.
+    await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
 
     this.#localUserCards.splice(identityIndex, 1);
     await this.#saveLocalUserCards();
@@ -1168,14 +1171,18 @@ export class EncryptionManagerPQ extends EventTarget {
 
   /**
    * A named slot's JSON value, or null when the slot was never written or
-   * does not decrypt. For readers only: a writer goes through patchSlotJson,
-   * which refuses rather than build on a value it could not read.
+   * does not decrypt — `strict` tells the two apart by throwing for the
+   * second. For readers only: a writer goes through patchSlotJson, which
+   * refuses rather than build on a value it could not read.
    */
-  async loadSlotJson(name) {
+  async loadSlotJson(name, { strict = false } = {}) {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
-    if (!this.#cryptSkey) return null;
+    if (!this.#cryptSkey) {
+      if (strict) throw new Error('Crypt key not loaded');
+      return null;
+    }
     const uuid = await this.#slotUuid(name);
-    return uuid ? this.#readJsonAt(uuid, `the ${name} slot`) : null;
+    return uuid ? this.#readJsonAt(uuid, `The ${name} slot`, { strict }) : null;
   }
 
   /**

@@ -237,3 +237,38 @@ describe('ownDialogCarriesAvatar', () => {
 		expect(await store.ownDialogCarriesAvatar(PEER_HASH, { requireOwnKey: true })).toEqual({ ownKey: true, carries: true });
 	});
 });
+
+describe('ownDialogCarriesAvatar: remembered once true', () => {
+	const avatarPart = {
+		kind: 'avatar' as const, avatarId: 'a'.repeat(32),
+		photo: { kind: 'inline_image' as const, widthAspect: 1, heightAspect: 1, thumbHashB64: '', name: 'a.jpg', size: 1, mimeType: 'image/jpeg', createdAt: 0, dataB64: 'AA' },
+	};
+	const carrying = () => ({
+		message_id: 'dmsg_1', dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, sign_hash: 'dms_1',
+		content_b64: `enc(${encodeContent([avatarPart])})`, deleted_flag: false,
+	});
+
+	it('answers later sends without reading the dialog, until this account deletes or edits a message there', async () => {
+		const store = useDialogsStore();
+		collections.dialog.messages.rows.set('dmsg_1', carrying());
+		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+		// gone from the dialog, but not by this account's hand: still remembered
+		collections.dialog.messages.rows.clear();
+		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+		// this account deletes one of its messages there: read again
+		await store.deleteMessage(PEER_HASH, 'dmsg_1').catch(() => {});
+		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: false });
+		collections.dialog.messages.rows.set('dmsg_1', carrying());
+		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+		collections.dialog.messages.rows.clear();
+		await store.editMessage(PEER_HASH, 'dmsg_1', 'now text').catch(() => {});
+		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: false });
+	});
+
+	it('remembers nothing it did not find', async () => {
+		const store = useDialogsStore();
+		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: false });
+		collections.dialog.messages.rows.set('dmsg_1', carrying());
+		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+	});
+});

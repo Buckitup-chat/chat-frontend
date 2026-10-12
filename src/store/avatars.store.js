@@ -21,7 +21,7 @@ import { thumbDataUrl } from '@/lib/data/imageMeta';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
 import { fileKey } from '@/lib/data/fileKey';
 import { isRefusedFile } from '@/lib/data/fileIntegrity';
-import { IndexedDbStore } from '@/lib/data/indexedDbStore';
+import { getThumb, putThumb, forgetThumb, loadOwed, updateOwed } from '@/lib/avatars/localStore';
 import { resizeImageUrl } from '@/utils/imageResize';
 
 /** A photo that failed to arrive is not asked for again before this. */
@@ -30,6 +30,8 @@ export const PHOTO_RETRY_AFTER_MS = 60_000;
 const OWN_PICTURE_SIDE = 128;
 /** A contact's picture in the lists. */
 const CONTACT_THUMB_SIDE = 96;
+/** A gallery read this recently answers "is there any photo" without reading the slot again. */
+const OWN_GALLERY_MAX_AGE_MS = 60_000;
 
 export const useAvatarsStore = defineStore('avatars', () => {
 	const $userPQ = userPQStore();
@@ -87,17 +89,18 @@ export const useAvatarsStore = defineStore('avatars', () => {
 	};
 
 	// A contact's picture in the lists: a small thumbnail of the photo the
-	// contacts slot names, made once and kept on this device; its ThumbHash
-	// blur until then.
-	const thumbStore = new IndexedDbStore('bkp-avatar-thumbs');
-	const thumbs = ref({}); // `${userHash}/${avatarId}` -> data URL
+	// contacts slot names, made once and kept on this device, sealed per
+	// account (lib/avatars/localStore) — one per contact, replaced when the
+	// photo changes; its ThumbHash blur until then.
+	const thumbs = ref({}); // `${owner}|${userHash}|${avatarId}` -> data URL
 	const thumbsAsked = new Set();
 
-	const loadThumb = async (key, photo, userHash) => {
-		let thumb = await thumbStore.get(key).catch(() => null);
+	const loadThumb = async (owner, key, userHash, { avatarId, photo }) => {
+		const stored = await getThumb(owner, userHash).catch(() => null);
+		let thumb = stored?.avatarId === avatarId ? stored.thumb : null;
 		if (!thumb) {
 			thumb = (await resizeImageUrl(await loadPhoto(photo, userHash), CONTACT_THUMB_SIDE, 0.7)).dataUrl;
-			thumbStore.set(key, thumb).catch(() => {});
+			await putThumb(owner, userHash, { avatarId, thumb }).catch((e) => console.warn('[avatars] thumbnail not kept:', e?.message ?? e));
 		}
 		thumbs.value = { ...thumbs.value, [key]: thumb };
 	};
@@ -105,38 +108,51 @@ export const useAvatarsStore = defineStore('avatars', () => {
 	/** What the lists draw for a contact whose slot entry caches `avatar` ({ id, photo }); empty for none. */
 	const contactAvatarSrc = (avatar, userHash) => {
 		const cached = cachedPhotoOf(avatar);
-		if (!cached) return '';
-		const key = `${userHash}/${cached.avatarId}`;
+		const owner = $userPQ.currentUserHash;
+		if (!cached || !owner) return '';
+		const key = `${owner}|${userHash}|${cached.avatarId}`;
 		if (thumbs.value[key]) return thumbs.value[key];
 		if (!thumbsAsked.has(key)) {
 			thumbsAsked.add(key);
-			loadThumb(key, cached.photo, userHash).catch(() => {
+			loadThumb(owner, key, userHash, cached).catch(() => {
 				setTimeout(() => thumbsAsked.delete(key), PHOTO_RETRY_AFTER_MS);
 			});
 		}
 		return thumbDataUrl(cached.photo);
 	};
 
+	/** Drops the thumbnail kept for a contact whose gallery is empty. */
+	const forgetContactThumb = (userHash) => {
+		const owner = $userPQ.currentUserHash;
+		if (owner) forgetThumb(owner, userHash).catch((e) => console.warn('[avatars] thumbnail not removed:', e?.message ?? e));
+	};
+
 	// ---------- the owner's gallery ----------
 
-	const own = ref({ owner: null, record: null });
+	const own = ref({ owner: null, record: null, at: 0 });
 	let loading = null;
 
 	/** The account's photos, newest first: the first is the current avatar. */
 	const ownGallery = computed(() =>
 		own.value.owner && own.value.owner === $userPQ.currentUserHash ? ownGalleryOf(own.value.record) : []);
 
-	/** Reads the gallery slot once per account; `fresh` reads it again (another device may have changed it). */
-	const loadOwn = ({ fresh = false } = {}) => {
+	/**
+	 * Reads the gallery slot once per account; `fresh` reads it again (another
+	 * device may have changed it), `maxAgeMs` when the last read is older. A
+	 * slot there that does not decrypt fails the read rather than reading as
+	 * an empty gallery.
+	 */
+	const loadOwn = ({ fresh = false, maxAgeMs = Infinity } = {}) => {
 		const owner = $userPQ.currentUserHash;
 		if (!owner) return Promise.resolve([]);
-		if (!fresh && own.value.owner === owner) return Promise.resolve(ownGallery.value);
+		const recent = own.value.owner === owner && Date.now() - own.value.at <= maxAgeMs;
+		if (!fresh && recent) return Promise.resolve(ownGallery.value);
 		if (loading?.owner === owner) return loading.promise;
 		const promise = (async () => {
-			const record = await em().loadSlotJson(AVATARS_SLOT);
+			// null: the account has no gallery slot.
+			const record = await em().loadSlotJson(AVATARS_SLOT, { strict: true });
 			if ($userPQ.currentUserHash !== owner) throw new Error('The account changed while its photos were loading');
-			// null: no slot yet, or none this device could read.
-			own.value = { owner, record };
+			own.value = { owner, record, at: Date.now() };
 			return ownGallery.value;
 		})().finally(() => { if (loading?.promise === promise) loading = null; });
 		loading = { owner, promise };
@@ -145,7 +161,7 @@ export const useAvatarsStore = defineStore('avatars', () => {
 
 	const patchOwn = async (owner, patch) => {
 		const record = await em().patchSlotJson(AVATARS_SLOT, patch);
-		if ($userPQ.currentUserHash === owner) own.value = { owner, record };
+		if ($userPQ.currentUserHash === owner) own.value = { owner, record, at: Date.now() };
 		return record;
 	};
 
@@ -153,15 +169,16 @@ export const useAvatarsStore = defineStore('avatars', () => {
 	 * Keeps the account's own picture (menu, account list) on the current
 	 * photo: a small data URL kept on this device, refreshed when the current
 	 * photo is another one than the one it shows — after a change here, or one
-	 * another device made.
+	 * another device made. With no gallery there is no picture: one kept from
+	 * before the gallery is not the account's photo. Runs only after a read
+	 * of the slot that succeeded (loadOwn throws for one that does not
+	 * decrypt), so a failed read never clears it.
 	 */
 	const syncOwnAvatarImage = async () => {
 		const owner = $userPQ.currentUserHash;
 		const current = ownGallery.value[0] ?? null;
 		const shown = $userPQ.currentUser?.avatarId ?? null;
 		if ((current?.avatarId ?? null) === shown && (current || !$userPQ.currentUser?.avatar)) return;
-		// A slot that could not be read says nothing about the picture: keep it.
-		if (!current && own.value.record === null) return;
 		const dataUrl = current
 			? (await resizeImageUrl(await loadPhoto(current.photo, owner), OWN_PICTURE_SIDE, 0.8)).dataUrl
 			: null;
@@ -181,9 +198,9 @@ export const useAvatarsStore = defineStore('avatars', () => {
 			if ($userPQ.currentUserHash !== owner) throw new Error('The account changed; its photos are not sent from another one');
 		};
 		const delivery = createAvatarDelivery({
-			gallery: () => {
+			gallery: ({ fresh = false } = {}) => {
 				sameAccount();
-				return loadOwn();
+				return loadOwn(fresh ? { fresh } : { maxAgeMs: OWN_GALLERY_MAX_AGE_MS });
 			},
 			contacts: () => Object.keys($userPQ.contactsMap).filter((p) => p !== owner),
 			isTarget: (peerHash) => peerHash !== owner && !!$userPQ.contactsMap[peerHash],
@@ -201,18 +218,34 @@ export const useAvatarsStore = defineStore('avatars', () => {
 					if (status === 'error') console.warn('[avatars] a photo message was refused for', peerHash, cause);
 				});
 			},
+			owed: {
+				load: () => loadOwed(owner),
+				update: (change) => updateOwed(owner, change),
+			},
 		});
 		deliveries.set(owner, delivery);
 		return delivery;
 	};
 
-	// Rule 2: a message this account stores for a dialog may bring the gallery along.
-	$dialogs.onOwnSend((peerHash, parts) => {
-		const owner = $userPQ.currentUserHash;
-		if (!owner) return;
-		deliveryFor(owner).onOwnSend(peerHash, parts)
+	// Rule 2: a message this account stores for a dialog may bring the
+	// gallery along — the account that stored it, and only while it is the
+	// one signed in.
+	$dialogs.onOwnSend((peerHash, parts, ownerHash) => {
+		if (!ownerHash || ownerHash !== $userPQ.currentUserHash) return;
+		deliveryFor(ownerHash).onOwnSend(peerHash, parts)
 			.catch((e) => console.warn('[avatars] gallery not sent into a new dialog:', e));
 	});
+
+	/** Sends what dialogs are owed, if anything; on sign-in, on reconnect. */
+	const retryOwed = () => {
+		const owner = $userPQ.currentUserHash;
+		if (!owner) return Promise.resolve(null);
+		return deliveryFor(owner).retryOwed().catch((e) => {
+			console.warn('[avatars] owed photos not sent:', e?.message ?? e);
+			return null;
+		});
+	};
+	if (typeof window !== 'undefined') window.addEventListener('online', () => { void retryOwed(); });
 
 	// ---------- owner's actions ----------
 
@@ -272,6 +305,12 @@ export const useAvatarsStore = defineStore('avatars', () => {
 			.catch((e) => console.warn('[avatars] gallery not loaded:', e));
 	}, { immediate: true });
 
+	// What was owed when the app last ran goes out once the contacts it is
+	// owed to are known — they load after sign-in.
+	watch(() => [$userPQ.currentUserHash, Object.keys($userPQ.contactsMap ?? {}).length > 0], ([owner, haveContacts], before) => {
+		if (owner && haveContacts && (before?.[0] !== owner || !before?.[1])) void retryOwed();
+	}, { immediate: true });
+
 	return {
 		ownGallery,
 		loadOwn,
@@ -281,5 +320,7 @@ export const useAvatarsStore = defineStore('avatars', () => {
 		photoUrl,
 		loadPhoto,
 		contactAvatarSrc,
+		forgetContactThumb,
+		retryOwed,
 	};
 });

@@ -701,7 +701,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         }
         trackOwnSentMessage(dialogHash, messageId);
         try {
-            ownSendHook?.(peerHash, parts);
+            ownSendHook?.(peerHash, parts, ownerHash);
         } catch (e) {
             console.warn('[dialogs] own-send hook failed:', e);
         }
@@ -709,8 +709,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     // Told of every message this account stores for sending, after it is
-    // durable — the avatars store sends its gallery into a dialog from here
-    // (pq_avatars § Delivery, rule 2). One hook; setting it replaces it.
+    // durable, as (peerHash, parts, ownerHash) — the avatars store sends its
+    // gallery into a dialog from here (pq_avatars § Delivery, rule 2). One
+    // hook; setting it replaces it.
     let ownSendHook = null;
     const onOwnSend = (hook) => { ownSendHook = hook; };
 
@@ -895,6 +896,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const myHash = $userPQ.currentUserHash;
         const token = pinActiveSession(myHash, 'editMessage:start');
         const dialogHash = getDialogHash(peerHash);
+        carriesMemo.delete(`${myHash}|${dialogHash}`);
         await ownMessageBase(dialogHash, messageId, myHash, token, 'editMessage');
         const parts = typeof newText === 'string' ? [{ kind: 'text', text: newText }] : newText;
         const chainKey = `msg:${messageId}`;
@@ -1006,6 +1008,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const myHash = $userPQ.currentUserHash;
         const token = pinActiveSession(myHash, 'deleteMessage:start');
         const dialogHash = getDialogHash(peerHash);
+        carriesMemo.delete(`${myHash}|${dialogHash}`);
         await ownMessageBase(dialogHash, messageId, myHash, token, 'deleteMessage');
         const chainKey = `msg:${messageId}`;
         const intentId = await serialized(captureLocks, chainKey, async () => {
@@ -1046,6 +1049,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     const carriesAvatar = (parts) => (parts || []).some((p) => p.kind === 'avatar');
 
+    // "carries" once true stays true until this account edits or deletes one
+    // of its messages there, which may have taken the photo out — so every
+    // later send into the dialog answers without reading it. By (owner,
+    // dialog): another account's answer is never this one's.
+    const carriesMemo = new Set();
+    watch(() => $userPQ.currentUserHash, () => carriesMemo.clear());
+
     /**
      * What the dialog with a peer says about this account, in one read:
      * `ownKey` (asked for with requireOwnKey) — it has sent there; `carries` —
@@ -1055,8 +1065,16 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * where a message could not be read. With requireOwnKey, `carries` is
      * read only when the key is there.
      */
-    const ownDialogCarriesAvatar = (peerHash, { requireOwnKey = false } = {}) =>
-        readLiveDialog(peerHash, async (colls, { dialogHash, me }) => {
+    const ownDialogCarriesAvatar = (peerHash, { requireOwnKey = false } = {}) => {
+        // A dialog's carrying a photo implies this account has sent there.
+        const known = `${$userPQ.currentUserHash}|${getDialogHash(peerHash)}`;
+        if (carriesMemo.has(known)) return Promise.resolve({ ownKey: requireOwnKey ? true : undefined, carries: true });
+        return readLiveDialog(peerHash, async (colls, { dialogHash, me }) => {
+            const memoKey = `${me}|${dialogHash}`;
+            const found = (ownKey) => {
+                carriesMemo.add(memoKey);
+                return { ownKey, carries: true };
+            };
             let ownKey;
             if (requireOwnKey) {
                 ownKey = senderMsgKeys.value[`${dialogHash}_${me}`]
@@ -1066,7 +1084,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             }
             const { entries } = await intentsOf(me);
             if (entries.some((e) => e.intent?.kind === 'message' && e.intent.dialogHash === dialogHash && carriesAvatar(e.intent.parts))) {
-                return { ownKey, carries: true };
+                return found(ownKey);
             }
             // The newest revision first: the outbox, then what the server
             // accepted, then the shape.
@@ -1088,13 +1106,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 if (row.deleted_flag) continue;
                 try {
                     const json = await DialogCrypto.decryptContent(key, row.content_b64);
-                    if (json && carriesAvatar(decodeContent(json))) return { ownKey, carries: true };
+                    if (json && carriesAvatar(decodeContent(json))) return found(ownKey);
                 } catch {
                     unread = true;
                 }
             }
             return { ownKey, carries: unread ? null : false };
         });
+    };
 
     /**
      * Decrypt a message row
@@ -1102,7 +1121,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
     const decryptMessageRow = async (row, colls = null) => {
         try {
             const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash, colls);
-            if (!key) return { ...row, decrypted: false, text: "Waiting for keys..." };
+            // Not a verdict: the key may still arrive.
+            if (!key) return { ...row, decrypted: false, awaitingKey: true, text: "Waiting for keys..." };
 
             const jsonStr = await DialogCrypto.decryptContent(key, row.content_b64);
             // Deletion tombstones carry empty content by design (07: an empty
