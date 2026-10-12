@@ -699,7 +699,8 @@ export class EncryptionManagerPQ extends EventTarget {
 
   #normalizeKey(key) {
     if (!key) return null;
-    if (key instanceof Uint8Array) return key;
+    // A copy: logout zeroes the session's key, never the vault's cached one.
+    if (key instanceof Uint8Array) return new Uint8Array(key);
     if (typeof key === 'object' && !ArrayBuffer.isView(key)) {
       return new Uint8Array(Object.values(key).map(v => Number(v)));
     }
