@@ -24,7 +24,7 @@ import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDia
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyReplicatedRow } from '@/lib/data/rowVerification';
 import { projectionReplacement } from '@/lib/data/operationLifecycle';
-import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError } from '@/lib/pq/content';
+import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError, fileRefsOf } from '@/lib/pq/content';
 import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
@@ -1002,14 +1002,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
     const openVideoSource = (part, opts) => openVideo(part, opts);
 
     /** How much of an attachment this node can serve (§2.4). */
-    const getFileAvailability = (fileId) => fileAvailability(fileId);
+    const getFileAvailability = (part) => fileAvailability(part.fileId, part.uploaderHash);
 
-    /**
-     * Downloads and decrypts an attachment; progress in chunks (§2.3).
-     * `uploaderHash` refuses a file someone else uploaded.
-     */
-    const fetchFile = (filePart, { onProgress, signal, uploaderHash } = {}) =>
-        downloadFile({ fileId: filePart.fileId, encSecretB64: filePart.encSecretB64, onProgress, signal, uploaderHash });
+    /** Downloads and decrypts an attachment; progress in chunks (§2.3). */
+    const fetchFile = (filePart, { onProgress, signal } = {}) =>
+        downloadFile({ fileId: filePart.fileId, uploaderHash: filePart.uploaderHash, encSecretB64: filePart.encSecretB64, onProgress, signal });
 
     /**
      * Deletes own message (§3.2): a new revision with deleted_flag and no
@@ -1097,7 +1094,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
             const jsonStr = await DialogCrypto.decryptContent(key, row.content_b64);
             // Deletion tombstones carry empty content by design (07: an empty
             // content_b64 is only valid alongside deleted_flag) — not a format error.
+            // A file is its sender's: its manifest and chunks must be signed by
+            // the author of this row (fileIntegrity.ts) — a profile photo's too.
+            // The parts are fresh from the decoder, so they are stamped in place.
             const parts = jsonStr ? decodeContent(jsonStr) : [];
+            for (const ref of parts.flatMap(fileRefsOf)) ref.uploaderHash = row.sender_hash;
 
             return {
                 ...row,

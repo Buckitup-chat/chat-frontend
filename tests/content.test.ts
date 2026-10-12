@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError } from '@/lib/pq/content';
+import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError, fileRefsOf } from '@/lib/pq/content';
 
 // Wire-format contract with every other client (07_content_polymorphism.md).
 // The acceptance names follow the review's T-CONTENT set.
@@ -453,5 +453,23 @@ describe('T-CONTENT-INLINE-IMAGE: inline_image envelope', () => {
 		const reply = encodeContent([{ kind: 'quote', authorHash: 'u_a', messageId: 'm', signHash: 's', snapshot: decodeContent(JSON.stringify({ inline_image: wire })) }]);
 		expect(reply).not.toContain('AAEC');
 		expect(reply).toContain('🖼 small.png');
+	});
+});
+
+describe('fileRefsOf: the files a part references', () => {
+	const image = decodeContent(JSON.stringify({ image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_a', 'k'] }))[0];
+	it('names an attachment itself and a profile photo nested in its avatar part', () => {
+		expect(fileRefsOf(image)).toEqual([image]);
+		const avatar = decodeContent(JSON.stringify({ avatar: ['a'.repeat(32), { image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_b', 'k'] }] }))[0];
+		expect(fileRefsOf(avatar).map((r) => r.fileId)).toEqual(['f_b']);
+		// the same object, so a reader's stamp lands on the part it renders
+		expect(fileRefsOf(avatar)[0]).toBe((avatar as { photo: unknown }).photo);
+	});
+	it('names nothing for text, an inline photo or a removal', () => {
+		const inline = decodeContent(JSON.stringify({ avatar: ['a'.repeat(32), { inline_image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'AA'] }] }))[0];
+		expect([{ kind: 'text', text: 'x' } as const, inline, { kind: 'avatar_removed', avatarId: 'a'.repeat(32) } as const].flatMap(fileRefsOf)).toEqual([]);
+	});
+	it('a reader\'s uploaderHash never reaches the wire', () => {
+		expect(encodeContent([{ ...(image as object), uploaderHash: 'u_x' } as never])).not.toContain('u_x');
 	});
 });

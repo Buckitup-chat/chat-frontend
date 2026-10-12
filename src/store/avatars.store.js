@@ -18,6 +18,7 @@ import {
 import { createAvatarDelivery } from '@/lib/avatars/delivery';
 import { imageMime, inlineDataUrl } from '@/lib/avatars/display';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
+import { fileKey } from '@/lib/data/fileKey';
 import { fromBase64, toBase64 } from '@/lib/pq/signature';
 
 export const useAvatarsStore = defineStore('avatars', () => {
@@ -32,7 +33,7 @@ export const useAvatarsStore = defineStore('avatars', () => {
 	// else is a different, refused, entry.
 	const photoUrls = ref({}); // key -> { url } | { error: true }
 	const inFlight = new Map(); // key -> Promise<string>
-	const photoKey = (photo, uploaderHash) => `${uploaderHash}|${photo.fileId}`;
+	const photoKey = (photo, uploaderHash) => fileKey({ uploaderHash, fileId: photo.fileId });
 
 	/** A photo's URL if it is here; empty while it is on its way or failed. */
 	const photoUrl = (photo, uploaderHash) => {
@@ -47,15 +48,15 @@ export const useAvatarsStore = defineStore('avatars', () => {
 		const key = photoKey(photo, uploaderHash);
 		const known = photoUrls.value[key]?.url;
 		if (known) return Promise.resolve(known);
-		const cached = getCachedMedia(`avatar|${key}`);
+		const cached = getCachedMedia(key);
 		if (cached) {
 			photoUrls.value = { ...photoUrls.value, [key]: { url: cached } };
 			return Promise.resolve(cached);
 		}
 		if (inFlight.has(key)) return inFlight.get(key);
-		const pending = $dialogs.fetchFile(photo, { uploaderHash })
+		const pending = $dialogs.fetchFile({ ...photo, uploaderHash })
 			.then((bytes) => {
-				const url = putCachedMedia(`avatar|${key}`, bytes, imageMime(photo.mimeType));
+				const url = putCachedMedia(key, bytes, imageMime(photo.mimeType));
 				photoUrls.value = { ...photoUrls.value, [key]: { url } };
 				return url;
 			}, (e) => {
@@ -68,7 +69,7 @@ export const useAvatarsStore = defineStore('avatars', () => {
 	};
 
 	const photoBytes = (photo, uploaderHash) =>
-		photo.kind === 'inline_image' ? Promise.resolve(fromBase64(photo.dataB64)) : $dialogs.fetchFile(photo, { uploaderHash });
+		photo.kind === 'inline_image' ? Promise.resolve(fromBase64(photo.dataB64)) : $dialogs.fetchFile({ ...photo, uploaderHash });
 
 	// ---------- the owner's gallery ----------
 

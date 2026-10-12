@@ -13,7 +13,8 @@
 		<div class="lightbox-frame">
 			<img v-if="frame.src" :src="frame.src" :alt="frame.alt || ''" />
 			<img v-else-if="frame.placeholder" class="_blur" :src="frame.placeholder" alt="" />
-			<div v-if="frame.progress" class="lightbox-progress">{{ frame.progress }}</div>
+			<div v-if="frame.error" class="lightbox-progress _err">{{ frame.error }}</div>
+			<div v-else-if="frame.progress" class="lightbox-progress">{{ frame.progress }}</div>
 		</div>
 		<button v-if="frames.length > 1" type="button" class="lightbox-nav _next" @click.stop="step(1)">›</button>
 		<div v-if="frame.caption" class="lightbox-caption">{{ frame.caption }}</div>
@@ -74,6 +75,7 @@
 	padding: 2px 7px;
 	font-size: 11px;
 }
+.lightbox-progress._err { background: rgba(220, 53, 69, .85); }
 .lightbox-nav {
 	position: absolute;
 	top: 50%;
@@ -118,7 +120,7 @@
 import { computed, onMounted, onBeforeUnmount } from 'vue';
 
 const props = defineProps({
-	/** { key, src, placeholder?, alt?, caption?, progress? } per frame; `src` empty while the picture is on its way. */
+	/** { key, src, placeholder?, alt?, caption?, progress?, error? } per frame; `src` empty while the picture is on its way. */
 	frames: { type: Array, required: true },
 	index: { type: Number, default: 0 },
 	/** Between the position and the total in the counter: "2 / 5", "2 of 5". */

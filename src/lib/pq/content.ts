@@ -41,9 +41,15 @@ export interface QuotePart extends Extensible {
 	snapshot: ContentPart[];
 }
 
+/** What a reader adds to an out-of-band reference: never on the wire. */
+interface Received {
+	/** The sender of the message carrying the file, whose signatures alone speak for it (lib/data/fileIntegrity). */
+	uploaderHash?: string;
+}
+
 /** Out-of-band file attachment (07 §"file"): the bytes live as encrypted
  * chunks on the device; the envelope carries the reference and the key. */
-export interface FilePart extends Extensible {
+export interface FilePart extends Extensible, Received {
 	kind: 'file';
 	name: string;
 	size: number;
@@ -59,7 +65,7 @@ export interface FilePart extends Extensible {
  * ratio and a ThumbHash to blur in behind it, so the bubble does not jump
  * when the real image lands.
  */
-export interface ImagePart extends Extensible {
+export interface ImagePart extends Extensible, Received {
 	kind: 'image';
 	widthAspect: number;
 	heightAspect: number;
@@ -572,6 +578,16 @@ export const photoFromWire = (wire: unknown): AvatarPhoto | null => {
 	} catch {
 		return null;
 	}
+};
+
+/** A part whose bytes travel as a file (lib/data/fileTransfer). */
+export type FileRef = FilePart | ImagePart | VideoPart;
+
+/** The out-of-band files a part references: its own, or its profile photo's. */
+export const fileRefsOf = (part: ContentPart): FileRef[] => {
+	if (part.kind === 'file' || part.kind === 'image' || part.kind === 'video') return [part];
+	if (part.kind === 'avatar' && part.photo.kind === 'image') return [part.photo];
+	return [];
 };
 
 /** The wire element of a profile photo, as photoFromWire reads it. */

@@ -1,4 +1,4 @@
-// Local backfill journal per file (screen 05, "backfill progress").
+// Local backfill journal per file, by fileKey (screen 05, "backfill progress").
 //
 // The protocol does not record when chunks reached this node — chunk rows
 // carry the uploader's signing time, not arrival time — so the only honest
@@ -15,13 +15,13 @@ export interface BackfillEvent {
 
 const logs = new Map<string, BackfillEvent[]>();
 
-export const recordAvailability = (fileId: string, present: number, total: number): void => {
-	const log = logs.get(fileId) ?? [];
+export const recordAvailability = (key: string, present: number, total: number): void => {
+	const log = logs.get(key) ?? [];
 	const last = log[log.length - 1];
 	// Only growth is an event; repeat polls with the same count are noise.
 	if (last && last.present === present && last.total === total) return;
 	log.push({ at: Math.floor(Date.now() / 1000), present, total });
-	logs.set(fileId, log);
+	logs.set(key, log);
 };
 
-export const backfillLog = (fileId: string): BackfillEvent[] => logs.get(fileId) ?? [];
+export const backfillLog = (key: string): BackfillEvent[] => logs.get(key) ?? [];

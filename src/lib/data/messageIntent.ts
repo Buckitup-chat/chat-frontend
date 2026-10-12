@@ -16,7 +16,7 @@ import type { UserCardRow } from './types';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
-import { encodeContent } from '@/lib/pq/content';
+import { encodeContent, fileRefsOf, type ContentPart } from '@/lib/pq/content';
 
 function decode(str: string, fieldName: string): Uint8Array {
 	const result = decodeHexOrBase64(str);
@@ -191,13 +191,8 @@ export async function trustedRowBase(
 	return freshestOf(verified, own);
 }
 
-// A profile photo's file sits inside its avatar part (07 §"avatar").
-const fileIdsOf = (parts: unknown[] | undefined): string[] =>
-	(parts ?? []).flatMap((part) => {
-		const p = part as { fileId?: unknown; photo?: { fileId?: unknown } } | null;
-		const fileId = p?.fileId ?? p?.photo?.fileId;
-		return typeof fileId === 'string' && fileId ? [fileId] : [];
-	});
+const fileIdsOf = (parts: ContentPart[] | undefined): string[] =>
+	(parts ?? []).flatMap(fileRefsOf).map((ref) => ref.fileId).filter(Boolean);
 
 export async function materializeMessageIntent(
 	payload: DialogIntentPayload,
