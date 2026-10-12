@@ -32,7 +32,9 @@
 				</div>
 				<div class="d-flex gap-2">
 					<button v-if="showDiscard" class="btn btn-outline-dark flex-fill" :disabled="busy" data-test="discard" @click="discard">Discard</button>
-					<button class="btn btn-dark flex-fill" :disabled="busy" data-test="continue" @click="cont">{{ continueLabel }}</button>
+					<button v-if="store.canTakeOver" class="btn btn-outline-dark flex-fill" :disabled="busy" data-test="continue" @click="cont">Show progress</button>
+					<button v-if="store.canTakeOver" class="btn btn-dark flex-fill" :disabled="busy" data-test="take-over" @click="takeOver">Continue on this device</button>
+					<button v-else class="btn btn-dark flex-fill" :disabled="busy" data-test="continue" @click="cont">{{ continueLabel }}</button>
 				</div>
 				<div v-if="actionError" class="cb-field-error">{{ actionError }}</div>
 			</template>
@@ -75,7 +77,7 @@ import HealthLine from './HealthLine.vue';
 import ContactAvatar from './ContactAvatar.vue';
 import errorMessage from '@/utils/errorMessage';
 import { plural } from '@/lib/recovery/backupPlan';
-import { STEP_LABELS, alertsText, hasOutsideAlerts, healthView } from './backupFlow';
+import { STEP_LABELS, agoText, alertsText, hasOutsideAlerts, healthView } from './backupFlow';
 
 const ABOUT = 'Your keys are split between contacts you trust and a few independent nodes. Nobody can open your account alone.';
 
@@ -133,11 +135,13 @@ const stepLine = computed(() => `step ${step.value} of 6: ${STEP_LABELS[step.val
 const elsewhere = computed(() => !store.runsHere);
 const unfinishedTitle = computed(() => {
 	if (store.running) return 'Creating your backup';
+	if (store.heldElsewhere) return 'Your backup is being created in another tab';
 	if (elsewhere.value) return `Your backup is being created on your ${run.value.device}`;
 	return 'Your backup was not finished';
 });
 const unfinishedText = computed(() => {
 	if (store.running) return `Now at ${stepLine.value}.`;
+	if (store.canTakeOver) return `No progress for ${agoText(run.value.updatedAt).replace(/ ago$/, '')}, at ${stepLine.value}. If that device is lost or closed, continue here.`;
 	if (elsewhere.value) return `Last seen at ${stepLine.value}. This device shows its progress and does not start a second backup.`;
 	return `Stopped at ${stepLine.value}.`;
 });
@@ -147,7 +151,11 @@ const continueLabel = computed(() => (store.running || elsewhere.value ? 'Show p
 const cont = () => {
 	const resume = !store.running && !elsewhere.value;
 	open('progress');
-	if (resume) store.resume();
+	if (resume) store.resume().catch((e) => console.warn('[recovery] the backup could not continue:', e));
+};
+const takeOver = () => {
+	open('progress');
+	store.takeOver().catch((e) => console.warn('[recovery] the backup could not continue here:', e));
 };
 const discard = async () => {
 	busy.value = true;

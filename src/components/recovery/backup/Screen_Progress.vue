@@ -64,8 +64,12 @@
 		<div v-if="actionError" class="cb-error">{{ actionError }}</div>
 
 		<div v-if="!store.runsHere" class="cb-block" data-test="other-device">
-			<span class="fw-semibold">Running on your {{ run.device }}</span>
-			<span class="cb-muted">This device shows its progress and does not start a second backup.</span>
+			<span class="fw-semibold">{{ store.heldElsewhere ? 'Running in another tab' : `Running on your ${run.device}` }}</span>
+			<template v-if="store.canTakeOver">
+				<span class="cb-muted">No progress for {{ agoText(run.updatedAt).replace(/ ago$/, '') }}. If that device is lost or closed, continue here.</span>
+				<div><button class="btn btn-sm btn-dark" data-test="take-over" @click="takeOver">Continue on this device</button></div>
+			</template>
+			<span v-else class="cb-muted">This device shows its progress and does not start a second backup.</span>
 		</div>
 
 		<div v-if="run.step !== 'done'" class="cb-small text-center">You can close the app. The backup continues from this step next time.</div>
@@ -182,6 +186,7 @@ const act = async (fn) => {
 	}
 };
 const retry = () => act(() => store.resume());
+const takeOver = () => act(() => store.takeOver());
 const finishWithout = () => act(() => store.finishWithoutPendingNodes());
 const cancel = async () => {
 	busy.value = true;

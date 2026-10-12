@@ -90,6 +90,30 @@ describe('with an unfinished run', () => {
 	});
 });
 
+describe('with a run another device stopped moving', () => {
+	it('offers to continue it on this device', async () => {
+		H.store.run = makeRun({ step: 'registered', device: 'phone-lost', updatedAt: Math.floor(Date.now() / 1000) - 3600 });
+		H.store.runsHere = false;
+		H.store.canTakeOver = true;
+		const w = render();
+		expect(text(w, 'unfinished').text()).toContain('No progress for 1 hour');
+		await text(w, 'take-over').trigger('click');
+		expect(H.store.takeOver).toHaveBeenCalled();
+		expect(opened).toEqual([{ id: 'community_backup', start: 'progress' }]);
+		expect(H.store.resume).not.toHaveBeenCalled();
+	});
+
+	it('says so when another tab of this device drives it', () => {
+		H.store.run = makeRun({ step: 'published' });
+		H.store.runsHere = false;
+		H.store.heldElsewhere = true;
+		const w = render();
+		expect(text(w, 'unfinished').text()).toContain('being created in another tab');
+		expect(text(w, 'continue').text()).toBe('Show progress');
+		expect(text(w, 'take-over').exists()).toBe(false);
+	});
+});
+
 describe('with a finished backup', () => {
 	const done = (alerts) => {
 		const run = makeRun({ step: 'done', settings: { threshold: 2, approvals: 3, spares: 2, delaySec: 86400 * 3, windowSec: 86400 * 7, nodeThreshold: 2 }, alerts });

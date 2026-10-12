@@ -207,6 +207,18 @@ describe('Progress', () => {
 		expect(at(w, 'other-device').text()).toContain('Running on your laptop-1');
 		expect(at(w, 'continue').exists()).toBe(false);
 		expect(at(w, 'cancel').exists()).toBe(false);
+		expect(at(w, 'take-over').exists()).toBe(false);
+		w.unmount();
+	});
+
+	it('offers to continue here a run another device stopped moving', async () => {
+		H.store.run = makeRun({ step: 'registered', device: 'laptop-1', updatedAt: Math.floor(Date.now() / 1000) - 3600 });
+		H.store.runsHere = false;
+		H.store.canTakeOver = true;
+		const w = render(Screen_Progress);
+		expect(at(w, 'other-device').text()).toContain('No progress for 1 hour');
+		await at(w, 'take-over').trigger('click');
+		expect(H.store.takeOver).toHaveBeenCalled();
 		w.unmount();
 	});
 
