@@ -32,18 +32,23 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	},
 }));
 
-const { useAvatarsStore } = await import('@/store/avatars.store');
+// Canvas work is the browser's; here a resize just names what it was given.
+vi.mock('@/utils/imageResize', () => ({
+	resizeImageUrl: async (src, side) => ({ dataUrl: `resized(${side}):${src}`, blobFile: null }),
+}));
+
+const { useAvatarsStore, PHOTO_RETRY_AFTER_MS } = await import('@/store/avatars.store');
 
 const fakeDialogs = () => {
 	const messages = new Map(); // peer -> [{ messageId, senderHash, parts }]
-	const listeners = new Set();
+	let hook = null;
 	let seq = 0;
 	return {
 		messages,
 		sent: [],
 		uploads: 0,
 		getDialogHash: (peer) => `di_${peer}`,
-		onOwnSend: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+		onOwnSend: (fn) => { hook = fn; },
 		async uploadAttachment({ name, mimeType, bytes }) {
 			this.uploads++;
 			return {
@@ -56,11 +61,22 @@ const fakeDialogs = () => {
 			const list = messages.get(peer) ?? [];
 			list.push({ messageId: `dmsg_${String(++seq).padStart(4, '0')}`, senderHash: user.currentUserHash, parts });
 			messages.set(peer, list);
-			for (const fn of listeners) fn(peer, parts);
+			hook?.(peer, parts);
 		},
-		async hasOwnDialogKey(peer) { return messages.has(peer); },
-		async ownMessagesIn(peer) { return (messages.get(peer) ?? []).filter((m) => m.senderHash === user.currentUserHash); },
-		async fetchFile() { return new Uint8Array([1, 2, 3]); },
+		probes: 0,
+		async ownDialogCarriesAvatar(peer, { requireOwnKey } = {}) {
+			this.probes++;
+			const ownKey = messages.has(peer);
+			if (requireOwnKey && !ownKey) return { ownKey, carries: null };
+			const own = (messages.get(peer) ?? []).filter((m) => m.senderHash === user.currentUserHash);
+			return { ownKey, carries: own.some((m) => m.parts.some((x) => x.kind === 'avatar')) };
+		},
+		fetches: [],
+		fetchResult: async () => new Uint8Array([1, 2, 3]),
+		async fetchFile(part) {
+			this.fetches.push(part);
+			return this.fetchResult(part);
+		},
 	};
 };
 
@@ -95,7 +111,9 @@ describe('avatars store', () => {
 		expect(dialogs.uploads).toBe(1);
 		expect(store.ownGallery).toHaveLength(1);
 		expect(user.currentUser.avatarId).toBe(store.ownGallery[0].avatarId);
-		expect(user.currentUser.avatar).toBe('data:image/jpeg;base64,CQkJ');
+		// the own picture is the uploaded bytes, downscaled — nothing downloaded back
+		expect(user.currentUser.avatar).toMatch(/^resized\(128\):blob:/);
+		expect(dialogs.fetches).toEqual([]);
 		expect(result.sent).toEqual([WRITTEN]);
 		expect(kindsSentTo(SILENT)).toEqual([]);
 		expect(kindsSentTo(STRANGER)).toEqual([]);
@@ -144,14 +162,62 @@ describe('avatars store', () => {
 		await store.addPhoto(photoBlob());
 		dialogs.sent.length = 0;
 		const send = dialogs.sendMessage.bind(dialogs);
-		dialogs.hasOwnDialogKey = async (peer) => {
+		const probe = dialogs.ownDialogCarriesAvatar.bind(dialogs);
+		dialogs.ownDialogCarriesAvatar = async (peer, opts) => {
 			user.currentUserHash = OTHER_ACCOUNT;
-			return dialogs.messages.has(peer);
+			return probe(peer, opts);
 		};
 		dialogs.sendMessage = send;
 		const result = await store.setMain(store.ownGallery[0].avatarId);
 		expect(dialogs.sent).toEqual([]);
 		expect(result.sent).toEqual([]);
 		expect(String(result.failed[0]?.error?.message)).toMatch(/account changed/);
+	});
+
+	it('with no photo, a first message reads no dialog', async () => {
+		useAvatarsStore();
+		await dialogs.sendMessage(SILENT, [{ kind: 'text', text: 'hello' }]);
+		await settle();
+		expect(dialogs.probes).toBe(0);
+		expect(kindsSentTo(SILENT)).toEqual(['text']);
+	});
+});
+
+describe('photos as the screens draw them', () => {
+	const PEER = WRITTEN;
+	const photoOf = {
+		kind: 'image', widthAspect: 1, heightAspect: 1, thumbHashB64: '', name: 'p.jpg', size: 3, mimeType: 'image/jpeg',
+		createdAt: 0, fileId: 'f_' + '9'.repeat(32), encSecretB64: 'k',
+	};
+
+	it('fetches a photo as its sender\'s file, once, and serves it from the media cache', async () => {
+		const store = useAvatarsStore();
+		const photo = photoOf;
+		expect(store.photoUrl(photo, PEER)).toBe('');
+		const url = await store.loadPhoto(photo, PEER);
+		expect(url).toMatch(/^blob:/);
+		expect(store.photoUrl(photo, PEER)).toBe(url);
+		expect(dialogs.fetches).toEqual([{ ...photo, uploaderHash: PEER }]);
+	});
+
+	it('a photo that failed is not fetched again before its retry-after, and is after it', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			const store = useAvatarsStore();
+			// another file than the test above's: the media cache outlives a test
+			const photo = { ...photoOf, fileId: 'f_' + '8'.repeat(32) };
+			dialogs.fetchResult = async () => { throw new Error('chunk 0 unavailable'); };
+			await expect(store.loadPhoto(photo, PEER)).rejects.toThrow('chunk 0 unavailable');
+			// every redraw asks again; none of them reaches the network
+			for (let i = 0; i < 5; i++) store.photoUrl(photo, PEER);
+			await expect(store.loadPhoto(photo, PEER)).rejects.toThrow(/asked for again later/);
+			expect(dialogs.fetches).toHaveLength(1);
+			vi.setSystemTime(Date.now() + PHOTO_RETRY_AFTER_MS + 1);
+			dialogs.fetchResult = async () => new Uint8Array([1]);
+			await expect(store.loadPhoto(photo, PEER)).resolves.toMatch(/^blob:/);
+			expect(dialogs.fetches).toHaveLength(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

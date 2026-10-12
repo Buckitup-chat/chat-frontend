@@ -1,43 +1,35 @@
-// Drawing profile photos: what a photo element shows before and after its
-// bytes arrive.
+// Drawing profile photos.
 
-import { thumbHashToDataURL } from 'thumbhash';
-import { fromBase64 } from '@/lib/pq/signature';
-import type { AvatarPhoto } from '@/lib/pq/content';
-
-const DRAWABLE = /^image\/(jpeg|png|webp|gif)$/;
+import { isImageMime, thumbDataUrl } from '@/lib/data/imageMeta';
+import { photoFromWire, type AvatarPhoto } from '@/lib/pq/content';
 
 /** The MIME type a photo is drawn as: the sender's word only when it names a picture format. */
-export const imageMime = (mimeType: string): string => (DRAWABLE.test(mimeType) ? mimeType : 'image/jpeg');
+export const imageMime = (mimeType: string): string => (isImageMime(mimeType) ? mimeType : 'image/jpeg');
+
+export const dataUrlOf = (b64: string, mimeType: string): string => `data:${imageMime(mimeType)};base64,${b64}`;
 
 /** An inline photo's bytes as a data URL; empty for an out-of-band one, whose bytes are fetched. */
 export const inlineDataUrl = (photo: AvatarPhoto): string =>
-	photo.kind === 'inline_image' && photo.dataB64 ? `data:${imageMime(photo.mimeType)};base64,${photo.dataB64}` : '';
-
-const thumbs = new Map<string, string>();
-
-/** The ThumbHash blur drawn while the photo is on its way; empty when there is none or it does not decode. */
-export const thumbDataUrl = (photo: AvatarPhoto | null | undefined): string => {
-	const hash = photo?.thumbHashB64;
-	if (!hash) return '';
-	let url = thumbs.get(hash);
-	if (url === undefined) {
-		try {
-			url = thumbHashToDataURL(fromBase64(hash));
-		} catch {
-			url = '';
-		}
-		thumbs.set(hash, url);
-	}
-	return url;
-};
+	photo.kind === 'inline_image' && photo.dataB64 ? dataUrlOf(photo.dataB64, photo.mimeType) : '';
 
 /**
- * What an account record's `avatar` draws: the own account keeps a data URL,
- * a contact the `{ id, photo, thumb }` cache its dialog left behind.
+ * A contact's current photo as the contacts slot caches it (pq_avatars §
+ * What a reader keeps): its id and its wire element, or nothing.
  */
-export const avatarSrcOf = (avatar: unknown): string => {
-	if (typeof avatar === 'string') return avatar;
-	const thumb = (avatar as { thumb?: unknown } | null)?.thumb;
-	return typeof thumb === 'string' ? thumb : '';
+export const cachedPhotoOf = (avatar: unknown): { avatarId: string; photo: AvatarPhoto } | null => {
+	const a = avatar as { id?: unknown; photo?: unknown } | null;
+	const photo = a && typeof a.id === 'string' ? photoFromWire(a.photo) : null;
+	return photo ? { avatarId: a!.id as string, photo } : null;
 };
+
+/** A gallery as the viewer's frames, newest first. */
+export const galleryFrames = (
+	entries: { avatarId: string; photo: AvatarPhoto }[],
+	uploaderHash: string,
+	photoUrl: (photo: AvatarPhoto, uploaderHash: string) => string,
+) => entries.map(({ avatarId, photo }) => ({
+	key: avatarId,
+	src: photoUrl(photo, uploaderHash),
+	placeholder: thumbDataUrl(photo),
+	alt: 'Profile photo',
+}));

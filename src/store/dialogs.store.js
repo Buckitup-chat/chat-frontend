@@ -20,6 +20,7 @@ import {
     awaitingApprovalIds,
 } from '@/lib/data/outbox';
 import { feedOrderKey } from '@/lib/data/feedOrder';
+import { serialized } from '@/lib/data/serialized';
 import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyReplicatedRow } from '@/lib/data/rowVerification';
@@ -699,24 +700,19 @@ export const useDialogsStore = defineStore('dialogs', () => {
             throw notStored();
         }
         trackOwnSentMessage(dialogHash, messageId);
-        for (const listener of ownSendListeners) {
-            try {
-                listener(peerHash, parts);
-            } catch (e) {
-                console.warn('[dialogs] own-send listener failed:', e);
-            }
+        try {
+            ownSendHook?.(peerHash, parts);
+        } catch (e) {
+            console.warn('[dialogs] own-send hook failed:', e);
         }
         return { intentId, payload, token };
     };
 
     // Told of every message this account stores for sending, after it is
     // durable — the avatars store sends its gallery into a dialog from here
-    // (pq_avatars § Delivery, rule 2). Returns the unsubscribe.
-    const ownSendListeners = new Set();
-    const onOwnSend = (listener) => {
-        ownSendListeners.add(listener);
-        return () => ownSendListeners.delete(listener);
-    };
+    // (pq_avatars § Delivery, rule 2). One hook; setting it replaces it.
+    let ownSendHook = null;
+    const onOwnSend = (hook) => { ownSendHook = hook; };
 
     const intentAwaitsRecovery = async (intentId, ownerHash) => {
         const entry = await getIntent(intentId).catch(() => null);
@@ -800,14 +796,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
     const chainRuns = new Map();
     const captureLocks = new Map();
     const signedOf = new Map();
-
-    const serialized = (locks, key, fn) => {
-        const run = (locks.get(key) ?? Promise.resolve()).then(fn, fn);
-        const settledRun = run.then(() => undefined, () => undefined);
-        locks.set(key, settledRun);
-        settledRun.then(() => { if (locks.get(key) === settledRun) locks.delete(key); });
-        return run;
-    };
 
     const lastIntentOf = async (owner, belongs) => {
         const { entries } = await intentsOf(owner);
@@ -1034,54 +1022,79 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return { messageId, status: await revisionOutcome(chainKey, intentId, token) };
     };
 
+    // ---------- this account's side of a dialog (pq_avatars delivery) ----------
+
     // A cold shape's first sync can stall; a background read gives up on it
     // and is asked again later rather than holding its caller.
     const BACKGROUND_READ_MS = 10_000;
-    const withinBudget = (promise) => {
+    const liveWithinBudget = async (coll) => {
         let timer;
-        return Promise.race([
-            promise,
+        const state = await Promise.race([
+            settled(coll),
             new Promise((resolve) => { timer = setTimeout(() => resolve({ state: 'failed' }), BACKGROUND_READ_MS); }),
         ]).finally(() => clearTimeout(timer));
+        return state.state === 'live';
     };
 
-    /**
-     * Whether this account has sent in the dialog with a peer — its own key
-     * row is there. null when the dialog could not be read.
-     */
-    const hasOwnDialogKey = async (peerHash) => {
+    /** Runs `read(colls, { dialogHash, me })` over a dialog without joining the warm set; null when signed out. */
+    const readLiveDialog = (peerHash, read) => {
         const me = $userPQ.currentUserHash;
         const dialogHash = getDialogHash(peerHash);
-        if (!dialogHash) return null;
-        if (senderMsgKeys.value[`${dialogHash}_${me}`]) return true;
-        return withDialogCollections(dialogHash, async (colls) => {
-            if ((await withinBudget(settled(colls.keys))).state !== 'live') return null;
-            return !!colls.keys.get(`${dialogHash}|${me}`);
-        });
+        if (!me || !dialogHash) return Promise.resolve(null);
+        return withDialogCollections(dialogHash, (colls) => read(colls, { dialogHash, me }));
     };
 
+    const carriesAvatar = (parts) => (parts || []).some((p) => p.kind === 'avatar');
+
     /**
-     * This account's live messages in the dialog with a peer, decrypted, as
-     * { messageId, senderHash, parts }. null when the dialog could not be
-     * read or one of them could not be decrypted: a partial answer would read
-     * as "absent".
+     * What the dialog with a peer says about this account, in one read:
+     * `ownKey` (asked for with requireOwnKey) — it has sent there; `carries` —
+     * its live messages carry an `avatar` part, counting the ones still on
+     * their way: an intent not sent yet, a row in the outbox, a row accepted
+     * but not back through the shape. Stops at the first avatar part; null
+     * where a message could not be read. With requireOwnKey, `carries` is
+     * read only when the key is there.
      */
-    const ownMessagesIn = async (peerHash) => {
-        const me = $userPQ.currentUserHash;
-        const dialogHash = getDialogHash(peerHash);
-        if (!dialogHash) return null;
-        return withDialogCollections(dialogHash, async (colls) => {
-            if ((await withinBudget(settled(colls.messages))).state !== 'live') return null;
-            const rows = colls.messages.toArray.filter((r) => r.sender_hash === me && r.sign_hash && !r.deleted_flag);
-            const out = [];
-            for (const row of rows) {
-                const decrypted = await decryptMessageRow(row, colls);
-                if (!decrypted.decrypted) return null;
-                out.push({ messageId: row.message_id, senderHash: me, parts: decrypted.parts });
+    const ownDialogCarriesAvatar = (peerHash, { requireOwnKey = false } = {}) =>
+        readLiveDialog(peerHash, async (colls, { dialogHash, me }) => {
+            let ownKey;
+            if (requireOwnKey) {
+                ownKey = senderMsgKeys.value[`${dialogHash}_${me}`]
+                    ? true
+                    : (await liveWithinBudget(colls.keys)) ? !!colls.keys.get(`${dialogHash}|${me}`) : null;
+                if (ownKey !== true) return { ownKey, carries: null };
             }
-            return out;
+            const { entries } = await intentsOf(me);
+            if (entries.some((e) => e.intent?.kind === 'message' && e.intent.dialogHash === dialogHash && carriesAvatar(e.intent.parts))) {
+                return { ownKey, carries: true };
+            }
+            // The newest revision first: the outbox, then what the server
+            // accepted, then the shape.
+            const rows = new Map();
+            const add = (row) => {
+                if (row && row.dialog_hash === dialogHash && row.sender_hash === me && row.sign_hash && !rows.has(row.message_id)) rows.set(row.message_id, row);
+            };
+            for (const entry of await pendingEntries(me)) {
+                if (entry.relation === 'dialog_messages') for (const m of entry.mutations) add(m?.modified ?? m?.changes);
+            }
+            for (const row of await getAllAcceptedForRelation('dialog_messages')) add(row);
+            const live = await liveWithinBudget(colls.messages);
+            if (live) for (const row of colls.messages.toArray) add(row);
+            // Own messages decrypt under the key this account derives itself,
+            // whether or not its key row has come back yet.
+            const key = await ownSenderMsgKey(peerHash);
+            let unread = !live;
+            for (const row of rows.values()) {
+                if (row.deleted_flag) continue;
+                try {
+                    const json = await DialogCrypto.decryptContent(key, row.content_b64);
+                    if (json && carriesAvatar(decodeContent(json))) return { ownKey, carries: true };
+                } catch {
+                    unread = true;
+                }
+            }
+            return { ownKey, carries: unread ? null : false };
         });
-    };
 
     /**
      * Decrypt a message row
@@ -1924,8 +1937,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         sendMessage,
         captureMessageIntent,
         onOwnSend,
-        hasOwnDialogKey,
-        ownMessagesIn,
+        ownDialogCarriesAvatar,
         dispatchMessageIntent,
         editMessage,
         decryptMessageRow,

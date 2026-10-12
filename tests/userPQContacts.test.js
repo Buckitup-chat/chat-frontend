@@ -326,7 +326,7 @@ describe('the contacts slot', () => {
 // the contact so the list can draw it without reading every dialog.
 describe('the cached avatar of a contact', () => {
 	let store;
-	const cached = { id: 'c'.repeat(32), photo: { image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_1', 'k'] }, thumb: 'data:image/jpeg;base64,AA' };
+	const cached = { id: 'c'.repeat(32), photo: { image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_1', 'k'] } };
 
 	beforeEach(async () => {
 		setActivePinia(createPinia());
@@ -348,7 +348,7 @@ describe('the cached avatar of a contact', () => {
 	it('is replaced whole by the next one, and cleared with null', async () => {
 		await store.saveContact(A, { name: 'Ann' });
 		await store.cacheContactAvatar(A, cached);
-		await store.cacheContactAvatar(A, { id: 'd'.repeat(32), photo: { inline_image: [1, 1, '', 'b.jpg', 1, 'image/jpeg', 0, 'AA'] }, thumb: 't' });
+		await store.cacheContactAvatar(A, { id: 'd'.repeat(32), photo: { inline_image: [1, 1, '', 'b.jpg', 1, 'image/jpeg', 0, 'AA'] } });
 		expect(fake.stored.contacts[A].avatar.photo).toEqual({ inline_image: [1, 1, '', 'b.jpg', 1, 'image/jpeg', 0, 'AA'] });
 		await store.cacheContactAvatar(A, null);
 		expect(fake.stored.contacts[A].avatar).toBeNull();

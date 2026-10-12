@@ -60,44 +60,9 @@
 <style lang="scss" scoped>
 @import '@/scss/variables.scss';
 @import '@/scss/breakpoints.scss';
+@import '@/scss/profile-avatar';
 
-._avatar {
-	display: flex;
-	justify-content: center;
-	width: 100%;
-
-	._wrap {
-		position: relative;
-
-		._img_wrap {
-			width: 10rem;
-			height: 10rem;
-
-			@include media-breakpoint-up(sm) {
-				width: 14rem;
-				height: 14rem;
-			}
-
-			border-radius: 50%;
-			border: 5px solid $white;
-			overflow: hidden;
-
-			img,
-			svg {
-				height: 100%;
-				width: 100%;
-				object-fit: cover;
-			}
-		}
-
-		a {
-			position: absolute;
-			bottom: 1rem;
-			right: 5rem;
-			transform: translateX(4rem);
-		}
-	}
-}
+@include profile-avatar;
 </style>
 
 <script setup>
@@ -105,29 +70,30 @@
 import { ref, computed, onMounted, watch, inject } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useLoader } from '@/composables/useLoader';
-import imageResize from '@/utils/imageResize';
+import { resizeImageUrl } from '@/utils/imageResize';
 import errorMessage from '@/utils/errorMessage';
 import copyToClipboard from '@/utils/copyToClipboard';
 import Avatar from 'vue-boring-avatars';
-import { avatarSrcOf } from '@/lib/avatars/display';
-import { AVATAR_MAX_SIDE } from '@/lib/avatars/gallery';
+import { ALLOWED_IMAGE_TYPES, AVATAR_MAX_SIDE } from '@/lib/avatars/gallery';
 
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');
 const $loader = useLoader();
 const $user = userPQStore();
 
-const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const maxNameLength = 30;
 const maxNotesLength = 300;
 
 const emit = defineEmits(['update', 'avatar-draft']);
 const account = ref();
 const avatarDataUrl = ref(null);
-const avatarSrc = computed(() => avatarDataUrl.value || avatarSrcOf(account.value?.avatar));
+const avatarSrc = computed(() =>
+	avatarDataUrl.value || avatarUrl || (typeof account.value?.avatar === 'string' ? account.value.avatar : ''));
 
-const { accountIn, avatarEditable } = defineProps({
+const { accountIn, avatarEditable, avatarUrl } = defineProps({
 	accountIn: { type: Object },
+	/** The picture to draw when the account record holds none of its own (a contact's, from its dialog). */
+	avatarUrl: { type: String, default: '' },
 	/** Whether the default picture offers to pick one (a new account does; a contact's is theirs). */
 	avatarEditable: { type: Boolean, default: true },
 });
@@ -182,26 +148,18 @@ const copyUserHash = () => {
 
 const handleImage = async (event) => {
 	event.preventDefault();
+	const file = Array.from(event.target.files || [])[0];
+	event.target.value = '';
+	if (!file) return;
 	$loader.show();
+	const source = URL.createObjectURL(file);
 	try {
-		const file = Array.from(event.target.files)[0];
 		if (!ALLOWED_IMAGE_TYPES.includes(file.type)) throw Error(`"${file.name}" not supported media format`);
-		var reader = new FileReader();
-		reader.onload = function (readerEvent) {
-			var image = new Image();
-			image.onload = async function () {
-				const { dataUrl, blobFile } = imageResize(image, AVATAR_MAX_SIDE, 0.85);
-				if (dataUrl && blobFile) {
-					avatarDataUrl.value = dataUrl;
-					account.value.avatar = dataUrl; // for comparison in parent
-					emit('avatar-draft', blobFile);
-					emit('update', account.value);
-				}
-				$loader.hide();
-			};
-			image.src = readerEvent.target.result;
-		};
-		reader.readAsDataURL(file);
+		const { dataUrl, blobFile } = await resizeImageUrl(source, AVATAR_MAX_SIDE, 0.85);
+		avatarDataUrl.value = dataUrl;
+		account.value.avatar = dataUrl; // for comparison in parent
+		emit('avatar-draft', blobFile);
+		emit('update', account.value);
 	} catch (error) {
 		console.error(error);
 
@@ -211,11 +169,10 @@ const handleImage = async (event) => {
 			footer: errorMessage(error),
 			timer: 15000,
 		});
-
+	} finally {
+		URL.revokeObjectURL(source);
 		$loader.hide();
 	}
-
-	event.target.value = '';
 };
 
 defineExpose({ reset });

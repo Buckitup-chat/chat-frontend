@@ -13,46 +13,69 @@
 // gets the whole gallery even on a change, since one part alone would leave
 // it with a gallery of one.
 //
-// Whether a dialog carries an avatar part is read from its messages once and
-// then remembered per dialog (`mark`): the messages this device sends are
-// not in the shape until they round-trip, and a second send in that window
-// must not produce a second snapshot. A snapshot sent twice is harmless —
-// applying it reproduces the same order — so the marker only spares noise.
+// Whether a dialog carries an avatar part is read from it every time, its
+// messages still on their way included (dialogs.store ownDialogCarriesAvatar);
+// deliveries into one dialog run one at a time, so a second one sees what the
+// first stored. A snapshot sent twice anyway is harmless — applying it
+// reproduces the same order.
 
-import type { AvatarPart, AvatarRemovedPart, ContentPart } from '@/lib/pq/content';
+import { isAvatarPart, type AvatarPart, type AvatarRemovedPart, type ContentPart } from '@/lib/pq/content';
+import { serialized } from '@/lib/data/serialized';
 import { snapshotParts, type GalleryEntry } from './gallery';
 
 export type AvatarChange = AvatarPart | AvatarRemovedPart;
 
+/** What a dialog says about this account; null where it could not be read. */
+export interface DialogProbe {
+	/** This account has sent in the dialog: its own key is there. Not read unless asked for. */
+	ownKey?: boolean | null;
+	/** This account's messages there carry an `avatar` part. Not read when ownKey was asked for and is not true. */
+	carries: boolean | null;
+}
+
 export interface DeliveryDeps {
 	/** The owner's gallery after the change, newest first. */
 	gallery(): Promise<GalleryEntry[]>;
-	/** Peers a change goes to: the dialogs the account has. */
-	targets(): Promise<string[]>;
+	/** The peers a change may go to: the account's contacts. */
+	contacts(): string[];
 	/** Whether a send to this peer may carry the gallery at all (a contact). */
 	isTarget(peerHash: string): boolean;
-	/** Whether this account's live messages in the dialog carry an `avatar` part; null when the dialog could not be read. */
-	readCarries(peerHash: string): Promise<boolean | null>;
-	marked(peerHash: string): boolean;
-	mark(peerHash: string): void;
+	/** One read of the dialog with a peer. */
+	probe(peerHash: string, opts: { requireOwnKey: boolean }): Promise<DialogProbe>;
 	/** Stores the message durably for sending (the dialog outbox). */
 	send(peerHash: string, parts: ContentPart[]): Promise<void>;
+	now?(): number;
 }
 
-const isAvatarPart = (p: ContentPart) => p.kind === 'avatar' || p.kind === 'avatar_removed';
+/** Dialogs probed at once on a change: enough to overlap the reads, few enough not to open every shape together. */
+export const PROBE_CONCURRENCY = 4;
+
+/** How long a dialog found without this account's key is skipped by the next changes. */
+export const NO_KEY_TTL_MS = 60_000;
 
 /**
  * The message a change becomes in one dialog. Where the dialog already
  * carries this account's gallery it is the change alone; elsewhere it is the
- * gallery after the change, with a removal kept at the end for a reader who
- * had the photo from a message this device could not see.
+ * gallery after the change. A dialog that could not be read also gets a
+ * removal after the gallery, for a reader who had the photo from a message
+ * this device could not see.
  */
-export const changeMessage = (change: AvatarChange, gallery: GalleryEntry[], carries: boolean | null): ContentPart[] =>
-	carries === true
-		? [change]
-		: [...snapshotParts(gallery), ...(change.kind === 'avatar_removed' ? [change] : [])];
+export const changeMessage = (change: AvatarChange, gallery: GalleryEntry[], carries: boolean | null): ContentPart[] => {
+	if (carries === true) return [change];
+	const snapshot: ContentPart[] = snapshotParts(gallery);
+	return carries === null && change.kind === 'avatar_removed' ? [...snapshot, change] : snapshot;
+};
 
-export type FirstSendOutcome = 'skipped' | 'present' | 'unknown' | 'empty' | 'sent';
+/** Runs `fn` over `items`, at most `limit` at a time. */
+const eachLimit = async <T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> => {
+	let next = 0;
+	const worker = async () => {
+		while (next < items.length) await fn(items[next++]);
+	};
+	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+};
+
+export type FirstSendOutcome = 'skipped' | 'empty' | 'present' | 'unknown' | 'sent';
 
 export interface DeliveryResult {
 	sent: string[];
@@ -60,42 +83,29 @@ export interface DeliveryResult {
 }
 
 export const createAvatarDelivery = (deps: DeliveryDeps) => {
-	// One delivery per dialog at a time: a change and a first message racing
-	// in the same dialog would otherwise both find it unmarked.
+	const now = deps.now ?? Date.now;
 	const queues = new Map<string, Promise<unknown>>();
-	const perPeer = <T>(peerHash: string, fn: () => Promise<T>): Promise<T> => {
-		const run = (queues.get(peerHash) ?? Promise.resolve()).then(fn, fn);
-		const settled = run.catch(() => undefined);
-		queues.set(peerHash, settled);
-		void settled.then(() => { if (queues.get(peerHash) === settled) queues.delete(peerHash); });
-		return run;
-	};
-
-	const carries = async (peerHash: string): Promise<boolean | null> => {
-		if (deps.marked(peerHash)) return true;
-		const read = await deps.readCarries(peerHash);
-		if (read === true) deps.mark(peerHash);
-		return read;
-	};
+	const perPeer = <T>(peerHash: string, fn: () => Promise<T>) => serialized(queues, peerHash, fn);
+	// Contacts found without this account's key: each change would read their
+	// dialogs again for the same answer, until the account writes there.
+	const noKeyUntil = new Map<string, number>();
 
 	/** Rule 1: sends a change into every dialog the account has. */
 	const deliverChange = async (change: AvatarChange): Promise<DeliveryResult> => {
 		const result: DeliveryResult = { sent: [], failed: [] };
 		const gallery = await deps.gallery();
-		for (const peerHash of await deps.targets()) {
-			try {
-				await perPeer(peerHash, async () => {
-					const parts = changeMessage(change, gallery, await carries(peerHash));
-					if (!parts.length) return;
-					await deps.send(peerHash, parts);
-					// A removal alone does not put an avatar part into the dialog.
-					if (parts.some((p) => p.kind === 'avatar')) deps.mark(peerHash);
-					result.sent.push(peerHash);
-				});
-			} catch (error) {
-				result.failed.push({ peerHash, error });
+		const peers = deps.contacts().filter((p) => !((noKeyUntil.get(p) ?? 0) > now()));
+		await eachLimit(peers, PROBE_CONCURRENCY, (peerHash) => perPeer(peerHash, async () => {
+			const { ownKey, carries } = await deps.probe(peerHash, { requireOwnKey: true });
+			if (ownKey !== true) {
+				if (ownKey === false) noKeyUntil.set(peerHash, now() + NO_KEY_TTL_MS);
+				return;
 			}
-		}
+			const parts = changeMessage(change, gallery, carries);
+			if (!parts.length) return;
+			await deps.send(peerHash, parts);
+			result.sent.push(peerHash);
+		}).catch((error) => { result.failed.push({ peerHash, error }); }));
 		return result;
 	};
 
@@ -104,18 +114,19 @@ export const createAvatarDelivery = (deps: DeliveryDeps) => {
 	 * gallery follows it when the dialog carries no avatar part from it yet.
 	 * Its own avatar messages never trigger it, which keeps it from looping.
 	 */
-	const onOwnSend = (peerHash: string, parts: ContentPart[]): Promise<FirstSendOutcome> => {
-		if (parts.some(isAvatarPart) || !deps.isTarget(peerHash)) return Promise.resolve('skipped');
-		if (deps.marked(peerHash)) return Promise.resolve('present');
+	const onOwnSend = async (peerHash: string, parts: ContentPart[]): Promise<FirstSendOutcome> => {
+		if (parts.some(isAvatarPart) || !deps.isTarget(peerHash)) return 'skipped';
+		noKeyUntil.delete(peerHash);
+		// No photo, nothing to read the dialog for.
+		if (!(await deps.gallery()).length) return 'empty';
 		return perPeer(peerHash, async () => {
-			const known = await carries(peerHash);
-			if (known === true) return 'present';
+			const { carries } = await deps.probe(peerHash, { requireOwnKey: false });
+			if (carries === true) return 'present';
 			// Unread is not absent: try again at the next message rather than guess.
-			if (known === null) return 'unknown';
+			if (carries === null) return 'unknown';
 			const gallery = await deps.gallery();
 			if (!gallery.length) return 'empty';
 			await deps.send(peerHash, snapshotParts(gallery));
-			deps.mark(peerHash);
 			return 'sent';
 		});
 	};

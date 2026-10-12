@@ -324,11 +324,12 @@ export const userPQStore = defineStore('userPQ', () => {
 
   /**
    * Caches a contact's current avatar next to the contact (pq_avatars § What
-   * a reader keeps): `{ id, photo, thumb }` — the photo's id, its wire
-   * element, a small decrypted thumbnail as a data URL — or null when their
-   * gallery is empty. The dialog stays the source of truth; this only spares
-   * the contact list from reading every dialog. Someone who is not a contact
-   * is not made one by it.
+   * a reader keeps): `{ id, photo }` — the photo's id and its wire element,
+   * whose ThumbHash the lists blur in at once and whose bytes make the small
+   * picture this device keeps (avatars.store contactAvatarSrc) — or null when
+   * their gallery is empty. The dialog stays the source of truth; this only
+   * spares the contact list from reading every dialog. Someone who is not a
+   * contact is not made one by it.
    */
   const cacheContactAvatar = async (userHash, avatar) => {
     if (!em.value || !currentUserHash.value || !contactsMap.value[userHash]) return false;

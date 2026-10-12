@@ -107,7 +107,7 @@
               <div class="msg-video-frame" :style="{ aspectRatio: v.widthAspect + ' / ' + v.heightAspect }"
                 :role="videos[fileKey(v)]?.url ? undefined : 'button'"
                 @click="!refusedFile(v) && !videos[fileKey(v)]?.url && videos[fileKey(v)]?.status !== 'opening' && emit('playVideo', v)">
-                <img v-if="thumbUrl(v)" class="msg-image-blur" :src="thumbUrl(v)" alt="" />
+                <img v-if="thumbDataUrl(v)" class="msg-image-blur" :src="thumbDataUrl(v)" alt="" />
                 <video v-if="videos[fileKey(v)]?.url" class="msg-video-el"
                   :src="videos[fileKey(v)].url" controls playsinline
                   @loadedmetadata="restoreVideoPosition(v.fileId, $event)"
@@ -145,7 +145,7 @@
             <div v-if="imagesOf(msg).length === 1" class="msg-image"
               :style="{ aspectRatio: imagesOf(msg)[0].widthAspect + ' / ' + imagesOf(msg)[0].heightAspect }"
               @click="openLightbox(msg, 0)">
-              <img v-if="thumbUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbUrl(imagesOf(msg)[0])" alt="" />
+              <img v-if="thumbDataUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbDataUrl(imagesOf(msg)[0])" alt="" />
               <img v-if="images[fileKey(imagesOf(msg)[0])]?.url" class="msg-image-full"
                 :src="images[fileKey(imagesOf(msg)[0])].url" :alt="imagesOf(msg)[0].name" />
               <div v-if="refusedFile(imagesOf(msg)[0])" class="msg-image-progress _err">This image could not be verified</div>
@@ -164,7 +164,7 @@
               :class="'_n' + Math.min(imagesOf(msg).length, 4)">
               <div v-for="(im, i) in visibleImages(msg)" :key="im.fileId" class="msg-gallery-cell"
                 @click="openLightbox(msg, i)">
-                <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
+                <img v-if="thumbDataUrl(im)" class="msg-image-blur" :src="thumbDataUrl(im)" alt="" />
                 <img v-if="images[fileKey(im)]?.url" class="msg-image-full" :src="images[fileKey(im)].url" :alt="im.name" />
                 <div v-if="refusedFile(im)" class="msg-image-progress _err">could not be verified</div>
                 <div v-if="overflowCount(msg) && i === visibleImages(msg).length - 1" class="msg-gallery-more">
@@ -416,15 +416,14 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { fileKey } from '@/lib/data/fileKey';
 import { contentToText, quoteSnapshot } from '@/lib/pq/content';
-import { thumbHashToDataURL } from 'thumbhash';
-import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { useMenu } from '@/composables/useMenu';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
 import { playableAudioType } from '@/composables/useAudioPlayback';
 import Avatar from 'vue-boring-avatars';
 import GalleryViewer from '@/components/GalleryViewer.vue';
-import { thumbDataUrl } from '@/lib/avatars/display';
+import { thumbDataUrl } from '@/lib/data/imageMeta';
+import { isAvatarPart } from '@/lib/pq/content';
 
 const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
 const $breakpoint = useBreakpoint();
@@ -499,10 +498,10 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
-  /** Decrypted profile photos by avatar id, for the service lines. */
-  avatarUrls: {
-    type: Object,
-    default: () => ({})
+  /** (photo, senderHash) → the decrypted profile photo's URL, empty while it is on its way. */
+  avatarSrc: {
+    type: Function,
+    default: () => ''
   }
 });
 
@@ -766,8 +765,6 @@ const onVideoTime = (fileId, event) => {
 
 
 
-// ThumbHash decodes to a tiny data URL; cached because it is pure and the
-// list re-renders on every sync tick.
 // Past four previews the rest live behind the +N counter (§1.6).
 const MAX_TILES = 4;
 const visibleImages = (msg) => imagesOf(msg).slice(0, MAX_TILES);
@@ -810,7 +807,7 @@ const lightboxFrames = computed(() =>
     return {
       key: fileKey(part),
       src: state?.url || '',
-      placeholder: thumbUrl(part),
+      placeholder: thumbDataUrl(part),
       alt: part.name,
       caption,
       error: refusedFile(part) ? 'This image could not be verified' : '',
@@ -820,44 +817,36 @@ const lightboxFrames = computed(() =>
 
 // ---------- profile-photo messages (pq_avatars) ----------
 
-const AVATAR_KINDS = new Set(['avatar', 'avatar_removed']);
-
-/** The service line a profile-photo message reads as; null for any other message. */
-const avatarLine = (msg) => {
-  const parts = msg.parts || [];
-  if (msg._deleted || !parts.length || !parts.every((p) => AVATAR_KINDS.has(p.kind))) return null;
-  const photos = parts.filter((p) => p.kind === 'avatar');
-  const who = msg.isMine ? 'You' : props.title;
-  const shown = photos.at(-1);
-  let text;
-  if (photos.length > 1) text = `${who} shared ${photos.length} profile photos`;
-  else if (photos.length) text = msg.isMine ? 'You updated your photo' : `${who} updated their photo`;
-  else text = `${who} removed a photo`;
-  return {
-    text,
-    avatarId: shown?.avatarId ?? null,
-    src: shown ? props.avatarUrls[shown.avatarId] || thumbDataUrl(shown.photo) : '',
-  };
-};
+/** The service line of each profile-photo message, by message id; other messages have none. */
+const avatarLines = computed(() => {
+  const lines = new Map();
+  for (const msg of props.messages) {
+    const parts = msg.parts || [];
+    if (msg._deleted || !parts.length || !parts.every(isAvatarPart)) continue;
+    const photos = parts.filter((p) => p.kind === 'avatar');
+    const who = msg.isMine ? 'You' : props.title;
+    const shown = photos.at(-1);
+    const senderHash = msg._raw?.sender_hash || (msg.isMine ? props.myHash : props.peerHash);
+    let text;
+    if (photos.length > 1) text = `${who} shared ${photos.length} profile photos`;
+    else if (photos.length) text = msg.isMine ? 'You updated your photo' : `${who} updated their photo`;
+    else text = `${who} removed a photo`;
+    lines.set(msg.id, {
+      text,
+      senderHash,
+      avatarId: shown?.avatarId ?? null,
+      src: shown ? props.avatarSrc(shown.photo, senderHash) || thumbDataUrl(shown.photo) : '',
+    });
+  }
+  return lines;
+});
+const avatarLine = (msg) => avatarLines.value.get(msg.id) ?? null;
 
 const openAvatarLine = (msg) => {
   const line = avatarLine(msg);
-  const senderHash = msg._raw?.sender_hash || (msg.isMine ? props.myHash : props.peerHash);
-  emit('showAvatar', { senderHash, avatarId: line?.avatarId ?? null });
+  if (line) emit('showAvatar', { senderHash: line.senderHash, avatarId: line.avatarId });
 };
 
-const thumbCache = new Map();
-const thumbUrl = (im) => {
-  if (!im.thumbHashB64) return '';
-  // By the hash itself: each message carries its own, unverified, blur.
-  if (thumbCache.has(im.thumbHashB64)) return thumbCache.get(im.thumbHashB64);
-  let url = '';
-  try {
-    url = thumbHashToDataURL(fromBase64(im.thumbHashB64));
-  } catch { /* a malformed hash just means no blur */ }
-  thumbCache.set(im.thumbHashB64, url);
-  return url;
-};
 
 const fmtSize = (n) => {
   if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;

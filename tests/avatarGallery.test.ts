@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-	galleryOf, carriesAvatarFrom, snapshotParts, newAvatarId,
+	galleryOf, snapshotParts, newAvatarId,
 	ownGalleryOf, nextAt, addPatch, setMainPatch, removePatch, type GalleryMessage,
 } from '@/lib/avatars/gallery';
 import { decodeContent, encodeContent, type AvatarPhoto, type ContentPart } from '@/lib/pq/content';
@@ -78,15 +78,6 @@ describe('galleryOf', () => {
 		expect(snapshot.map((p) => p.avatarId[0])).toEqual(['c', 'a']); // oldest first
 		const wire = encodeContent(snapshot);
 		expect(galleryOf([msg(1, decodeContent(wire))], PEER)).toEqual(gallery);
-	});
-});
-
-describe('carriesAvatarFrom', () => {
-	it('is about live avatar parts of that sender only', () => {
-		expect(carriesAvatarFrom([msg(1, [avatar('a')], { senderHash: ME })], ME)).toBe(true);
-		expect(carriesAvatarFrom([msg(1, [avatar('a')])], ME)).toBe(false);
-		expect(carriesAvatarFrom([msg(1, [avatar('a')], { senderHash: ME, deleted: true })], ME)).toBe(false);
-		expect(carriesAvatarFrom([msg(1, [removed('a')], { senderHash: ME })], ME)).toBe(false);
 	});
 });
 

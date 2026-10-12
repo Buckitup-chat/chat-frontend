@@ -5,6 +5,7 @@
 // in a user_storage slot shared by the owner's devices, and is the source of
 // what every dialog is sent.
 
+import { bytesToHex, randomBytes } from '@noble/hashes/utils';
 import {
 	isAvatarId, photoFromWire, photoToWire,
 	type AvatarPart, type AvatarPhoto, type ContentPart,
@@ -12,6 +13,9 @@ import {
 
 /** A photo's longer side, at most (pq_avatars § The photo): the client resizes before sending. */
 export const AVATAR_MAX_SIDE = 640;
+
+/** What a photo may be picked from. */
+export const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 export interface GalleryEntry {
 	avatarId: string;
@@ -53,17 +57,12 @@ export const galleryOf = (messages: GalleryMessage[], senderHash: string): Galle
 	return [...order].reverse().map(([avatarId, photo]) => ({ avatarId, photo }));
 };
 
-/** Whether the sender's live messages in a dialog carry any `avatar` part (delivery rule 2). */
-export const carriesAvatarFrom = (messages: GalleryMessage[], senderHash: string): boolean =>
-	messages.some((m) => m.senderHash === senderHash && !m.deleted && m.parts.some((p) => p.kind === 'avatar'));
-
 /** The whole gallery as one message, oldest first, so a reader applying it reproduces the order. */
 export const snapshotParts = (gallery: GalleryEntry[]): AvatarPart[] =>
 	[...gallery].reverse().map(({ avatarId, photo }) => ({ kind: 'avatar', avatarId, photo }));
 
 /** A fresh photo id: 16 random bytes, lowercase hex. */
-export const newAvatarId = (): string =>
-	Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+export const newAvatarId = (): string => bytesToHex(randomBytes(16));
 
 // ---------- the owner's gallery slot ----------
 //

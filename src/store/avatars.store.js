@@ -5,7 +5,7 @@
 // The gallery lives in the `avatars` user_storage slot, shared by the
 // owner's devices; every change to it goes out as dialog messages
 // (lib/avatars/delivery). A reader's view of someone's gallery is not kept
-// here: it is computed from the dialog (lib/avatars/gallery galleryOf).
+// here: it is computed from the dialog (composables/usePeerGallery).
 
 import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
@@ -13,13 +13,23 @@ import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import {
-	AVATARS_SLOT, ownGalleryOf, nextAt, addPatch, setMainPatch, removePatch, newAvatarId, carriesAvatarFrom,
+	AVATARS_SLOT, ownGalleryOf, nextAt, addPatch, setMainPatch, removePatch, newAvatarId,
 } from '@/lib/avatars/gallery';
 import { createAvatarDelivery } from '@/lib/avatars/delivery';
-import { imageMime, inlineDataUrl } from '@/lib/avatars/display';
+import { cachedPhotoOf, imageMime, inlineDataUrl } from '@/lib/avatars/display';
+import { thumbDataUrl } from '@/lib/data/imageMeta';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
 import { fileKey } from '@/lib/data/fileKey';
-import { fromBase64, toBase64 } from '@/lib/pq/signature';
+import { isRefusedFile } from '@/lib/data/fileIntegrity';
+import { IndexedDbStore } from '@/lib/data/indexedDbStore';
+import { resizeImageUrl } from '@/utils/imageResize';
+
+/** A photo that failed to arrive is not asked for again before this. */
+export const PHOTO_RETRY_AFTER_MS = 60_000;
+/** The account's own picture, kept on the device for the menu and the account list. */
+const OWN_PICTURE_SIDE = 128;
+/** A contact's picture in the lists. */
+const CONTACT_THUMB_SIDE = 96;
 
 export const useAvatarsStore = defineStore('avatars', () => {
 	const $userPQ = userPQStore();
@@ -28,48 +38,84 @@ export const useAvatarsStore = defineStore('avatars', () => {
 
 	// ---------- decrypted photos ----------
 
-	// Keyed by uploader and file: a photo counts only as its sender's own
-	// upload (pq_avatars § The photo), so the same file fetched for someone
-	// else is a different, refused, entry.
-	const photoUrls = ref({}); // key -> { url } | { error: true }
-	const inFlight = new Map(); // key -> Promise<string>
-	const photoKey = (photo, uploaderHash) => fileKey({ uploaderHash, fileId: photo.fileId });
-
-	/** A photo's URL if it is here; empty while it is on its way or failed. */
-	const photoUrl = (photo, uploaderHash) => {
-		if (!photo) return '';
-		if (photo.kind === 'inline_image') return inlineDataUrl(photo);
-		return photoUrls.value[photoKey(photo, uploaderHash)]?.url ?? '';
-	};
+	// The URLs live in the media cache, keyed by fileKey: a photo is its
+	// sender's own upload (pq_avatars § The photo), so the same file named by
+	// someone else is another entry. This tick only tells the screens that
+	// one arrived or failed; a URL the cache evicted is fetched again.
+	const photoTick = ref(0);
+	const inFlight = new Map(); // fileKey -> Promise<string>
+	const failedUntil = new Map(); // fileKey -> time a retry is allowed
+	const keyOf = (photo, uploaderHash) => fileKey({ uploaderHash, fileId: photo.fileId });
 
 	/** Fetches a photo uploaded by `uploaderHash`; resolves to its URL. */
 	const loadPhoto = (photo, uploaderHash) => {
 		if (photo.kind === 'inline_image') return Promise.resolve(inlineDataUrl(photo));
-		const key = photoKey(photo, uploaderHash);
-		const known = photoUrls.value[key]?.url;
-		if (known) return Promise.resolve(known);
+		const key = keyOf(photo, uploaderHash);
 		const cached = getCachedMedia(key);
-		if (cached) {
-			photoUrls.value = { ...photoUrls.value, [key]: { url: cached } };
-			return Promise.resolve(cached);
-		}
+		if (cached) return Promise.resolve(cached);
 		if (inFlight.has(key)) return inFlight.get(key);
+		if ((failedUntil.get(key) ?? 0) > Date.now()) return Promise.reject(new Error('This photo did not arrive; it is asked for again later'));
 		const pending = $dialogs.fetchFile({ ...photo, uploaderHash })
 			.then((bytes) => {
-				const url = putCachedMedia(key, bytes, imageMime(photo.mimeType));
-				photoUrls.value = { ...photoUrls.value, [key]: { url } };
-				return url;
+				failedUntil.delete(key);
+				return putCachedMedia(key, bytes, imageMime(photo.mimeType));
 			}, (e) => {
-				photoUrls.value = { ...photoUrls.value, [key]: { error: true } };
+				// A refused file gets the same answer every time.
+				failedUntil.set(key, isRefusedFile(e) ? Infinity : Date.now() + PHOTO_RETRY_AFTER_MS);
+				console.warn('[avatars] photo not loaded:', e?.message ?? e);
 				throw e;
 			})
-			.finally(() => inFlight.delete(key));
+			.finally(() => {
+				inFlight.delete(key);
+				photoTick.value++;
+			});
 		inFlight.set(key, pending);
 		return pending;
 	};
 
-	const photoBytes = (photo, uploaderHash) =>
-		photo.kind === 'inline_image' ? Promise.resolve(fromBase64(photo.dataB64)) : $dialogs.fetchFile({ ...photo, uploaderHash });
+	/**
+	 * A photo's URL if it is here; empty while it is on its way, and asking
+	 * for it starts that — or, after a failure, not before its retry-after.
+	 */
+	const photoUrl = (photo, uploaderHash) => {
+		if (!photo) return '';
+		if (photo.kind === 'inline_image') return inlineDataUrl(photo);
+		void photoTick.value;
+		const url = getCachedMedia(keyOf(photo, uploaderHash));
+		if (!url) loadPhoto(photo, uploaderHash).catch(() => {});
+		return url ?? '';
+	};
+
+	// A contact's picture in the lists: a small thumbnail of the photo the
+	// contacts slot names, made once and kept on this device; its ThumbHash
+	// blur until then.
+	const thumbStore = new IndexedDbStore('bkp-avatar-thumbs');
+	const thumbs = ref({}); // `${userHash}/${avatarId}` -> data URL
+	const thumbsAsked = new Set();
+
+	const loadThumb = async (key, photo, userHash) => {
+		let thumb = await thumbStore.get(key).catch(() => null);
+		if (!thumb) {
+			thumb = (await resizeImageUrl(await loadPhoto(photo, userHash), CONTACT_THUMB_SIDE, 0.7)).dataUrl;
+			thumbStore.set(key, thumb).catch(() => {});
+		}
+		thumbs.value = { ...thumbs.value, [key]: thumb };
+	};
+
+	/** What the lists draw for a contact whose slot entry caches `avatar` ({ id, photo }); empty for none. */
+	const contactAvatarSrc = (avatar, userHash) => {
+		const cached = cachedPhotoOf(avatar);
+		if (!cached) return '';
+		const key = `${userHash}/${cached.avatarId}`;
+		if (thumbs.value[key]) return thumbs.value[key];
+		if (!thumbsAsked.has(key)) {
+			thumbsAsked.add(key);
+			loadThumb(key, cached.photo, userHash).catch(() => {
+				setTimeout(() => thumbsAsked.delete(key), PHOTO_RETRY_AFTER_MS);
+			});
+		}
+		return thumbDataUrl(cached.photo);
+	};
 
 	// ---------- the owner's gallery ----------
 
@@ -105,29 +151,25 @@ export const useAvatarsStore = defineStore('avatars', () => {
 
 	/**
 	 * Keeps the account's own picture (menu, account list) on the current
-	 * photo: a data URL kept on this device, refreshed when the current photo
-	 * is another one than the one it shows — after a change here, or one
+	 * photo: a small data URL kept on this device, refreshed when the current
+	 * photo is another one than the one it shows — after a change here, or one
 	 * another device made.
 	 */
-	const syncOwnAvatarImage = async ({ bytes = null } = {}) => {
+	const syncOwnAvatarImage = async () => {
 		const owner = $userPQ.currentUserHash;
 		const current = ownGallery.value[0] ?? null;
 		const shown = $userPQ.currentUser?.avatarId ?? null;
 		if ((current?.avatarId ?? null) === shown && (current || !$userPQ.currentUser?.avatar)) return;
 		// A slot that could not be read says nothing about the picture: keep it.
 		if (!current && own.value.record === null) return;
-		let dataUrl = null;
-		if (current) {
-			const data = bytes ?? await photoBytes(current.photo, owner);
-			dataUrl = `data:${imageMime(current.photo.mimeType)};base64,${toBase64(data)}`;
-		}
+		const dataUrl = current
+			? (await resizeImageUrl(await loadPhoto(current.photo, owner), OWN_PICTURE_SIDE, 0.8)).dataUrl
+			: null;
 		if ($userPQ.currentUserHash !== owner) return;
 		await $userPQ.setOwnAvatarImage({ avatarId: current?.avatarId ?? null, dataUrl });
 	};
 
 	// ---------- delivery ----------
-
-	const markerKey = (owner, peerHash) => `bkp:avatar-carried:${owner}:${$dialogs.getDialogHash(peerHash)}`;
 
 	// One delivery per account, its dependencies bound to that account: a
 	// delivery still running after an account switch must not send the old
@@ -138,38 +180,20 @@ export const useAvatarsStore = defineStore('avatars', () => {
 		const sameAccount = () => {
 			if ($userPQ.currentUserHash !== owner) throw new Error('The account changed; its photos are not sent from another one');
 		};
-		const marked = (peerHash) => {
-			try {
-				return localStorage.getItem(markerKey(owner, peerHash)) === '1';
-			} catch {
-				return false;
-			}
-		};
 		const delivery = createAvatarDelivery({
 			gallery: () => {
 				sameAccount();
 				return loadOwn();
 			},
-			targets: async () => {
-				const out = [];
-				for (const peerHash of Object.keys($userPQ.contactsMap)) {
-					if (peerHash === owner) continue;
-					sameAccount();
-					if (marked(peerHash) || (await $dialogs.hasOwnDialogKey(peerHash).catch(() => null)) === true) out.push(peerHash);
-				}
-				return out;
-			},
+			contacts: () => Object.keys($userPQ.contactsMap).filter((p) => p !== owner),
 			isTarget: (peerHash) => peerHash !== owner && !!$userPQ.contactsMap[peerHash],
-			readCarries: async (peerHash) => {
+			probe: async (peerHash, opts) => {
 				sameAccount();
-				const messages = await $dialogs.ownMessagesIn(peerHash).catch(() => null);
-				return messages ? carriesAvatarFrom(messages, owner) : null;
-			},
-			marked,
-			mark: (peerHash) => {
-				try {
-					localStorage.setItem(markerKey(owner, peerHash), '1');
-				} catch { /* private mode: the dialog is read again next time */ }
+				const read = await $dialogs.ownDialogCarriesAvatar(peerHash, opts).catch((e) => {
+					console.warn('[avatars] dialog not read:', e?.message ?? e);
+					return null;
+				});
+				return read ?? { ownKey: null, carries: null };
 			},
 			send: async (peerHash, parts) => {
 				sameAccount();
@@ -211,9 +235,11 @@ export const useAvatarsStore = defineStore('avatars', () => {
 			createdAt: Math.floor(Date.now() / 1000), blob,
 		});
 		if (photo.kind !== 'image') throw new Error('The photo could not be read as an image');
+		// The bytes are here already: no download of what was just uploaded.
+		putCachedMedia(keyOf(photo, owner), bytes, imageMime(photo.mimeType));
 		const avatarId = newAvatarId();
 		await patchOwn(owner, addPatch(avatarId, photo, nextAt(own.value.record)));
-		await syncOwnAvatarImage({ bytes }).catch((e) => console.warn('[avatars] own picture not refreshed:', e));
+		await syncOwnAvatarImage().catch((e) => console.warn('[avatars] own picture not refreshed:', e));
 		return deliveryFor(owner).deliverChange({ kind: 'avatar', avatarId, photo });
 	};
 
@@ -254,5 +280,6 @@ export const useAvatarsStore = defineStore('avatars', () => {
 		removePhoto,
 		photoUrl,
 		loadPhoto,
+		contactAvatarSrc,
 	};
 });

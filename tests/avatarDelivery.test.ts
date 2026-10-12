@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { createAvatarDelivery, changeMessage, type DeliveryDeps } from '@/lib/avatars/delivery';
+import { createAvatarDelivery, changeMessage, NO_KEY_TTL_MS, PROBE_CONCURRENCY, type DeliveryDeps } from '@/lib/avatars/delivery';
 import { galleryOf, type GalleryEntry, type GalleryMessage } from '@/lib/avatars/gallery';
 import type { AvatarPhoto, ContentPart } from '@/lib/pq/content';
 
 // pq_avatars § Delivery, driven through fakes that keep the contract: a sent
-// message lands in the peer's dialog, and reading the dialog sees it.
+// message lands in the peer's dialog, and the next probe of it sees it.
 
 const ME = 'u_' + 'a'.repeat(128);
 const id = (c: string) => c.repeat(32);
@@ -17,40 +17,46 @@ const entry = (c: string, n = 1): GalleryEntry => ({ avatarId: id(c), photo: pho
 const world = (opts: { gallery?: GalleryEntry[]; contacts?: string[]; sentTo?: string[]; unreadable?: string[] } = {}) => {
 	const dialogs = new Map<string, GalleryMessage[]>();
 	for (const peer of opts.sentTo ?? []) dialogs.set(peer, [{ messageId: 'dmsg_0000', senderHash: ME, parts: [{ kind: 'text', text: 'hi' }] }]);
-	const markers = new Set<string>();
 	const sends: { peer: string; parts: ContentPart[] }[] = [];
-	const state = { gallery: opts.gallery ?? [], reads: 0 };
+	const state = { gallery: opts.gallery ?? [], probes: [] as string[], clock: 1000, inProbe: 0, maxInProbe: 0 };
 	let seq = 1;
 	const contacts = opts.contacts ?? [];
 	const deps: DeliveryDeps = {
 		gallery: async () => state.gallery,
-		targets: async () => contacts.filter((p) => dialogs.has(p)),
+		contacts: () => contacts,
 		isTarget: (p) => contacts.includes(p),
-		readCarries: async (p) => {
-			state.reads++;
-			if (opts.unreadable?.includes(p)) return null;
-			return (dialogs.get(p) ?? []).some((m) => m.senderHash === ME && m.parts.some((x) => x.kind === 'avatar'));
+		probe: async (p, { requireOwnKey }) => {
+			state.probes.push(p);
+			state.inProbe++;
+			state.maxInProbe = Math.max(state.maxInProbe, state.inProbe);
+			await new Promise((r) => setTimeout(r, 1));
+			state.inProbe--;
+			if (opts.unreadable?.includes(p)) return { ownKey: requireOwnKey ? true : undefined, carries: null };
+			const ownKey = dialogs.has(p);
+			if (requireOwnKey && !ownKey) return { ownKey, carries: null };
+			return { ownKey, carries: (dialogs.get(p) ?? []).some((m) => m.parts.some((x) => x.kind === 'avatar')) };
 		},
-		marked: (p) => markers.has(p),
-		mark: (p) => { markers.add(p); },
 		send: async (p, parts) => {
 			sends.push({ peer: p, parts });
 			const list = dialogs.get(p) ?? [];
 			list.push({ messageId: `dmsg_${String(seq++).padStart(4, '0')}`, senderHash: ME, parts });
 			dialogs.set(p, list);
 		},
+		now: () => state.clock,
 	};
 	const readerGallery = (peer: string) => galleryOf(dialogs.get(peer) ?? [], ME).map((e) => e.avatarId[0]);
-	return { deps, sends, markers, state, readerGallery, delivery: createAvatarDelivery(deps) };
+	return { deps, sends, state, dialogs, readerGallery, delivery: createAvatarDelivery(deps) };
 };
 
 const kinds = (parts: ContentPart[]) => parts.map((p) => `${p.kind}:${(p as { avatarId?: string }).avatarId?.[0] ?? ''}`);
+const sendAvatar = (w: ReturnType<typeof world>, peer: string, c: string) => w.deps.send(peer, [{ kind: 'avatar', avatarId: id(c), photo: photo(1) }]);
 
 describe('rule 1: a change goes to every dialog the account has', () => {
 	it('sends the change alone where the dialog already carries the gallery', async () => {
 		const w = world({ gallery: [entry('b'), entry('a')], contacts: ['P1', 'P2'], sentTo: ['P1', 'P2'] });
-		w.markers.add('P1');
-		w.markers.add('P2');
+		await sendAvatar(w, 'P1', 'a');
+		await sendAvatar(w, 'P2', 'a');
+		w.sends.length = 0;
 		const result = await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('b'), photo: photo(1) });
 		expect(result).toEqual({ sent: ['P1', 'P2'], failed: [] });
 		expect(w.sends.map((s) => kinds(s.parts))).toEqual([['avatar:b'], ['avatar:b']]);
@@ -61,29 +67,54 @@ describe('rule 1: a change goes to every dialog the account has', () => {
 		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('c'), photo: photo(1) });
 		expect(kinds(w.sends[0].parts)).toEqual(['avatar:a', 'avatar:b', 'avatar:c']);
 		expect(w.readerGallery('P1')).toEqual(['c', 'b', 'a']);
-		expect(w.markers.has('P1')).toBe(true);
 	});
 
-	it('skips contacts never written to and people who are not contacts', async () => {
+	it('skips contacts never written to, and does not read their dialogs again for the next change', async () => {
 		const w = world({ gallery: [entry('a')], contacts: ['P1', 'P2'], sentTo: ['P1', 'STRANGER'] });
 		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
 		expect(w.sends.map((s) => s.peer)).toEqual(['P1']);
+		w.state.probes.length = 0;
+		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
+		expect(w.state.probes).toEqual(['P1']);
+		w.state.clock += NO_KEY_TTL_MS + 1;
+		w.state.probes.length = 0;
+		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
+		expect(w.state.probes.sort()).toEqual(['P1', 'P2']);
 	});
 
-	it('a removal reaches a dialog read as carrying the gallery as the removal', async () => {
+	it('a contact the account then writes to is probed again at once', async () => {
+		const w = world({ gallery: [entry('a')], contacts: ['P2'] });
+		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
+		expect(await w.delivery.onOwnSend('P2', [{ kind: 'text', text: 'hi' }])).toBe('sent');
+		w.state.probes.length = 0;
+		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
+		expect(w.state.probes).toEqual(['P2']);
+	});
+
+	it('probes at most a few dialogs at once', async () => {
+		const contacts = Array.from({ length: 12 }, (_, i) => `P${i}`);
+		const w = world({ gallery: [entry('a')], contacts, sentTo: contacts });
+		const result = await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
+		expect(result.sent).toHaveLength(12);
+		expect(w.state.maxInProbe).toBeGreaterThan(1);
+		expect(w.state.maxInProbe).toBeLessThanOrEqual(PROBE_CONCURRENCY);
+	});
+
+	it('a removal reaches a dialog carrying the gallery as the removal alone', async () => {
 		const w = world({ gallery: [entry('a')], contacts: ['P1'], sentTo: ['P1'] });
-		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('b'), photo: photo(2) });
-		w.state.gallery = [entry('a')];
+		await sendAvatar(w, 'P1', 'a');
+		await sendAvatar(w, 'P1', 'b');
 		w.sends.length = 0;
 		await w.delivery.deliverChange({ kind: 'avatar_removed', avatarId: id('b') });
 		expect(kinds(w.sends[0].parts)).toEqual(['avatar_removed:b']);
 		expect(w.readerGallery('P1')).toEqual(['a']);
 	});
 
-	it('an unreadable dialog gets the gallery with the removal after it, which leaves it right either way', () => {
-		expect(kinds(changeMessage({ kind: 'avatar_removed', avatarId: id('b') }, [entry('a')], null)))
-			.toEqual(['avatar:a', 'avatar_removed:b']);
-		expect(changeMessage({ kind: 'avatar_removed', avatarId: id('b') }, [], false)).toEqual([{ kind: 'avatar_removed', avatarId: id('b') }]);
+	it('an unreadable dialog gets the gallery with the removal after it; one known to carry nothing, the gallery alone', () => {
+		const removal = { kind: 'avatar_removed' as const, avatarId: id('b') };
+		expect(kinds(changeMessage(removal, [entry('a')], null))).toEqual(['avatar:a', 'avatar_removed:b']);
+		expect(kinds(changeMessage(removal, [entry('a')], false))).toEqual(['avatar:a']);
+		expect(changeMessage(removal, [], false)).toEqual([]);
 	});
 
 	it('one dialog refusing does not stop the others, and is reported', async () => {
@@ -108,22 +139,26 @@ describe('rule 2: the first message in a dialog brings the gallery', () => {
 		expect(w.readerGallery('P1')).toEqual(['b', 'a']);
 	});
 
-	it('two messages sent at once still bring one snapshot', async () => {
+	it('two messages sent at once still bring one snapshot: the second probe sees the first send', async () => {
 		const w = world({ gallery: [entry('a')], contacts: ['P1'] });
 		const outcomes = await Promise.all([w.delivery.onOwnSend('P1', text), w.delivery.onOwnSend('P1', text)]);
 		expect(outcomes.sort()).toEqual(['present', 'sent']);
 		expect(w.sends).toHaveLength(1);
 	});
 
-	it('does nothing where the dialog already carries an avatar part from this account, and remembers it', async () => {
+	it('with no photo, sends nothing and does not read the dialog at all', async () => {
+		const w = world({ gallery: [], contacts: ['P1'] });
+		expect(await w.delivery.onOwnSend('P1', text)).toBe('empty');
+		expect(w.state.probes).toEqual([]);
+		expect(w.sends).toHaveLength(0);
+	});
+
+	it('does nothing where the dialog already carries an avatar part from this account', async () => {
 		const w = world({ gallery: [entry('a')], contacts: ['P1'], sentTo: ['P1'] });
-		await w.deps.send('P1', [{ kind: 'avatar', avatarId: id('a'), photo: photo(1) }]);
+		await sendAvatar(w, 'P1', 'a');
 		w.sends.length = 0;
 		expect(await w.delivery.onOwnSend('P1', text)).toBe('present');
 		expect(w.sends).toHaveLength(0);
-		const reads = w.state.reads;
-		expect(await w.delivery.onOwnSend('P1', text)).toBe('present');
-		expect(w.state.reads).toBe(reads);
 	});
 
 	it('its own avatar messages never trigger it: no loop', async () => {
@@ -136,20 +171,13 @@ describe('rule 2: the first message in a dialog brings the gallery', () => {
 	it('sends nothing to someone who is not a contact', async () => {
 		const w = world({ gallery: [entry('a')], contacts: [] });
 		expect(await w.delivery.onOwnSend('STRANGER', text)).toBe('skipped');
-		expect(w.sends).toHaveLength(0);
-	});
-
-	it('an empty gallery sends nothing and leaves the dialog for later', async () => {
-		const w = world({ gallery: [], contacts: ['P1'] });
-		expect(await w.delivery.onOwnSend('P1', text)).toBe('empty');
-		expect(w.markers.has('P1')).toBe(false);
+		expect(w.state.probes).toEqual([]);
 	});
 
 	it('a dialog it could not read is tried again at the next message, not guessed', async () => {
 		const w = world({ gallery: [entry('a')], contacts: ['P1'], unreadable: ['P1'] });
 		expect(await w.delivery.onOwnSend('P1', text)).toBe('unknown');
 		expect(w.sends).toHaveLength(0);
-		expect(w.markers.has('P1')).toBe(false);
 	});
 
 	// Whichever runs first sends the gallery; the other then finds the dialog

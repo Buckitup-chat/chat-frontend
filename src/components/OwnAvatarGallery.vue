@@ -6,7 +6,7 @@
 	<div class="_avatar">
 		<div class="_wrap">
 			<div class="_img_wrap" :class="{ _pointer: gallery.length }" :role="gallery.length ? 'button' : undefined"
-				@click="openViewer(0)">
+				@click="viewer.open()">
 				<img v-if="currentSrc" :src="currentSrc" alt="Profile photo" />
 				<Avatar v-else :name="userHash || 'User'" variant="bauhaus" />
 			</div>
@@ -18,12 +18,12 @@
 			<input class="_hidden" ref="photoInput" type="file" :accept="ALLOWED_IMAGE_TYPES.join(',')" @change="pickPhoto" />
 		</div>
 	</div>
-	<div v-if="gallery.length > 1" class="_photo_count text-center small mt-1" role="button" @click="openViewer(0)">
+	<div v-if="gallery.length > 1" class="_photo_count text-center small mt-1" role="button" @click="viewer.open()">
 		{{ gallery.length }} photos
 	</div>
 
 	<GalleryViewer v-if="viewerIndex !== null && frames.length" :frames="frames" :index="viewerIndex" count-join="of"
-		@update:index="showFrame" @close="viewerIndex = null">
+		@update:index="viewer.show" @close="viewer.close">
 		<template #actions="{ frame, index }">
 			<button type="button" class="btn btn-light btn-sm rounded-pill" :disabled="busy || index === 0"
 				@click="run(() => $avatars.setMain(frame.key), 'Set as main')">
@@ -38,44 +38,9 @@
 <style lang="scss" scoped>
 @import '@/scss/variables.scss';
 @import '@/scss/breakpoints.scss';
+@import '@/scss/profile-avatar';
 
-._avatar {
-	display: flex;
-	justify-content: center;
-	width: 100%;
-
-	._wrap {
-		position: relative;
-
-		._img_wrap {
-			width: 10rem;
-			height: 10rem;
-
-			@include media-breakpoint-up(sm) {
-				width: 14rem;
-				height: 14rem;
-			}
-
-			border-radius: 50%;
-			border: 5px solid $white;
-			overflow: hidden;
-
-			img,
-			svg {
-				height: 100%;
-				width: 100%;
-				object-fit: cover;
-			}
-		}
-
-		a {
-			position: absolute;
-			bottom: 1rem;
-			right: 5rem;
-			transform: translateX(4rem);
-		}
-	}
-}
+@include profile-avatar;
 
 ._photo_count {
 	color: $grey_dark;
@@ -83,17 +48,15 @@
 </style>
 
 <script setup>
-import { ref, computed, inject, watch } from 'vue';
+import { ref, computed, inject } from 'vue';
 import Avatar from 'vue-boring-avatars';
 import GalleryViewer from '@/components/GalleryViewer.vue';
 import { useAvatarsStore } from '@/store/avatars.store';
 import { userPQStore } from '@/store/userPQ.store';
-import { AVATAR_MAX_SIDE } from '@/lib/avatars/gallery';
-import { thumbDataUrl } from '@/lib/avatars/display';
+import { useGalleryViewer } from '@/composables/useGalleryViewer';
+import { ALLOWED_IMAGE_TYPES, AVATAR_MAX_SIDE } from '@/lib/avatars/gallery';
 import { resizeImageUrl } from '@/utils/imageResize';
 import errorMessage from '@/utils/errorMessage';
-
-const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 const $swal = inject('$swal');
 const $avatars = useAvatarsStore();
@@ -102,7 +65,8 @@ const $userPQ = userPQStore();
 const userHash = computed(() => $userPQ.currentUserHash);
 const gallery = computed(() => $avatars.ownGallery);
 const busy = ref(false);
-const viewerIndex = ref(null);
+const viewer = useGalleryViewer(gallery, userHash);
+const { index: viewerIndex, frames } = viewer;
 
 // The circle draws the decrypted current photo, or until it arrives the
 // copy this device keeps for the menu.
@@ -111,35 +75,8 @@ const currentSrc = computed(() => {
 	return (current && $avatars.photoUrl(current.photo, userHash.value)) || $userPQ.currentUser?.avatar || '';
 });
 
-const load = (entry) => {
-	if (entry) $avatars.loadPhoto(entry.photo, userHash.value).catch((e) => console.warn('[profile] photo not loaded:', e?.message ?? e));
-};
-
 // Another device may have changed the gallery since this one read it.
 $avatars.loadOwn({ fresh: true }).catch((e) => console.warn('[profile] gallery not loaded:', e?.message ?? e));
-watch(() => gallery.value[0], load, { immediate: true });
-
-const frames = computed(() => gallery.value.map(({ avatarId, photo }) => ({
-	key: avatarId,
-	src: $avatars.photoUrl(photo, userHash.value),
-	placeholder: thumbDataUrl(photo),
-	alt: 'Profile photo',
-})));
-
-const showFrame = (index) => {
-	viewerIndex.value = index;
-	load(gallery.value[index]);
-};
-const openViewer = (index) => {
-	if (gallery.value.length) showFrame(index);
-};
-
-// The viewer follows the gallery: a removed last frame steps back, an empty gallery closes it.
-watch(() => gallery.value.length, (length) => {
-	if (viewerIndex.value === null) return;
-	if (!length) viewerIndex.value = null;
-	else if (viewerIndex.value >= length) showFrame(length - 1);
-});
 
 /** Runs a gallery change and says what came of it: stored for sending, or why not. */
 const run = async (change, title) => {

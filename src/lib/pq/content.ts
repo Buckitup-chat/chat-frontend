@@ -390,6 +390,10 @@ const AVATAR_LABELS = {
 	avatar_removed: '🖼 profile photo removed',
 } as const;
 
+type AvatarMessagePart = Extract<ContentPart, { kind: keyof typeof AVATAR_LABELS }>;
+/** A part that changes the sender's photo gallery: `avatar` or `avatar_removed`. */
+export const isAvatarPart = (part: ContentPart): part is AvatarMessagePart => Object.hasOwn(AVATAR_LABELS, part.kind);
+
 /** What a quote copies as it is; every other part is named by a label. */
 const COPIED_IN_QUOTES = new Set<ContentPart['kind']>(['text', 'quote', 'file', 'image', 'video', 'checkpoint']);
 
@@ -405,7 +409,7 @@ const quotable = (part: ContentPart): ContentPart => {
 	if (isRecoveryPart(part)) return { kind: 'text', text: RECOVERY_LABELS[part.kind] };
 	// A photo is named, not copied: an inline one would repeat its bytes, and
 	// an avatar part inside a reply is not the replier's photo.
-	if (part.kind === 'avatar' || part.kind === 'avatar_removed') return { kind: 'text', text: AVATAR_LABELS[part.kind] };
+	if (isAvatarPart(part)) return { kind: 'text', text: AVATAR_LABELS[part.kind] };
 	if (part.kind === 'inline_image') return { kind: 'text', text: `🖼 ${part.name}` };
 	return { kind: 'text', text: part.kind === 'unknown' ? `[${part.type}]` : `[${part.kind}]` };
 };
@@ -722,7 +726,7 @@ export const contentToText = (parts: ContentPart[]): string =>
 			if (p.kind === 'file' || p.kind === 'image' || p.kind === 'video') return '';
 			if (p.kind === 'checkpoint') return ''; // renders as its own marker
 			if (isRecoveryPart(p)) return RECOVERY_LABELS[p.kind];
-			if (p.kind === 'avatar' || p.kind === 'avatar_removed') return AVATAR_LABELS[p.kind];
+			if (isAvatarPart(p)) return AVATAR_LABELS[p.kind];
 			// No bubble draws an inline picture yet, so it is named rather than left blank.
 			if (p.kind === 'inline_image') return `🖼 ${p.name}`;
 			return `[${p.type}]`;

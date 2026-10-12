@@ -38,9 +38,17 @@ describe('profile-photo messages render as a service line', () => {
 		expect(render([message([avatar('a'), avatar('b'), avatar('c')])]).find('.msg-avatar-line').text()).toBe('Ирина shared 3 profile photos');
 	});
 
-	it('shows the decrypted photo when the page has it, the newest one of the message', () => {
-		const w = render([message([avatar('a'), avatar('b')])], { avatarUrls: { [id('b')]: 'blob:b', [id('a')]: 'blob:a' } });
-		expect(w.find('.msg-avatar-thumb').attributes('src')).toBe('blob:b');
+	it('shows the decrypted photo when the page has it, the newest one of the message, as its sender\'s', () => {
+		const asked = [];
+		const avatarSrc = (photo, sender) => { asked.push(sender); return `blob:${photo.name}`; };
+		const w = render([message([avatar('a'), { ...avatar('b'), photo: { ...photo, name: 'b.jpg' } }])], { avatarSrc });
+		expect(w.find('.msg-avatar-thumb').attributes('src')).toBe('blob:b.jpg');
+		expect(new Set(asked)).toEqual(new Set([PEER]));
+	});
+
+	it('draws nothing where neither the photo nor a blur is there yet', () => {
+		const w = render([message([avatar('a')])]);
+		expect(w.find('.msg-avatar-thumb').exists()).toBe(false);
 	});
 
 	it('a tap opens the sender\'s gallery at that photo', async () => {

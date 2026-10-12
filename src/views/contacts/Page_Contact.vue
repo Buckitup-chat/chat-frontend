@@ -11,7 +11,7 @@
 		</template>
 		<template #content>
 			<div class="_full_width_block">
-				<Account_Info :account-in="contact" :avatar-editable="false" @update="updateContact" />
+				<Account_Info :account-in="contact" :avatar-editable="false" :avatar-url="contactAvatar" @update="updateContact" />
 
 				<div class="text-danger text-center fw-bold mt-2" v-if="contact.hidden">Contact is hidden in your list of contacts</div>
 
@@ -80,8 +80,10 @@ import { userPQStore } from '@/store/userPQ.store';
 import { onMounted, inject, computed } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
+import { useAvatarsStore } from '@/store/avatars.store';
 
 const $userPQ = userPQStore();
+const $avatars = useAvatarsStore();
 const $swal = inject('$swal');
 const $route = inject('$route');
 const $router = inject('$router');
@@ -105,6 +107,8 @@ const contact = computed(() => {
 	}
 	return c;
 });
+
+const contactAvatar = computed(() => $avatars.contactAvatarSrc(contact.value?.avatar, contact.value?.user_hash));
 
 const isContact = computed(() => {
 	return !!$userPQ.contacts.find((e) => e.user_hash === $route.params.address);
