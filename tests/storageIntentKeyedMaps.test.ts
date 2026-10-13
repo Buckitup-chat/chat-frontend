@@ -36,4 +36,23 @@ describe('mergeJsonPatch: keyed maps', () => {
 			holdings: { g: { n: 5 }, h: { n: 4 } },
 		});
 	});
+
+	it('keeps a sticky entry against a live one or a deletion, and lets a sticky one replace it', () => {
+		const rule = { $sticky: { holdings: { state: ['given_back', 'dropped'] } } };
+		const base = { holdings: { k: { state: 'given_back', shareB64: '' }, j: { state: 'stored', shareB64: 'AA' } } };
+		// A stale device writes the share back as pending: the tombstone stands; a live entry is still replaced.
+		expect(land(base, { $keyed: ['holdings'], ...rule, holdings: { k: { state: 'pending', shareB64: 'AA' }, j: { state: 'dropped', shareB64: '' } } })).toEqual({
+			holdings: { k: { state: 'given_back', shareB64: '' }, j: { state: 'dropped', shareB64: '' } },
+		});
+		expect(land(base, { $keyed: ['holdings'], ...rule, holdings: { k: null } }).holdings).toHaveProperty('k');
+		expect(land(base, { $keyed: ['holdings'], ...rule, holdings: { k: { state: 'given_back', shareB64: '', reported: 'given_back' } } }).holdings).toMatchObject({ k: { reported: 'given_back' } });
+		// Without the rule, the last writer wins.
+		expect(land(base, { $keyed: ['holdings'], holdings: { k: { state: 'pending' } } }).holdings).toMatchObject({ k: { state: 'pending' } });
+	});
+
+	it('applies the rule inside coalesced pending patches too', () => {
+		const rule = { $sticky: { answers: { answer: ['decline'] } } };
+		const pending = mergeJsonPatch({ $keyed: ['answers'], ...rule, answers: { i: { answer: 'decline' } } }, { $keyed: ['answers'], ...rule, answers: { i: { answer: 'accept' } } });
+		expect(land(null, pending)).toEqual({ answers: { i: { answer: 'decline' } } });
+	});
 });

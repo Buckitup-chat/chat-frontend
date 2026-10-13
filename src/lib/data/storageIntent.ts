@@ -34,9 +34,31 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 // patch does not name stay as they are. The directive and the deletions
 // survive coalescing with a pending patch and are stripped by the
 // materializer (stripPatchDirectives).
+//
+// `$sticky` guards a keyed map against a writer that has not seen a final
+// entry: `{ $sticky: { holdings: { state: ['dropped', 'given_back'] } } }`
+// says an entry whose stored `state` is one of those values is replaced only
+// by another such entry — never by a live one, nor deleted. A guardian's
+// tombstone thus survives a stale device writing the share back, and an
+// answer's decline survives a stale acceptance.
 export const KEYED = '$keyed';
+export const STICKY = '$sticky';
+type StickyRules = Record<string, Record<string, unknown[]>>;
 const keyedMapsOf = (record: Record<string, unknown> | null | undefined): string[] =>
 	Array.isArray(record?.[KEYED]) ? (record[KEYED] as unknown[]).filter((k): k is string => typeof k === 'string') : [];
+const stickyOf = (record: Record<string, unknown> | null | undefined): StickyRules => (isRecord(record?.[STICKY]) ? (record[STICKY] as StickyRules) : {});
+/** Whether `entry` is final under `rule` ({ field: values }). */
+const isSticky = (rule: Record<string, unknown[]> | undefined, entry: unknown): boolean =>
+	!!rule && isRecord(entry) && Object.entries(rule).some(([field, values]) => Array.isArray(values) && values.includes(entry[field]));
+
+function mergeKeyedMap(base: unknown, patch: Record<string, unknown>, rule: Record<string, unknown[]> | undefined): Record<string, unknown> {
+	const merged: Record<string, unknown> = { ...(isRecord(base) ? base : {}) };
+	for (const [id, entry] of Object.entries(patch)) {
+		if (isSticky(rule, merged[id]) && !isSticky(rule, entry)) continue;
+		merged[id] = entry;
+	}
+	return merged;
+}
 
 export function mergeJsonPatch(
 	base: Record<string, unknown> | null,
@@ -51,11 +73,13 @@ export function mergeJsonPatch(
 	}
 	if (base?.contacts || patch.contacts) merged.contacts = mergeContacts(base?.contacts, patch.contacts);
 	const keyed = keyedMapsOf(patch);
+	const sticky = { ...stickyOf(base), ...stickyOf(patch) };
 	for (const key of keyed) {
-		if (isRecord(patch[key])) merged[key] = { ...(isRecord(base?.[key]) ? base[key] : {}), ...patch[key] };
+		if (isRecord(patch[key])) merged[key] = mergeKeyedMap(base?.[key], patch[key], sticky[key]);
 	}
 	const directive = [...new Set([...keyedMapsOf(base), ...keyed])];
 	if (directive.length) merged[KEYED] = directive;
+	if (Object.keys(sticky).length) merged[STICKY] = sticky;
 	return merged;
 }
 
@@ -110,6 +134,7 @@ export function stripPatchDirectives(record: Record<string, unknown>): Record<st
 	const stored = { ...record };
 	delete stored.retiredVaults;
 	delete stored[KEYED];
+	delete stored[STICKY];
 	for (const key of keyedMapsOf(record)) {
 		if (isRecord(stored[key])) stored[key] = Object.fromEntries(Object.entries(stored[key]).filter(([, v]) => v !== null));
 	}
