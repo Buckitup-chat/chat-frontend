@@ -10,10 +10,13 @@
 // endpoint the backend does not have yet — is "no relay": the handshake goes
 // on with the phone's own addresses, which is all a shared network needs.
 //
-// Credentials live in memory only, per account, and are asked for again when
-// less than 150 s remain: a session (90 s, then 15 s for the channel and 10 s
-// for the confirmation) must not outlive its credential, or the relay refuses
-// it mid-session. A failure is remembered too, for a minute or the server's
+// Credentials live in memory only, per account. They are renewed in the
+// background once less than 150 s remain (half the lifetime, for a credential
+// that lives less than 300 s), and a session takes one only while it lasts the
+// session: 90 s, then 15 s for the channel and 10 s for the confirmation, with
+// a margin. A credential the session would outlive is refused by the relay
+// mid-session; until a fresh one arrives the old one is still used rather
+// than none, as long as it is valid. A failure is remembered too, for a minute or the server's
 // Retry-After: opening the view and starting the scanner do not each pay for a
 // challenge, an ML-DSA signature and a POST that will fail the same way.
 /* global RTCIceServer -- a DOM type */
@@ -39,6 +42,8 @@ export interface RelayRefusal {
 export type RelaySource = (account: string) => Promise<RelayCredentials | RelayRefusal>;
 
 export const RENEW_BEFORE_MS = 150_000;
+/** What a session needs of its credential: 90 s + 15 s + 10 s, and a margin. */
+export const SESSION_LIFETIME_MS = 125_000;
 export const SESSION_WAIT_MS = 1_000;
 export const FAILURE_RETRY_MS = 60_000;
 const FETCH_TIMEOUT_MS = 10_000;
@@ -98,12 +103,23 @@ const devRelay = (): RelaySource | null => {
 };
 
 let source: RelaySource = devRelay() ?? fromEndpoint;
-let cached: { account: string; credentials: RelayCredentials } | null = null;
+let cached: { account: string; credentials: RelayCredentials; renewAt: number } | null = null;
 let inflight: { account: string; promise: Promise<RelayCredentials | null> } | null = null;
 let failed: { account: string; until: number } | null = null;
 
-const usable = (account: string, now = Date.now()): RelayCredentials | null =>
-	cached && cached.account === account && cached.credentials.expiresAt - now >= RENEW_BEFORE_MS ? cached.credentials : null;
+/** This account's credential while it is valid at all. */
+const valid = (account: string, now = Date.now()): RelayCredentials | null =>
+	cached && cached.account === account && now < cached.credentials.expiresAt ? cached.credentials : null;
+
+/** It lasts a whole session from now. */
+const lastsSession = (c: RelayCredentials, now = Date.now()): boolean => c.expiresAt - now >= SESSION_LIFETIME_MS;
+
+/** Time to ask for the next: less than 150 s left, or half a short credential's lifetime. */
+const renewalDue = (account: string, now = Date.now()): boolean =>
+	!valid(account, now) || now >= cached!.renewAt;
+
+const renewAtOf = (c: RelayCredentials, now: number): number =>
+	c.expiresAt - Math.min(RENEW_BEFORE_MS, (c.expiresAt - now) / 2);
 
 /** A request for this account failed a moment ago: asking again now would fail the same way. */
 const backingOff = (account: string, now = Date.now()): boolean => failed?.account === account && now < failed.until;
@@ -119,7 +135,7 @@ const request = (account: string): Promise<RelayCredentials | null> => {
 			if (inflight?.promise !== promise) return null; // cleared meanwhile: logout, account switch
 			inflight = null;
 			if ('iceServers' in answer) {
-				cached = { account, credentials: answer };
+				cached = { account, credentials: answer, renewAt: renewAtOf(answer, Date.now()) };
 				failed = null;
 				return answer;
 			}
@@ -139,10 +155,10 @@ const currentAccount = async (): Promise<string | null> => {
 	}
 };
 
-/** Starts a request unless a usable credential is cached or one is on its way. Never throws. */
+/** Starts a request when renewal is due and no failure is being waited out. Never throws. */
 export const prefetchRelay = async (): Promise<void> => {
 	const account = await currentAccount();
-	if (account && !usable(account) && !backingOff(account)) void request(account);
+	if (account && renewalDue(account) && !backingOff(account)) void request(account);
 };
 
 /**
@@ -153,9 +169,14 @@ export const relayIceServers = async (waitMs = SESSION_WAIT_MS): Promise<RTCIceS
 	const deadline = Date.now() + waitMs;
 	const account = await Promise.race([currentAccount(), timeout(waitMs, null)]);
 	if (!account) return [];
-	if (usable(account) || backingOff(account)) return usable(account)?.iceServers ?? [];
-	await Promise.race([request(account), timeout(Math.max(0, deadline - Date.now()), null)]);
-	return usable(account)?.iceServers ?? [];
+	if (renewalDue(account) && !backingOff(account)) {
+		const renewal = request(account); // in the background, unless what is held will not last
+		const held = valid(account);
+		if (!held || !lastsSession(held)) await Promise.race([renewal, timeout(Math.max(0, deadline - Date.now()), null)]);
+	}
+	// The freshest valid credential held: one that is short of the session's
+	// lifetime still beats none, which would leave phones on two networks apart.
+	return valid(account)?.iceServers ?? [];
 };
 
 const timeout = <T>(ms: number, value: T): Promise<T> => new Promise((resolve) => setTimeout(() => resolve(value), ms));

@@ -8,7 +8,7 @@ const em = { isAuth: true, currentUserHash: 'u_' + 'a'.repeat(128) as string | n
 vi.mock('@/libs/EncryptionManagerPQ', () => ({ EncryptionManagerPQ: { getInstance: () => em } }));
 
 const {
-	_setRelaySourceForTests, clearRelayCredentials, credentialsOf, prefetchRelay, relayIceServers, RENEW_BEFORE_MS, FAILURE_RETRY_MS,
+	_setRelaySourceForTests, clearRelayCredentials, credentialsOf, prefetchRelay, relayIceServers, RENEW_BEFORE_MS, FAILURE_RETRY_MS, SESSION_LIFETIME_MS,
 } = await import('@/lib/data/turnCredentials');
 type Answer = Awaited<ReturnType<Parameters<typeof _setRelaySourceForTests>[0] & {}>>;
 
@@ -41,12 +41,42 @@ describe('relay credentials', () => {
 		expect(calls).toHaveLength(1);
 	});
 
-	it('are asked for again when less than 150 s remain', async () => {
-		answer = async () => ({ iceServers: relay('short'), expiresAt: Date.now() + RENEW_BEFORE_MS - 1_000 });
+	it('are renewed in the background once less than 150 s remain; a session meanwhile takes the old one, which still lasts it', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
 		await prefetchRelay();
 		await vi.waitFor(() => expect(calls).toHaveLength(1));
-		answer = async () => ({ iceServers: relay('fresh'), expiresAt: Date.now() + 600_000 });
-		expect(await relayIceServers()).toEqual(relay('fresh'));
+		vi.setSystemTime(Date.now() + 600_000 - RENEW_BEFORE_MS + 10_000); // 140 s left: enough for a session
+		let deliver: (v: Answer) => void = () => {};
+		answer = () => new Promise((resolve) => { deliver = resolve; });
+		const started = Date.now();
+		expect(await relayIceServers()).toEqual(relay('one'));
+		expect(Date.now() - started).toBeLessThan(100); // not waited for
+		expect(calls).toHaveLength(2);
+		deliver({ iceServers: relay('fresh'), expiresAt: Date.now() + 600_000 });
+		await vi.waitFor(async () => expect(await relayIceServers()).toEqual(relay('fresh')));
+		expect(calls).toHaveLength(2);
+	});
+
+	it('never give [] while a valid credential is held: one short of a session is still used when no fresh one comes in 1 s', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		await prefetchRelay();
+		await vi.waitFor(() => expect(calls).toHaveLength(1));
+		vi.setSystemTime(Date.now() + 600_000 - SESSION_LIFETIME_MS + 25_000); // 100 s left: short of a session
+		answer = () => new Promise(() => {});
+		expect(await relayIceServers(50)).toEqual(relay('one'));
+		vi.setSystemTime(Date.now() + 100_000); // expired
+		expect(await relayIceServers(50)).toEqual([]);
+	});
+
+	it('a credential that lives less than 300 s is renewed at half its life, not on every session', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		answer = async () => ({ iceServers: relay('brief'), expiresAt: Date.now() + 120_000 });
+		expect(await relayIceServers()).toEqual(relay('brief'));
+		expect(await relayIceServers()).toEqual(relay('brief'));
+		await prefetchRelay();
+		expect(calls).toHaveLength(1);
+		vi.setSystemTime(Date.now() + 61_000);
+		await prefetchRelay();
 		expect(calls).toHaveLength(2);
 	});
 
