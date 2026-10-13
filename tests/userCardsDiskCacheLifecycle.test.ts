@@ -78,7 +78,10 @@ vi.mock('@lo-fi/local-data-lock', () => ({ removeLocalAccount: async () => {} })
 const freshVaultDisk = () => {
 	const vault = new Map([['sign_skey', new Uint8Array(32).fill(7)], ['crypt_skey', new Uint8Array(32).fill(8)]]);
 	return {
-		raw: new Map<string, unknown>([['pq-vaults-registry', [{ user_hash: ME, vaultId: 'vault-me', name: 'Alice', crypt_pkey: ALICE.crypt_pkey }]]]),
+		raw: new Map<string, unknown>([
+			['pq-vaults-registry', [{ user_hash: ME, vaultId: 'vault-me', name: 'Alice', crypt_pkey: ALICE.crypt_pkey }]],
+			['local-vault-vault-me', { accountID: 'account-vault-me', data: 'sealed' }],
+		]),
 		vaults: new Map([['vault-me', { id: 'vault-me', async get(k: string) { return vault.get(k); }, async set(k: string, v: Uint8Array) { vault.set(k, v); } }]]),
 	};
 };

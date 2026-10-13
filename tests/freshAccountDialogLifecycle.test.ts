@@ -52,6 +52,7 @@ vi.mock('@lo-fi/local-vault', () => ({
 			const id = `vault-${vaultDisk.vaults.size + 1}`;
 			const data = new Map<string, unknown>();
 			vaultDisk.vaults.set(id, { id, async get(k: string) { return data.get(k); }, async set(k: string, v: unknown) { data.set(k, v); }, async clear() { data.clear(); } });
+			vaultDisk.raw.set(`local-vault-${id}`, { accountID: `account-${id}`, data: 'sealed' });
 			return vaultDisk.vaults.get(id);
 		}
 		return vaultDisk.vaults.get(vaultID);

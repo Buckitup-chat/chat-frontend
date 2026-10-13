@@ -331,6 +331,13 @@ const signinPQ = async () => {
 		$mitt.emit('modal::close');
 	} catch (error) {
 		console.error('signin', error);
+		if (error?.name === 'LocalVaultMissingError') {
+			$swal.fire({
+				icon: 'error',
+				title: 'Account keys missing on this device',
+				text: 'Restore this account from a backup or another device.',
+			});
+		}
 	}
 
 	console.log('is loader next')
