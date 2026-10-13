@@ -1,5 +1,5 @@
 <template>
-	<ScreenHeader title="Create your backup" :step="3" step-label="Review" back />
+	<ScreenHeader :title="draft.reshare ? 'Renew your backup' : 'Create your backup'" :step="3" step-label="Review" back />
 
 	<div class="cb-block">
 		<div class="d-flex review-faces">
@@ -21,7 +21,7 @@
 	<div v-if="error" class="cb-error" data-test="create-error">{{ error }}</div>
 	<div class="cb-actions">
 		<button class="btn btn-dark w-100" :disabled="!!blocked || creating" data-test="create" @click="create">
-			<span v-if="creating" class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Create backup
+			<span v-if="creating" class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>{{ draft.reshare ? 'Renew backup' : 'Create backup' }}
 		</button>
 		<div v-if="blocked" class="cb-small text-center">{{ blocked }}</div>
 	</div>

@@ -40,7 +40,8 @@ const SCREENS = {
 const props = defineProps({ inputData: { type: Object, default: () => ({}) } });
 const $mitt = inject('$mitt');
 const store = useRecoveryBackupStore();
-const draft = createBackupDraft(store);
+// Opened with `reshare` — from the finale of a recovery — it makes the next version of the backup, suggesting `keep`.
+const draft = createBackupDraft(store, { reshare: !!props.inputData?.reshare, keep: Array.isArray(props.inputData?.keep) ? props.inputData.keep : null });
 
 const first = SCREENS[props.inputData?.start] ? props.inputData.start : 'guardians';
 const stack = ref([first]);

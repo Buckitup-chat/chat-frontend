@@ -180,9 +180,13 @@ export const refusedNodeStatus = (reason) =>
 
 /**
  * The backup being set up. `store` is the recovery backup store; the draft
- * reads its candidates and nodes and builds what store.start takes.
+ * reads its candidates and nodes and builds what store.start takes. With
+ * `reshare` it is the next version of the finished backup, and `keep` — the
+ * guardians to suggest, by userHash — replaces "every agreed contact" as the
+ * selection until the owner changes it: after a recovery, the backup's
+ * guardians without those whose returned piece was set aside.
  */
-export const createBackupDraft = (store) => {
+export const createBackupDraft = (store, { reshare = false, keep = null } = {}) => {
 	const state = reactive({
 		/** userHash of each guardian picked. */
 		selected: [],
@@ -209,12 +213,13 @@ export const createBackupDraft = (store) => {
 	const guardians = computed(() => store.pickable.filter((c) => state.selected.includes(c.userHash)));
 	const guardianHashes = computed(() => guardians.value.map((g) => g.userHash));
 
-	// Every agreed contact is picked until the owner changes the selection.
+	// Every agreed contact — or every one of `keep` — is picked until the owner changes the selection.
 	watch(
 		() => store.pickable.map((c) => c.userHash).join(),
 		() => {
 			const hashes = store.pickable.map((c) => c.userHash);
-			state.selected = state.touched ? state.selected.filter((h) => hashes.includes(h)) : hashes;
+			const suggested = keep ? hashes.filter((h) => keep.includes(h)) : hashes;
+			state.selected = state.touched ? state.selected.filter((h) => hashes.includes(h)) : suggested;
 		},
 		{ immediate: true },
 	);
@@ -288,10 +293,12 @@ export const createBackupDraft = (store) => {
 			nodes: [...nodes.value],
 			fee: choice === 'self' ? { kind: 'self' } : choice === 'other' ? { kind: 'relayer', url: state.fee.url.trim() } : { kind: 'relayer' },
 			alerts: { channels: [...alertChannels.value], skipped: !alertsConnected.value && state.alerts.skipped },
+			...(reshare ? { reshare: true } : {}),
 		};
 	};
 
 	return {
+		reshare,
 		state,
 		guardians,
 		guardianHashes,

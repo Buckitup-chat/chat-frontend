@@ -8,6 +8,7 @@
 	<QuarantinedWritesBanner v-if="$userPQ.currentUser" />
 	<AccessGateBanner v-if="$userPQ.currentUser" />
 	<RecoveryAlertBanner v-if="$userPQ.currentUser && !$restore.active" />
+	<RecoveryFinaleBanner v-if="$userPQ.currentUser && !$restore.active" />
 
 	<!-- Signed in as a temporary account that is recovering another: the recovery is all there is (plan § 7.5). -->
 	<div v-if="$restore.active" class="_recovering">
@@ -168,6 +169,7 @@ import QuarantinedWritesBanner from '@/components/QuarantinedWritesBanner.vue';
 import AccessGateBanner from '@/components/AccessGateBanner.vue';
 import RecoveryAlertBanner from '@/components/RecoveryAlertBanner.vue';
 import RecoverScreen from '@/components/recovery/restore/RecoverScreen.vue';
+import RecoveryFinaleBanner from '@/components/RecoveryFinaleBanner.vue';
 import { useRecoveryRestoreStore } from '@/store/recoveryRestore.store';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';

@@ -1,5 +1,5 @@
 <template>
-	<ScreenHeader title="Community backup" :step="1" step-label="Guardians" />
+	<ScreenHeader :title="draft.reshare ? 'Renew your backup' : 'Community backup'" :step="1" step-label="Guardians" />
 
 	<!-- 2.1: nobody has agreed yet -->
 	<template v-if="!store.pickable.length">
