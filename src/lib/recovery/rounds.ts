@@ -29,6 +29,9 @@ const PHASES: Partial<Record<RoundState, RoundPhase>> = {
 	[RoundState.Window]: 'window',
 };
 
+/** Whether a round is live in `state`: voting, in its timelock, or in its window. */
+export const roundIsLive = (state: RoundState): boolean => !!PHASES[state];
+
 /** The alert for `secret` in `state`, or null when no round is live (none, or expired) or the secret is revoked. */
 export const alertOf = (secretId: string, secret: SecretState | null, state: RoundState): RoundAlert | null => {
 	const phase = PHASES[state];

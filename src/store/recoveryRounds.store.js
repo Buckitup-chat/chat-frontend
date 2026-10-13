@@ -1,37 +1,46 @@
 // Recovery rounds on the owner's own backup, watched while the app is open,
 // and the veto (plan § 7.4, "Alerts in the app"). The round is read from the
-// chain on start, every few minutes and whenever the app comes back to the
-// foreground; one at any number of devices is enough for the owner to stop it.
+// chain on start, every few minutes while the app is shown and whenever it
+// comes back to the foreground; one at any number of devices is enough for
+// the owner to stop it. The backup's secret and how it pays are read from its
+// slot once and kept, and read again only when the backup changes here or
+// the chain no longer has it as a live secret.
 import { defineStore } from 'pinia';
 import { computed, ref, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
+import { BACKUP_SLOT, useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
-import { RecoveryChain } from '@/lib/recovery/chain';
+import { ChainUnavailableError, RecoveryChain } from '@/lib/recovery/chain';
 import { maybeRecoveryDeployment } from '@/lib/recovery/deployments';
-import { directGateway, relayerGateway } from '@/lib/recovery/gateway';
+import { gatewayOf } from '@/lib/recovery/gateway';
+import { ownerKeyOf } from '@/lib/recovery/evmSign';
 import { signBound } from '@/lib/recovery/typedData';
-import { acknowledged, alertOf } from '@/lib/recovery/rounds';
+import { registeredSecretOf } from '@/lib/recovery/backupRun';
+import { acknowledged, alertOf, roundIsLive } from '@/lib/recovery/rounds';
 import errorMessage from '@/utils/errorMessage';
 
-/** The community backup's record (recoveryBackup.store), read here only for the secret it registered. */
-const BACKUP_SLOT = 'recovery_backup';
 const POLL_MS = 5 * 60_000;
+/** A return to the foreground this soon after a check does not check again. */
+const VISIBLE_GAP_MS = 30_000;
 const ackKey = (owner) => `buckitup:recovery-ack:${owner}`;
+const shownNow = () => typeof document === 'undefined' || document.visibilityState === 'visible';
 
 export const useRecoveryRoundsStore = defineStore('recoveryRounds', () => {
 	const $userPQ = userPQStore();
+	const $backup = useRecoveryBackupStore();
 	const deployment = maybeRecoveryDeployment();
 	let chain = null;
 	const chainOf = () => (chain ??= new RecoveryChain(deployment));
+	const em = () => EncryptionManagerPQ.getInstance();
 
-	/** Live rounds on this account's secrets, by secret id. */
-	const alerts = ref({});
+	/** The live round on the account's backup, or null. */
+	const alert = ref(null);
 	const ack = ref({});
 	const stopping = ref(null);
 	const lastError = ref(null);
 
-	/** The rounds to show: live, and not ones the owner said are theirs. */
-	const shown = computed(() => Object.values(alerts.value).filter((a) => !acknowledged(a, ack.value)));
+	/** The round to show: live, and not one the owner said is theirs. */
+	const shown = computed(() => (alert.value && !acknowledged(alert.value, ack.value) ? alert.value : null));
 
 	const loadAck = (owner) => {
 		try {
@@ -41,61 +50,96 @@ export const useRecoveryRoundsStore = defineStore('recoveryRounds', () => {
 		}
 	};
 
-	/** The registered secret of this account's backup, and how it pays, or null. */
-	const backupOf = async () => {
-		const rec = (await EncryptionManagerPQ.getInstance().loadSlotJson(BACKUP_SLOT))?.run;
-		return rec?.secretId && ['registered', 'done'].includes(rec.step) ? { secretId: rec.secretId, fee: rec.fee } : null;
+	/** The account's registered secret and its fee ({ owner, secretId, fee }), as last read; null: read the slot at the next check. */
+	let backup = null;
+	/** Secrets the chain says are revoked: never watched again. */
+	const revoked = new Set();
+
+	const readBackup = async (owner) => {
+		if (backup?.owner === owner) return backup;
+		const found = registeredSecretOf(await em().loadSlotJson(BACKUP_SLOT));
+		if ($userPQ.currentUserHash !== owner) return null;
+		// No backup yet is not kept: one registered on another device is found at the next check.
+		backup = found && !revoked.has(found.secretId) ? { owner, ...found } : null;
+		return backup;
+	};
+
+	let lastCheckAt = 0;
+	const checkOnce = async (owner) => {
+		lastCheckAt = Date.now();
+		const b = await readBackup(owner);
+		if ($userPQ.currentUserHash !== owner) return;
+		if (!b?.secretId) {
+			alert.value = null;
+			return;
+		}
+		const c = chainOf();
+		let state;
+		try {
+			state = await c.roundState(b.secretId);
+		} catch (e) {
+			if (e instanceof ChainUnavailableError) throw e;
+			// The chain refused the question: no such secret now. Read the slot again next time.
+			backup = null;
+			alert.value = null;
+			return;
+		}
+		if ($userPQ.currentUserHash !== owner) return;
+		if (!roundIsLive(state)) {
+			alert.value = null;
+			return;
+		}
+		const secret = await c.readSecret(b.secretId);
+		if ($userPQ.currentUserHash !== owner) return;
+		if (!secret || secret.revoked) {
+			if (secret?.revoked) revoked.add(b.secretId);
+			backup = null;
+			alert.value = null;
+			return;
+		}
+		alert.value = alertOf(b.secretId, secret, state);
 	};
 
 	let checking = null;
-	/** Reads the round of the account's backup; a chain that does not answer leaves the last answer standing. */
-	const check = () => {
+	/**
+	 * Reads the round of the account's backup; a chain that does not answer
+	 * leaves the last answer standing. With `fresh`, a check already in flight
+	 * — begun before what the caller just did — is followed by a new one.
+	 */
+	const check = ({ fresh = false } = {}) => {
 		const owner = $userPQ.currentUserHash;
 		if (!owner || !deployment) return Promise.resolve();
-		checking ??= (async () => {
-			try {
-				const backup = await backupOf();
-				if ($userPQ.currentUserHash !== owner) return;
-				if (!backup) {
-					alerts.value = {};
-					return;
-				}
-				const c = chainOf();
-				const [secret, state] = await Promise.all([c.readSecret(backup.secretId), c.roundState(backup.secretId)]);
-				if ($userPQ.currentUserHash !== owner) return;
-				const alert = alertOf(backup.secretId, secret, state);
-				alerts.value = alert ? { [backup.secretId]: alert } : {};
-			} catch (e) {
-				console.warn('[recovery] round check failed:', e);
-			} finally {
-				checking = null;
-			}
-		})();
-		return checking;
+		if (checking && !fresh) return checking;
+		const run = (checking ?? Promise.resolve())
+			.then(() => checkOnce(owner))
+			.catch((e) => console.warn('[recovery] round check failed:', e))
+			.finally(() => {
+				if (checking === run) checking = null;
+			});
+		checking = run;
+		return run;
 	};
 
 	/** "This is me": hides this round's banner on this device; a later round shows again. */
-	const acknowledge = (alert) => {
+	const acknowledge = (a) => {
 		const owner = $userPQ.currentUserHash;
-		ack.value = { ...ack.value, [alert.secretId]: alert.round };
+		ack.value = { ...ack.value, [a.secretId]: a.round };
 		localStorage.setItem(ackKey(owner), JSON.stringify(ack.value));
 	};
 
 	/** The veto: cancels the live round, through the free service or from the owner's own address, as the backup pays. */
-	const stop = async (alert) => {
+	const stop = async (a) => {
 		const owner = $userPQ.currentUserHash;
-		stopping.value = alert.secretId;
+		stopping.value = a.secretId;
 		lastError.value = null;
 		try {
-			const backup = await backupOf();
-			const keys = await EncryptionManagerPQ.getInstance().exportVaultKeys();
-			const key = keys.evm_skey.startsWith('0x') ? keys.evm_skey : `0x${keys.evm_skey}`;
+			const fee = backup?.secretId === a.secretId ? backup.fee : (await readBackup(owner))?.fee;
+			const key = await ownerKeyOf(em());
 			if ($userPQ.currentUserHash !== owner) return;
 			const c = chainOf();
-			const { body } = await signBound(c, key, 'CancelRecovery', alert.secretId, {});
-			const gateway = backup?.fee?.kind === 'self' ? directGateway(c, key) : relayerGateway(backup?.fee?.url || deployment.relayerUrl);
-			await gateway.cancelRecovery(body);
-			await check();
+			const { body } = await signBound(c, key, 'CancelRecovery', a.secretId, {});
+			await gatewayOf(c, fee, key, deployment.relayerUrl).cancelRecovery(body);
+			await check({ fresh: true });
 		} catch (e) {
 			lastError.value = errorMessage(e);
 			throw e;
@@ -104,13 +148,24 @@ export const useRecoveryRoundsStore = defineStore('recoveryRounds', () => {
 		}
 	};
 
+	// The backup changed here — registered, reshared, revoked: its secret is read again.
+	watch(
+		() => [$backup.run?.secretId, $backup.run?.step, $backup.run?.revokedAt],
+		() => {
+			backup = null;
+			if (timer) check({ fresh: true });
+		},
+	);
+
 	let timer = null;
 	const onVisible = () => {
-		if (document.visibilityState === 'visible') check();
+		if (shownNow() && Date.now() - lastCheckAt >= VISIBLE_GAP_MS) check();
 	};
 	const startWatching = () => {
 		if (timer) return;
-		timer = setInterval(check, POLL_MS);
+		timer = setInterval(() => {
+			if (shownNow()) check();
+		}, POLL_MS);
 		document.addEventListener('visibilitychange', onVisible);
 		check();
 	};
@@ -123,7 +178,9 @@ export const useRecoveryRoundsStore = defineStore('recoveryRounds', () => {
 	watch(
 		() => $userPQ.currentUserHash,
 		(owner) => {
-			alerts.value = {};
+			alert.value = null;
+			backup = null;
+			revoked.clear();
 			stopWatching();
 			if (owner) {
 				loadAck(owner);
@@ -133,5 +190,5 @@ export const useRecoveryRoundsStore = defineStore('recoveryRounds', () => {
 		{ immediate: true },
 	);
 
-	return { alerts, shown, stopping, lastError, check, acknowledge, stop, stopWatching };
+	return { alert, shown, stopping, lastError, check, acknowledge, stop, stopWatching };
 });
