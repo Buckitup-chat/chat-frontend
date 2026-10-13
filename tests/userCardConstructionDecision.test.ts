@@ -356,13 +356,28 @@ describe('the signed card the optical handshake sends (freshestOwnCard)', () => 
 		storeAccepted(cardRow(100));
 		expect(await freshestOwnCard(USER)).toMatchObject({ owner_timestamp: 100, sign_b64: expect.any(String) });
 		shape.rows.set(USER, cardRow(200, { name: 'Me, renamed' }));
+		await goLive();
 		expect(await freshestOwnCard(USER)).toMatchObject({ owner_timestamp: 200, name: 'Me, renamed' });
 		shape.rows.set(USER, cardRow(300));
 		storeAccepted(cardRow(400));
 		expect(await freshestOwnCard(USER)).toMatchObject({ owner_timestamp: 400 });
 	});
 
+	it('takes the shape\'s card only while the shape is live: a stale shape proves nothing', async () => {
+		storeAccepted(cardRow(100));
+		shape.rows.set(USER, cardRow(200, { name: 'from a shape not yet live' }));
+		expect(await freshestOwnCard(USER)).toMatchObject({ owner_timestamp: 100 });
+		await goLive();
+		expect(await freshestOwnCard(USER)).toMatchObject({ owner_timestamp: 200 });
+	});
+
+	it('never sends an accepted copy that does not verify', async () => {
+		storeAccepted({ ...cardRow(100), name: 'tampered on disk' });
+		expect(await freshestOwnCard(USER)).toBeNull();
+	});
+
 	it('is never a shape card that does not verify, nor a deleted card', async () => {
+		await goLive();
 		shape.rows.set(USER, { ...cardRow(200), name: 'not re-signed' });
 		expect(await freshestOwnCard(USER)).toBeNull();
 		storeAccepted(cardRow(100, { deleted_flag: true }));
