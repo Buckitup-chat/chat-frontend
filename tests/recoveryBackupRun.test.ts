@@ -349,4 +349,36 @@ describe('a reshare', () => {
 		expect(stopped).toBeInstanceOf(RunStoppedError);
 		expect(stopped.reason).toBe('registration_pending');
 	});
+
+	const resharing = (first: BackupRun, over: Partial<BackupRun> = {}): BackupRun => ({
+		...prepareRun({ deployment: 'x', owner: OWNER, guardians: GUARDIANS.slice(0, 3).map(({ userHash, metaAddress }) => ({ userHash, metaAddress })), settings: defaultSettings(3, 5), nodes: NODES, device: 'd', now: 1, reshareOf: { secretId: first.secretId!, version: first.version! } }),
+		...over,
+	});
+
+	it('stops, sending nothing, when another change took the secret further than the next version', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const sentBefore = net.sent.length;
+		// This reshare went out; meanwhile two other changes landed.
+		net.registered.set(first.secretId!, { version: 3, fields: {} });
+		const stopped = await advance(resharing(first, { step: 'submitted', submittedAt: 1000 }), net.deps).catch((e) => e);
+		expect(stopped).toBeInstanceOf(RunStoppedError);
+		expect(stopped.reason).toBe('version_moved');
+		expect(net.sent.length).toBe(sentBefore);
+		expect(net.deposits.filter((d) => d.version === 3)).toHaveLength(0);
+		expect(net.saved.at(-1)).toMatchObject({ superseded: 3, step: 'submitted' });
+		expect(canDiscard(net.saved.at(-1)!)).toBe(true);
+	});
+
+	it('does not take a next version it never sent for its own', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const published = { ...resharing(first), step: 'published' as const, vaultUuid: 'v' };
+		// Another device's reshare landed at the next version before this one was sent.
+		net.registered.set(first.secretId!, { version: 2, fields: {} });
+		let reshared = false;
+		const stopped = await advance(published, { ...net.deps, reshare: async () => ((reshared = true), {}) }).catch((e) => e);
+		expect(stopped).toMatchObject({ reason: 'version_moved' });
+		expect(reshared).toBe(false);
+	});
 });

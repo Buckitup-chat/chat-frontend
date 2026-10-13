@@ -46,8 +46,8 @@ export const stepNumber = (run: BackupRun): number => {
 	return nodesPending(run).length ? 4 : 5;
 };
 
-/** Steps 1–2 can be discarded: nothing is on chain yet. */
-export const canDiscard = (run: BackupRun): boolean => run.step === 'prepared' || run.step === 'published';
+/** Steps 1–2 can be discarded: nothing is on chain yet; and a reshare another change overtook, which can never land. */
+export const canDiscard = (run: BackupRun): boolean => run.step === 'prepared' || run.step === 'published' || (!!run.reshareOf && run.superseded !== undefined);
 
 /** Whether `run` is still being made: neither finished nor dropped. */
 export const unfinished = (run: BackupRun | null | undefined): run is BackupRun => !!run && run.step !== 'done' && run.step !== 'discarded';
@@ -66,6 +66,34 @@ export interface BackupSlot {
 /** The run being made, if any: an unfinished reshare, else an unfinished record. */
 export const activeRun = (slot: BackupSlot | null | undefined): BackupRun | null =>
 	unfinished(slot?.reshare) ? slot!.reshare! : unfinished(slot?.run) ? slot!.run! : null;
+
+/**
+ * The backup's record once a reshare of it is done: what the reshare changed
+ * — the version, the split and its keys, the guardians and nodes, the counts
+ * and threshold, what was sent and deposited — over what it did not: the
+ * secret and its label, the waiting period and the time to finish (setPolicy
+ * alone changes those; reshareWithSig does not), the alerts, how owner
+ * actions pay, a revocation. Spares handed out belong to the old split and
+ * go with it.
+ */
+export const promoteReshare = (record: BackupRun, done: BackupRun): BackupRun => {
+	const changed: BackupRun = { ...done };
+	delete changed.reshareOf;
+	delete changed.superseded;
+	delete changed.sparesGiven;
+	return {
+		...changed,
+		label: record.label,
+		secretId: record.secretId,
+		owner: record.owner,
+		deployment: record.deployment,
+		startedAt: record.startedAt,
+		settings: { ...done.settings, delaySec: record.settings.delaySec, windowSec: record.settings.windowSec },
+		...(record.fee ? { fee: record.fee } : {}),
+		...(record.alerts ? { alerts: record.alerts } : {}),
+		...(record.revokedAt ? { revokedAt: record.revokedAt } : {}),
+	};
+};
 
 /**
  * The secret the owner's backup has on chain, and how owner actions on it
@@ -96,6 +124,8 @@ export interface ReshareOf {
 export interface BackupRun {
 	/** Set when this run reshares an existing backup (RunInput.reshareOf). */
 	reshareOf?: ReshareOf;
+	/** A reshare's: the version another change took the secret to first. Such a run stops for good; it can only be discarded. */
+	superseded?: number;
 	/** Unix seconds the owner revoked the backup for good (plan § 7.4). */
 	revokedAt?: number;
 	/** Spare pieces handed to guardians of the backup, by share index. */
@@ -273,7 +303,7 @@ export const REGISTRATION_WAIT_MS = 10 * 60_000;
 const POLL_MS = 5_000;
 
 export class RunStoppedError extends Error {
-	constructor(readonly run: BackupRun, readonly reason: 'registration_pending' | 'nodes_failed', message: string) {
+	constructor(readonly run: BackupRun, readonly reason: 'registration_pending' | 'nodes_failed' | 'version_moved', message: string) {
 		super(message);
 	}
 }
@@ -329,12 +359,23 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 
 	if (run.step === 'published' || run.step === 'submitted') {
 		const id = run.reshareOf ? run.reshareOf.secretId : deps.secretIdOf(run.owner, run.label);
-		// A reshare is on chain once the secret reaches the version after the one it replaced.
+		const of = run.reshareOf;
+		// Another change moved the secret on: nothing of this one may be sent.
+		const moved = async (v: number) => {
+			await step({ superseded: v });
+			throw new RunStoppedError(run, 'version_moved', `The backup is at version ${v} on the network: another change landed first. Discard this one and start again.`);
+		};
+		// A reshare is on chain once the secret reaches exactly the version after the one it replaced; any other is not this one.
 		const readVersion = async () => {
 			const v = await deps.readVersion(id);
-			return v !== null && run.reshareOf && v <= run.reshareOf.version ? null : v;
+			if (v === null) return null;
+			if (!of) return v;
+			if (v <= of.version) return null;
+			return v === of.version + 1 ? v : moved(v);
 		};
 		let version = await readVersion();
+		// Before this reshare was sent, a next version on chain is someone else's.
+		if (of && version !== null && run.step === 'published') await moved(version);
 		// The step and its time are saved before the registration leaves: a run
 		// that stops after the broadcast waits for it rather than sending again
 		// blindly. One not on chain after REGISTRATION_WAIT_MS is handed over

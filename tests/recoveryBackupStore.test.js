@@ -171,6 +171,48 @@ describe('one backup per account', () => {
 		expect(store.run.runId).toBe('r2');
 		expect(store.reshare).toBeNull();
 	});
+
+	const doneReshare = (over = {}) => {
+		const sent = Object.fromEntries(guardians.map((g, i) => [g.userHash, { messageId: 'm' + i, shareIndex: i + 1 }]));
+		const outcomes = Object.fromEntries(nodes.map((n) => [n.descriptor.id, { state: 'held' }]));
+		return savedRun({ runId: 'r2', label: 'bu-2', step: 'registered', secretId: SECRET, version: 4, splitId: 's2', reshareOf: { secretId: SECRET, version: 3 }, sent, nodeOutcomes: outcomes, nodeShares: [null, null, null], ...over });
+	};
+
+	it('merges a done reshare into the record as the slot holds it then: the new split, the record’s policy, alerts and fee', async () => {
+		const store = useRecoveryBackupStore();
+		const settings = { ...defaultSettings(3, 3), delaySec: 7 * 86400, windowSec: 2 * 86400 };
+		slots.recovery_backup = {
+			run: savedRun({ step: 'done', secretId: SECRET, version: 3, settings, fee: { kind: 'self' }, sparesGiven: { 4: { guardian: U('1'), messageId: 'x' } } }),
+			reshare: doneReshare({ settings: { ...defaultSettings(3, 3), spares: 1 }, fee: { kind: 'relayer' } }),
+		};
+		await store.load();
+		// Another device recorded alerts on the backup while this reshare was being made.
+		slots.recovery_backup.run = { ...slots.recovery_backup.run, alerts: { channels: ['app', 'webhook'], skipped: false } };
+		await store.resume();
+		const promoted = slots.recovery_backup.run;
+		expect(promoted).toMatchObject({ runId: 'r2', label: 'bu-1', version: 4, splitId: 's2', fee: { kind: 'self' }, alerts: { channels: ['app', 'webhook'], skipped: false } });
+		expect(promoted.settings).toMatchObject({ spares: 1, delaySec: 7 * 86400, windowSec: 2 * 86400 });
+		expect(promoted.sparesGiven).toBeUndefined();
+	});
+
+	it('never puts a reshare over a revoked record', async () => {
+		const store = useRecoveryBackupStore();
+		const revoked = savedRun({ step: 'done', secretId: SECRET, version: 3, revokedAt: 9 });
+		slots.recovery_backup = { run: revoked, reshare: doneReshare() };
+		await store.load();
+		await store.resume();
+		expect(slots.recovery_backup.run).toEqual(revoked);
+		expect(slots.recovery_backup.reshare).toMatchObject({ runId: 'r2', step: 'done' });
+	});
+
+	it('takes a reshare’s waiting period and time to finish from the record, not the setup', async () => {
+		const store = useRecoveryBackupStore();
+		const settings = { ...defaultSettings(3, 3), delaySec: 5 * 86400, windowSec: 3 * 86400 };
+		slots.recovery_backup = { run: savedRun({ step: 'done', secretId: SECRET, version: 3, settings }) };
+		// Times out of bounds in the setup: not the reshare's to set, so not refused either.
+		await store.start(input({ reshare: true, settings: { ...defaultSettings(3, 3), delaySec: 1 } }));
+		expect(slots.recovery_backup.reshare.settings).toMatchObject({ delaySec: 5 * 86400, windowSec: 3 * 86400 });
+	});
 });
 
 describe('two tabs', () => {
