@@ -127,6 +127,8 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 			if ($userPQ.currentUserHash !== owner) return;
 			clock.value = nowSec();
 			if (!running.value) show({ run: backup?.run ?? null, reshare: backup?.reshare ?? null });
+			// A revoked backup whose old copies could not all be removed: try again, in the background.
+			if (backup?.run?.revokedAt && backup.run.retirePending) retireRevoked().catch((e) => console.warn('[recovery] the revoked backup\'s old copy could not be removed:', e));
 			savedNodeUrls.value = nodes?.urls ?? [];
 			loaded.value = true;
 		})().finally(() => {
@@ -782,11 +784,40 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		);
 
 	/** Revokes the backup for good: no recovery can ever use it (pq_recovery_shares § Dying). */
+	/** Writes `changes(record)` onto the record whatever it is — a revoked one too — under the record's lock. */
+	const patchAnyRecord = (owner, changes) =>
+		withRecordLock(owner, async () => {
+			const fresh = (await readSlot(owner)).run;
+			if (!fresh) return;
+			const c = changes(fresh);
+			if (c) await writeSlot({ run: { ...fresh, ...c } });
+		});
+
+	/** Why a revoked backup still says it has an old copy to remove. */
+	const RETIRE_PENDING = 'The backup is revoked, but an old copy of it is still on the server: it could not be removed just now. The app tries again each time it opens your backup.';
+
+	/**
+	 * Removes every copy of a revoked backup's vault from the server. Revoked,
+	 * a vault opens nothing that matters on chain; removed, nothing is left to
+	 * read at all. Until it succeeds the record says `retirePending`, and it
+	 * is retried when the backup is read and from the roster.
+	 */
+	const retireRevoked = async () => {
+		const owner = $userPQ.currentUserHash;
+		try {
+			await em().retireRecoveryVaults();
+		} catch (e) {
+			throw new Error(RETIRE_PENDING, { cause: e });
+		}
+		if ($userPQ.currentUserHash !== owner) return;
+		await patchAnyRecord(owner, (r) => (r.retirePending ? { retirePending: false } : null));
+	};
+
 	const revoke = async () => {
 		const owner = $userPQ.currentUserHash;
-		await ownerAct('RevokeSecret', 'revokeSecret', () => ({}), () => ({ revokedAt: nowSec() }));
-		// Revoked, the vaults open nothing that matters on chain; retired, nothing is left to read at all.
-		if ($userPQ.currentUserHash === owner && run.value?.revokedAt) await em().retireRecoveryVaults();
+		// The record says the copies are still to go before the first one goes: a failure, or a closed tab, is retried.
+		await ownerAct('RevokeSecret', 'revokeSecret', () => ({}), () => ({ revokedAt: nowSec(), retirePending: true }));
+		if ($userPQ.currentUserHash === owner && run.value?.revokedAt) await retireRevoked();
 	};
 
 	/**
@@ -863,6 +894,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		setAlerts,
 		setPolicy,
 		revoke,
+		retireRevoked,
 		giveSpare,
 		removeSubscription,
 		history,

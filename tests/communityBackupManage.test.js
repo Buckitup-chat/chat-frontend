@@ -472,6 +472,23 @@ describe('what the nodes hold now', () => {
 describe('a revoked backup', () => {
 	beforeEach(() => setup());
 
+	it('offers to remove an old copy the revoke could not remove, and tries again when shown', async () => {
+		H.store.run.revokedAt = 1_700_000_500;
+		H.store.run.retirePending = true;
+		H.store.retireRevoked = vi.fn(async () => {
+			throw new Error('still on the server');
+		});
+		const w = render(Screen_Manage);
+		await flushPromises();
+		expect(H.store.retireRevoked).toHaveBeenCalledTimes(1);
+		expect(at(w, 'retire-error').text()).toContain('still on the server');
+		H.store.retireRevoked = vi.fn(async () => {});
+		await at(w, 'retire').trigger('click');
+		await flushPromises();
+		expect(H.store.retireRevoked).toHaveBeenCalledTimes(1);
+		expect(at(w, 'retire-error').exists()).toBe(false);
+	});
+
 	it('offers a new backup in its place', async () => {
 		H.store.run.revokedAt = 1_700_000_500;
 		draft.beginReshare(H.store.run);

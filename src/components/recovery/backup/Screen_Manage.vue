@@ -9,6 +9,11 @@
 			<span class="fw-semibold">Revoked for good</span>
 			<span class="cb-muted">This backup was revoked on {{ dateText(run.revokedAt) }}. No recovery can use it, and your guardians drop their pieces.</span>
 		</div>
+		<div v-if="run.retirePending" class="cb-warn" data-test="retire-pending">
+			<span>An old copy of this backup is still on the server. It opens nothing that counts on the network any more, but it should not stay there.</span>
+			<div><button class="btn btn-sm btn-dark" :disabled="retiring" data-test="retire" @click="retire">Remove the old copy</button></div>
+			<div v-if="retireError" class="cb-field-error" data-test="retire-error">{{ retireError }}</div>
+		</div>
 		<button class="btn btn-outline-dark w-100" data-test="create-new" @click="createNew">Create a new backup</button>
 	</template>
 
@@ -185,6 +190,21 @@ const HOLDINGS_EVERY_MS = 5 * 60_000;
 const draft = inject(DRAFT);
 const nav = inject(NAV);
 const store = useRecoveryBackupStore();
+
+// A revoked backup's old copy that could not be removed yet (store.retireRevoked).
+const retiring = ref(false);
+const retireError = ref(null);
+const retire = async () => {
+	retiring.value = true;
+	retireError.value = null;
+	try {
+		await store.retireRevoked();
+	} catch (e) {
+		retireError.value = errorMessage(e);
+	} finally {
+		retiring.value = false;
+	}
+};
 const $userPQ = userPQStore();
 
 const run = computed(() => store.run);
@@ -284,6 +304,7 @@ let left = false;
 
 onMounted(async () => {
 	if (!store.loaded) await store.load().catch((e) => console.warn('[recovery] backup could not be read:', e));
+	if (!left && store.run?.revokedAt && store.run.retirePending) retire();
 	if (left || !isLiveBackup(store.run)) return;
 	store.refreshReceipts().catch((e) => console.warn('[recovery] the guardians\' receipts could not be read:', e));
 	loadSubs();

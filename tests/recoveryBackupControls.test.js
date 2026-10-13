@@ -111,6 +111,23 @@ describe('changing a finished backup', () => {
 		await expect(store.setPolicy({ delaySec: 86400, windowSec: 86400 })).rejects.toThrow(/revoked/);
 	});
 
+	it('says so and keeps the copy to remove when the old vault could not be removed after the revoke, then removes it on the next read', async () => {
+		em.retireRecoveryVaults.mockClear();
+		em.retireRecoveryVaults.mockRejectedValueOnce(new Error('tombstone refused'));
+		const store = await loaded(done());
+		await expect(store.revoke()).rejects.toThrow(/revoked, but an old copy of it is still on the server/);
+		expect(slots.recovery_backup.run).toMatchObject({ revokedAt: expect.any(Number), retirePending: true });
+
+		setActivePinia(createPinia());
+		const again = useRecoveryBackupStore();
+		await again.load();
+		await vi.waitFor(() => expect(slots.recovery_backup.run.retirePending).toBe(false));
+		expect(em.retireRecoveryVaults).toHaveBeenCalledTimes(2);
+		// Removed: reading it again tries nothing.
+		await useRecoveryBackupStore().load();
+		expect(em.retireRecoveryVaults).toHaveBeenCalledTimes(2);
+	});
+
 	it('hands a spare piece to a guardian of the backup, once, and to nobody else', async () => {
 		const store = await loaded(done());
 		await expect(store.giveSpare(U('9'))).rejects.toThrow(/only to a guardian/);
