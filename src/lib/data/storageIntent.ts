@@ -25,6 +25,16 @@ export interface StorageIntentPayload {
 	conflictAttempts?: number;
 }
 
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+// The recovery slots keep records by id — invitations and answers (roster and
+// guardian slots), a guardian's holdings — and another device or tab adds its
+// own between our read and our write. A patch edits such a map by key: an
+// entry replaces the one under its key whole, null deletes it, and the keys a
+// patch does not name stay as they are. The deletions survive coalescing with
+// a pending patch and are stripped by the materializer.
+const KEYED_MAPS = ['invites', 'answers', 'holdings'] as const;
+
 export function mergeJsonPatch(
 	base: Record<string, unknown> | null,
 	patch: Record<string, unknown>
@@ -37,6 +47,9 @@ export function mergeJsonPatch(
 		mergeVaultList(merged, base, patch);
 	}
 	if (base?.contacts || patch.contacts) merged.contacts = mergeContacts(base?.contacts, patch.contacts);
+	for (const key of KEYED_MAPS) {
+		if (isRecord(patch[key])) merged[key] = { ...(isRecord(base?.[key]) ? base[key] : {}), ...patch[key] };
+	}
 	return merged;
 }
 
@@ -89,6 +102,9 @@ function mergeVaultList(merged: Record<string, unknown>, base: Record<string, un
 /** Keys of a patch that steer the merge and are not part of the stored record. */
 export function stripPatchDirectives(record: Record<string, unknown>): Record<string, unknown> {
 	const { retiredVaults: _retired, ...stored } = record;
+	for (const key of KEYED_MAPS) {
+		if (isRecord(stored[key])) stored[key] = Object.fromEntries(Object.entries(stored[key]).filter(([, v]) => v !== null));
+	}
 	if (stored.contacts) {
 		stored.contacts = Object.fromEntries(
 			Object.entries(stored.contacts as ContactEdits)

@@ -295,6 +295,18 @@ describe('named JSON slots', () => {
 		expect(await em.loadSlotJson('holdings')).toEqual({ a: 1, b: 2 });
 	});
 
+	it('edits a keyed map by key, so a later patch keeps the entries an earlier one added', async () => {
+		const em = await login();
+		await em.patchSlotJson('guardian', { answers: { i1: { answer: 'accept' } } });
+		await em.patchSlotJson('guardian', { holdings: { h1: { state: 'pending' } } });
+		await em.patchSlotJson('guardian', { answers: { i2: { answer: 'decline' } }, holdings: { h2: { state: 'stored' } } });
+		await em.patchSlotJson('guardian', { holdings: { h1: null } });
+		expect(await em.loadSlotJson('guardian')).toEqual({
+			answers: { i1: { answer: 'accept' }, i2: { answer: 'decline' } },
+			holdings: { h2: { state: 'stored' } },
+		});
+	});
+
 	it('refuses to update a slot it cannot read rather than overwrite it', async () => {
 		const em = await login();
 		const before = new Set(rows.keys());
