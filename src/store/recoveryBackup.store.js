@@ -1,7 +1,8 @@
-// The account's community backup (plan § 7.2): who can be a guardian, the
-// nodes it knows, the fee, the alert channels, and the run that creates the
-// backup — kept in one user_storage slot, so another device shows the same
-// progress and never starts a second one.
+// The account's community backup (plan § 7.2, § 7.4): who can be a guardian,
+// the nodes it knows, the fee, the alert channels, the run that creates the
+// backup and the reshare that makes its next version — kept in one
+// user_storage slot (backupRun.BackupSlot), so another device shows the same
+// progress and never starts a second one — and the owner's controls over it.
 import { defineStore } from 'pinia';
 import { computed, ref, watch } from 'vue';
 import { formatEther } from 'ethers';
@@ -15,12 +16,13 @@ import { fromBase64 } from '@/lib/pq/signature';
 import { publishVault } from '@/lib/recovery/vault';
 import { RecoveryChain } from '@/lib/recovery/chain';
 import { maybeRecoveryDeployment, deploymentNamespace, secretIdOf, secretRefOf } from '@/lib/recovery/deployments';
-import { directGateway, relayerGateway } from '@/lib/recovery/gateway';
+import { gatewayOf } from '@/lib/recovery/gateway';
+import { ownerKeyOf } from '@/lib/recovery/evmSign';
 import { signAddSecret, signBound } from '@/lib/recovery/typedData';
 import { depositShare } from '@/lib/recovery/nodeClient';
 import { liveInviteId } from '@/lib/recovery/inviteThread';
 import { knownNodes, checkNode, syncedServerNode } from '@/lib/recovery/nodeDirectory';
-import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedError, advance, prepareRun, skipPendingNodes, canDiscard, sharePartOf } from '@/lib/recovery/backupRun';
+import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedError, advance, prepareRun, skipPendingNodes, canDiscard, sharePartOf, activeRun, unfinished } from '@/lib/recovery/backupRun';
 import { settingsProblems } from '@/lib/recovery/backupPlan';
 import { setProblems } from '@/lib/recovery/nodeChoice';
 import { listSubscriptions, subscribeWebhook, telegramReply, alertWallet, unsubscribe, alertHistory } from '@/lib/recovery/alerts';
@@ -40,7 +42,6 @@ export const TAKEOVER_AFTER_SEC = 10 * 60;
 /** One tab of one device drives an account's run at a time. */
 export const runLockName = (owner) => `buckitup:backup-run:${owner}`;
 const nowSec = () => Math.floor(Date.now() / 1000);
-const unfinished = (r) => !!r && r.step !== 'done' && r.step !== 'discarded';
 
 /** A name for this device, kept locally: the progress screen says which device runs a backup. */
 const deviceLabel = () => {
@@ -54,8 +55,6 @@ const deviceLabel = () => {
 	return label;
 };
 
-const hexKey = (k) => (k.startsWith('0x') ? k : `0x${k}`);
-
 export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	const $userPQ = userPQStore();
 	const $dialogs = useDialogsStore();
@@ -63,8 +62,12 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 
 	const deployment = maybeRecoveryDeployment();
 
-	/** The run, or the finished backup's record; null before the first backup. */
+	/** The backup's record: the first run until it is done, then the finished backup; null before the first backup. */
 	const run = ref(null);
+	/** The next version of a finished backup while it is being made; it takes `run`'s place once done. */
+	const reshare = ref(null);
+	/** The run being made, if any — a reshare or the first run — else the record: what progress shows. */
+	const current = computed(() => activeRun({ run: run.value, reshare: reshare.value }) ?? run.value);
 	const savedNodeUrls = ref([]);
 	const loaded = ref(false);
 	const running = ref(false);
@@ -78,6 +81,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	watch(() => $userPQ.currentUserHash, () => {
 		ownerAddressOf = null;
 		run.value = null;
+		reshare.value = null;
 		savedNodeUrls.value = [];
 		loaded.value = false;
 		stopped.value = null;
@@ -95,11 +99,15 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		if ($userPQ.currentUserHash === owner) heldElsewhere.value = !running.value && held.some((l) => l.name === runLockName(owner));
 	};
 
-	/** The run as `owner`'s slot holds it now; throws RunAbortedError once another account is signed in. */
-	const readRun = async (owner) => {
+	/** `owner`'s backup slot as it is now ({ run, reshare }); throws RunAbortedError once another account is signed in. */
+	const readSlot = async (owner) => {
 		const backup = await em().loadSlotJson(BACKUP_SLOT);
 		if ($userPQ.currentUserHash !== owner) throw new RunAbortedError();
-		return backup?.run ?? null;
+		return { run: backup?.run ?? null, reshare: backup?.reshare ?? null };
+	};
+	const show = (slot) => {
+		run.value = slot.run;
+		reshare.value = slot.reshare;
 	};
 
 	const load = async () => {
@@ -107,7 +115,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		const [backup, nodes] = await Promise.all([em().loadSlotJson(BACKUP_SLOT), em().loadSlotJson(NODES_SLOT), $invites.load({ refresh: true }), checkHeld(owner)]);
 		if ($userPQ.currentUserHash !== owner) return;
 		clock.value = nowSec();
-		if (!running.value) run.value = backup?.run ?? null;
+		if (!running.value) show({ run: backup?.run ?? null, reshare: backup?.reshare ?? null });
 		savedNodeUrls.value = nodes?.urls ?? [];
 		loaded.value = true;
 	};
@@ -115,10 +123,10 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	/** Only the run's slot, for following a run another device or tab drives. */
 	const refreshRun = async () => {
 		const owner = $userPQ.currentUserHash;
-		const [latest] = await Promise.all([readRun(owner).catch(() => undefined), checkHeld(owner)]);
+		const [latest] = await Promise.all([readSlot(owner).catch(() => undefined), checkHeld(owner)]);
 		clock.value = nowSec();
 		if (latest === undefined || running.value) return;
-		run.value = latest;
+		show(latest);
 	};
 
 	// Screens that show an unfinished run follow it; nothing is read while none does.
@@ -128,7 +136,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		followers += 1;
 		followTimer ??= setInterval(() => {
 			clock.value = nowSec();
-			if (running.value || !unfinished(run.value)) return;
+			if (running.value || !activeRun({ run: run.value, reshare: reshare.value })) return;
 			refreshRun().catch((e) => console.warn('[recovery] the backup run could not be read:', e));
 		}, FOLLOW_MS);
 	};
@@ -140,7 +148,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		}
 	};
 
-	const ownerKey = async () => hexKey((await em().exportVaultKeys()).evm_skey);
+	const ownerKey = () => ownerKeyOf(em());
 	/** The owner's EVM address, lowercase, for this account. */
 	let ownerAddressOf = null;
 	const ownerAddress = async () => {
@@ -304,9 +312,24 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 
 	// --- The run -------------------------------------------------------------
 
-	const save = async (next) => {
-		const accepted = await em().patchSlotJson(BACKUP_SLOT, { run: next });
-		run.value = accepted?.run ?? next;
+	/** Writes `patch` into the backup slot and shows the slot as the server took it. */
+	const writeSlot = async (patch) => {
+		const accepted = await em().patchSlotJson(BACKUP_SLOT, patch);
+		show({
+			run: accepted ? (accepted.run ?? null) : 'run' in patch ? patch.run : run.value,
+			reshare: accepted ? (accepted.reshare ?? null) : 'reshare' in patch ? patch.reshare : reshare.value,
+		});
+	};
+	/** A reshare, done, as the backup's record: it no longer reshares anything. */
+	const promoted = ({ reshareOf: _of, ...r }) => r;
+	/** Writes a run where it belongs: a reshare beside the record until it is done, then in the record's place. */
+	const save = (next) =>
+		writeSlot(!next.reshareOf ? { run: next } : next.step === 'done' ? { run: promoted(next), reshare: null } : { reshare: next });
+	/** Shows a run where it belongs, without writing it. */
+	const place = (r) => {
+		if (!r?.reshareOf) run.value = r;
+		else if (r.step === 'done') show({ run: promoted(r), reshare: null });
+		else reshare.value = r;
 	};
 
 	/** Runs `fn(locked)` under the account's run lock, if this tab can take it now. */
@@ -335,9 +358,10 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 			alive();
 			return k;
 		};
+		// The run being made, as the slot holds it, must still be this one, on this device.
 		const ours = async (runId) => {
-			const current = await readRun(owner);
-			if (current && (current.runId !== runId || current.device !== here || current.step === 'discarded')) throw new RunTakenOverError();
+			const active = activeRun(await readSlot(owner));
+			if (!active || active.runId !== runId || active.device !== here) throw new RunTakenOverError();
 			alive();
 		};
 		return {
@@ -358,8 +382,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 				const k = await key();
 				const { id, body } = await signAddSecret(chain, k, fields);
 				alive();
-				const gateway = fee?.kind === 'self' ? directGateway(chain, k) : relayerGateway(fee?.url || deployment.relayerUrl);
-				const { txHash } = await gateway.addSecret(body);
+				const { txHash } = await gatewayOf(chain, fee, k, deployment.relayerUrl).addSecret(body);
 				return { id, txHash };
 			},
 			reshare: async ({ id, shares, threshold }) => {
@@ -367,8 +390,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 				const k = await key();
 				const { body } = await signBound(chain, k, 'Reshare', id, { shares, threshold });
 				alive();
-				const gateway = fee?.kind === 'self' ? directGateway(chain, k) : relayerGateway(fee?.url || deployment.relayerUrl);
-				return gateway.reshare(body);
+				return gatewayOf(chain, fee, k, deployment.relayerUrl).reshare(body);
 			},
 			secretIdOf,
 			readVersion: async (id) => {
@@ -386,9 +408,9 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	};
 
 	/**
-	 * Drives the account's run, under its lock. `prepare(latest, write)` gets
-	 * the run as the slot holds it now — never a copy this tab kept — and
-	 * returns the run to advance (writing any change first), or null; what it
+	 * Drives the account's run being made, under its lock. `prepare(slot,
+	 * write)` gets the slot as it is now ({ run, reshare }) — never a copy this
+	 * tab kept — and returns the run to advance (writing any change first), or null; what it
 	 * throws is the caller's. Resolves to 'busy' when another tab of this
 	 * device holds the lock, else once the run stops; why it stopped lands in
 	 * `stopped`.
@@ -405,21 +427,21 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 				if ($userPQ.currentUserHash !== owner) throw new RunAbortedError();
 				await save(next);
 			};
-			const from = await prepare(await readRun(owner), write);
+			const from = await prepare(await readSlot(owner), write);
 			if (!from) return 'idle';
 			running.value = true;
 			stopped.value = null;
 			try {
-				if ($userPQ.currentUserHash === owner) run.value = from;
+				if ($userPQ.currentUserHash === owner) place(from);
 				const done = await advance(from, runDeps(from, owner), (r) => {
-					if ($userPQ.currentUserHash === owner) run.value = r;
+					if ($userPQ.currentUserHash === owner) place(r);
 				});
-				if ($userPQ.currentUserHash === owner) run.value = done;
+				if ($userPQ.currentUserHash === owner) place(done);
 			} catch (e) {
-				if (e instanceof RunTakenOverError) run.value = await readRun(owner).catch(() => run.value);
+				if (e instanceof RunTakenOverError) await readSlot(owner).then(show, () => undefined);
 				else if (e instanceof RunStoppedError) {
 					stopped.value = e.reason;
-					run.value = e.run;
+					place(e.run);
 				} else if (!(e instanceof RunInterruptedError)) stopped.value = errorMessage(e);
 			} finally {
 				running.value = false;
@@ -433,23 +455,29 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		if (r && r.step !== 'discarded') throw new Error('A backup is already being created.');
 	};
 
+	/** `r` if it is a finished backup that can still be changed; throws otherwise. */
+	const finishedOf = (r) => {
+		if (r?.step !== 'done' || !r.secretId || r.version == null) throw new Error('There is no finished backup.');
+		if (r.revokedAt) throw new Error('This backup was revoked.');
+		return r;
+	};
+
 	/**
-	 * Starts a backup: step 1 is decided and saved before anything leaves this
-	 * device. Resolves once it is saved; the run goes on in the background
-	 * (`running`, `run`, `stopped`). Refused while the account has a backup
-	 * or a run — one per account — and for settings or nodes the rules refuse:
-	 * the screens are not the only way to this call, and what it registers
-	 * cannot be taken back.
+	 * Starts a backup — or, with `reshare`, the next version of the finished
+	 * one: step 1 is decided and saved before anything leaves this device.
+	 * Resolves once it is saved; the run goes on in the background (`running`,
+	 * `current`, `stopped`). A first backup is refused while the account has a
+	 * backup or a run — one per account — and a reshare unless the backup is
+	 * finished and not revoked, with no other reshare being made; both are
+	 * refused for settings or nodes the rules refuse: the screens are not the
+	 * only way to this call, and what it registers cannot be taken back. A
+	 * reshare is kept beside the record, which stays as it is until the
+	 * reshare is done.
 	 */
-	const start = async ({ guardians, settings, nodes: chosen, fee, alerts, reshare = false }) => {
+	const start = async ({ guardians, settings, nodes: chosen, fee, alerts, reshare: resharing = false }) => {
 		if (!deployment) throw new Error('This app names no network to back up on.');
-		// A reshare replaces a finished backup with its next version; a first backup needs none.
-		const checkBase = (r) => {
-			if (!reshare) return refuseExisting(r);
-			if (r?.step !== 'done' || !r.secretId || !r.version) throw new Error('There is no finished backup to change.');
-		};
-		// This tab's copy can refuse at once; only the slot, read under the lock, can tell a reshare it may go ahead.
-		if (!reshare) checkBase(run.value);
+		// This tab's copy can refuse a first backup at once; a reshare is decided on the slot, under the lock.
+		if (!resharing) refuseExisting(run.value);
 		const problems = [
 			...settingsProblems(settings, guardians.length, chosen.length).map((p) => `${p.field}: ${p.reason}`),
 			...setProblems(chosen, settings.nodeThreshold, guardians.map((g) => g.userHash)).map((p) => p.kind),
@@ -458,11 +486,16 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		const owner = await ownerAddress();
 		let markSaved;
 		const saved = new Promise((resolve) => (markSaved = resolve));
-		const driving = drive(async (latest, write) => {
-			checkBase(latest);
+		const driving = drive(async (slot, write) => {
+			let reshareOf;
+			if (resharing) {
+				const base = finishedOf(slot.run);
+				if (unfinished(slot.reshare)) throw new Error('The backup is already being reshared.');
+				reshareOf = { secretId: base.secretId, version: base.version };
+			} else refuseExisting(slot.run);
 			const prepared = {
 				...prepareRun({
-					...(reshare ? { reshareOf: { secretId: latest.secretId, version: latest.version } } : {}),
+					...(reshareOf ? { reshareOf } : {}),
 					deployment: deploymentNamespace(deployment),
 					owner,
 					guardians,
@@ -471,8 +504,8 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 					device: deviceLabel(),
 					now: nowSec(),
 				}),
-				fee: fee ?? latest?.fee,
-				alerts: alerts ?? latest?.alerts,
+				fee: fee ?? slot.run?.fee,
+				alerts: alerts ?? slot.run?.alerts,
 			};
 			await write(prepared);
 			markSaved();
@@ -481,103 +514,131 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		if ((await Promise.race([saved.then(() => 'saved'), driving])) === 'busy') throw new Error('A backup is being created in another tab.');
 	};
 
-	/** Continues the run from its saved step, when this device runs it. */
-	const resume = () => drive(async (latest) => (unfinished(latest) && latest.device === deviceLabel() ? latest : null));
+	/** Continues the run being made from its saved step, when this device runs it. */
+	const resume = () =>
+		drive(async (slot) => {
+			const active = activeRun(slot);
+			return active && active.device === deviceLabel() ? active : null;
+		});
 
 	/** Finishes without the nodes still pending, when the rest reach the node threshold. */
 	const finishWithoutPendingNodes = () =>
-		drive(async (latest, write) => {
-			if (!latest || latest.device !== deviceLabel()) return null;
-			const next = skipPendingNodes(latest);
+		drive(async (slot, write) => {
+			const active = activeRun(slot);
+			if (!active || active.device !== deviceLabel()) return null;
+			const next = skipPendingNodes(active);
 			await write(next);
 			return next;
 		});
 
 	/** Whether `r` is another device's run that has not moved for long enough to be continued here. */
 	const takeoverable = (r, now) => unfinished(r) && r.device !== deviceLabel() && now - r.updatedAt > TAKEOVER_AFTER_SEC;
-	const canTakeOver = computed(() => takeoverable(run.value, clock.value));
+	const canTakeOver = computed(() => takeoverable(current.value, clock.value));
 
 	/** Continues on this device a run another device stopped moving (it may be lost). */
 	const takeOver = () =>
-		drive(async (latest, write) => {
-			if (!takeoverable(latest, nowSec())) throw new Error('This backup is still moving on another device.');
-			const next = { ...latest, device: deviceLabel(), updatedAt: nowSec() };
+		drive(async (slot, write) => {
+			const active = activeRun(slot);
+			if (!takeoverable(active, nowSec())) throw new Error('This backup is still moving on another device.');
+			const next = { ...active, device: deviceLabel(), updatedAt: nowSec() };
 			await write(next);
 			return next;
 		});
 
-	/** Drops a run that has not reached the chain. */
+	/** Drops the run being made while it has not reached the chain; a reshare goes, and the backup it would replace stays. */
 	const discard = async () => {
 		const owner = $userPQ.currentUserHash;
 		await withRunLock(owner, async (locked) => {
 			if (!locked) throw new Error('This backup is being created in another tab.');
-			const latest = await readRun(owner);
-			if (!latest || !canDiscard(latest)) throw new Error('This backup already exists on the network.');
-			await save({ ...latest, step: 'discarded' });
+			const active = activeRun(await readSlot(owner));
+			if (!active || !canDiscard(active)) throw new Error('This backup already exists on the network.');
+			await writeSlot(active.reshareOf ? { reshare: null } : { run: { ...active, step: 'discarded' } });
 		});
-	};
-
-	/** Records the alert channels set up once the backup exists, so its card stops warning. */
-	const setAlerts = async (alerts) => {
-		if (run.value?.step !== 'done') throw new Error('Alerts are recorded on a finished backup.');
-		await save({ ...run.value, alerts });
 	};
 
 	// --- Changing a finished backup (plan § 7.4, Controls) ----------------------
 
-	const finished = () => {
-		const r = run.value;
-		if (r?.step !== 'done' || !r.secretId) throw new Error('There is no finished backup.');
-		if (r.revokedAt) throw new Error('This backup was revoked.');
-		return r;
+	/**
+	 * Runs `fn(record)` on the finished backup as the slot holds it now, under
+	 * the run lock: two tabs never act on one record at once, and none on a
+	 * copy it kept from before another's change.
+	 */
+	const onFinished = (fn) => {
+		const owner = $userPQ.currentUserHash;
+		return withRunLock(owner, async (locked) => {
+			if (!locked) throw new Error('The backup is being changed in another tab.');
+			return fn(finishedOf((await readSlot(owner)).run), owner);
+		});
 	};
-	const gatewayFor = (r, k) => (r.fee?.kind === 'self' ? directGateway(chainOf(), k) : relayerGateway(r.fee?.url || deployment.relayerUrl));
+	const saveRecord = (r) => writeSlot({ run: r });
+
+	/**
+	 * An owner action signed over the backup's secret (typedData.signBound
+	 * `type`) and sent the way the backup pays (gateway `method`), then
+	 * recorded: `fields(record)` is what is signed — it may refuse — and
+	 * `patch(record)` what the record gains.
+	 */
+	const ownerAct = (type, method, fields, patch) =>
+		onFinished(async (r, owner) => {
+			const signed = fields(r);
+			const k = await ownerKey();
+			if ($userPQ.currentUserHash !== owner) throw new RunAbortedError();
+			const c = chainOf();
+			const { body } = await signBound(c, k, type, r.secretId, signed);
+			await gatewayOf(c, r.fee, k, deployment.relayerUrl)[method](body);
+			await saveRecord({ ...r, ...patch(r) });
+		});
+
+	/** Records the alert channels set up once the backup exists, so its card stops warning. */
+	const setAlerts = async (alerts) => {
+		if (run.value?.step !== 'done') throw new Error('Alerts are recorded on a finished backup.');
+		await onFinished((r) => saveRecord({ ...r, alerts }));
+	};
 
 	/** Changes the waiting period and the time to finish, on chain, then in the record. */
-	const setPolicy = async ({ delaySec, windowSec }) => {
-		const r = finished();
-		const bad = settingsProblems({ ...r.settings, delaySec, windowSec }, r.guardians.length, r.nodes.length).filter((p) => p.field === 'delaySec' || p.field === 'windowSec');
-		if (bad.length) throw new Error(`These times are out of bounds (${bad.map((p) => p.field).join(', ')}).`);
-		const k = await ownerKey();
-		const { body } = await signBound(chainOf(), k, 'SetRecoveryPolicy', r.secretId, { recoveryDelay: BigInt(delaySec), recoveryWindow: BigInt(windowSec) });
-		await gatewayFor(r, k).setRecoveryPolicy(body);
-		await save({ ...r, settings: { ...r.settings, delaySec, windowSec } });
-	};
+	const setPolicy = ({ delaySec, windowSec }) =>
+		ownerAct(
+			'SetRecoveryPolicy',
+			'setRecoveryPolicy',
+			(r) => {
+				const bad = settingsProblems({ ...r.settings, delaySec, windowSec }, r.guardians.length, r.nodes.length).filter((p) => p.field === 'delaySec' || p.field === 'windowSec');
+				if (bad.length) throw new Error(`These times are out of bounds (${bad.map((p) => p.field).join(', ')}).`);
+				return { recoveryDelay: BigInt(delaySec), recoveryWindow: BigInt(windowSec) };
+			},
+			(r) => ({ settings: { ...r.settings, delaySec, windowSec } }),
+		);
 
 	/** Revokes the backup for good: no recovery can ever use it (pq_recovery_shares § Dying). */
-	const revoke = async () => {
-		const r = finished();
-		const k = await ownerKey();
-		const { body } = await signBound(chainOf(), k, 'RevokeSecret', r.secretId, {});
-		await gatewayFor(r, k).revokeSecret(body);
-		await save({ ...r, revokedAt: nowSec() });
-	};
+	const revoke = () => ownerAct('RevokeSecret', 'revokeSecret', () => ({}), () => ({ revokedAt: nowSec() }));
 
 	/**
 	 * Hands one spare piece to a guardian already in the backup: a second index
 	 * of the same split, custody only — a spare never makes anyone a guardian
-	 * (pq_recovery_shares § Spares). It leaves the record once sent.
+	 * (pq_recovery_shares § Spares). It leaves the record once sent; the record
+	 * read under the lock is what says which spares are left.
 	 */
-	const giveSpare = async (guardianHash) => {
-		const r = finished();
-		if (!r.guardians.some((g) => g.userHash === guardianHash)) throw new Error('A spare goes only to a guardian of this backup.');
-		const i = r.shares.findIndex((s, at) => at >= r.guardians.length && s);
-		if (i < 0) throw new Error('No spare pieces are left.');
-		const messageId = await $dialogs.sendMessage(guardianHash, [sharePartOf(r, i, secretRefOf(deployment, r.secretId), nowSec())]);
-		const shares = [...r.shares];
-		shares[i] = null;
-		await save({ ...r, shares, sparesGiven: { ...(r.sparesGiven ?? {}), [i + 1]: { guardian: guardianHash, messageId } } });
-	};
+	const giveSpare = (guardianHash) =>
+		onFinished(async (r) => {
+			if (!r.guardians.some((g) => g.userHash === guardianHash)) throw new Error('A spare goes only to a guardian of this backup.');
+			const i = r.shares.findIndex((s, at) => at >= r.guardians.length && s);
+			if (i < 0) throw new Error('No spare pieces are left.');
+			const messageId = await $dialogs.sendMessage(guardianHash, [sharePartOf(r, i, secretRefOf(deployment, r.secretId), nowSec())]);
+			const shares = [...r.shares];
+			shares[i] = null;
+			await saveRecord({ ...r, shares, sparesGiven: { ...(r.sparesGiven ?? {}), [i + 1]: { guardian: guardianHash, messageId } } });
+		});
 
 	const removeSubscription = async (id) => unsubscribe(alertsBase(), await ownerKey(), id);
 	const history = async () => (alertsBase() ? alertHistory(alertsBase(), await ownerKey()) : []);
 
 	/** Whether this tab of this device is the one to run the backup (another only shows its progress). */
-	const runsHere = computed(() => !!run.value && run.value.device === deviceLabel() && !heldElsewhere.value);
+	const runsHere = computed(() => !!current.value && current.value.device === deviceLabel() && !heldElsewhere.value);
 
 	return {
 		deployment,
 		run,
+		reshare,
+		current,
 		loaded,
 		running,
 		stopped,

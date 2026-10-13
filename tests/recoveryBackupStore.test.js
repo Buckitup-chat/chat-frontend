@@ -83,6 +83,7 @@ const savedRun = (over = {}) => ({
 	fee: { kind: 'relayer' },
 	...over,
 });
+const SECRET = '0x' + 'ab'.repeat(32);
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe('starting a backup', () => {
@@ -123,12 +124,52 @@ describe('one backup per account', () => {
 		expect(em.patchSlotJson).not.toHaveBeenCalled();
 	});
 
-	it('changes a finished backup only as a reshare of its secret, at its next version', async () => {
+	it('changes a finished backup only as a reshare of its secret, at its next version, kept beside the record', async () => {
 		const store = useRecoveryBackupStore();
-		await expect(store.start(input({ reshare: true }))).rejects.toThrow('There is no finished backup to change.');
-		slots.recovery_backup = { run: savedRun({ step: 'done', secretId: '0x' + 'ab'.repeat(32), version: 3, fee: { kind: 'self' } }) };
+		await expect(store.start(input({ reshare: true }))).rejects.toThrow('There is no finished backup.');
+		const base = savedRun({ step: 'done', secretId: SECRET, version: 3, fee: { kind: 'self' } });
+		slots.recovery_backup = { run: base };
 		await store.start(input({ reshare: true, fee: undefined }));
-		expect(slots.recovery_backup.run).toMatchObject({ step: 'prepared', reshareOf: { secretId: '0x' + 'ab'.repeat(32), version: 3 }, fee: { kind: 'self' } });
+		// The finished backup stays the record; the reshare is made beside it.
+		expect(slots.recovery_backup.run).toEqual(base);
+		expect(slots.recovery_backup.reshare).toMatchObject({ step: 'prepared', reshareOf: { secretId: SECRET, version: 3 }, fee: { kind: 'self' } });
+		expect(store.run).toEqual(base);
+		expect(store.current.runId).toBe(slots.recovery_backup.reshare.runId);
+	});
+
+	it('refuses a reshare of a revoked backup, or while another reshare is being made', async () => {
+		const store = useRecoveryBackupStore();
+		slots.recovery_backup = { run: savedRun({ step: 'done', secretId: SECRET, version: 3, revokedAt: 5 }) };
+		await expect(store.start(input({ reshare: true }))).rejects.toThrow(/revoked/);
+		slots.recovery_backup = { run: savedRun({ step: 'done', secretId: SECRET, version: 3 }), reshare: savedRun({ runId: 'r2', reshareOf: { secretId: SECRET, version: 3 }, device: 'phone-other' }) };
+		await expect(store.start(input({ reshare: true }))).rejects.toThrow(/already being reshared/);
+		expect(em.patchSlotJson).not.toHaveBeenCalled();
+	});
+
+	it('discards a reshare and leaves the backup it would have replaced', async () => {
+		const store = useRecoveryBackupStore();
+		const base = savedRun({ step: 'done', secretId: SECRET, version: 3 });
+		slots.recovery_backup = { run: base, reshare: savedRun({ runId: 'r2', reshareOf: { secretId: SECRET, version: 3 } }) };
+		await store.load();
+		await store.discard();
+		expect(slots.recovery_backup).toEqual({ run: base, reshare: null });
+		expect(store.current).toEqual(base);
+	});
+
+	it('puts a reshare in the record’s place once it is done, and not before', async () => {
+		const store = useRecoveryBackupStore();
+		const base = savedRun({ step: 'done', secretId: SECRET, version: 3, alerts: { channels: ['app'], skipped: true } });
+		const sent = Object.fromEntries(guardians.map((g, i) => [g.userHash, { messageId: 'm' + i, shareIndex: i + 1 }]));
+		const outcomes = Object.fromEntries(nodes.map((n) => [n.descriptor.id, { state: 'held' }]));
+		const next = savedRun({ runId: 'r2', step: 'registered', secretId: SECRET, version: 4, reshareOf: { secretId: SECRET, version: 3 }, sent, nodeOutcomes: outcomes, nodeShares: [null, null, null] });
+		slots.recovery_backup = { run: base, reshare: next };
+		await store.load();
+		await store.resume();
+		expect(slots.recovery_backup.reshare).toBeNull();
+		expect(slots.recovery_backup.run).toMatchObject({ runId: 'r2', step: 'done', version: 4 });
+		expect(slots.recovery_backup.run.reshareOf).toBeUndefined();
+		expect(store.run.runId).toBe('r2');
+		expect(store.reshare).toBeNull();
 	});
 });
 

@@ -99,7 +99,7 @@ const nav = inject(NAV);
 const store = useRecoveryBackupStore();
 const $userPQ = userPQStore();
 
-const run = computed(() => store.run);
+const run = computed(() => store.current);
 const current = computed(() => (run.value ? stepNumber(run.value) : 1));
 const isDone = computed(() => run.value?.step === 'done');
 

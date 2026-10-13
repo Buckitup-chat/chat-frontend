@@ -68,6 +68,11 @@ export const fakeBackupStore = (over = {}) =>
 	reactive({
 		deployment: { chainId: 11155111 },
 		run: null,
+		reshare: null,
+		// As the store: the run being made, else the record.
+		get current() {
+			return this.reshare ?? this.run;
+		},
 		loaded: true,
 		running: false,
 		stopped: null,
