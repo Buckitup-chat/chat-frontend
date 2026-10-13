@@ -16,7 +16,7 @@ import { gatewayOf } from '@/lib/recovery/gateway';
 import { ownerKeyOf } from '@/lib/recovery/evmSign';
 import { signBound } from '@/lib/recovery/typedData';
 import { registeredSecretOf } from '@/lib/recovery/backupRun';
-import { acknowledged, alertOf, roundIsLive } from '@/lib/recovery/rounds';
+import { ackOf, acknowledged, alertOf, roundIsLive } from '@/lib/recovery/rounds';
 import errorMessage from '@/utils/errorMessage';
 
 const POLL_MS = 5 * 60_000;
@@ -120,10 +120,10 @@ export const useRecoveryRoundsStore = defineStore('recoveryRounds', () => {
 		return run;
 	};
 
-	/** "This is me": hides this round's banner on this device; a later round shows again. */
+	/** "This is me": hides this round's banner on this device, for the device it elected if any; a later round, or one electing another device, shows again. */
 	const acknowledge = (a) => {
 		const owner = $userPQ.currentUserHash;
-		ack.value = { ...ack.value, [a.secretId]: a.round };
+		ack.value = { ...ack.value, [a.secretId]: ackOf(a) };
 		localStorage.setItem(ackKey(owner), JSON.stringify(ack.value));
 	};
 
@@ -148,9 +148,17 @@ export const useRecoveryRoundsStore = defineStore('recoveryRounds', () => {
 		}
 	};
 
-	// The backup changed here — registered, reshared, revoked: its secret is read again.
+	// The backup changed here — registered, reshared, revoked, paid another way: its secret is read again.
+	// One source per value, so a record read again unchanged sets off nothing.
 	watch(
-		() => [$backup.run?.secretId, $backup.run?.step, $backup.run?.revokedAt],
+		[
+			() => $backup.run?.secretId,
+			() => $backup.run?.step,
+			() => $backup.run?.revokedAt,
+			() => $backup.run?.fee?.kind,
+			() => $backup.run?.fee?.url,
+			() => !!$backup.reshare,
+		],
 		() => {
 			backup = null;
 			if (timer) check({ fresh: true });

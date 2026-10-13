@@ -48,8 +48,31 @@ export const alertOf = (secretId: string, secret: SecretState | null, state: Rou
 	};
 };
 
-/** Whether the owner already said this round is theirs (stored per secret: the last round acknowledged). */
-export const acknowledged = (alert: RoundAlert, ack: Record<string, number>): boolean => ack[alert.secretId] === alert.round;
+/** What the owner said is theirs, per secret: a round, and once quorum is reached the device it elected. */
+export interface RoundAck {
+	round: number;
+	/** The recipient acknowledged, lowercase; null when acknowledged while voting. */
+	recipient: string | null;
+}
+
+/** What acknowledging `alert` records. */
+export const ackOf = (alert: RoundAlert): RoundAck => ({ round: alert.round, recipient: alert.recipient?.toLowerCase() ?? null });
+
+/**
+ * Whether the owner already said this round is theirs. While voting, the
+ * round is enough; once quorum elects a device, only an acknowledgement of
+ * that device is: a round acknowledged while voting shows again when it
+ * hands access to someone, so the owner can check it is their new device.
+ */
+export const acknowledged = (alert: RoundAlert, ack: Record<string, RoundAck | undefined>): boolean => {
+	const a = ack[alert.secretId];
+	if (!a || typeof a !== 'object' || a.round !== alert.round) return false;
+	if (alert.phase === 'voting') return true;
+	return !!a.recipient && a.recipient === alert.recipient?.toLowerCase();
+};
+
+/** "0x7a3F…c91E": enough of an address to tell one device from another. */
+const shortAddress = (a: string): string => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
 const span = (sec: number): string => {
 	const s = Math.max(0, Math.round(sec));
@@ -59,7 +82,9 @@ const span = (sec: number): string => {
 	return 'a minute';
 };
 
-/** The banner's words for `alert` at unix time `now`. */
+const device = (alert: RoundAlert) => (alert.recipient ? ` ${shortAddress(alert.recipient)}` : '');
+
+/** The banner's words for `alert` at unix time `now`; once a device is elected, it is named by its address. */
 export const alertText = (alert: RoundAlert, now: number): { title: string; body: string } => {
 	if (alert.phase === 'voting') {
 		return {
@@ -70,11 +95,11 @@ export const alertText = (alert: RoundAlert, now: number): { title: string; body
 	if (alert.phase === 'timelock') {
 		return {
 			title: 'A recovery of your account was approved',
-			body: `Access goes to the new device in ${span(alert.executeAfter - now)}. If this is not you, stop it before then.`,
+			body: `Access goes to the new device${device(alert)} in ${span(alert.executeAfter - now)}. If this is not your device, stop it before then.`,
 		};
 	}
 	return {
 		title: 'Access to your account has been handed over',
-		body: `The new device can open your backup for ${span(alert.expiresAt - now)} more. If this is not you, stop it now.`,
+		body: `The new device${device(alert)} can open your backup for ${span(alert.expiresAt - now)} more. If this is not your device, stop it now.`,
 	};
 };

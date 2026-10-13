@@ -2,7 +2,7 @@
 // (plan § 7.4): over every screen until it ends or the owner says it is theirs.
 import { describe, it, expect } from 'vitest';
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
-import { acknowledged, alertOf, alertText } from '@/lib/recovery/rounds';
+import { ackOf, acknowledged, alertOf, alertText } from '@/lib/recovery/rounds';
 import type { SecretState } from '@/lib/recovery/chain';
 
 const ID = '0x' + 'ab'.repeat(32);
@@ -38,8 +38,24 @@ describe('a round on the owner’s secret', () => {
 
 	it('stays dismissed for the round the owner said is theirs, and only that one', () => {
 		const a = alertOf(ID, secret(), RoundState.Voting)!;
-		expect(acknowledged(a, { [ID]: 4 })).toBe(true);
-		expect(acknowledged({ ...a, round: 5 }, { [ID]: 4 })).toBe(false);
+		expect(acknowledged(a, { [ID]: ackOf(a) })).toBe(true);
+		expect(acknowledged({ ...a, round: 5 }, { [ID]: ackOf(a) })).toBe(false);
+	});
+
+	it('shows again once quorum elects a device, unless the owner acknowledged that device', () => {
+		const voting = alertOf(ID, secret(), RoundState.Voting)!;
+		const elected = alertOf(ID, secret({ executeAfter: 10_000n, recoveryRecipient: '0x' + 'Ab'.repeat(20) }), RoundState.TimeLock)!;
+		expect(acknowledged(elected, { [ID]: ackOf(voting) })).toBe(false);
+		expect(acknowledged(elected, { [ID]: ackOf(elected) })).toBe(true);
+		expect(acknowledged({ ...elected, phase: 'window' }, { [ID]: ackOf(elected) })).toBe(true);
+		expect(acknowledged({ ...elected, recipient: '0x' + '33'.repeat(20) }, { [ID]: ackOf(elected) })).toBe(false);
+		expect(acknowledged(voting, { [ID]: 4 as never })).toBe(false);
+	});
+
+	it('names the elected device by its address', () => {
+		const elected = alertOf(ID, secret({ executeAfter: 10_000n, recoveryRecipient: '0x7a3F' + '00'.repeat(16) + 'c91E' }), RoundState.TimeLock)!;
+		expect(alertText(elected, 0).body).toContain('the new device 0x7a3F…c91E in');
+		expect(alertText({ ...elected, phase: 'window' }, 0).body).toContain('The new device 0x7a3F…c91E can');
 	});
 
 	it('says how long the owner has', () => {

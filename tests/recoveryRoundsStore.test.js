@@ -12,11 +12,11 @@ import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
 const OWNER = 'u_' + 'a'.repeat(128);
 const ID = '0x' + 'ab'.repeat(32);
 const user = { currentUserHash: OWNER };
-const H = vi.hoisted(() => ({ slotReads: 0, chain: { secretReads: 0, stateReads: 0 }, revoked: false, gate: null }));
+const H = vi.hoisted(() => ({ slotReads: 0, chain: { secretReads: 0, stateReads: 0 }, revoked: false, gate: null, recipient: '0x' + '00'.repeat(20) }));
 let slot = null;
 let chainState = RoundState.Voting;
 const calls = [];
-const backupStore = reactive({ run: null });
+const backupStore = reactive({ run: null, reshare: null });
 
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 vi.mock('@/store/recoveryBackup.store', () => ({ BACKUP_SLOT: 'recovery_backup', useRecoveryBackupStore: () => backupStore }));
@@ -32,7 +32,7 @@ vi.mock('@/lib/recovery/deployments', () => ({ maybeRecoveryDeployment: () => ({
 vi.mock('@/lib/recovery/chain', async (orig) => ({
 	...(await orig()),
 	RecoveryChain: class {
-		readSecret = async () => (H.chain.secretReads++, { revoked: H.revoked, recoveryRound: 4n, executeAfter: 0n, recoveryWindow: 3600n, recoveryRecipient: '0x' + '00'.repeat(20) });
+		readSecret = async () => (H.chain.secretReads++, { revoked: H.revoked, recoveryRound: 4n, executeAfter: 0n, recoveryWindow: 3600n, recoveryRecipient: H.recipient });
 		// The state as the chain had it when asked, answered once the gate opens.
 		roundState = async () => {
 			H.chain.stateReads++;
@@ -63,9 +63,11 @@ beforeEach(() => {
 	setActivePinia(createPinia());
 	slot = { run: { secretId: ID, step: 'done', fee: { kind: 'relayer' } } };
 	backupStore.run = null;
+	backupStore.reshare = null;
 	chainState = RoundState.Voting;
 	H.revoked = false;
 	H.gate = null;
+	H.recipient = '0x' + '00'.repeat(20);
 	H.slotReads = 0;
 	H.chain.secretReads = 0;
 	H.chain.stateReads = 0;
@@ -125,6 +127,26 @@ describe('watching the owner’s backup', () => {
 		expect(s.shown).toBeNull();
 	});
 
+	it('reads the slot again only for a real change of the backup, not a record read again unchanged', async () => {
+		backupStore.run = { secretId: ID, step: 'done', fee: { kind: 'relayer' } };
+		const s = await started();
+		await nextTick();
+		await s.check();
+		const reads = H.slotReads;
+		backupStore.run = { secretId: ID, step: 'done', fee: { kind: 'relayer' } };
+		await nextTick();
+		await s.check();
+		expect(H.slotReads).toBe(reads);
+		backupStore.run = { secretId: ID, step: 'done', fee: { kind: 'relayer', url: 'https://mine.example' } };
+		await nextTick();
+		await s.check();
+		expect(H.slotReads).toBe(reads + 1);
+		backupStore.reshare = { step: 'prepared' };
+		await nextTick();
+		await s.check();
+		expect(H.slotReads).toBe(reads + 2);
+	});
+
 	it('stops the round through the free service, without reading the slot again, and shows the round gone', async () => {
 		const s = await started();
 		await s.stop(s.shown);
@@ -150,11 +172,22 @@ describe('watching the owner’s backup', () => {
 		expect(s.shown).toBeNull();
 	});
 
+	it('shows a round acknowledged while voting again once it elects a device', async () => {
+		const s = await started();
+		s.acknowledge(s.shown);
+		chainState = RoundState.TimeLock;
+		H.recipient = '0x' + '22'.repeat(20);
+		await s.check({ fresh: true });
+		expect(s.shown).toMatchObject({ phase: 'timelock', recipient: H.recipient });
+		s.acknowledge(s.shown);
+		expect(s.shown).toBeNull();
+	});
+
 	it('hides a round the owner says is theirs, on this device, for that round only', async () => {
 		const s = await started();
 		s.acknowledge(s.shown);
 		expect(s.shown).toBeNull();
-		expect(JSON.parse(localStorage.getItem(`buckitup:recovery-ack:${OWNER}`))).toEqual({ [ID]: 4 });
+		expect(JSON.parse(localStorage.getItem(`buckitup:recovery-ack:${OWNER}`))).toEqual({ [ID]: { round: 4, recipient: null } });
 	});
 });
 
