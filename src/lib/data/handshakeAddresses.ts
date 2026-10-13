@@ -25,16 +25,19 @@ const asOffered = (c: QWBPGatheredCandidate, kind: AddressKind): OfferedAddress 
 });
 
 /**
- * What a code offers: UDP only; the relay's addresses first (two at most),
+ * What a code offers: UDP only, no mDNS names; the relay's addresses first (two at most),
  * then one STUN-found address — the relay answers STUN too — then the phone's
  * own; six at most, two of them IPv6 at most. A TCP candidate only repeats an
- * address the channel reaches over UDP anyway.
+ * address the channel reaches over UDP anyway. An mDNS name (`….local`, what a
+ * browser shows for a host address without camera or microphone permission)
+ * costs 19 bytes, as much as an IPv6 address, and resolves only on the same
+ * link — never through the relay or across networks — so it is left out.
  *
  * `relayOnly` leaves everything but the relay out: a test switch, so that two
  * pages on one host connect through the relay (qwbpChannel.ts gates it).
  */
 export const selectAddresses = (gathered: QWBPGatheredCandidate[], { relayOnly = false } = {}): OfferedAddress[] => {
-	const udp = gathered.filter((c) => c.protocol === 'udp');
+	const udp = gathered.filter((c) => c.protocol === 'udp' && !c.ip.endsWith('.local'));
 	const ofType = (type: QWBPGatheredCandidate['type']) => udp.filter((c) => c.type === type);
 	let ipv6 = 0;
 	return [

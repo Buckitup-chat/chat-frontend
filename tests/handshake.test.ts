@@ -249,6 +249,15 @@ describe('the addresses a code offers (§5a)', () => {
 		expect(offered.every((o) => o.candidate.protocol === 'udp')).toBe(true);
 	});
 
+	it('leaves mDNS names out: 19 bytes each, and of no use across networks — the bound of six and the size of C hold', () => {
+		const mdns = [at('0f4ac2b1-6c41-4a5e-9a1e-2b9a6e1d7c11.local', 'host'), at('1a2b3c4d-1111-2222-3333-444455556666.local', 'host')];
+		const offered = selectAddresses([...mdns, ...gathered, ...relays]);
+		expect(offered.some((o) => o.candidate.ip.endsWith('.local'))).toBe(false);
+		const payload = encodeQwbp(fill(32, 5), offered.map((o) => o.candidate));
+		expect(payload.length).toBe(34 + 4 * 7 + 2 * 19);
+		expect(selectAddresses(mdns)).toEqual([]);
+	});
+
 	it('without a relay offers the phone\'s own addresses, and never a TCP one', () => {
 		expect(described(selectAddresses(gathered.filter((c) => c.type === 'host')))).toEqual([
 			'host/host/192.168.1.5', 'host/host/fd00::1', 'host/host/fd00::2', 'host/host/10.0.0.5',
