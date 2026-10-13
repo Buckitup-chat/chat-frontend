@@ -85,6 +85,15 @@ export const modalRegistry = {
 		icon: '_icon_reload',
 	},
 
+	// Recovery with friends: the recovering device's temporary account (plan § 7.5).
+	account_recover_friends: {
+		header: true,
+		component: 'Modal_Recover_Friends',
+		modalClass: 'modal-sm',
+		title: 'Recover with friends',
+		icon: '_icon_contacts',
+	},
+
 	account_activate: {
 		header: false,
 		component: 'Modal_Account_Activate',

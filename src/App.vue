@@ -7,9 +7,14 @@
 
 	<QuarantinedWritesBanner v-if="$userPQ.currentUser" />
 	<AccessGateBanner v-if="$userPQ.currentUser" />
-	<RecoveryAlertBanner v-if="$userPQ.currentUser" />
+	<RecoveryAlertBanner v-if="$userPQ.currentUser && !$restore.active" />
 
-	<div class="wrapper" v-if="$userPQ.currentUser">
+	<!-- Signed in as a temporary account that is recovering another: the recovery is all there is (plan § 7.5). -->
+	<div v-if="$restore.active" class="_recovering">
+		<RecoverScreen />
+	</div>
+
+	<div class="wrapper" v-else-if="$userPQ.currentUser">
 		<Menu class="_menu" :class="{ _opened: $menuOpened }" />
 
 		<div class="_menu_backdrop" :class="{ _opened: $menuOpened && $breakpoint.lt('md') }"
@@ -52,6 +57,13 @@
 	font-size: 12px;
 	text-align: center;
 	opacity: .92;
+}
+
+._recovering {
+	min-height: 100vh;
+	min-height: 100dvh;
+	overflow-y: auto;
+	padding: 16px 0;
 }
 
 ._login {
@@ -154,6 +166,8 @@ import Loader from './components/Loader.vue';
 import QuarantinedWritesBanner from '@/components/QuarantinedWritesBanner.vue';
 import AccessGateBanner from '@/components/AccessGateBanner.vue';
 import RecoveryAlertBanner from '@/components/RecoveryAlertBanner.vue';
+import RecoverScreen from '@/components/recovery/restore/RecoverScreen.vue';
+import { useRecoveryRestoreStore } from '@/store/recoveryRestore.store';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';
 import Swal from '@/components/swal/Swal_.vue';
@@ -162,6 +176,7 @@ import { useRoute, useRouter } from 'vue-router';
 
 const $user = userStore();
 const $userPQ = userPQStore();
+const $restore = useRecoveryRestoreStore();
 const $breakpoint = useBreakpoint();
 
 

@@ -862,6 +862,30 @@ export class EncryptionManagerPQ extends EventTarget {
     return seed;
   }
 
+  /**
+   * The community-backup recovery this account runs as its temporary account
+   * (plan § 7.5), or null. It lives in the account's vault beside its keys, so
+   * the candidate key in it never leaves the device and goes when the
+   * temporary account is destroyed, keys and vault together. Not exported:
+   * exportVaultKeys names what a backup carries.
+   */
+  async loadRecoveryProgress() {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+    const text = await this.#currentVault.get('recovery_progress');
+    return typeof text === 'string' ? JSON.parse(text) : null;
+  }
+
+  async saveRecoveryProgress(progress) {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+    await this.#currentVault.set('recovery_progress', JSON.stringify(progress));
+  }
+
+  /** The shared secret of an ML-KEM-1024 ciphertext made for this account's crypt_pkey: a share returned by hand. */
+  kemDecapsulate(cipherText) {
+    if (!this.#cryptSkey) throw new Error('Not authenticated or secret key not loaded');
+    return ml_kem1024.decapsulate(cipherText, this.#cryptSkey);
+  }
+
   async exportVaultKeys() {
     if (!this.#currentVault) throw new Error('Vault not loaded');
 

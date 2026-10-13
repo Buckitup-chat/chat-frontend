@@ -70,6 +70,14 @@
 			<button class="btn btn-outline-light w-100" @click="setMode('connect')">Sync with other device</button>
 		</div>
 
+		<!-- After device-link on purpose: a person with any working device is better served by it. -->
+		<div v-if="recovering" class="px-3 w-100 mb-3">
+			<button class="btn btn-light w-100" data-test="continue-recovering" @click="continueRecovering()">Continue recovering</button>
+		</div>
+		<div v-else class="px-3 w-100 mb-3">
+			<button class="btn btn-outline-light w-100" data-test="recover-with-friends" @click="setMode('friends')">Recover with friends</button>
+		</div>
+
 		<div class="px-3 w-100 mb-3 opacity-50">
 			<button class="btn btn-outline-light w-100" @click="wipe()">Wipe all</button>
 		</div>
@@ -233,7 +241,8 @@ import { userStore } from '@/store/user.store';
 
 
 import Account_Selector from '@/components/Account_Selector.vue';
-import { inject, ref, onMounted, onUnmounted } from 'vue';
+import { computed, inject, ref, onMounted, onUnmounted } from 'vue';
+import { useRecoveryRestoreStore } from '@/store/recoveryRestore.store';
 import * as $enigma from '@/libs/enigma';
 
 const $mitt = inject('$mitt');
@@ -282,7 +291,19 @@ function setMode(m) {
 	if (m === 'restore') $mitt.emit('modal::open', { id: 'account_restore_local' });
 	if (m === 'shares') $mitt.emit('modal::open', { id: 'account_restore_shares' });
 	if (m === 'connect') $mitt.emit('modal::open', { id: 'account_link_device' });
+	if (m === 'friends') $mitt.emit('modal::open', { id: 'account_recover_friends' });
 }
+
+// A recovery started on this device goes on in its temporary account, while that account is still here.
+const $restore = useRecoveryRestoreStore();
+const recovering = computed(() => !!$restore.temporary && !!$userPQ.myLocalUsers?.some((u) => u.user_hash === $restore.temporary));
+const continueRecovering = async () => {
+	try {
+		await $userPQ.login($restore.temporary);
+	} catch (e) {
+		console.error('[recovery] could not sign in to the temporary account:', e);
+	}
+};
 
 const connectVaultLocalApp = async () => {
 	const vaults = await $encryptionManager.getVaults();
