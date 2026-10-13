@@ -6,7 +6,7 @@ import { hexToBytes } from '@noble/hashes/utils';
 import { metaKeysOf } from '@/lib/recovery/guardianInvite';
 import { defaultSettings } from '@/lib/recovery/backupPlan';
 import { prepareRun, shareInputsOf, sharePartOf } from '@/lib/recovery/backupRun';
-import { conflictOf, holdingKey, holdingStatesOf, judgeShare, reportOf, shouldDrop, type Holding, type KeepingContext } from '@/lib/recovery/holdings';
+import { classifyShare, conflictKey, holdingFor, holdingKey, judgeShare, reportFor, shouldDrop, type Holding, type KeepingContext } from '@/lib/recovery/holdings';
 
 const NS = 'eip155:11155111:0xd9ffd20f2db9c774b9f0237c4837f52dcbd937a7';
 const ID = '0x' + 'ab'.repeat(32);
@@ -49,12 +49,27 @@ describe('judging a share received', () => {
 const holding = (over: Partial<Holding> = {}): Holding => ({ owner: OWNER, share, messageId: 'dmsg_1', state: 'stored', detail: '', updatedAt: 1, ...over });
 
 describe('keeping several shares', () => {
+	const kept = { [holdingKey(OWNER, share)]: holding() };
+
 	it('allows a second index of the same split, refuses changed bytes or another split at the same version', () => {
 		const { kind: _k, ...spare } = sharePartOf(run, 1, `${NS}/${ID}`, 1);
-		expect(conflictOf(spare, [holding()])).toBeNull();
-		expect(conflictOf({ ...share, shareB64: 'AAAA' }, [holding()])).toMatch(/different contents/);
-		expect(conflictOf({ ...share, splitId: '00'.repeat(16) }, [holding()])).toMatch(/another split/);
+		expect(classifyShare(OWNER, { messageId: 'dmsg_2', share: spare }, kept)).toEqual({ kind: 'new' });
+		expect(classifyShare(OWNER, { messageId: 'dmsg_2', share: { ...share, shareB64: 'AAAA' } }, kept)).toMatchObject({ kind: 'conflict', reason: expect.stringMatching(/different contents/) });
+		expect(classifyShare(OWNER, { messageId: 'dmsg_2', share: { ...share, splitId: '00'.repeat(16) } }, kept)).toMatchObject({ kind: 'conflict', reason: expect.stringMatching(/another split/) });
+		// Another owner's split at that version is no conflict.
+		expect(classifyShare('u_other', { messageId: 'dmsg_2', share: { ...share, splitId: '00'.repeat(16) } }, kept)).toEqual({ kind: 'new' });
 		expect(holdingKey(OWNER, share)).toBe(`${OWNER}|${NS}/${ID}|1|${share.splitId}|1`);
+	});
+
+	it('treats as handled the same bytes again, a tombstone, or a refusal recorded', () => {
+		expect(classifyShare(OWNER, { messageId: 'dmsg_9', share }, kept)).toBeNull();
+		const gone = { [holdingKey(OWNER, share)]: holding({ state: 'given_back', share: { ...share, shareB64: '' } }) };
+		expect(classifyShare(OWNER, { messageId: 'dmsg_9', share }, gone)).toBeNull();
+		const other = { messageId: 'dmsg_2', share: { ...share, shareB64: 'AAAA' } };
+		const refused = { ...kept, [conflictKey(OWNER, other)]: holding({ state: 'conflict', messageId: 'dmsg_2' }) };
+		expect(classifyShare(OWNER, other, refused)).toBeNull();
+		expect(holdingFor(OWNER, other, refused)?.key).toBe(conflictKey(OWNER, other));
+		expect(holdingFor(OWNER, other, kept)).toBeNull();
 	});
 });
 
@@ -78,23 +93,12 @@ describe('dropping a share', () => {
 });
 
 describe('telling the owner', () => {
-	it('tells each change once', () => {
-		expect(reportOf(holding())).toMatchObject({ kind: 'recovery_holding', state: 'stored', shareIndex: 1, version: 1 });
-		expect(reportOf(holding({ reported: 'stored' }))).toBeNull();
-		expect(reportOf(holding({ state: 'pending' }))).toBeNull();
-		expect(reportOf(holding({ state: 'unverified', detail: 'x' }))).toMatchObject({ state: 'unverified', detail: 'x' });
-	});
-
-	it('the owner reads only the guardian’s own word about the share they were sent, latest last', () => {
-		const sent = { [guardians[0].userHash]: { secretRef: share.secretRef, version: 1, splitId: share.splitId, shareIndex: 1 } };
-		const word = (state: string, over = {}) => ({ kind: 'recovery_holding', secretRef: share.secretRef, version: 1, splitId: share.splitId, shareIndex: 1, state, detail: '', ...over });
-		const msgs = [
-			{ senderHash: guardians[0].userHash, parts: [word('stored')] },
-			{ senderHash: guardians[1].userHash, parts: [word('given_back')] }, // not the guardian it went to
-			{ senderHash: guardians[0].userHash, parts: [word('stored', { shareIndex: 2 })] }, // another share
-			{ senderHash: guardians[0].userHash, parts: [word('given_back')] },
-			{ senderHash: guardians[0].userHash, parts: [word('whatever')] },
-		];
-		expect(holdingStatesOf(msgs, sent)).toEqual({ [guardians[0].userHash]: 'given_back' });
+	it('tells each change once, a refusal as unverified, nothing while pending', () => {
+		expect(reportFor(holding())).toMatchObject({ kind: 'recovery_holding', state: 'stored', shareIndex: 1, version: 1, detail: '' });
+		expect(reportFor(holding({ reported: 'stored' }))).toBeNull();
+		expect(reportFor(holding({ state: 'pending' }))).toBeNull();
+		expect(reportFor(holding({ state: 'unverified', detail: 'x' }))).toMatchObject({ state: 'unverified', detail: 'x' });
+		expect(reportFor(holding({ state: 'conflict', detail: 'y' }))).toMatchObject({ state: 'unverified', detail: 'y' });
+		expect(reportFor(holding({ state: 'conflict', detail: 'y', reported: 'unverified' }))).toBeNull();
 	});
 });

@@ -21,11 +21,16 @@ const run = { ...prepareRun({ deployment: NS, owner: '0x' + '77'.repeat(20), gua
 const { kind: _kind, ...share } = sharePartOf(run, 0, `${NS}/${ID}`, 1);
 const KEY = holdingKey(OWNER, share);
 
-const H = vi.hoisted(() => ({ inputs: [], secret: null }));
+const H = vi.hoisted(() => ({ inputs: [], secret: null, chainReads: 0 }));
 H.inputs = shareInputsOf(run);
-vi.mock('@/lib/recovery/chain', () => ({
+vi.mock('@/lib/recovery/chain', async (importOriginal) => ({
+	...(await importOriginal()),
 	RecoveryChain: class {
+		constructor() {
+			H.chainReads = 0;
+		}
 		async readSecret() {
+			H.chainReads += 1;
 			return H.secret;
 		}
 		async guardiansAt() {
@@ -65,6 +70,12 @@ beforeEach(() => {
 	user.currentUserHash = ME;
 	H.secret = { version: 1n, revoked: false };
 	Object.defineProperty(globalThis, 'navigator', { value: { locks: makeFakeLockManager() }, configurable: true });
+	const local = new Map();
+	Object.defineProperty(globalThis, 'localStorage', {
+		value: { getItem: (k) => local.get(k) ?? null, setItem: (k, v) => local.set(k, String(v)) },
+		configurable: true,
+	});
+	H.chainReads = 0;
 });
 
 describe('a share the dialog hands in', () => {
@@ -114,6 +125,7 @@ describe('the periodic pass', () => {
 	it('reads nothing on chain while nothing is kept', async () => {
 		const store = useRecoveryHoldingsStore();
 		await store.sweep();
+		expect(H.chainReads).toBe(0);
 		expect(em.patchSlotJson).not.toHaveBeenCalled();
 	});
 
@@ -126,6 +138,39 @@ describe('the periodic pass', () => {
 		await store.sweep();
 		expect(slots.guardian.holdings[KEY]).toMatchObject({ state: 'stored' });
 		expect(reports()).toEqual([[OWNER, 'stored']]);
+	});
+
+	it('asks the chain without the lock, and reads and writes the slot only when something changed', async () => {
+		const store = useRecoveryHoldingsStore();
+		await store.receive(OWNER, [{ messageId: 'dmsg_1', share }]);
+		const reads = em.loadSlotJson.mock.calls.length;
+		const writes = em.patchSlotJson.mock.calls.length;
+		expect(await store.sweep()).toEqual({ read: false });
+		expect(H.chainReads).toBeGreaterThan(0);
+		expect(em.loadSlotJson.mock.calls.length).toBe(reads);
+		expect(em.patchSlotJson.mock.calls.length).toBe(writes);
+
+		// Another tab swept a moment ago: this one skips its turn, unless asked.
+		H.secret = { version: 1n, revoked: true };
+		const chainReads = H.chainReads;
+		await store.sweep();
+		expect(H.chainReads).toBe(chainReads);
+		expect(await store.sweep({ force: true })).toEqual({ read: true });
+		expect(slots.guardian.holdings[KEY]).toMatchObject({ state: 'dropped' });
+		expect(reports()).toEqual([[OWNER, 'stored'], [OWNER, 'dropped']]);
+	});
+
+	it('skips while the page is hidden', async () => {
+		const store = useRecoveryHoldingsStore();
+		await store.receive(OWNER, [{ messageId: 'dmsg_1', share }]);
+		Object.defineProperty(globalThis, 'document', { value: { hidden: true }, configurable: true });
+		try {
+			H.chainReads = 0;
+			await store.sweep();
+			expect(H.chainReads).toBe(0);
+		} finally {
+			delete globalThis.document;
+		}
 	});
 });
 

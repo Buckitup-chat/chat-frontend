@@ -4,15 +4,15 @@
 // shares and the chain's slots are a real run's; the slot merges by key as
 // storageIntent does, and the chain answers from what that run registered.
 import { describe, it, expect, beforeEach } from 'vitest';
-import { bytesToHex } from '@noble/hashes/utils';
 import { metaKeysOf } from '@/lib/recovery/guardianInvite';
 import { defaultSettings } from '@/lib/recovery/backupPlan';
 import { prepareRun, shareInputsOf, sharePartOf } from '@/lib/recovery/backupRun';
-import { holdingKey } from '@/lib/recovery/holdings';
+import { conflictKey, holdingKey, type Holdings, type ShareEnvelope } from '@/lib/recovery/holdings';
+import { guardianChainReads, type GuardianChain } from '@/lib/recovery/chain';
+import { consentedIn } from '@/lib/recovery/invitations';
 import { mergeJsonPatch, stripPatchDirectives } from '@/lib/data/storageIntent';
 import {
-	anyUnhandled, chainContexts, conflictKey, consentedIn, giveBack, GiveBackError, receiveShares, sweepHoldings,
-	type GuardianChain, type Holdings, type KeepingDeps, type ShareEnvelope,
+	anyUnhandled, giveBack, GiveBackError, receiveShares, secretsToCheck, sweepDue, sweepHoldings, type KeepingDeps,
 } from '@/lib/recovery/keeping';
 import type { RecoveryHoldingPart } from '@/lib/pq/content';
 import type { GuardianAnswer } from '@/lib/recovery/inviteThread';
@@ -72,18 +72,17 @@ let seed: Uint8Array | null;
 
 const holdings = (): Holdings => (slot.holdings ?? {}) as Holdings;
 
+let saves: number;
 const deps = (): KeepingDeps => {
-	const { keeping, dying } = chainContexts({
-		chain: chainFake.chain,
-		namespace: NS,
-		answers: () => answers,
-		metaSeed: async () => (seed ? bytesToHex(seed) : null),
-	});
+	const reads = guardianChainReads(chainFake.chain, async () => (seed ? metaKeysOf(seed) : null));
+	const keeping = { reachable: (ns: string) => ns === NS, consented: (o: string, ns: string) => consentedIn(answers, o, ns), readSecret: reads.readSecret, slotsAt: reads.slotsAt };
+	const dying = { readSecret: reads.readSecret, addressedToMe: reads.addressedToMe };
 	return {
 		load: async () => structuredClone(holdings()),
 		// The slot's keyed merge, as the materializer applies it.
 		save: async (entries) => {
-			slot = structuredClone(stripPatchDirectives(mergeJsonPatch(slot, { holdings: entries })));
+			saves += 1;
+			slot = structuredClone(stripPatchDirectives(mergeJsonPatch(slot, { $keyed: ['holdings'], holdings: entries })));
 			return structuredClone(holdings());
 		},
 		send: async (owner, parts) => {
@@ -98,6 +97,7 @@ const deps = (): KeepingDeps => {
 
 beforeEach(() => {
 	slot = { answers: {} };
+	saves = 0;
 	sent = [];
 	failSend = false;
 	answers = { i1: { owner: OWNER, deployment: NS, answer: 'accept', at: 10 } };
@@ -161,7 +161,7 @@ describe('a share that disagrees with one kept', () => {
 
 		expect(holdings()[KEY]).toMatchObject({ state: 'stored', messageId: 'dmsg_1' });
 		expect(holdings()[KEY].share.shareB64).toBe(share.shareB64);
-		const refused = holdings()[conflictKey(OWNER, 'dmsg_2', other)];
+		const refused = holdings()[conflictKey(OWNER, { messageId: 'dmsg_2', share: other })];
 		expect(refused).toMatchObject({ state: 'conflict', detail: expect.stringMatching(/different contents/), reported: 'unverified' });
 		expect(refused.share.shareB64).toBe('');
 		expect(sent.map((s) => [s.parts[0].state, s.parts[0].detail])).toEqual([['stored', ''], ['unverified', 'this piece was already sent with different contents']]);
@@ -172,7 +172,7 @@ describe('a share that disagrees with one kept', () => {
 		const otherSplit = envelopeOf(runAt(1), 1);
 		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_2', share: otherSplit }]);
 		expect(holdings()[holdingKey(OWNER, otherSplit)]).toBeUndefined();
-		expect(holdings()[conflictKey(OWNER, 'dmsg_2', otherSplit)]).toMatchObject({ state: 'conflict', detail: expect.stringMatching(/another split/) });
+		expect(holdings()[conflictKey(OWNER, { messageId: 'dmsg_2', share: otherSplit })]).toMatchObject({ state: 'conflict', detail: expect.stringMatching(/another split/) });
 	});
 });
 
@@ -252,6 +252,39 @@ describe('the periodic pass', () => {
 		await sweepHoldings(deps());
 		expect(holdings()[holdingKey(OWNER, elsewhere)]).toMatchObject({ state: 'unreachable' });
 		expect(chainFake.reads.secret).toBe(reads);
+	});
+});
+
+describe('whether a sweep has anything to do', () => {
+	it('asks the chain about kept shares on a reachable network, and is due only on a change, a pending share or an untold state', async () => {
+		const spare = envelopeOf(v1, 1);
+		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_1', share }, { messageId: 'dmsg_2', share: spare }]);
+		const reachable = (ns: string) => ns === NS;
+		expect(secretsToCheck(holdings(), reachable)).toEqual([ID]);
+		expect(secretsToCheck(holdings(), () => false)).toEqual([]);
+		expect(sweepDue(holdings(), new Map([[ID, { version: 1, revoked: false }]]))).toBe(false);
+		expect(sweepDue(holdings(), new Map())).toBe(false);
+		expect(sweepDue(holdings(), new Map([[ID, { version: 2, revoked: false }]]))).toBe(true);
+		expect(sweepDue(holdings(), new Map([[ID, { version: 1, revoked: true }]]))).toBe(true);
+		expect(sweepDue({ ...holdings(), [KEY]: { ...holdings()[KEY], reported: undefined } }, new Map())).toBe(true);
+		expect(sweepDue({ ...holdings(), [KEY]: { ...holdings()[KEY], state: 'pending' } }, new Map())).toBe(true);
+	});
+
+	it('writes every change of a pass in one patch, and every mark of what was told in one more', async () => {
+		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_1', share }, { messageId: 'dmsg_2', share: envelopeOf(v1, 1) }]);
+		expect(saves).toBe(3); // the copies, the judged states, the marks
+		chainFake.state.revoked = true;
+		saves = 0;
+		await sweepHoldings(deps());
+		expect(saves).toBe(2);
+		expect(states()).toEqual(['stored', 'stored', 'dropped', 'dropped']);
+	});
+
+	it('takes secrets already read as read', async () => {
+		const reads = guardianChainReads(chainFake.chain, async () => null, new Map([[ID, { version: 7, revoked: false }]]));
+		expect(await reads.readSecret(ID)).toEqual({ version: 7, revoked: false });
+		expect(chainFake.reads.secret).toBe(0);
+		await expect(guardianChainReads(null, async () => null).readSecret(ID)).rejects.toThrow(/no network/);
 	});
 });
 

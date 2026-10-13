@@ -176,7 +176,7 @@ describe('sending an invitation', () => {
 		const { deps, log, slots, sent } = fakeDeps({ myHash: OWNER });
 		const { inviteId } = await sendInvite(deps, GUARDIAN);
 		expect(log).toEqual([`patch:${ROSTER_SLOT}`, 'send']);
-		expect(slots[ROSTER_SLOT][0]).toEqual({ invites: { [inviteId]: { contact: GUARDIAN, deployment: DEPLOYMENT, messageId: 'dmsg_0199' } } });
+		expect(slots[ROSTER_SLOT][0]).toEqual({ $keyed: ['invites'], invites: { [inviteId]: { contact: GUARDIAN, deployment: DEPLOYMENT, messageId: 'dmsg_0199' } } });
 		expect(sent[0]).toEqual({ peerHash: GUARDIAN, parts: [{ kind: 'recovery_invite', inviteId, deployment: DEPLOYMENT }], messageId: 'dmsg_0199' });
 	});
 
@@ -185,7 +185,7 @@ describe('sending an invitation', () => {
 		await expect(sendInvite(deps, GUARDIAN)).rejects.toThrow('not stored');
 		const [added, removed] = slots[ROSTER_SLOT];
 		const [inviteId] = Object.keys(added.invites);
-		expect(removed).toEqual({ invites: { [inviteId]: null } });
+		expect(removed).toEqual({ $keyed: ['invites'], invites: { [inviteId]: null } });
 	});
 
 	it('goes only to a contact confirmed in person', async () => {
@@ -203,7 +203,7 @@ describe('answering an invitation', () => {
 		expect(reply).toMatchObject({ kind: 'recovery_invite_reply', inviteId: INVITE, answer: 'accept', metaAddress: keys.metaAddress });
 		expect(checkInviteReply(reply, OWNER, GUARDIAN)).toEqual({ ok: true, answer: 'accept', metaAddress: keys.metaAddress });
 		expect(log).toEqual(['send', `patch:${GUARDIAN_SLOT}`]);
-		expect(slots[GUARDIAN_SLOT][0]).toEqual({ answers: { [INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'accept', at: expect.any(Number) } } });
+		expect(slots[GUARDIAN_SLOT][0]).toEqual({ $keyed: ['answers'], answers: { [INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'accept', at: expect.any(Number) } } });
 	});
 
 	it('answers every owner with the same meta-address', async () => {

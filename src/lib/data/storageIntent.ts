@@ -27,13 +27,16 @@ export interface StorageIntentPayload {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-// The recovery slots keep records by id — invitations and answers (roster and
-// guardian slots), a guardian's holdings — and another device or tab adds its
-// own between our read and our write. A patch edits such a map by key: an
-// entry replaces the one under its key whole, null deletes it, and the keys a
-// patch does not name stay as they are. The deletions survive coalescing with
-// a pending patch and are stripped by the materializer.
-const KEYED_MAPS = ['invites', 'answers', 'holdings'] as const;
+// A record that keeps entries by id — invitations, answers, a guardian's
+// holdings — gains them from another device or tab between our read and our
+// write. A patch names such maps in `$keyed` and edits them by key: an entry
+// replaces the one under its key whole, null deletes it, and the keys the
+// patch does not name stay as they are. The directive and the deletions
+// survive coalescing with a pending patch and are stripped by the
+// materializer (stripPatchDirectives).
+export const KEYED = '$keyed';
+const keyedMapsOf = (record: Record<string, unknown> | null | undefined): string[] =>
+	Array.isArray(record?.[KEYED]) ? (record[KEYED] as unknown[]).filter((k): k is string => typeof k === 'string') : [];
 
 export function mergeJsonPatch(
 	base: Record<string, unknown> | null,
@@ -47,9 +50,12 @@ export function mergeJsonPatch(
 		mergeVaultList(merged, base, patch);
 	}
 	if (base?.contacts || patch.contacts) merged.contacts = mergeContacts(base?.contacts, patch.contacts);
-	for (const key of KEYED_MAPS) {
+	const keyed = keyedMapsOf(patch);
+	for (const key of keyed) {
 		if (isRecord(patch[key])) merged[key] = { ...(isRecord(base?.[key]) ? base[key] : {}), ...patch[key] };
 	}
+	const directive = [...new Set([...keyedMapsOf(base), ...keyed])];
+	if (directive.length) merged[KEYED] = directive;
 	return merged;
 }
 
@@ -101,8 +107,10 @@ function mergeVaultList(merged: Record<string, unknown>, base: Record<string, un
 
 /** Keys of a patch that steer the merge and are not part of the stored record. */
 export function stripPatchDirectives(record: Record<string, unknown>): Record<string, unknown> {
-	const { retiredVaults: _retired, ...stored } = record;
-	for (const key of KEYED_MAPS) {
+	const stored = { ...record };
+	delete stored.retiredVaults;
+	delete stored[KEYED];
+	for (const key of keyedMapsOf(record)) {
 		if (isRecord(stored[key])) stored[key] = Object.fromEntries(Object.entries(stored[key]).filter(([, v]) => v !== null));
 	}
 	if (stored.contacts) {
@@ -156,27 +164,34 @@ export const RECONCILE_RETRY_DELAY_MS = 300;
 
 export class BaseUnavailableError extends Error {}
 
-const inProcessSlotLocks = new Map<string, Promise<unknown>>();
+const inProcessLocks = new Map<string, Promise<unknown>>();
 
-async function withCrossTabLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+async function withCrossTabLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
 	const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
 	if (!locks?.request) return fn();
-	return locks.request(`buckitup-storage-slot:${key}`, () => fn());
+	return locks.request(name, () => fn());
 }
 
-export function withStorageSlotLock<T>(userHash: string, uuid: string, fn: () => Promise<T>): Promise<T> {
-	const key = `${userHash}|${uuid}`;
-	const previous = inProcessSlotLocks.get(key) ?? Promise.resolve();
-	const run = previous.then(() => withCrossTabLock(key, fn), () => withCrossTabLock(key, fn));
+/**
+ * Runs `fn` alone under `name`: queued behind earlier calls in this tab,
+ * and under the Web Lock of that name across tabs where there is one.
+ */
+export function withNamedLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
+	const previous = inProcessLocks.get(name) ?? Promise.resolve();
+	const run = previous.then(() => withCrossTabLock(name, fn), () => withCrossTabLock(name, fn));
 	const settled = run.then(
 		() => undefined,
 		() => undefined
 	);
-	inProcessSlotLocks.set(key, settled);
+	inProcessLocks.set(name, settled);
 	settled.then(() => {
-		if (inProcessSlotLocks.get(key) === settled) inProcessSlotLocks.delete(key);
+		if (inProcessLocks.get(name) === settled) inProcessLocks.delete(name);
 	});
 	return run;
+}
+
+export function withStorageSlotLock<T>(userHash: string, uuid: string, fn: () => Promise<T>): Promise<T> {
+	return withNamedLock(`buckitup-storage-slot:${userHash}|${uuid}`, fn);
 }
 
 export function signAndDispatchDurably(

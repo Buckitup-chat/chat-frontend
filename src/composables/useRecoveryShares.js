@@ -6,28 +6,16 @@ import { computed, ref, watch } from 'vue';
 import { useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { userPQStore } from '@/store/userPQ.store';
-import { holdingKey } from '@/lib/recovery/holdings';
-import { conflictKey, GiveBackError, holdsBytes } from '@/lib/recovery/keeping';
+import { holdingFor, holdsBytes } from '@/lib/recovery/holdings';
+import { GiveBackError } from '@/lib/recovery/keeping';
 import { sentSharesOf } from '@/lib/recovery/receipts';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { guardianDelivery } from '@/components/recovery/backup/backupFlow';
 import { confirmGiveBack } from '@/components/recovery/holdingWords';
 
 const envelopeOf = ({ kind: _kind, ...share }) => share;
-
-/**
- * The holding a share message stands for: its refusal, or the holding of
- * the same share — unless that one keeps other bytes, which makes this
- * message a refusal not recorded yet.
- */
-export const holdingFor = (holdings, owner, messageId, share) => {
-	const refused = holdings[conflictKey(owner, messageId, share)];
-	if (refused) return { key: conflictKey(owner, messageId, share), holding: refused };
-	const key = holdingKey(owner, share);
-	const held = holdings[key];
-	if (!held || (holdsBytes(held) && held.share.shareB64 !== share.shareB64)) return null;
-	return { key, holding: held };
-};
+const RECOVERY_KINDS = new Set(['recovery_share', 'recovery_holding']);
+const aboutRecovery = (m) => (m.parts || []).some((p) => RECOVERY_KINDS.has(p.kind));
 
 /**
  * @param {object} o
@@ -43,9 +31,12 @@ export function useRecoveryShares({ peerHash, messages, peerName, swal, isAlive 
 	const $userPQ = userPQStore();
 	const givingBack = ref(false);
 
-	/** The peer's rows that verified and say something: a share or a report is only ever taken from these. */
+	/** The messages with a share or a report in them: most dialogs have none, and then nothing below runs. */
+	const recoveryMessages = computed(() => messages.value.filter(aboutRecovery));
+
+	/** The peer's rows of those that verified, in dialog order: a share or a report is only ever taken from these. */
 	const fromPeer = computed(() =>
-		messages.value
+		recoveryMessages.value
 			.filter((m) => m._raw?.sender_hash === peerHash.value && m._verify === 'verified' && m._decrypted && !m._deleted)
 			.sort((a, b) => feedOrderKey(a._raw.message_id, a._raw.owner_timestamp) - feedOrderKey(b._raw.message_id, b._raw.owner_timestamp)),
 	);
@@ -82,18 +73,19 @@ export function useRecoveryShares({ peerHash, messages, peerName, swal, isAlive 
 	);
 
 	const views = computed(() => {
+		if (!recoveryMessages.value.length) return {};
 		const me = $userPQ.currentUserHash;
 		const peer = peerHash.value;
 		const sent = sentSharesOf($backup.run)[peer];
 		const out = {};
-		for (const m of messages.value) {
+		for (const m of recoveryMessages.value) {
 			if (m._deleted || !m._raw) continue;
 			const sender = m._raw.sender_hash;
 			const parts = m.parts || [];
 			const share = parts.find((p) => p.kind === 'recovery_share');
 			if (share && sender === peer) {
 				const env = envelopeOf(share);
-				const found = holdingFor($holdings.holdings, peer, m.id, env);
+				const found = holdingFor(peer, { messageId: m.id, share: env }, $holdings.holdings);
 				out[m.id] = {
 					kind: 'kept_share',
 					key: found?.key ?? null,

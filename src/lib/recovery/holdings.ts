@@ -1,11 +1,15 @@
-// A guardian keeping the shares they were sent, and the owner reading back
-// where each one stands (chat repo: pq_recovery_shares § Holding, § Dying;
-// 07 § recovery_share, § recovery_holding). Pure: the chain and the
-// guardian's own records come in as functions, and the answers go out as
-// states the screens show and the dialog carries.
+// What a guardian keeps of the shares they were sent (chat repo:
+// pq_recovery_shares § Holding, § Dying; 07 § recovery_share,
+// § recovery_holding): the holding record and its keys, where a received
+// share stands against the chain and against what is already kept, when a
+// kept one dies, and what the owner is told. Pure: the chain and the
+// guardian's records come in as functions and values.
 import { fromBase64 } from '@/lib/pq/signature';
 import type { RecoveryHoldingPart, RecoverySharePart } from '@/lib/pq/content';
 import { checkShare, rootFromSlots, ShareCheckError } from './shareSplit';
+
+/** A `recovery_share` envelope, whole: a return reproduces what was issued. */
+export type ShareEnvelope = Omit<RecoverySharePart, 'kind'>;
 
 /** What a holding can be. `pending`: the chain does not show its version yet; `conflict`: refused, it disagrees with one already kept. */
 export type HoldingState = 'pending' | 'stored' | 'unverified' | 'unreachable' | 'unrequested' | 'given_back' | 'dropped' | 'conflict';
@@ -13,12 +17,14 @@ export type HoldingState = 'pending' | 'stored' | 'unverified' | 'unreachable' |
 /** The states a guardian tells the owner (07 § recovery_holding). */
 export const REPORTED_STATES = ['stored', 'unverified', 'unreachable', 'unrequested', 'given_back', 'dropped'] as const;
 export type ReportedState = (typeof REPORTED_STATES)[number];
+export const isReportedState = (state: string): state is ReportedState => (REPORTED_STATES as readonly string[]).includes(state);
 
-/** One share the guardian keeps, envelope whole: a return reproduces what was issued. */
+/** One share the guardian keeps, or kept. */
 export interface Holding {
 	/** The dialog peer who sent it: the holding is their claim (§ Holding). */
 	owner: string;
-	share: Omit<RecoverySharePart, 'kind'>;
+	/** The envelope; a tombstone's has no `shareB64`. */
+	share: ShareEnvelope;
 	/** The message it came in. */
 	messageId: string;
 	state: HoldingState;
@@ -28,9 +34,60 @@ export interface Holding {
 	updatedAt: number;
 }
 
+/** The guardian slot's `holdings`: by holdingKey, or conflictKey for a share refused. */
+export type Holdings = Record<string, Holding>;
+
+/** A `recovery_share` from the dialog peer, with the message it came in. */
+export interface ReceivedShare {
+	messageId: string;
+	share: ShareEnvelope;
+}
+
 /** `<owner>|<secret_ref>|<version>|<split_id>|<share_index>`: what a guardian may hold once. */
-export const holdingKey = (owner: string, s: Pick<RecoverySharePart, 'secretRef' | 'version' | 'splitId' | 'shareIndex'>): string =>
+export const holdingKey = (owner: string, s: Pick<ShareEnvelope, 'secretRef' | 'version' | 'splitId' | 'shareIndex'>): string =>
 	`${owner}|${s.secretRef}|${s.version}|${s.splitId}|${s.shareIndex}`;
+
+/** A refused share's key: beside the holding it disagrees with, never over it. */
+export const conflictKey = (owner: string, r: ReceivedShare): string => `${holdingKey(owner, r.share)}#${r.messageId}`;
+
+/** States in which the share's bytes are kept. */
+const HELD: ReadonlySet<HoldingState> = new Set(['pending', 'stored', 'unverified', 'unreachable', 'unrequested']);
+export const holdsBytes = (h: Holding): boolean => HELD.has(h.state);
+
+/** States kept without the bytes: dropped, given back, refused. */
+export const TOMBSTONES: ReadonlySet<HoldingState> = new Set(['dropped', 'given_back', 'conflict']);
+
+/**
+ * The holding a received share stands for, with its key: its refusal, or the
+ * holding of the same share — unless that one keeps other bytes, which makes
+ * this share a refusal not recorded yet. Null when there is none.
+ */
+export const holdingFor = (owner: string, r: ReceivedShare, holdings: Holdings): { key: string; holding: Holding } | null => {
+	const refusal = conflictKey(owner, r);
+	if (holdings[refusal]) return { key: refusal, holding: holdings[refusal] };
+	const key = holdingKey(owner, r.share);
+	const held = holdings[key];
+	if (!held || (holdsBytes(held) && held.share.shareB64 !== r.share.shareB64)) return null;
+	return { key, holding: held };
+};
+
+/**
+ * What a received share is to the holdings, or null when it is already
+ * handled — the same bytes kept under its key (a re-issue sends them again in
+ * a later message), a tombstone there, or its refusal recorded. Several
+ * shares of one split are fine: a spare handed to an existing guardian is a
+ * second index. The same share with other bytes, or another split at a
+ * version held, is a fault to report, not a share to keep (§ Holding).
+ */
+export const classifyShare = (owner: string, r: ReceivedShare, holdings: Holdings): { kind: 'new' } | { kind: 'conflict'; reason: string } | null => {
+	if (holdingFor(owner, r, holdings)) return null;
+	if (holdings[holdingKey(owner, r.share)]) return { kind: 'conflict', reason: 'this piece was already sent with different contents' };
+	const { secretRef, version, splitId } = r.share;
+	const otherSplit = Object.values(holdings).some(
+		(h) => h.owner === owner && holdsBytes(h) && h.share.secretRef === secretRef && h.share.version === version && h.share.splitId !== splitId,
+	);
+	return otherSplit ? { kind: 'conflict', reason: 'another split was already sent for this version' } : { kind: 'new' };
+};
 
 /** `<namespace>/<id>` → its parts, or null when it is not that shape. */
 export const parseSecretRef = (ref: string): { namespace: string; id: string } | null => {
@@ -63,7 +120,7 @@ export interface KeepingContext {
  * fault, and the owner has to hear it. The detail travels to the owner, so it
  * names "the guardian" rather than "you".
  */
-export const judgeShare = async (owner: string, share: Omit<RecoverySharePart, 'kind'>, ctx: KeepingContext): Promise<{ state: HoldingState; detail: string }> => {
+export const judgeShare = async (owner: string, share: ShareEnvelope, ctx: KeepingContext): Promise<{ state: HoldingState; detail: string }> => {
 	const ref = parseSecretRef(share.secretRef);
 	if (!ref) return { state: 'unverified', detail: 'it names no secret the guardian\'s app can read' };
 	if (!ctx.reachable(ref.namespace)) return { state: 'unreachable', detail: 'it is for a network the guardian\'s app cannot reach' };
@@ -94,23 +151,6 @@ export const judgeShare = async (owner: string, share: Omit<RecoverySharePart, '
 		throw e;
 	}
 	return { state: 'stored', detail: '' };
-};
-
-/**
- * Whether `incoming` may be kept beside `held` (every holding from the same
- * owner). Several shares of one split are fine — a spare handed to an
- * existing guardian is a second index. The same share with other bytes is
- * refused, and so is another split at a version already held: both are faults
- * to report, not shares to keep (§ Holding).
- */
-export const conflictOf = (incoming: Omit<RecoverySharePart, 'kind'>, held: readonly Holding[]): string | null => {
-	for (const h of held) {
-		const s = h.share;
-		if (s.secretRef !== incoming.secretRef || s.version !== incoming.version) continue;
-		if (s.splitId !== incoming.splitId) return 'another split was already sent for this version';
-		if (s.shareIndex === incoming.shareIndex && s.shareB64 !== incoming.shareB64) return 'this piece was already sent with different contents';
-	}
-	return null;
 };
 
 export interface DyingContext {
@@ -144,36 +184,15 @@ export const shouldDrop = async (h: Holding, all: readonly Holding[], ctx: Dying
 	return mine === false ? 'the backup no longer lists this guardian' : null;
 };
 
-/** The message telling the owner where `h` stands, or null when they already know. */
-export const reportOf = (h: Holding): RecoveryHoldingPart | null => {
-	if (!(REPORTED_STATES as readonly string[]).includes(h.state) || h.reported === h.state) return null;
-	const { secretRef, version, splitId, shareIndex } = h.share;
-	return { kind: 'recovery_holding', secretRef, version, splitId, shareIndex, state: h.state, detail: h.state === 'stored' ? '' : h.detail };
-};
-
 /**
- * The owner's side: each guardian's latest word on the share they were sent,
- * with its reason, from their `recovery_holding` messages in dialog order.
- * Only the guardian the share went to can state it, and only about that share.
+ * The message telling the owner where `h` stands, or null when there is
+ * nothing to tell yet (pending) or they already know. A refused share is told
+ * as `unverified` with the reason: the owner's client sent two pieces that
+ * cannot both be right.
  */
-export const holdingReportsOf = (
-	messages: readonly { senderHash: string; parts: readonly { kind: string }[] }[],
-	sent: Record<string, { secretRef: string; version: number; splitId: string; shareIndex: number }>,
-): Record<string, { state: ReportedState; detail: string }> => {
-	const out: Record<string, { state: ReportedState; detail: string }> = {};
-	for (const m of messages) {
-		const expected = sent[m.senderHash];
-		if (!expected) continue;
-		for (const p of m.parts) {
-			if (p.kind !== 'recovery_holding') continue;
-			const r = p as RecoveryHoldingPart;
-			if (r.secretRef !== expected.secretRef || r.version !== expected.version || r.splitId !== expected.splitId || r.shareIndex !== expected.shareIndex) continue;
-			if ((REPORTED_STATES as readonly string[]).includes(r.state)) out[m.senderHash] = { state: r.state as ReportedState, detail: r.detail };
-		}
-	}
-	return out;
+export const reportFor = (h: Holding): RecoveryHoldingPart | null => {
+	const state: ReportedState | null = h.state === 'conflict' ? 'unverified' : isReportedState(h.state) ? h.state : null;
+	if (!state || h.reported === state) return null;
+	const { secretRef, version, splitId, shareIndex } = h.share;
+	return { kind: 'recovery_holding', secretRef, version, splitId, shareIndex, state, detail: state === 'stored' ? '' : h.detail };
 };
-
-/** holdingReportsOf, the states alone. */
-export const holdingStatesOf = (...args: Parameters<typeof holdingReportsOf>): Record<string, ReportedState> =>
-	Object.fromEntries(Object.entries(holdingReportsOf(...args)).map(([guardian, r]) => [guardian, r.state]));

@@ -5,7 +5,7 @@
 // arrived — read from each guardian's dialog, for this run only.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { receiptOf, sentSharesOf } from '@/lib/recovery/receipts';
+import { isReportOn, latestReport, receiptOf, sentSharesOf } from '@/lib/recovery/receipts';
 
 const NS = 'eip155:11155111:0xd9ffd20f2db9c774b9f0237c4837f52dcbd937a7';
 const ID = '0x' + 'AB'.repeat(32);
@@ -46,6 +46,20 @@ describe('receiptOf', () => {
 		expect(receiptOf(G('a'), sent[G('a')], read(word('stored', { shareIndex: 2 }), word('stored', { version: 1 })))).toBeNull();
 	});
 
+	it('reads only the guardian’s own word about the share they were sent, latest last', () => {
+		const msgs = [
+			{ senderHash: G('a'), parts: [word('stored')] },
+			{ senderHash: G('b'), parts: [word('given_back')] }, // not the guardian it went to
+			{ senderHash: G('a'), parts: [word('stored', { shareIndex: 2 })] }, // another share
+			{ senderHash: G('a'), parts: [word('given_back')] },
+			{ senderHash: G('a'), parts: [word('whatever')] }, // a state the owner does not read
+		];
+		expect(latestReport(msgs, G('a'), sent[G('a')])).toEqual({ state: 'given_back', detail: 'why' });
+		expect(latestReport(msgs, G('c'), sent[G('a')])).toBeNull();
+		expect(isReportOn(sent[G('a')])(word('whatever'))).toBe(false);
+		expect(isReportOn(sent[G('a')])(word('stored'))).toBe(true);
+	});
+
 	it('falls back to delivered when the dialog says the piece arrived, and to nothing otherwise', () => {
 		expect(receiptOf(G('a'), sent[G('a')], { messages: [], delivered: ['ma'] })).toEqual({ state: 'delivered', detail: '' });
 		expect(receiptOf(G('a'), sent[G('a')], { messages: [], delivered: ['mb'] })).toBeNull();
@@ -81,18 +95,33 @@ describe('the backup store’s receipts', () => {
 		dialogs[G('b')] = { messages: [{ senderHash: G('b'), parts: [word('given_back', { shareIndex: 2 })] }], delivered: [] };
 		const store = useRecoveryBackupStore();
 		await store.refreshReceipts();
-		expect(readPeerParts.mock.calls.map(([peer, kinds, o]) => [peer, kinds, o.deliveredOf])).toEqual([
-			[G('a'), ['recovery_holding'], ['ma']],
-			[G('b'), ['recovery_holding'], ['mb']],
-			[G('c'), ['recovery_holding'], ['mc']],
+		expect(readPeerParts.mock.calls.map(([peer, kinds, o]) => [peer, kinds, o.deliveredOf, o.newestMatch(word('stored', { shareIndex: o.deliveredOf[0] === 'ma' ? 1 : 9 }))])).toEqual([
+			[G('a'), ['recovery_holding'], ['ma'], true],
+			[G('b'), ['recovery_holding'], ['mb'], false],
+			[G('c'), ['recovery_holding'], ['mc'], false],
 		]);
 		expect(store.receipts).toEqual({ [G('a')]: 'stored', [G('b')]: 'given_back' });
 		expect(store.receiptDetails[G('b')]).toEqual({ state: 'given_back', detail: 'why' });
 
-		// A later read that fails keeps what was heard.
-		delete dialogs[G('a')];
-		await store.refreshReceipts({ only: G('a') });
-		expect(store.receipts[G('a')]).toBe('stored');
+		// Heard a moment ago: not read again; a dialog that could not be read is.
+		readPeerParts.mockClear();
+		await store.refreshReceipts();
+		expect(readPeerParts.mock.calls.map(([peer]) => peer)).toEqual([G('c')]);
+		readPeerParts.mockClear();
+
+		// Later, a read that fails keeps what was heard; an unchanged word changes nothing.
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			vi.setSystemTime(Date.now() + 3 * 60_000);
+			delete dialogs[G('a')];
+			const before = store.receiptDetails;
+			await store.refreshReceipts();
+			expect(readPeerParts).toHaveBeenCalledTimes(3);
+			expect(store.receipts[G('a')]).toBe('stored');
+			expect(store.receiptDetails).toBe(before);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('takes an open dialog’s messages as they are, and forgets what was heard for another run', async () => {

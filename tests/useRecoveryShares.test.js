@@ -4,8 +4,7 @@
 // piece is given back only after the prompt is confirmed.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ref, reactive, nextTick } from 'vue';
-import { holdingKey } from '@/lib/recovery/holdings';
-import { conflictKey } from '@/lib/recovery/keeping';
+import { conflictKey, holdingKey } from '@/lib/recovery/holdings';
 
 const ME = 'u_' + 'a'.repeat(128);
 const PEER = 'u_' + 'b'.repeat(128);
@@ -51,6 +50,14 @@ beforeEach(() => {
 });
 
 describe('the shares the peer sent', () => {
+	it('cost nothing in a dialog without any', async () => {
+		const { views } = use([msg(PEER, [{ kind: 'text', text: 'hi' }]), msg(ME, [{ kind: 'text', text: 'yo' }])]);
+		await flush();
+		expect(views.value).toEqual({});
+		expect(holdings.receive).not.toHaveBeenCalled();
+		expect(backup.noteGuardianMessages).not.toHaveBeenCalled();
+	});
+
 	it('are handed to the holdings when the dialog opens: verified, live and the peer’s only', async () => {
 		const good = msg(PEER, [sharePart()]);
 		use([
@@ -72,7 +79,7 @@ describe('the shares the peer sent', () => {
 		expect(views.value[a.id]).toMatchObject({ state: 'stored', key: holdingKey(PEER, env()), canGiveBack: true, version: 1, shareIndex: 1 });
 		// Other bytes under a kept key: not this one's holding — a refusal still being recorded.
 		expect(views.value[b.id]).toMatchObject({ state: 'saving' });
-		holdings.holdings[conflictKey(PEER, b.id, env({ shareB64: 'BBBB' }))] = { owner: PEER, share: env({ shareB64: '' }), messageId: b.id, state: 'conflict', detail: 'different contents' };
+		holdings.holdings[conflictKey(PEER, { messageId: b.id, share: env({ shareB64: 'BBBB' }) })] = { owner: PEER, share: env({ shareB64: '' }), messageId: b.id, state: 'conflict', detail: 'different contents' };
 		expect(views.value[b.id]).toMatchObject({ state: 'conflict', detail: 'different contents', canGiveBack: false });
 	});
 });

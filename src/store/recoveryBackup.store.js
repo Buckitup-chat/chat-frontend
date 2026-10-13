@@ -14,7 +14,7 @@ import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { fromBase64 } from '@/lib/pq/signature';
 import { publishVault } from '@/lib/recovery/vault';
 import { RecoveryChain } from '@/lib/recovery/chain';
-import { recoveryDeployment, deploymentNamespace, secretIdOf, secretRefOf } from '@/lib/recovery/deployments';
+import { maybeRecoveryDeployment, deploymentNamespace, secretIdOf, secretRefOf } from '@/lib/recovery/deployments';
 import { directGateway, relayerGateway } from '@/lib/recovery/gateway';
 import { signAddSecret } from '@/lib/recovery/typedData';
 import { depositShare } from '@/lib/recovery/nodeClient';
@@ -24,13 +24,17 @@ import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedErro
 import { settingsProblems } from '@/lib/recovery/backupPlan';
 import { setProblems } from '@/lib/recovery/nodeChoice';
 import { listSubscriptions, subscribeWebhook, telegramReply, alertWallet } from '@/lib/recovery/alerts';
-import { receiptOf, sentSharesOf } from '@/lib/recovery/receipts';
+import { isReportOn, receiptOf, sentSharesOf } from '@/lib/recovery/receipts';
 
 export const BACKUP_SLOT = 'recovery_backup';
 export const NODES_SLOT = 'recovery_nodes';
 const DEVICE_KEY = 'buckitup:device-label';
 /** How often a run driven elsewhere — another device or tab — is read again while a screen follows it. */
 const FOLLOW_MS = 15_000;
+/** A guardian's word read this recently is not read again from their dialog. */
+const RECEIPT_FRESH_MS = 2 * 60_000;
+/** Guardian dialogs read at once for their receipts. */
+const RECEIPT_READS_AT_ONCE = 3;
 /** A run another device has not moved for this long may be continued here: that device may be lost. */
 export const TAKEOVER_AFTER_SEC = 10 * 60;
 /** One tab of one device drives an account's run at a time. */
@@ -57,13 +61,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	const $dialogs = useDialogsStore();
 	const $invites = useRecoveryInvitesStore();
 
-	const deployment = (() => {
-		try {
-			return recoveryDeployment();
-		} catch {
-			return null;
-		}
-	})();
+	const deployment = maybeRecoveryDeployment();
 
 	/** The run, or the finished backup's record; null before the first backup. */
 	const run = ref(null);
@@ -85,6 +83,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		stopped.value = null;
 		heldElsewhere.value = false;
 		heard.value = { runId: null, byGuardian: {} };
+		lastHeard.clear();
 	});
 
 	const em = () => EncryptionManagerPQ.getInstance();
@@ -243,34 +242,46 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	const receiptDetails = computed(() => (heard.value.runId && heard.value.runId === run.value?.runId ? heard.value.byGuardian : {}));
 	/** userHash → Delivery: what backupFlow.guardianDelivery and healthView take. */
 	const receipts = computed(() => Object.fromEntries(Object.entries(receiptDetails.value).map(([g, r]) => [g, r.state])));
+	/** When each guardian's word was last taken, by `<runId>|<guardian>`: a read this fresh is not made again. */
+	const lastHeard = new Map();
 	const hear = (runId, guardian, receipt) => {
+		lastHeard.set(`${runId}|${guardian}`, Date.now());
+		if (!receipt) return;
 		const byGuardian = heard.value.runId === runId ? heard.value.byGuardian : {};
+		const prev = byGuardian[guardian];
+		if (prev && prev.state === receipt.state && prev.detail === receipt.detail) return;
 		heard.value = { runId, byGuardian: { ...byGuardian, [guardian]: receipt } };
 	};
 
 	/**
 	 * Reads what each guardian the run sent a piece to has said about it, in
-	 * their dialog, one dialog at a time; `only` reads one guardian's. A
+	 * their dialog, a few dialogs at a time: only the newest report on that
+	 * piece is decrypted. A guardian heard from within RECEIPT_FRESH_MS — an
+	 * open dialog feeds its word in as it comes — is not read again, and a
 	 * dialog that cannot be read now keeps what was heard before.
 	 */
 	let reading = null;
-	const refreshReceipts = async ({ only = null } = {}) => {
-		if (!only && reading) return reading;
+	const refreshReceipts = () => {
+		if (reading) return reading;
 		const owner = $userPQ.currentUserHash;
-		const pass = (async () => {
+		reading = (async () => {
 			if (!loaded.value) await load();
 			const current = run.value;
 			const sent = sentSharesOf(current);
-			for (const guardian of Object.keys(sent)) {
-				if (only && guardian !== only) continue;
-				const read = await $dialogs.readPeerParts(guardian, ['recovery_holding'], { deliveredOf: [sent[guardian].messageId] });
+			const due = Object.keys(sent).filter((g) => Date.now() - (lastHeard.get(`${current.runId}|${g}`) ?? 0) >= RECEIPT_FRESH_MS);
+			const readOne = async (guardian) => {
+				const read = await $dialogs.readPeerParts(guardian, ['recovery_holding'], {
+					deliveredOf: [sent[guardian].messageId],
+					newestMatch: isReportOn(sent[guardian]),
+				});
+				if (read && $userPQ.currentUserHash === owner) hear(current.runId, guardian, receiptOf(guardian, sent[guardian], read));
+			};
+			// A few dialogs at a time: each read opens its own shape.
+			for (let i = 0; i < due.length; i += RECEIPT_READS_AT_ONCE) {
+				await Promise.all(due.slice(i, i + RECEIPT_READS_AT_ONCE).map(readOne));
 				if ($userPQ.currentUserHash !== owner) return;
-				const receipt = read && receiptOf(guardian, sent[guardian], read);
-				if (receipt) hear(current.runId, guardian, receipt);
 			}
-		})();
-		if (only) return pass;
-		reading = pass.finally(() => {
+		})().finally(() => {
 			reading = null;
 		});
 		return reading;
@@ -284,9 +295,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	const noteGuardianMessages = (guardian, messages) => {
 		const current = run.value;
 		const sent = sentSharesOf(current)[guardian];
-		if (!sent) return;
-		const receipt = receiptOf(guardian, sent, { messages, delivered: [] });
-		if (receipt) hear(current.runId, guardian, receipt);
+		if (sent) hear(current.runId, guardian, receiptOf(guardian, sent, { messages, delivered: [] }));
 	};
 
 	// --- The run -------------------------------------------------------------

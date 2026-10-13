@@ -19,15 +19,15 @@
 				You keep no one's backup piece. When a contact you agreed to guard backs up, their piece appears here.
 			</div>
 			<template v-else>
-				<div class="sk-list">
-					<div v-for="r in rows" :key="r.key" class="sk-row" :class="{ dim: r.gone }" data-test="kept-row">
-						<ContactAvatar :hash="r.owner" :muted="r.gone" />
-						<span class="sk-row-main">
-							<span class="sk-row-name">{{ r.name }}</span>
-							<span class="cb-small">Version {{ r.version }} · piece {{ r.shareIndex }}</span>
-							<span :class="r.problem ? 'sk-status-warn' : r.state === 'stored' ? 'sk-status-ok' : 'cb-small'" data-test="kept-state">{{ r.stateText }}</span>
+				<div class="cb-list">
+					<div v-for="r in rows" :key="r.key" class="cb-row sk-row" :class="{ dim: !r.kept }" data-test="kept-row">
+						<ContactAvatar :hash="r.owner" :muted="!r.kept" />
+						<span class="cb-row-main">
+							<span class="cb-row-name">{{ r.name }}</span>
+							<span class="cb-row-sub">Version {{ r.version }} · piece {{ r.shareIndex }}</span>
+							<span :class="r.problem ? 'cb-status-warn' : r.state === 'stored' ? 'cb-status-ok' : 'cb-small'" data-test="kept-state">{{ r.stateText }}</span>
 						</span>
-						<button v-if="r.canGiveBack" class="btn btn-sm btn-outline-dark" :disabled="busy" data-test="give-back" @click="giveBack(r)">Give back</button>
+						<button v-if="r.kept" class="btn btn-sm btn-outline-dark" :disabled="busy" data-test="give-back" @click="giveBack(r)">Give back</button>
 					</div>
 				</div>
 				<div class="cb-small">Each piece is listed under the contact who sent it: the network does not say whose backup it belongs to.</div>
@@ -44,7 +44,7 @@
 import { computed, inject, onMounted, ref } from 'vue';
 import { useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
 import { userPQStore } from '@/store/userPQ.store';
-import { holdsBytes } from '@/lib/recovery/keeping';
+import { holdsBytes } from '@/lib/recovery/holdings';
 import errorMessage from '@/utils/errorMessage';
 import ContactAvatar from './backup/ContactAvatar.vue';
 import { confirmGiveBack, keptStateIsProblem, keptStateText } from './holdingWords';
@@ -59,13 +59,19 @@ const busy = ref(false);
 
 const load = async () => {
 	loadError.value = null;
+	// One read of the slot per visit: the sweep's when it has something to
+	// do or this session has not read the slot yet, a fresh one otherwise.
+	let read = false;
 	try {
-		await store.load({ refresh: true });
+		({ read } = await store.sweep({ force: true }));
+	} catch (e) {
+		console.warn('[recovery] the shares kept could not be checked:', e);
+	}
+	try {
+		if (!read) await store.load({ refresh: true });
 	} catch (e) {
 		loadError.value = errorMessage(e);
-		return;
 	}
-	store.sweep().catch((e) => console.warn('[recovery] the shares kept could not be checked:', e));
 };
 onMounted(load);
 
@@ -83,8 +89,8 @@ const rows = computed(() =>
 		state: h.state,
 		stateText: keptStateText(h.state, h.detail),
 		problem: keptStateIsProblem(h.state),
-		gone: !holdsBytes(h),
-		canGiveBack: holdsBytes(h),
+		/** Its bytes are here: it can be given back. */
+		kept: holdsBytes(h),
 	})),
 );
 
@@ -110,42 +116,7 @@ const giveBack = async (r) => {
 	background-color: #f8f9fa;
 	border-radius: 12px;
 }
-.sk-list {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-}
 .sk-row {
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	padding: 7px 8px;
-	border-radius: 10px;
 	background: #fff;
-	&.dim .sk-row-name {
-		color: #6c757d;
-	}
-}
-.sk-row-main {
-	flex: 1;
-	display: flex;
-	flex-direction: column;
-	gap: 2px;
-	min-width: 0;
-}
-.sk-row-name {
-	font-weight: 500;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-.sk-status-ok {
-	font-weight: 500;
-	font-size: 12px;
-	color: #1f7d16;
-}
-.sk-status-warn {
-	font-weight: 500;
-	font-size: 12px;
-	color: #a8620c;
 }
 </style>

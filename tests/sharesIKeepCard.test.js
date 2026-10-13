@@ -29,19 +29,26 @@ beforeEach(() => {
 		loaded: true,
 		list: [],
 		load: vi.fn(async () => {}),
-		sweep: vi.fn(async () => {}),
+		sweep: vi.fn(async () => ({ read: false })),
 		giveBack: vi.fn(async () => {}),
 	});
 	swal = { fire: vi.fn(async () => ({ isConfirmed: true })) };
 });
 
 describe('Shares I keep', () => {
-	it('reads the slot again and checks the pieces when shown, and says when there are none', async () => {
+	it('checks the pieces when shown, reads the slot once, and says when there are none', async () => {
 		const w = render();
 		await flushPromises();
+		expect(H.store.sweep).toHaveBeenCalledWith({ force: true });
 		expect(H.store.load).toHaveBeenCalledWith({ refresh: true });
-		expect(H.store.sweep).toHaveBeenCalledTimes(1);
 		expect(w.find('[data-test="empty"]').text()).toContain("You keep no one's backup piece.");
+
+		// The sweep read the slot: no second read.
+		H.store.sweep = vi.fn(async () => ({ read: true }));
+		H.store.load = vi.fn(async () => {});
+		render();
+		await flushPromises();
+		expect(H.store.load).not.toHaveBeenCalled();
 	});
 
 	it('lists each piece under the contact who sent it, with its version and state', async () => {
@@ -80,7 +87,6 @@ describe('Shares I keep', () => {
 		const failed = render();
 		await flushPromises();
 		expect(failed.find('[data-test="load-error"]').text()).toContain('vault locked');
-		expect(H.store.sweep).not.toHaveBeenCalled();
 
 		H.store.load = vi.fn(async () => {});
 		H.store.list = [held('k1')];

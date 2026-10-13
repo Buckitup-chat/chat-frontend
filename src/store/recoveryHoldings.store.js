@@ -1,48 +1,39 @@
 // The shares this account keeps as a guardian (pq_recovery_shares § Holding,
 // § Dying; plan § 7.3): the copies in its `guardian` slot, kept once per
 // account. A dialog hands in the shares its peer sent when it opens; a
-// periodic pass, while the app is open, reads the chain again for pending
-// shares and drops the ones § Dying ends. One pass runs at a time, across the
-// tabs of this device, so each state is told to its owner once.
+// periodic pass, while the app is open and shown, asks the chain whether
+// anything changed and only then takes the slot's lock to judge pending
+// shares again and drop what § Dying ends. One pass runs at a time, across
+// the tabs of this device, so each state is told to its owner once.
 import { defineStore } from 'pinia';
 import { computed, ref, watch } from 'vue';
+import { hexToBytes } from '@noble/hashes/utils';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
-import { RecoveryChain } from '@/lib/recovery/chain';
-import { deploymentNamespace, recoveryDeployment } from '@/lib/recovery/deployments';
-import { GUARDIAN_SLOT } from '@/lib/recovery/invitations';
-import { anyUnhandled, chainContexts, giveBack as giveBackHolding, needsSweep, receiveShares, sweepHoldings } from '@/lib/recovery/keeping';
+import { withNamedLock } from '@/lib/data/storageIntent';
+import { RecoveryChain, guardianChainReads } from '@/lib/recovery/chain';
+import { deploymentNamespace, maybeRecoveryDeployment } from '@/lib/recovery/deployments';
+import { metaKeysOf } from '@/lib/recovery/guardianInvite';
+import { GUARDIAN_SLOT, consentedIn } from '@/lib/recovery/invitations';
+import { holdsBytes } from '@/lib/recovery/holdings';
+import { anyUnhandled, giveBack as giveBackHolding, receiveShares, secretsToCheck, sweepDue, sweepHoldings } from '@/lib/recovery/keeping';
 
-/** How often the app reads the chain again for the shares it keeps. */
+/** How often the app asks the chain again about the shares it keeps; a tab skips its turn when another swept within half of it. */
 export const SWEEP_MS = 5 * 60_000;
 export const holdingsLockName = (owner) => `buckitup:holdings:${owner}`;
+const sweptKey = (owner) => `buckitup:holdings-swept:${owner}`;
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 export const useRecoveryHoldingsStore = defineStore('recoveryHoldings', () => {
 	const $userPQ = userPQStore();
 	const $dialogs = useDialogsStore();
 
-	const deployment = (() => {
-		try {
-			return recoveryDeployment();
-		} catch {
-			return null;
-		}
-	})();
+	const deployment = maybeRecoveryDeployment();
 	const namespace = deployment ? deploymentNamespace(deployment) : null;
 	let chain = null;
-	const chainOf = () => (chain ??= new RecoveryChain(deployment));
-	/** Without a deployment nothing is reachable, and no read is made. */
-	const offChain = {
-		readSecret: async () => {
-			throw new Error('This app names no network to read.');
-		},
-		guardiansAt: async () => [],
-		shareAt: async () => {
-			throw new Error('This app names no network to read.');
-		},
-	};
+	const chainOf = () => (deployment ? (chain ??= new RecoveryChain(deployment)) : null);
+	const reachable = (ns) => namespace !== null && ns === namespace;
 
 	/** The slot's holdings, by key, as last read or written. */
 	const holdings = ref({});
@@ -59,19 +50,18 @@ export const useRecoveryHoldingsStore = defineStore('recoveryHoldings', () => {
 	);
 
 	const em = () => EncryptionManagerPQ.getInstance();
+	const metaKeys = async () => {
+		const seed = await em().guardianMetaSeed();
+		return seed ? metaKeysOf(hexToBytes(seed)) : null;
+	};
 
 	/** One pass's view of the slot and the world, for `owner`; every write refuses once another account is signed in. */
-	const passDeps = (owner) => {
+	const passDeps = (owner, known) => {
 		const alive = () => {
 			if ($userPQ.currentUserHash !== owner) throw new Error('The account changed; nothing was written');
 		};
 		let answers = {};
-		const { keeping, dying } = chainContexts({
-			chain: deployment ? chainOf() : offChain,
-			namespace,
-			answers: () => answers,
-			metaSeed: () => em().guardianMetaSeed(),
-		});
+		const reads = guardianChainReads(chainOf(), metaKeys, known);
 		return {
 			load: async () => {
 				const slot = await em().loadSlotJson(GUARDIAN_SLOT);
@@ -81,7 +71,7 @@ export const useRecoveryHoldingsStore = defineStore('recoveryHoldings', () => {
 			},
 			save: async (entries) => {
 				alive();
-				const accepted = await em().patchSlotJson(GUARDIAN_SLOT, { holdings: entries });
+				const accepted = await em().patchSlotJson(GUARDIAN_SLOT, { $keyed: ['holdings'], holdings: entries });
 				alive();
 				const out = accepted?.holdings ?? {};
 				holdings.value = out;
@@ -91,45 +81,43 @@ export const useRecoveryHoldingsStore = defineStore('recoveryHoldings', () => {
 				alive();
 				await $dialogs.sendMessage(to, parts);
 			},
-			keeping,
-			dying,
+			keeping: {
+				reachable,
+				consented: (o, ns) => consentedIn(answers, o, ns),
+				readSecret: reads.readSecret,
+				slotsAt: reads.slotsAt,
+			},
+			dying: { readSecret: reads.readSecret, addressedToMe: reads.addressedToMe },
 			now: nowSec,
 		};
 	};
 
-	// One pass at a time: in this tab through the chain, across tabs through the lock.
-	let queue = Promise.resolve();
-	const exclusive = (fn) => {
+	/** Runs a pass for the signed-in account under its lock; what it returns becomes the holdings shown. */
+	const exclusive = (fn, known) => {
 		const owner = $userPQ.currentUserHash;
 		if (!owner) return Promise.resolve(null);
-		const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
-		const run = queue.then(async () => {
+		return withNamedLock(holdingsLockName(owner), async () => {
 			if ($userPQ.currentUserHash !== owner) return null;
-			const deps = passDeps(owner);
-			const go = async () => {
-				const out = await fn(deps);
-				if ($userPQ.currentUserHash === owner) {
-					holdings.value = out;
-					loaded.value = true;
-					loadedFor = owner;
-				}
-				return out;
-			};
-			return locks?.request ? locks.request(holdingsLockName(owner), go) : go();
+			const out = await fn(passDeps(owner, known));
+			if ($userPQ.currentUserHash === owner) {
+				holdings.value = out;
+				loaded.value = true;
+				loadedFor = owner;
+			}
+			return out;
 		});
-		queue = run.catch(() => {});
-		return run;
 	};
 
-	/** Reads the slot: once per account, or again with `refresh`. */
+	/** Reads the slot: once per account, or again with `refresh`. Resolves to whether it read. */
 	const load = async ({ refresh = false } = {}) => {
 		const owner = $userPQ.currentUserHash;
-		if (!owner || (loadedFor === owner && !refresh)) return;
+		if (!owner || (loadedFor === owner && !refresh)) return false;
 		const slot = await em().loadSlotJson(GUARDIAN_SLOT);
-		if ($userPQ.currentUserHash !== owner) return;
+		if ($userPQ.currentUserHash !== owner) return false;
 		holdings.value = slot?.holdings ?? {};
 		loaded.value = true;
 		loadedFor = owner;
+		return true;
 	};
 
 	/**
@@ -144,12 +132,37 @@ export const useRecoveryHoldingsStore = defineStore('recoveryHoldings', () => {
 		await exclusive((deps) => receiveShares(deps, peerHash, received));
 	};
 
-	/** The periodic pass; skipped while nothing is kept that it would change. */
-	const sweep = async () => {
-		if (!$userPQ.currentUserHash) return;
-		await load();
-		if (!needsSweep(holdings.value)) return;
-		await exclusive((deps) => sweepHoldings(deps));
+	const sweptAt = (owner) => Number(localStorage.getItem(sweptKey(owner)) ?? 0);
+
+	/**
+	 * The periodic pass. The chain is asked first, about each secret kept, in
+	 * parallel and without the lock; the slot is read again and written only
+	 * when that, or a pending share or an untold state, gives the pass
+	 * something to do. Skipped while the page is hidden or another tab swept
+	 * lately, unless `force`d. Resolves to { read }: whether the slot was read.
+	 */
+	const sweep = async ({ force = false } = {}) => {
+		const owner = $userPQ.currentUserHash;
+		if (!owner) return { read: false };
+		let read = await load();
+		if (!force && ((typeof document !== 'undefined' && document.hidden) || Date.now() - sweptAt(owner) < SWEEP_MS / 2)) return { read };
+		localStorage.setItem(sweptKey(owner), String(Date.now()));
+		const ids = secretsToCheck(holdings.value, reachable);
+		const known = new Map();
+		const c = chainOf();
+		await Promise.all(
+			ids.map(async (id) => {
+				try {
+					const s = await c.readSecret(id);
+					known.set(id, s ? { version: Number(s.version), revoked: s.revoked } : null);
+				} catch (e) {
+					console.warn('[recovery] a kept share\'s secret could not be read:', id, e);
+				}
+			}),
+		);
+		if ($userPQ.currentUserHash !== owner || !sweepDue(holdings.value, known)) return { read };
+		read = (await exclusive((deps) => sweepHoldings(deps), known)) !== null || read;
+		return { read };
 	};
 
 	/** Gives back the share kept under `key`, telling its owner. */
@@ -168,7 +181,7 @@ export const useRecoveryHoldingsStore = defineStore('recoveryHoldings', () => {
 		Object.entries(holdings.value)
 			.filter(([, h]) => h.state !== 'conflict')
 			.map(([key, h]) => ({ key, ...h }))
-			.sort((a, b) => Number(['given_back', 'dropped'].includes(a.state)) - Number(['given_back', 'dropped'].includes(b.state)) || b.updatedAt - a.updatedAt),
+			.sort((a, b) => Number(!holdsBytes(a)) - Number(!holdsBytes(b)) || b.updatedAt - a.updatedAt),
 	);
 
 	return { holdings, list, loaded, load, receive, sweep, giveBack, watchWhileOpen };

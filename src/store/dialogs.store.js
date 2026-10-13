@@ -46,6 +46,15 @@ const safeBase64Decode = (str, fieldName) => {
     return result;
 };
 
+/** `promise`, or a rejection once `ms` pass first: one slow dialog read must not wedge what waits on it. */
+const withBudget = (promise, ms, label) => {
+    let timer;
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} budget exceeded`)), ms); }),
+    ]).finally(() => clearTimeout(timer));
+};
+
 /** Content parts whose bytes travel as a file (fileTransfer.ts). */
 const MEDIA_KINDS = new Set(['file', 'image', 'video']);
 
@@ -184,6 +193,22 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     const isRowAdmitted = (dialogHash, row) =>
         dialogGates.get(dialogHash)?.isRowAdmitted(row) ?? false;
+
+    /**
+     * A dialog's signed rows in feed order, run through the gate oldest
+     * first — parents before their children, as the feed admits — and those
+     * the gate admitted. Null when `alive` turns false once the rows are
+     * read: nothing is admitted for an account no longer signed in.
+     */
+    const admittedRowsOf = async (dialogHash, colls, alive = () => true) => {
+        await colls.messages.preload().catch(() => { });
+        if (!alive()) return null;
+        const rows = colls.messages.toArray
+            .filter((r) => r.sign_hash)
+            .sort((a, b) => feedOrderKey(a.message_id, a.owner_timestamp) - feedOrderKey(b.message_id, b.owner_timestamp));
+        for (const row of rows) await admitMessageRow(row, colls);
+        return { rows, admitted: rows.filter((r) => isRowAdmitted(dialogHash, r)) };
+    };
 
     /** Re-checks rows parked on absent author cards; call when user_cards sync. */
     const retryCardAdmissions = async () => {
@@ -1267,12 +1292,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // `me` once another account is open.
         const stillMine = () => $userPQ.currentUserHash === me;
         const { rows, pointer } = await withDialogCollections(dialogHash, async (colls) => {
-            await colls.messages.preload().catch(() => { });
-            if (!stillMine()) return { rows: [], pointer: stored };
-            const loaded = colls.messages.toArray.filter((r) => r.sign_hash);
-            const ordered = [...loaded].sort((a, b) => feedOrderKey(a.message_id, a.owner_timestamp) - feedOrderKey(b.message_id, b.owner_timestamp));
-            for (const row of ordered) await admitMessageRow(row, colls);
-            const admitted = loaded.filter((r) => isRowAdmitted(dialogHash, r));
+            const read = await admittedRowsOf(dialogHash, colls, stillMine);
+            if (!read) return { rows: [], pointer: stored };
+            const { rows: loaded, admitted } = read;
             const isAdmitted = (r) => isRowAdmitted(dialogHash, r);
             return { rows: admitted, pointer: await findLatestCheckpoint(dialogHash, loaded, stored, colls, isAdmitted, me) };
         });
@@ -1332,17 +1354,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 if (!peerHash || peerHash === $userPQ.currentUserHash) continue;
                 const dialogHash = getDialogHash(peerHash);
                 if (!dialogHash || !indexed.has(dialogHash)) continue;
-                let budget;
                 try {
-                    await Promise.race([
-                        refreshCheckpointAlert(peerHash),
-                        new Promise((_, reject) => { budget = setTimeout(
-                            () => reject(new Error('refresh budget exceeded')), REFRESH_BUDGET_MS); }),
-                    ]);
+                    await withBudget(refreshCheckpointAlert(peerHash), REFRESH_BUDGET_MS, 'refresh');
                 } catch (e) {
                     console.warn('[dialogs] checkpoint alert scan failed for', peerHash, e);
-                } finally {
-                    clearTimeout(budget);
                 }
             }
         })().finally(() => { scanInFlight = null; });
@@ -1355,55 +1370,49 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * The parts of `kinds` in the live messages `peerHash` sent in their
      * dialog, oldest first: [{ messageId, senderHash, parts }], with
      * `delivered` — the ids among `deliveredOf` that the peer's verified
-     * delivered receipt names. Read without joining the warm set, through the
-     * gate like the feed (a row that does not verify is not read), within a
-     * time budget: null when the dialog could not be read in time, or another
+     * delivered receipt names. With `newestMatch`, only the newest message
+     * with a part it accepts: rows are decrypted newest first and the read
+     * stops there. Read without joining the warm set, through the gate like
+     * the feed (a row that does not verify is not read), within a time
+     * budget: null when the dialog could not be read in time, or another
      * account is signed in by then. For screens that need a few facts from
      * dialogs that are not open — the owner's backup reads its guardians'
      * word on their pieces (pq_recovery_shares § Holding).
      */
     const PEER_READ_BUDGET_MS = 15_000;
-    const readPeerParts = async (peerHash, kinds, { deliveredOf = [] } = {}) => {
+    const readPeerParts = async (peerHash, kinds, { deliveredOf = [], newestMatch = null } = {}) => {
         const me = $userPQ.currentUserHash;
         const dialogHash = getDialogHash(peerHash);
         if (!dialogHash || !peerHash || peerHash === me) return null;
-        const wanted = new Set(kinds);
+        const wanted = (p) => kinds.includes(p.kind) && (!newestMatch || newestMatch(p));
+        const stillMine = () => $userPQ.currentUserHash === me;
         const read = withDialogCollections(dialogHash, async (colls) => {
-            await colls.messages.preload().catch(() => { });
-            const rows = colls.messages.toArray
-                .filter((r) => r.sign_hash)
-                .sort((a, b) => feedOrderKey(a.message_id, a.owner_timestamp) - feedOrderKey(b.message_id, b.owner_timestamp));
-            // Oldest first, as the feed admits: parents before their children.
-            for (const row of rows) await admitMessageRow(row, colls);
+            const gated = await admittedRowsOf(dialogHash, colls, stillMine);
+            if (!gated) return null;
+            const peerRows = gated.admitted.filter((row) => row.sender_hash === peerHash && !row.deleted_flag);
             const messages = [];
-            for (const row of rows) {
-                if (row.sender_hash !== peerHash || row.deleted_flag || !isRowAdmitted(dialogHash, row)) continue;
-                const decrypted = await decryptMessageRow(row, colls);
-                const parts = (decrypted.parts || []).filter((p) => wanted.has(p.kind));
-                if (parts.length) messages.push({ messageId: row.message_id, senderHash: row.sender_hash, parts });
+            for (const row of newestMatch ? [...peerRows].reverse() : peerRows) {
+                const parts = ((await decryptMessageRow(row, colls)).parts || []).filter(wanted);
+                if (!parts.length) continue;
+                messages.push({ messageId: row.message_id, senderHash: row.sender_hash, parts });
+                if (newestMatch) break;
             }
-            const delivered = [];
+            const delivered = new Set();
             if (deliveredOf.length) {
                 await colls.receipts.preload().catch(() => { });
                 for (const r of colls.receipts.toArray) {
                     if (r.peer_hash !== peerHash || r.type !== 'delivered' || !deliveredOf.includes(r.message_id)) continue;
-                    if (await admitReceiptRow(r)) delivered.push(r.message_id);
+                    if (await admitReceiptRow(r)) delivered.add(r.message_id);
                 }
             }
-            return { messages, delivered: [...new Set(delivered)] };
+            return { messages, delivered: [...delivered] };
         });
-        let budget;
         try {
-            const out = await Promise.race([
-                read,
-                new Promise((_, reject) => { budget = setTimeout(() => reject(new Error('read budget exceeded')), PEER_READ_BUDGET_MS); }),
-            ]);
-            return $userPQ.currentUserHash === me ? out : null;
+            const out = await withBudget(read, PEER_READ_BUDGET_MS, 'peer read');
+            return stillMine() ? out : null;
         } catch (e) {
             console.warn('[dialogs] the peer\'s messages could not be read:', peerHash, e?.message || e);
             return null;
-        } finally {
-            clearTimeout(budget);
         }
     };
 

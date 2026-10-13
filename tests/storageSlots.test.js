@@ -297,10 +297,10 @@ describe('named JSON slots', () => {
 
 	it('edits a keyed map by key, so a later patch keeps the entries an earlier one added', async () => {
 		const em = await login();
-		await em.patchSlotJson('guardian', { answers: { i1: { answer: 'accept' } } });
-		await em.patchSlotJson('guardian', { holdings: { h1: { state: 'pending' } } });
-		await em.patchSlotJson('guardian', { answers: { i2: { answer: 'decline' } }, holdings: { h2: { state: 'stored' } } });
-		await em.patchSlotJson('guardian', { holdings: { h1: null } });
+		await em.patchSlotJson('guardian', { $keyed: ['answers'], answers: { i1: { answer: 'accept' } } });
+		await em.patchSlotJson('guardian', { $keyed: ['holdings'], holdings: { h1: { state: 'pending' } } });
+		await em.patchSlotJson('guardian', { $keyed: ['answers', 'holdings'], answers: { i2: { answer: 'decline' } }, holdings: { h2: { state: 'stored' } } });
+		await em.patchSlotJson('guardian', { $keyed: ['holdings'], holdings: { h1: null } });
 		expect(await em.loadSlotJson('guardian')).toEqual({
 			answers: { i1: { answer: 'accept' }, i2: { answer: 'decline' } },
 			holdings: { h2: { state: 'stored' } },

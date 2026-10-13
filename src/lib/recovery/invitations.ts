@@ -7,7 +7,11 @@ import type { RecoveryInvitePart, RecoveryInviteReplyPart } from '@/lib/pq/conte
 import { inviteProof, metaKeysOf, newInviteId } from './guardianInvite';
 import type { GuardianAnswer, Roster, RosterAnswer, RosterInvite } from './inviteThread';
 
-/** The owner's roster slot; the guardian's slot for its answers and, later, its holdings. */
+/**
+ * The owner's roster slot; the guardian's slot for its answers and its
+ * holdings. Their maps are written by key (storageIntent's `$keyed`), so
+ * another device's entries stay.
+ */
 export const ROSTER_SLOT = 'recovery_roster';
 export const GUARDIAN_SLOT = 'guardian';
 
@@ -43,14 +47,14 @@ export const sendInvite = async (
 	const inviteId = newInviteId();
 	const messageId = await deps.newMessageId();
 	const invite: RosterInvite = { contact: peerHash, deployment: deps.deployment, messageId };
-	const roster = await deps.patchSlotJson(ROSTER_SLOT, { invites: { [inviteId]: invite } } satisfies Roster);
+	const roster = await deps.patchSlotJson(ROSTER_SLOT, { $keyed: ['invites'], invites: { [inviteId]: invite } });
 	const part: RecoveryInvitePart = { kind: 'recovery_invite', inviteId, deployment: deps.deployment };
 	try {
 		await deps.sendMessage(peerHash, [part], onStatus, messageId);
 	} catch (e) {
 		// Never captured, so never sent: left in the roster it would be the
 		// newest invitation and supersede the one the contact answered.
-		await deps.patchSlotJson(ROSTER_SLOT, { invites: { [inviteId]: null } }).catch((undo) => console.error('[recovery] an unsent invitation stays in the roster:', inviteId, undo));
+		await deps.patchSlotJson(ROSTER_SLOT, { $keyed: ['invites'], invites: { [inviteId]: null } }).catch((undo) => console.error('[recovery] an unsent invitation stays in the roster:', inviteId, undo));
 		throw e;
 	}
 	return { inviteId, roster: roster ?? {} };
@@ -92,7 +96,7 @@ export const answerInvite = async (
 	// owner reads; a record that fails to write is not a failed answer.
 	const answer: GuardianAnswer = { owner: peerHash, deployment: invite.deployment, answer: accept ? 'accept' : 'decline', at: Math.floor(Date.now() / 1000) };
 	try {
-		const slot = await deps.patchSlotJson(GUARDIAN_SLOT, { answers: { [invite.inviteId]: answer } });
+		const slot = await deps.patchSlotJson(GUARDIAN_SLOT, { $keyed: ['answers'], answers: { [invite.inviteId]: answer } });
 		return slot?.answers ?? {};
 	} catch (e) {
 		console.warn('[recovery] the answer was sent but not recorded:', invite.inviteId, e);
@@ -100,6 +104,20 @@ export const answerInvite = async (
 	}
 };
 
+/**
+ * Whether this guardian's latest answer to `owner` for `namespace` is an
+ * acceptance (§ Inviting, step 3): a decline at any time withdraws, and of
+ * two answers given in the same second the decline stands.
+ */
+export const consentedIn = (answers: Record<string, GuardianAnswer> | undefined, owner: string, namespace: string): boolean => {
+	let latest: GuardianAnswer | null = null;
+	for (const a of Object.values(answers ?? {})) {
+		if (a.owner !== owner || a.deployment !== namespace) continue;
+		if (!latest || a.at > latest.at || (a.at === latest.at && a.answer === 'decline')) latest = a;
+	}
+	return latest?.answer === 'accept';
+};
+
 /** Records the owner's judged outcomes (inviteThread.rosterAnswersDue). */
 export const recordRosterAnswers = async (deps: Pick<InvitationDeps, 'patchSlotJson'>, answers: Record<string, RosterAnswer>): Promise<Roster> =>
-	(await deps.patchSlotJson(ROSTER_SLOT, { answers } satisfies Roster)) ?? {};
+	(await deps.patchSlotJson(ROSTER_SLOT, { $keyed: ['answers'], answers })) ?? {};

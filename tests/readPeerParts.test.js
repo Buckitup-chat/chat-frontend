@@ -124,6 +124,18 @@ describe('readPeerParts', () => {
 		expect(registered).toBe(0);
 	});
 
+	it('with newestMatch, returns only the newest message with a part it accepts', async () => {
+		seed(
+			await message(peer, peerKey, 1, [holding('stored')]),
+			await message(peer, peerKey, 5, [holding('unverified')]),
+			await message(peer, peerKey, 6, [{ kind: 'text', text: 'bye' }]),
+		);
+		const newest = await store.readPeerParts(peer.userHash, ['recovery_holding'], { newestMatch: () => true });
+		expect(newest.messages).toEqual([{ messageId: id(5), senderHash: peer.userHash, parts: [holding('unverified')] }]);
+		const stored = await store.readPeerParts(peer.userHash, ['recovery_holding'], { newestMatch: (p) => p.state === 'stored' });
+		expect(stored.messages.map((m) => m.messageId)).toEqual([id(1)]);
+	});
+
 	it('names a message delivered only on the peer\'s own verified receipt', async () => {
 		seed(await message(me, myKey, 1, [{ kind: 'text', text: 'share' }]), await message(me, myKey, 2, [{ kind: 'text', text: 'other' }]));
 		const forged = receipt(peer, id(2), 'delivered');

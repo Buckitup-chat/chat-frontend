@@ -148,17 +148,7 @@ onMounted(() => {
 		font-size: 13px;
 		color: #333;
 	}
-	.cb-list {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
 	.cb-row {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 7px 8px;
-		border-radius: 10px;
 		&.pickable {
 			cursor: pointer;
 			user-select: none;
@@ -169,25 +159,6 @@ onMounted(() => {
 		&.picked,
 		&.picked:hover {
 			background: #f7e0f7;
-		}
-		.cb-row-main {
-			flex: 1;
-			display: flex;
-			flex-direction: column;
-			gap: 3px;
-			min-width: 0;
-		}
-		.cb-row-name {
-			font-weight: 500;
-			overflow: hidden;
-			text-overflow: ellipsis;
-		}
-		.cb-row-sub {
-			font-size: 12px;
-			color: $grey_dark;
-		}
-		&.dim .cb-row-name {
-			color: #6c757d;
 		}
 	}
 	.cb-check {
@@ -206,20 +177,6 @@ onMounted(() => {
 		&.none {
 			border: 0;
 		}
-	}
-	.cb-status-ok {
-		font-weight: 500;
-		font-size: 12px;
-		color: #1f7d16;
-	}
-	.cb-status-warn {
-		font-weight: 500;
-		font-size: 12px;
-		color: #a8620c;
-	}
-	.cb-status-off {
-		font-size: 12px;
-		color: $grey_dark;
 	}
 	.cb-tile {
 		background: #f2f2f2;
