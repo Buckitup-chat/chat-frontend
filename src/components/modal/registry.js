@@ -6,32 +6,6 @@
 // authority on reachability, and the thing a screen asks before rendering a
 // button whose only job is to open one.
 
-import { SANDBOX_SURFACES } from '@/config/sandbox';
-
-// Splitting the wrap key by hand into shares is scaffolding for the community
-// scheme, not a backup method (see config/sandbox). The gate belongs here rather
-// than on the buttons, because any component can emit modal::open with an id:
-// hiding an entry point would leave the modal itself reachable. The chunks do
-// still ship — the loader in Modal_.vue is a glob over ./views — so this is a
-// reachability gate, not a size one.
-const SANDBOX_MODALS = {
-	account_restore_shares: {
-		header: true,
-		component: 'Modal_Account_Restore_Shares',
-		modalClass: 'modal-md',
-		title: 'Restore account',
-		icon: '_icon_shares',
-	},
-	account_backup_shamir_create: {
-		header: true,
-		component: 'Modal_Backup_Shamir_Create',
-		modalClass: 'modal-md',
-		title: 'Shamir Shares Backup',
-		icon: '_icon_shares',
-		modalStatic: true,
-	},
-};
-
 export const modalRegistry = {
 	add_contact: {
 		header: true,
@@ -164,7 +138,6 @@ export const modalRegistry = {
 		title: 'Verified contacts',
 		icon: '_icon_contacts',
 	},
-	...(SANDBOX_SURFACES ? SANDBOX_MODALS : {}),
 };
 
 /** Whether this modal exists in this build. */

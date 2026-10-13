@@ -1,5 +1,4 @@
 import { defineStore } from 'pinia';
-import { newWrapKey } from '@/lib/pq/vaultEnvelope';
 import { ref, shallowRef, computed, watch, onScopeDispose } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
@@ -470,27 +469,6 @@ export const userPQStore = defineStore('userPQ', () => {
     };
   };
 
-  // The account sealed under a fresh wrap key and published where only that
-  // key can find it; the key is the one thing a share scheme ever splits
-  // (docs/backup-recovery-overview.md §6), and it never leaves this function.
-  // Split before publishing, so a parameter the split refuses leaves no vault
-  // behind; publish before returning, so nothing is shown until the server has
-  // the vault - shares of a key that opens nothing are worse than none.
-  const createRecoveryBackup = async ({ total, threshold }) => {
-    const backup = await exportBackup();
-    // Loaded here and not at the top: Shamir and its Buffer polyfill serve
-    // this one dev-gated screen and have no place in the startup bundle.
-    const { splitWrapKey } = await import('@/lib/wrapKeyShares');
-    const wrapKey = newWrapKey();
-    try {
-      const shares = splitWrapKey(wrapKey, total, threshold);
-      await em.value.publishRecoveryVault(wrapKey, JSON.stringify(backup));
-      return shares;
-    } finally {
-      wrapKey.fill(0);
-    }
-  };
-
   const importBackup = async (backupData) => {
     if (isAuthenticated.value) {
       await logout();
@@ -564,7 +542,6 @@ export const userPQStore = defineStore('userPQ', () => {
     getEvmPrivateKey,
     getEvmMetaKeys,
     exportBackup,
-    createRecoveryBackup,
     importBackup,
     signContactChallenge,
 

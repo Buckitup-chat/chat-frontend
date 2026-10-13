@@ -1134,8 +1134,8 @@ export class EncryptionManagerPQ extends EventTarget {
    *
    * Vault first, root second, tombstones last. A crash before the root write
    * leaves the new vault live and unreferenced, which is safe only because
-   * its key is never shown before this returns (userPQ.store
-   * createRecoveryBackup); a failure after the root write leaves the previous
+   * the caller hands its key to nobody before this returns; a failure after
+   * the root write leaves the previous
    * backup usable, since nothing is retired until the new one is on record.
    */
   async publishRecoveryVault(wrapKey, json) {
