@@ -195,11 +195,15 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 	const confirmBlock = async () => {
 		const read = pendingRead;
 		if (!read) return;
+		// The recovery it goes into first: with another account signed in, the block stays as it is, unopened.
+		const p = await load();
+		if (!p) throw new Error('The recovery is not signed in on this device now. Sign in to the temporary account again, then add the piece.');
 		const part = await read.open();
 		read.forget();
-		pendingRead = null;
-		pendingBlock.value = null;
-		const p = await load();
+		if (pendingRead === read) {
+			pendingRead = null;
+			pendingBlock.value = null;
+		}
 		await save({ ...p, typedReturns: [...p.typedReturns, { sender: read.guardian, part }] });
 		await check();
 	};

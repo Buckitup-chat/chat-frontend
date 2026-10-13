@@ -264,6 +264,15 @@ describe('a share returned by hand', () => {
 		expect(JSON.parse(H.vault.get(TEMP)).typedReturns).toHaveLength(1);
 	});
 
+	it('opens nothing and says why when the temporary account is no longer signed in', async () => {
+		await store.typeRequest(w.secretRef);
+		quorumAndWindow();
+		await store.readBlock((await blockFrom(0)).block);
+		user.currentUserHash = ORIGINAL;
+		await expect(store.confirmBlock()).rejects.toThrow(/not signed in on this device now/);
+		expect(JSON.parse(H.vault.get(TEMP)).typedReturns).toEqual([]);
+	});
+
 	it('refuses a block not signed by the guardian it names', async () => {
 		await store.typeRequest(w.secretRef);
 		const { block } = await blockFrom(0);
