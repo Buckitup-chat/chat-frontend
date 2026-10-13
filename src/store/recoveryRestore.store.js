@@ -105,11 +105,14 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 		return progress.value;
 	};
 
-	const deps = () => ({
+	/** A pass's world, for the temporary account `me`: nothing is sent under any other account signed in meanwhile. */
+	const deps = (me) => ({
 		namespace,
-		peersWhoWrote: () => peersWhoWrote($userPQ.currentUserHash),
+		peersWhoWrote: () => peersWhoWrote(me),
 		readPeer: async (peer) => (await $dialogs.readPeerParts(peer, ['text', 'recovery_share_return']))?.messages ?? null,
 		sendBinding: async (peer, parts) => {
+			// The binding names the temporary account and is signed as it: checked right before it is captured.
+			if ($userPQ.currentUserHash !== me) throw new Error('The account changed; no answer was sent');
 			await $dialogs.sendMessage(peer, parts);
 		},
 		chain: chainOf(),
@@ -128,7 +131,7 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 			try {
 				const p = await load();
 				if (!p) return;
-				const out = await restorePass(p, deps(), memo);
+				const out = await restorePass(p, deps(me), memo);
 				if ($userPQ.currentUserHash !== me) return;
 				progress.value = out.progress;
 				view.value = out.view;

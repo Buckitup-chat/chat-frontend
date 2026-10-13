@@ -59,7 +59,11 @@ const user = reactive({
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({
-		readPeerParts: async (peer, kinds) => ({ messages: H.world.inbox(user.currentUserHash, peer, kinds), delivered: [] }),
+		readPeerParts: async (peer, kinds, opts = {}) => {
+			const messages = H.world.inbox(user.currentUserHash, peer, kinds).filter((m) => !opts.after || m.messageId >= opts.after);
+			H.onRead?.();
+			return { messages, delivered: [] };
+		},
 		sendMessage: async (peer, parts) => H.world.send(user.currentUserHash, peer, parts),
 	}),
 }));
@@ -197,6 +201,17 @@ describe('a recovery through the dialogs', () => {
 			vi.useRealTimers();
 			vi.unstubAllGlobals();
 		}
+	});
+
+	it('sends no answer once another account is signed in mid-pass', async () => {
+		ask(0);
+		H.onRead = () => {
+			user.currentUserHash = ORIGINAL;
+		};
+		await store.check();
+		H.onRead = null;
+		expect(w.messages.filter((m) => m.parts.some((p) => p.kind === 'recovery_binding'))).toEqual([]);
+		expect(JSON.parse(H.vault.get(TEMP)).answered).toEqual({});
 	});
 
 	it('does not open the account short of the pieces', async () => {
