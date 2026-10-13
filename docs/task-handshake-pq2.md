@@ -272,24 +272,35 @@ The card is not written into `allNetworkUsers` (§1).
 ## 7. Code layout
 
 - `src/lib/pq/handshake.ts` — pure functions, no DOM: `encode`/`parse` for A–D
-  (length-checked), `transcript(a, b)`, `pqMessage(T, fpA, fpB)`, `sasOf(T)`,
-  the transport fingerprint via `qwbp`'s own `decode(payload).fingerprint`
-  (no second parser of its format), and the confirm-message check
+  (length-checked), `transcript(a, b)`, `pqMessage(T, fps)`, `sasOf(T, fps)`
+  (`fps`: each party's fingerprint by `user_hash`, ordered as `T` orders
+  them), `sessionTag(T)`, the transport fingerprint via `qwbp`'s own
+  `decode(payload).fingerprint` (no second parser of its format), and the
+  confirm-message check
   (`checkConfirm(msg, bound, T, fps) → { ok, card } | { ok: false, reason }`).
-- `src/components/engines/QRScannerEngine.vue` — camera, QR rendering, the
-  state machine and the QWBP connection, calling the module above. Session
-  state is one object, reset by `start()`.
+- `src/lib/handshake/engine.ts` — the state machine, a plain class over a
+  `ChannelAdapter`, one instance per session; `src/lib/handshake/qwbpChannel.ts`
+  — the adapter over the session's QWBP connection.
+- `src/components/engines/QRScannerEngine.vue` — camera, QR rendering and the
+  result, around one engine per session. A session id is checked after every
+  await, so an old session cannot draw over, stop the camera of, or complete
+  a new one. `completed` carries, beside the fields of §5 step 7, `reason`
+  and `cause` when not confirmed.
 - `EncryptionManagerPQ` gains `signHandshakePQ(M)` (ML-DSA-87 under
-  `sign_skey`) beside `signContactChallenge`.
-- `src/store/userPQ.store.js` — `confirmContact(userHash, card)` as in §6.
+  `sign_skey`) beside `signContactChallenge`, and `signedOwnCard()`.
+- `src/store/userPQ.store.js` — `confirmContact(userHash, card, fields?)` as
+  in §6.
 - `src/lib/data/turnCredentials.ts` — fetch, memory cache, expiry and the
-  1 s wait of the relay credentials (§5a), with the challenge proof extracted
-  from `api.ingestWithAuthEach` into one helper.
-- The address list (§5a) — a pure function beside it, ported from the
-  sandbox's `relaysOf` and selection in `channel.ts`.
+  1 s wait of the relay credentials (§5a). The challenge proof is one helper,
+  `src/lib/pq/challengeProof.ts`, for ingest, read sessions and this.
+- `src/lib/data/handshakeAddresses.ts` — the address list (§5a), a pure
+  function, and the `selectCandidates` hook built on it.
 - `qwbp` — patched with the `selectCandidates` hook and the early payload
-  (§5a), versioned with the app (a pinned fork or a committed patch), and
-  offered upstream.
+  (§5a): `patches/qwbp+0.1.0.patch`, applied by `patch-package` on install,
+  and offered upstream.
+- `scripts/handshake-check/check.mjs` — the engine and the patched QWBP in
+  two Chromium pages over real WebRTC, with no server; with `PQ2_TURN_URL`,
+  `PQ2_TURN_USER` and `PQ2_TURN_PASS`, also through that relay.
 - Reference implementation: `sandbox/handshake-pq2` (`src/protocol.ts`,
   `src/engine.ts`, `src/channel.ts`) runs this protocol on two phones; its
   `frames.ts` is the animated-QR experiment of §10 and stays out of the app.

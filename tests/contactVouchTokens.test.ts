@@ -31,6 +31,8 @@ const ScannerEngine = defineComponent({
 	},
 });
 vi.mock('@/components/engines/QRScannerEngine.vue', () => ({ default: ScannerEngine }));
+// No relay in these tests: the fake backend answers what they are about.
+vi.mock('@/lib/data/turnCredentials', () => ({ prefetchRelay: async () => {}, relayIceServers: async () => [], clearRelayCredentials: () => {} }));
 
 const DEVICE_ID = 'Server_test_node';
 const READ = `device.${DEVICE_ID}.storage.read`;
@@ -253,7 +255,13 @@ const confirmByQr = async (peer: Client, shownKey = cardOf(peer.hash).contact_pk
 	const Modal = (await import('@/components/modal/views/Modal_QrHandshake.vue')).default;
 	const wrapper = mount(Modal, { global: { provide: { $swal: swal, $mitt: { emit: vi.fn() }, $router: { push: vi.fn() } } } });
 	await flushPromises();
-	wrapper.findComponent(ScannerEngine).vm.$emit('completed', { user_hash: peer.hash, name: peer.name, contact_pkey: shownKey });
+	// The scanner's result: confirmed only when the key shown in person is the one the peer's card certifies.
+	const card = cardOf(peer.hash);
+	const confirmed = shownKey === card.contact_pkey;
+	wrapper.findComponent(ScannerEngine).vm.$emit('completed', {
+		user_hash: peer.hash, name: peer.name, contact_pkey: shownKey, confirmed, card: confirmed ? card : null, sas: '123456',
+		reason: confirmed ? null : 'the card does not certify the contact key the codes showed', cause: confirmed ? null : 'refused',
+	});
 	await flushPromises();
 	await wrapper.findAll('button').find((b) => /Save contact|Open contact/.test(b.text()))!.trigger('click');
 	await vi.waitFor(() => expect(swal.fire).toHaveBeenCalled(), { timeout: 15_000 });
@@ -517,7 +525,7 @@ describe('FRON-23: contact actions that are not a confirmed handshake', () => {
 		const { store, $dialogs } = Owner.app;
 
 		const swal = await confirmByQr(Bob, cardOf(Owner.hash).contact_pkey);
-		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ icon: 'success', title: 'Contact added' }));
+		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ icon: 'warning', title: 'Key verified in person; not yet confirmed' }));
 		expect(confirmedOf(store, Bob)).toBeFalsy();
 
 		await store.saveContact(stranger(9).user_hash, { name: 'Added by id', contact_pkey: 'pkC' });

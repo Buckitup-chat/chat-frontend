@@ -6,6 +6,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { QWBPConnection, decode } from 'qwbp';
 import { candidateSelector } from '@/lib/data/handshakeAddresses';
+import { QwbpChannel } from '@/lib/handshake/qwbpChannel';
 
 type Gathering = Array<[ms: number, line: string | null]>;
 let schedule: Gathering = [];
@@ -86,9 +87,23 @@ describe('QWBP\'s selectCandidates hook', () => {
 		expect(elapsed).toBeLessThan(500);
 	});
 
-	it('with no address at all, ends at once with no candidate', async () => {
+	it('with no address at all, ends at once with no candidate, and the channel says the phone has none', async () => {
 		const { elapsed, payload } = await connect(0, [[2, null]]);
 		expect(payload.length).toBe(34);
 		expect(elapsed).toBeLessThan(500);
+		schedule = [[2, null]];
+		vi.stubGlobal('RTCPeerConnection', StubPeerConnection);
+		const started = Date.now();
+		await expect(new QwbpChannel({ iceServers: [] }).payload()).rejects.toThrow(/no network address/);
+		expect(Date.now() - started).toBeLessThan(500);
+	});
+
+	it('the app\'s channel hands QWBP an explicit empty ICE server list, never QWBP\'s default STUN servers', async () => {
+		schedule = [[2, host], [3, null]];
+		vi.stubGlobal('RTCPeerConnection', StubPeerConnection);
+		const channel = new QwbpChannel({ iceServers: Promise.resolve([]) });
+		await channel.payload();
+		channel.close();
+		expect(made[0].configuration.iceServers).toEqual([]);
 	});
 });

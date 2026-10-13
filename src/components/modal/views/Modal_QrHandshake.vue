@@ -31,8 +31,8 @@
 			</div>
 
 			<div class="text-center text-secondary mb-1 small">
-				Hold the phones facing each other. Align cameras with QR codes at 10-20 cm, adjust if needed. Once successful, the qr turns green, the phone vibrates and new contact will appear for
-				adding. The exact positioning may vary depending on your phone's specifications.
+				Hold the phones face to face, screens towards each other, 25–40 cm apart: closer, the front cameras do not focus. Each phone shows its code and reads the other's; the phones
+				vibrate when the key is proved, and the contact appears for adding with six digits that both screens show.
 			</div>
 		</template>
 
@@ -42,8 +42,7 @@
 			{{ countdown }}
 		</div>
 
-		<!-- Vue Component Engine for QRHandshakeManager -->
-		<QRScannerEngine 
+		<QRScannerEngine
 			ref="scannerEngineRef"
 			v-if="hasCamera"
 			@scanning="onScanning"
@@ -97,9 +96,18 @@
 			<div class="_divider mb-3">
 				{{ isInContacts ? 'Existing contact' : 'Contact found' }}
 			</div>
-			<div class="fs-4 mb-4 text-center">
+			<div class="fs-4 mb-2 text-center">
 				<span class="fw-bold">{{ contact.name ? contact.name : 'Unnamed' }}</span>
 				<span class="text-secondary ms-2" v-if="contact.user_hash">[{{ contact.user_hash.slice(2, 7) }}]</span>
+			</div>
+			<div class="text-center mb-2" v-if="contact.viaHandshake">
+				<div :class="contact.confirmed ? 'text-success' : 'text-warning'">
+					{{ contact.confirmed ? 'Contact confirmed' : 'Key verified in person; not yet confirmed' }}
+				</div>
+				<div class="text-secondary small" v-if="!contact.confirmed">{{ notConfirmedReason(contact) }}</div>
+				<div class="small mt-1" v-if="contact.sas">
+					Code <span class="fw-bold" data-test="contact-sas">{{ contact.sas }}</span> — the same on both phones
+				</div>
 			</div>
 
 			<div class="col-30">
@@ -136,7 +144,7 @@ import { useMenu } from '@/composables/useMenu';
 import { ref, inject, onMounted, computed } from 'vue';
 import Account_Item from '@/components/Account_Item.vue';
 import QRScannerEngine from '@/components/engines/QRScannerEngine.vue';
-import { cardVouchesForContactKey } from '@/lib/pq/verifyCard';
+import { prefetchRelay } from '@/lib/data/turnCredentials';
 import errorMessage from '@/utils/errorMessage';
 
 const $userPQ = userPQStore();
@@ -158,6 +166,9 @@ const userIdInput = ref();
 const { inputData } = defineProps({ inputData: { type: Object } });
 
 onMounted(async () => {
+	// The relay credentials are asked for here, one screen before the scanner:
+	// a session takes what is cached, or waits at most 1 s for them.
+	void prefetchRelay();
 	try {
 		const devices = await navigator.mediaDevices.enumerateDevices();
 		hasCamera.value = devices.some((device) => device.kind === 'videoinput');
@@ -183,14 +194,20 @@ const onCountdown = (count) => {
 	}
 };
 
-// The handshake proves the person in front of you holds `contact_pkey`; their
-// certified card is what ties that key to the user_hash their QR named. Both
-// together confirm the contact; one typed in by id, or a key the card does not
-// carry, does not.
-const onHandshakeCompleted = (peerData) => {
-	const card = $userPQ.allNetworkUsers.find((u) => u.user_hash === peerData.user_hash);
-	contact.value = { ...peerData, viaHandshake: true, card, confirmed: cardVouchesForContactKey(card, peerData.user_hash, peerData.contact_pkey) };
+// The engine decides: `confirmed` comes with the card the handshake verified
+// (its certified key is the one proved in person, and its identity signed the
+// session over the channel). confirmContact checks that card again before
+// anything is saved (docs/task-handshake-pq2.md §6).
+const onHandshakeCompleted = (result) => {
+	contact.value = { ...result, viaHandshake: true };
 };
+
+const NOT_CONFIRMED = {
+	'no-channel': 'Check that both phones are online, or scan again on a shared Wi-Fi.',
+	'no-address': 'This phone has no network to reach the other one. Check that both phones are online, or scan again on a shared Wi-Fi.',
+	'no-card': 'Your profile card is not published yet, so the other phone cannot confirm you. Try again once you are online.',
+};
+const notConfirmedReason = (c) => NOT_CONFIRMED[c.cause] ?? (c.reason ? `Not confirmed: ${c.reason}.` : undefined);
 
 const onDeviceOnly = (saved) => !!saved?.status && saved.status !== 'synced';
 const notSyncedFooter = (saved) => {
@@ -201,9 +218,7 @@ const notSyncedFooter = (saved) => {
 };
 
 const notConfirmedFooter = () =>
-	contact.value.viaHandshake && !contact.value.confirmed
-		? 'Not confirmed: the key they showed is not the one on their card'
-		: undefined;
+	contact.value.viaHandshake && !contact.value.confirmed ? notConfirmedReason(contact.value) : undefined;
 
 async function toggleScanner() {
 	manual.value = false;
@@ -236,14 +251,17 @@ const addContact = async () => {
 		}
 
 		if (isInContacts.value) {
-			const existingContact = $userPQ.contactsMap[contact.value.user_hash];
-			// Scanned in person now, after being added by id before: that is what
-			// confirms it, with the key the handshake proved.
-			const confirmsIt = contact.value.confirmed && !existingContact.confirmed;
+			// Scanned in person: that is what confirms it, with the card the
+			// handshake verified.
+			const confirmsIt = contact.value.viaHandshake && contact.value.confirmed;
 			const saved = confirmsIt ? await $userPQ.confirmContact(contact.value.user_hash, contact.value.card) : null;
+			const notConfirmed = contact.value.viaHandshake && !confirmsIt;
 			$swal.fire({
-				icon: 'success',
-				title: onDeviceOnly(saved) ? 'Contact confirmed on this device' : confirmsIt ? 'Contact confirmed' : 'Contact already in your list',
+				icon: notConfirmed ? 'warning' : 'success',
+				title: onDeviceOnly(saved)
+					? 'Contact confirmed on this device'
+					: confirmsIt ? 'Contact confirmed' : notConfirmed ? 'Key verified in person; not yet confirmed' : 'Contact already in your list',
+				text: confirmsIt && contact.value.sas ? `Code ${contact.value.sas}` : undefined,
 				footer: notSyncedFooter(saved) ?? notConfirmedFooter(),
 				timer: 15000,
 			});
@@ -258,15 +276,18 @@ const addContact = async () => {
 		}
 
 		const fields = { name: contact.value.name, notes: '', hidden: false };
-		const saved = contact.value.confirmed
+		const confirmed = contact.value.viaHandshake && contact.value.confirmed;
+		const saved = confirmed
 			? await $userPQ.confirmContact(contact.value.user_hash, contact.value.card, fields)
 			: await $userPQ.saveContact(contact.value.user_hash, { ...fields, contact_pkey: contact.value.contact_pkey });
+		const notConfirmed = contact.value.viaHandshake && !confirmed;
 
 		$swal.fire({
-			icon: 'success',
+			icon: notConfirmed ? 'warning' : 'success',
 			title: onDeviceOnly(saved)
-				? (contact.value.confirmed ? 'Contact confirmed on this device' : 'Contact added on this device')
-				: (contact.value.confirmed ? 'Contact added and confirmed' : 'Contact added'),
+				? (confirmed ? 'Contact confirmed on this device' : 'Contact added on this device')
+				: (confirmed ? 'Contact added and confirmed' : notConfirmed ? 'Key verified in person; not yet confirmed' : 'Contact added'),
+			text: confirmed && contact.value.sas ? `Code ${contact.value.sas}` : undefined,
 			footer: notSyncedFooter(saved) ?? notConfirmedFooter() ?? 'Now you can name it and make notes',
 			timer: 15000,
 		});
