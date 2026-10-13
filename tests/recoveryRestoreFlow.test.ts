@@ -142,6 +142,32 @@ describe('the temporary account', () => {
 		expect(calls.hasApproved).toBe(w.guardians.length + 2 * (w.guardians.length - 1));
 	});
 
+	it('asks the nodes again for another backup, though the node ids and the candidate are the same', async () => {
+		const toWindow = async () => {
+			const candidate = candidateOf(progress.candidateKey);
+			vote(0, candidate, true);
+			vote(1, candidate);
+			w.clock.now += 601;
+			giveBack(0, candidate);
+			giveBack(1, candidate);
+			return pass();
+		};
+		w.send(w.guardians[0].userHash, TEMP, [{ kind: 'text', text: helpRequestText(w.secretRef) }]);
+		await pass();
+		expect((await toWindow()).ready).toBe(true);
+
+		// Another backup, on nodes with the same ids: the first one's releases are not its.
+		const before = w;
+		w = makeWorld();
+		w.clock.now = before.clock.now;
+		for (const g of w.guardians) w.send(g.userHash, TEMP, [{ kind: 'text', text: helpRequestText(w.secretRef) }]);
+		await pass();
+		const view = await toWindow();
+		expect(view.secretRef).toBe(w.secretRef);
+		expect(w.nodeCalls).toHaveLength(2);
+		expect(bytesToHex(wrapKeyFrom(view, memo))).toBe(w.run.wrapKey);
+	});
+
 	it('names the sender of a return that does not check, and does not count it', async () => {
 		w.send(w.guardians[0].userHash, TEMP, [{ kind: 'text', text: helpRequestText(w.secretRef) }]);
 		await pass();

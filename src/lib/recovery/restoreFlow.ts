@@ -101,9 +101,9 @@ export interface RestoreMemo {
 	roots: Map<string, Uint8Array | null>;
 	/** `<round>|<candidate>|<guardian>` of every approval seen. */
 	approved: Set<string>;
-	/** By `<candidate>|<node id>`. */
+	/** By `<secret id>|<candidate>|<node id>`. */
 	releases: Map<string, { version: number; share: string }>;
-	/** By `<candidate>|<node id>`: why it did not release, and when it was last asked. */
+	/** By `<secret id>|<candidate>|<node id>`: why it did not release, and when it was last asked. */
 	nodeFailures: Map<string, { reason: string; at: number }>;
 }
 
@@ -154,9 +154,12 @@ const emptyView = (candidate: string): RestoreView => ({
 
 const isReturn = (p: ContentPart): p is RecoveryShareReturnPart => p.kind === 'recovery_share_return';
 
-/** The releases this candidate holds, from the nodes the set names, at the round's version. */
-const releasesFor = (memo: RestoreMemo, candidate: string, nodes: NodeRef[], version: number) =>
-	nodes.map((n) => memo.releases.get(`${candidate}|${n.id}`)).filter((r): r is { version: number; share: string } => !!r && r.version === version);
+/** A node's answer for one secret and one candidate: node ids are not per secret, and a recovery may follow another backup. */
+const releaseKey = (id: string, candidate: string, node: NodeRef) => `${id.toLowerCase()}|${candidate}|${node.id}`;
+
+/** The releases this candidate holds for secret `id`, from the nodes the set names, at the round's version. */
+const releasesFor = (memo: RestoreMemo, id: string, candidate: string, nodes: NodeRef[], version: number) =>
+	nodes.map((n) => memo.releases.get(releaseKey(id, candidate, n))).filter((r): r is { version: number; share: string } => !!r && r.version === version);
 
 /**
  * One pass. Resolves to the progress — saved when it changed — and what the
@@ -262,12 +265,12 @@ export const restorePass = async (progress: RestoreProgress, deps: RestoreDeps, 
 
 	// The node half, from the set the verified shares name, once this device may decrypt.
 	const nodes = nodesOf(returns.nodeSet);
-	const usable = () => usableNodeShares(releasesFor(memo, candidate, nodes, version).map((r) => r.share)).shares.length;
+	const usable = () => usableNodeShares(releasesFor(memo, ref.id, candidate, nodes, version).map((r) => r.share)).shares.length;
 	if (nodes.length && round.phase === 'window' && usable() < returns.nodeSet!.threshold && (await deps.chain.canDecrypt(candidate, ref.id))) {
 		// All of them, in the set's order, until the node threshold: the spares count.
 		for (const node of nodes) {
 			if (usable() >= returns.nodeSet!.threshold) break;
-			const key = `${candidate}|${node.id}`;
+			const key = releaseKey(ref.id, candidate, node);
 			if (memo.releases.has(key)) continue;
 			const failed = memo.nodeFailures.get(key);
 			if (failed && now - failed.at < NODE_RETRY_SEC) continue;
@@ -286,7 +289,7 @@ export const restorePass = async (progress: RestoreProgress, deps: RestoreDeps, 
 		}
 	}
 	view.nodes = nodes.map((node) => {
-		const key = `${candidate}|${node.id}`;
+		const key = releaseKey(ref.id, candidate, node);
 		const released = memo.releases.get(key);
 		if (released && released.version === version) return { node, state: 'released' as const };
 		const failed = memo.nodeFailures.get(key);
@@ -299,8 +302,8 @@ export const restorePass = async (progress: RestoreProgress, deps: RestoreDeps, 
 
 /** S, from what the last pass found enough of; throws ShareCheckError when it does not combine. */
 export const wrapKeyFrom = (view: RestoreView, memo: RestoreMemo): Uint8Array => {
-	if (!view.returns || view.version === null) throw new Error('no returned shares');
-	const releases = releasesFor(memo, view.candidate, view.nodes.map((n) => n.node), view.version);
+	if (!view.returns || view.version === null || !view.secretRef) throw new Error('no returned shares');
+	const releases = releasesFor(memo, parseSecretRef(view.secretRef)!.id, view.candidate, view.nodes.map((n) => n.node), view.version);
 	return assembleWrapKey(
 		view.returns.verified.map((v) => v.checked),
 		releases.map((r) => r.share),
