@@ -131,7 +131,7 @@ describe('the scanner, two phones face to face', () => {
 
 		const [ra] = a.wrapper.emitted('completed')[0];
 		const [rb] = b.wrapper.emitted('completed')[0];
-		expect(ra).toMatchObject({ user_hash: bob.userHash, contact_pkey: bob.card.contact_pkey, confirmed: true, name: 'Bob', reason: null });
+		expect(ra).toMatchObject({ user_hash: bob.userHash, contact_pkey: bob.card.contact_pkey, confirmed: true, name: 'Bob', cause: null });
 		expect(ra.card).toEqual(bob.card);
 		expect(rb).toMatchObject({ user_hash: alice.userHash, confirmed: true, name: 'Alice' });
 		expect(ra.sas).toMatch(/^\d{6}$/);
@@ -139,15 +139,15 @@ describe('the scanner, two phones face to face', () => {
 		for (const p of [a, b]) {
 			await flushPromises();
 			expect(p.outcome()).toBe('confirmed');
-			expect(p.wrapper.text()).toMatch(/Contact confirmed/);
-			expect(p.wrapper.find('[data-test="sas"]').text().replace(' ', '')).toBe(ra.sas);
+			// The result and the six digits are the modal's to show, once.
+			expect(p.wrapper.text()).not.toMatch(/Contact confirmed|\d{3} ?\d{3}/);
 			expect(p.scanner.running).toBe(false);
 			expect(p.wrapper.emitted('scanning').at(-1)).toEqual([false]);
 		}
 		expect(a.code()).toMatch(/^PQ2:D:/); // still there for the other camera
 	});
 
-	it('ends verified in person, not confirmed, when the channel does not open in 15 s — with the six digits and the reason', async () => {
+	it('ends verified in person, not confirmed, when the channel does not open in 15 s — with the six digits and the cause', async () => {
 		net.reachable = false;
 		// The engine's timers are fake from the start, so 15 s can pass at once; the crypto runs as it does.
 		vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
@@ -160,11 +160,9 @@ describe('the scanner, two phones face to face', () => {
 		await flushPromises();
 		await flushPromises();
 		const [ra] = a.wrapper.emitted('completed')[0];
-		expect(ra).toMatchObject({ confirmed: false, card: null, cause: 'no-channel', name: 'Unknown user' });
-		expect(ra.reason).toMatch(/check that both phones are online, or scan again on a shared Wi-Fi/);
+		expect(ra).toMatchObject({ confirmed: false, card: null, cause: 'no-channel', name: 'Unknown user', sas: expect.stringMatching(/^\d{6}$/) });
+		expect(ra.reason).toBeUndefined();
 		expect(a.outcome()).toBe('verified');
-		expect(a.wrapper.text()).toMatch(/Key verified in person; not yet confirmed/);
-		expect(a.wrapper.find('[data-test="sas"]').exists()).toBe(true);
 	});
 
 	it('names the peer from a known card when the handshake did not confirm it', async () => {
@@ -188,7 +186,6 @@ describe('the scanner, two phones face to face', () => {
 		await flushPromises();
 		const first = a.code();
 		await vi.advanceTimersByTimeAsync(90_100);
-		expect(a.wrapper.emitted('expired')).toHaveLength(1);
 		expect(a.wrapper.emitted('completed')).toBeUndefined();
 		expect(a.wrapper.text()).toMatch(/Session expired/);
 		expect(a.scanner.running).toBe(false);

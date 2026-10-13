@@ -396,10 +396,13 @@ export const userPQStore = defineStore('userPQ', () => {
 
   /**
    * Marks a contact as met in person — adding it if it is not a contact yet —
-   * with the contact key of `card`: the card the optical handshake verified
-   * (docs/task-handshake-pq2.md §6). It trusts no caller: a card that is not a
-   * verified card of `userHash` certifying its contact key is refused, and
-   * nothing is written.
+   * after the optical handshake (docs/task-handshake-pq2.md §6). It trusts no
+   * caller, and checks that `card`:
+   * - is `userHash`'s card: user_hash is SHA3-512 of its sign_pkey;
+   * - is signed by that key, and certifies its contact_pkey with it;
+   * - certifies `contactPkey`, the key the handshake proved in person.
+   * Anything else is refused, and nothing is written. The stored key is
+   * `contactPkey`; `confirmedAt` is set here.
    *
    * Done once the contact is durable on this device; resolves to
    * `{ status }`, where anything but 'synced' means the server does not have
@@ -408,10 +411,10 @@ export const userPQStore = defineStore('userPQ', () => {
    * its own, which the device takes whatever it holds of this account's
    * contacts.
    */
-  const confirmContact = async (userHash, card, fields = {}) => {
+  const confirmContact = async (userHash, card, contactPkey, fields = {}) => {
     if (!em.value || !currentUserHash.value) return false;
-    if (!cardVouchesForContactKey(card, userHash, card?.contact_pkey)) {
-      throw new Error('This contact cannot be confirmed: their card does not verify, or is not theirs');
+    if (typeof contactPkey !== 'string' || !cardVouchesForContactKey(card, userHash, contactPkey)) {
+      throw new Error('This contact cannot be confirmed: their card does not certify the key they showed in person');
     }
     const account = currentUserHash.value;
     const { contact_pkey: _ignored, ...kept } = storedFields(fields);
@@ -419,7 +422,7 @@ export const userPQStore = defineStore('userPQ', () => {
       [userHash]: {
         ...kept,
         user_hash: userHash,
-        contact_pkey: card.contact_pkey,
+        contact_pkey: contactPkey,
         confirmed: true,
         confirmedAt: Math.floor(Date.now() / 1000),
       },

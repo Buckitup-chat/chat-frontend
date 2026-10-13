@@ -250,14 +250,16 @@ the handshake *optically verified*.
 
 `Modal_QrHandshake.vue`, on `completed`:
 
-- `confirmed` and not a contact yet → `confirmContact(user_hash, card, { name, notes: '', hidden: false })`; toast "Contact added and confirmed", SAS shown.
-- `confirmed` and already a contact → `confirmContact(user_hash, card)`; toast "Contact confirmed".
+- `confirmed` and not a contact yet → `confirmContact(user_hash, card, contact_pkey, { name, notes: '', hidden: false })`; toast "Contact added and confirmed", SAS shown.
+- `confirmed` and already a contact → `confirmContact(user_hash, card, contact_pkey)`; toast "Contact confirmed".
 - not `confirmed` → `saveContact(user_hash, { name, notes: '', hidden: false, contact_pkey })` if new; toast "Key verified in person; not yet confirmed" with the reason.
 - The contact page opens by `user_hash`.
 
 `confirmContact` is the only path that sets `confirmed` (`src/store/userPQ.store.js`),
-and it no longer trusts its caller: it takes the verified card and runs
-`cardVouchesForContactKey` itself, refusing when it fails. It sets
+and it no longer trusts its caller: it takes the verified card and the key the
+handshake proved in person, and runs `cardVouchesForContactKey` itself — the
+card is `user_hash`'s, verifies, and certifies that key — refusing when it
+fails. It stores that key and sets
 `confirmedAt` (unix seconds) itself; neither field is among those
 `saveContact` callers may write (`STORED_FIELDS`). A `saveContact` that
 changes the `contact_pkey` of a confirmed contact clears `confirmed`: the
@@ -281,14 +283,14 @@ The card is not written into `allNetworkUsers` (§1).
 - `src/lib/handshake/engine.ts` — the state machine, a plain class over a
   `ChannelAdapter`, one instance per session; `src/lib/handshake/qwbpChannel.ts`
   — the adapter over the session's QWBP connection.
-- `src/components/engines/QRScannerEngine.vue` — camera, QR rendering and the
-  result, around one engine per session. A session id is checked after every
-  await, so an old session cannot draw over, stop the camera of, or complete
-  a new one. `completed` carries, beside the fields of §5 step 7, `reason`
-  and `cause` when not confirmed.
+- `src/components/engines/QRScannerEngine.vue` — camera and QR rendering,
+  around one engine per session. A session id is checked after every await,
+  so an old session cannot draw over, stop the camera of, or complete a new
+  one. `completed` carries, beside the fields of §5 step 7, `cause` when not
+  confirmed; the modal shows the result and words the cause.
 - `EncryptionManagerPQ` gains `signHandshakePQ(M)` (ML-DSA-87 under
   `sign_skey`) beside `signContactChallenge`, and `signedOwnCard()`.
-- `src/store/userPQ.store.js` — `confirmContact(userHash, card, fields?)` as
+- `src/store/userPQ.store.js` — `confirmContact(userHash, card, contactPkey, fields?)` as
   in §6.
 - `src/lib/data/turnCredentials.ts` — fetch, memory cache, expiry and the
   1 s wait of the relay credentials (§5a). The challenge proof is one helper,

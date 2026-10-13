@@ -204,7 +204,8 @@ describe('two phones, face to face', () => {
 		await b.engine.read(a.code); // b verifies, shows C
 		const readAt = Date.now();
 		await a.engine.read(b.code); // a verifies C, needs its own payload for D
-		expect(a.outcome).toMatchObject({ kind: 'verified', cause: 'no-address', sas: null, reason: expect.stringMatching(/no network address/) });
+		expect(a.outcome).toMatchObject({ kind: 'verified', cause: 'no-address', sas: null, reason: 'no address' });
+		expect(a.log.join('\n')).toMatch(/no network address/);
 		expect(a.doneAt - readAt).toBeLessThan(100);
 		expect(net.channels[0].closed).toBe(true);
 	});

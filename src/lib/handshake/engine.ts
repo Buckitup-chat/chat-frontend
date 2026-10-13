@@ -48,9 +48,13 @@ export type Stage = 'idle' | 'A' | 'B' | 'C' | 'D' | 'done';
 export type Outcome =
 	/** The peer's card certifies the key proved in person, and its identity signed this session and channel. */
 	| { kind: 'confirmed'; peerHash: string; peerContactPkey: Uint8Array; sas: string; card: UserCardRow }
-	/** The key was proved in person; the post-quantum step did not complete. No SAS without a channel's fingerprints. */
+	/**
+	 * The key was proved in person; the post-quantum step did not complete. No
+	 * SAS without a channel's fingerprints. `reason` is a short diagnostic for
+	 * logs and tests; what the person reads is worded from `cause` by the UI.
+	 */
 	| { kind: 'verified'; peerHash: string; peerContactPkey: Uint8Array; sas: string | null; reason: string; cause: VerifiedCause }
-	| { kind: 'expired'; reason: string };
+	| { kind: 'expired' };
 
 /** Why a session ended verified only: what the person can do about it differs. */
 export type VerifiedCause = 'no-address' | 'no-channel' | 'no-card' | 'no-confirmation' | 'refused';
@@ -74,14 +78,11 @@ export interface EngineOptions {
 	onDone(outcome: Outcome): void;
 }
 
-export const SESSION_MS = 90_000;
-export const CHANNEL_MS = 15_000;
-export const CONFIRM_MS = 10_000;
+const SESSION_MS = 90_000;
+const CHANNEL_MS = 15_000;
+const CONFIRM_MS = 10_000;
 /** Our confirmation may still be on its way when the peer's arrives: the connection closes this much later. */
 const CLOSE_AFTER_CHANNEL_MS = 3_000;
-
-export const NO_CHANNEL_REASON =
-	'Key verified in person; not yet confirmed — check that both phones are online, or scan again on a shared Wi-Fi.';
 
 const short = (hash: string) => `${hash.slice(0, 10)}…`;
 const partyOf = (m: Party): Party => ({ userHash: m.userHash, contactPkey: m.contactPkey, nonce: m.nonce });
@@ -103,7 +104,6 @@ export class HandshakeEngine {
 	/** Our confirmation message, once signed. */
 	private message: string | null = null;
 	private link: ChannelLink | null = null;
-	private listening = false;
 	private busy = false;
 	private deadline: ReturnType<typeof setTimeout> | undefined;
 	private readonly noted = new Set<string>();
@@ -121,10 +121,6 @@ export class HandshakeEngine {
 		return this.stage;
 	}
 
-	get isEnded(): boolean {
-		return this.ended;
-	}
-
 	start(): void {
 		if (this.stage !== 'idle' || this.ended) throw new Error('An engine runs one session');
 		this.me = { userHash: this.o.identity.userHash, contactPkey: this.o.identity.contactPkey, nonce: newNonce() };
@@ -138,7 +134,7 @@ export class HandshakeEngine {
 			this.log(`own card: ${(e as Error)?.message ?? e}`);
 			return null;
 		});
-		this.setDeadline(this.o.sessionMs, () => ({ kind: 'expired', reason: `no handshake within ${this.o.sessionMs / 1000} s` }));
+		this.setDeadline(this.o.sessionMs, () => ({ kind: 'expired' }));
 		this.log(`session started as ${short(this.me.userHash)}`);
 		this.show({ kind: 'A', ...this.me }, 'A');
 	}
@@ -244,9 +240,8 @@ export class HandshakeEngine {
 		try {
 			this.myPayload = await this.conn!.payload();
 		} catch (e) {
-			const reason = `no channel: ${(e as Error)?.message ?? e}`;
-			this.log(reason);
-			this.finishVerified(reason, 'no-address');
+			this.log(`no channel: ${(e as Error)?.message ?? e}`);
+			this.finishVerified('no address', 'no-address');
 		}
 		return this.ended ? null : this.myPayload;
 	}
@@ -277,11 +272,11 @@ export class HandshakeEngine {
 		const fp = (hash: string) => `${bytesToHex(fps[hash]).slice(0, 8)}…`;
 		this.log(`both bootstrap payloads known (fingerprints ${fp(this.me.userHash)} / ${fp(peer.userHash)}) — waiting for the channel`);
 		// The channel window starts now, unless the channel is already open.
-		if (!this.link) this.setDeadline(this.o.channelMs, () => this.verified(NO_CHANNEL_REASON, 'no-channel'));
+		if (!this.link) this.setDeadline(this.o.channelMs, () => this.verified('no channel', 'no-channel'));
 		const [card, sigPq] = await Promise.all([this.ownCard!, this.o.identity.signPq(pqMessage(this.T!, fps))]);
 		if (this.ended) return;
 		if (!card) {
-			this.finishVerified('this account\'s card is not published yet, so the other phone cannot confirm it', 'no-card');
+			this.finishVerified('no own card', 'no-card');
 			return;
 		}
 		this.message = confirmMessage(card, sigPq);
@@ -294,17 +289,18 @@ export class HandshakeEngine {
 		this.link = link;
 		this.log('channel open');
 		if (this.message) this.exchange();
-		else if (this.bound) this.setDeadline(this.o.confirmMs, () => this.verified('the channel opened, but no confirmation came over it', 'no-confirmation'));
+		else if (this.bound) this.setDeadline(this.o.confirmMs, this.noConfirmation);
 	}
 
-	/** The channel is open and M is signed: send ours — once — and wait for theirs. */
+	/** The channel opened, and no confirmation came over it in time. */
+	private readonly noConfirmation = (): Outcome => this.verified('no confirmation', 'no-confirmation');
+
+	/** The channel is open and M is signed: send ours, and wait for theirs. Runs once: whichever of the two comes second calls it. */
 	private exchange(): void {
-		if (this.listening) return;
-		this.listening = true;
 		const { fps, sas } = this.bound!;
 		const peer = this.peer!;
 		const T = this.T!;
-		this.setDeadline(this.o.confirmMs, () => this.verified('the channel opened, but no confirmation came over it', 'no-confirmation'));
+		this.setDeadline(this.o.confirmMs, this.noConfirmation);
 		this.link!.onMessage((raw) => {
 			if (this.ended) return;
 			const verdict = checkConfirm(raw, peer, T, fps);

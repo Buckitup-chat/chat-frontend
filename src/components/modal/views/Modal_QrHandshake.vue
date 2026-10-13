@@ -202,12 +202,16 @@ const onHandshakeCompleted = (result) => {
 	contact.value = { ...result, viaHandshake: true };
 };
 
+// Why a handshake ended verified in person only, by the engine's cause: the
+// one place this is worded.
 const NOT_CONFIRMED = {
 	'no-channel': 'Check that both phones are online, or scan again on a shared Wi-Fi.',
 	'no-address': 'This phone has no network to reach the other one. Check that both phones are online, or scan again on a shared Wi-Fi.',
 	'no-card': 'Your profile card is not published yet, so the other phone cannot confirm you. Try again once you are online.',
+	'no-confirmation': 'The phones connected, but the other one sent no confirmation. Scan again.',
+	refused: 'Their profile card does not certify the key their phone showed: this is not confirmed as their account.',
 };
-const notConfirmedReason = (c) => NOT_CONFIRMED[c.cause] ?? (c.reason ? `Not confirmed: ${c.reason}.` : undefined);
+const notConfirmedReason = (c) => NOT_CONFIRMED[c.cause] ?? NOT_CONFIRMED['no-channel'];
 
 const onDeviceOnly = (saved) => !!saved?.status && saved.status !== 'synced';
 const notSyncedFooter = (saved) => {
@@ -217,8 +221,6 @@ const notSyncedFooter = (saved) => {
 		: 'It reaches the server when this device can send it';
 };
 
-const notConfirmedFooter = () =>
-	contact.value.viaHandshake && !contact.value.confirmed ? notConfirmedReason(contact.value) : undefined;
 
 async function toggleScanner() {
 	manual.value = false;
@@ -250,19 +252,23 @@ const addContact = async () => {
 			return;
 		}
 
+		// Only the handshake confirms: a contact added by id never carries `confirmed`.
+		const confirmed = !!contact.value.confirmed;
+		const notConfirmed = !!contact.value.viaHandshake && !confirmed;
+		const notConfirmedFooter = notConfirmed ? notConfirmedReason(contact.value) : undefined;
+		const sasText = confirmed && contact.value.sas ? `Code ${contact.value.sas}` : undefined;
+
 		if (isInContacts.value) {
 			// Scanned in person: that is what confirms it, with the card the
 			// handshake verified.
-			const confirmsIt = contact.value.viaHandshake && contact.value.confirmed;
-			const saved = confirmsIt ? await $userPQ.confirmContact(contact.value.user_hash, contact.value.card) : null;
-			const notConfirmed = contact.value.viaHandshake && !confirmsIt;
+			const saved = confirmed ? await $userPQ.confirmContact(contact.value.user_hash, contact.value.card, contact.value.contact_pkey) : null;
 			$swal.fire({
 				icon: notConfirmed ? 'warning' : 'success',
 				title: onDeviceOnly(saved)
 					? 'Contact confirmed on this device'
-					: confirmsIt ? 'Contact confirmed' : notConfirmed ? 'Key verified in person; not yet confirmed' : 'Contact already in your list',
-				text: confirmsIt && contact.value.sas ? `Code ${contact.value.sas}` : undefined,
-				footer: notSyncedFooter(saved) ?? notConfirmedFooter(),
+					: confirmed ? 'Contact confirmed' : notConfirmed ? 'Key verified in person; not yet confirmed' : 'Contact already in your list',
+				text: sasText,
+				footer: notSyncedFooter(saved) ?? notConfirmedFooter,
 				timer: 15000,
 			});
 			manual.value = false;
@@ -276,19 +282,17 @@ const addContact = async () => {
 		}
 
 		const fields = { name: contact.value.name, notes: '', hidden: false };
-		const confirmed = contact.value.viaHandshake && contact.value.confirmed;
 		const saved = confirmed
-			? await $userPQ.confirmContact(contact.value.user_hash, contact.value.card, fields)
+			? await $userPQ.confirmContact(contact.value.user_hash, contact.value.card, contact.value.contact_pkey, fields)
 			: await $userPQ.saveContact(contact.value.user_hash, { ...fields, contact_pkey: contact.value.contact_pkey });
-		const notConfirmed = contact.value.viaHandshake && !confirmed;
 
 		$swal.fire({
 			icon: notConfirmed ? 'warning' : 'success',
 			title: onDeviceOnly(saved)
 				? (confirmed ? 'Contact confirmed on this device' : 'Contact added on this device')
 				: (confirmed ? 'Contact added and confirmed' : notConfirmed ? 'Key verified in person; not yet confirmed' : 'Contact added'),
-			text: confirmed && contact.value.sas ? `Code ${contact.value.sas}` : undefined,
-			footer: notSyncedFooter(saved) ?? notConfirmedFooter() ?? 'Now you can name it and make notes',
+			text: sasText,
+			footer: notSyncedFooter(saved) ?? notConfirmedFooter ?? 'Now you can name it and make notes',
 			timer: 15000,
 		});
 		

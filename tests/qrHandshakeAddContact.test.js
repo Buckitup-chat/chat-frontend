@@ -43,10 +43,10 @@ const buttonNamed = (wrapper, text) => wrapper.findAll('button').find((b) => b.t
 
 /** What the scanner emits at the end of a handshake. */
 const CARD = { user_hash: A, name: 'Ann', contact_pkey: 'pkA', sign_b64: 'sig' };
-const confirmedResult = () => ({ user_hash: A, name: 'Ann', contact_pkey: 'pkA', confirmed: true, card: CARD, sas: '042917', reason: null, cause: null });
+const confirmedResult = () => ({ user_hash: A, name: 'Ann', contact_pkey: 'pkA', confirmed: true, card: CARD, sas: '042917', cause: null });
 const verifiedResult = (cause = 'no-channel') => ({
 	user_hash: A, name: 'Ann', contact_pkey: 'pkA', confirmed: false, card: null, sas: '042917',
-	reason: 'Key verified in person; not yet confirmed — check that both phones are online, or scan again on a shared Wi-Fi.', cause,
+	cause,
 });
 
 const completeWith = async (wrapper, result) => {
@@ -98,7 +98,7 @@ describe('adding a contact the server does not take', () => {
 		await buttonNamed(wrapper, 'Open contact').trigger('click');
 		await flushPromises();
 
-		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD);
+		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD, 'pkA');
 		expectErrorShownAndModalKept('Saved on this device, but the server did not take it');
 		expect(wrapper.text()).toContain('Existing contact'); // still on the contact, ready to try again
 	});
@@ -123,7 +123,7 @@ describe('what the modal does with the handshake\'s result', () => {
 		expect(wrapper.text()).toContain('Contact confirmed');
 		await buttonNamed(wrapper, 'Save contact').trigger('click');
 		await flushPromises();
-		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD, { name: 'Ann', notes: '', hidden: false });
+		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD, 'pkA', { name: 'Ann', notes: '', hidden: false });
 		expect(store.saveContact).not.toHaveBeenCalled();
 		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ icon: 'success', title: 'Contact added and confirmed', text: 'Code 042917' }));
 		expect(router.push).toHaveBeenCalledWith({ name: 'contact', params: { address: A } });
@@ -136,7 +136,7 @@ describe('what the modal does with the handshake\'s result', () => {
 		await completeWith(wrapper, confirmedResult());
 		await buttonNamed(wrapper, 'Open contact').trigger('click');
 		await flushPromises();
-		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD);
+		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD, 'pkA');
 		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ title: 'Contact confirmed' }));
 	});
 
@@ -159,14 +159,14 @@ describe('what the modal does with the handshake\'s result', () => {
 	it('not confirmed, and already a contact: writes nothing, and says it is not confirmed', async () => {
 		store.contactsMap = { [A]: { user_hash: A, name: 'Ann', contact_pkey: 'pkA' } };
 		const wrapper = await mountModal();
-		await completeWith(wrapper, { ...verifiedResult('refused'), reason: 'the card does not certify the contact key the codes showed' });
+		await completeWith(wrapper, verifiedResult('refused'));
 		await buttonNamed(wrapper, 'Open contact').trigger('click');
 		await flushPromises();
 		expect(store.confirmContact).not.toHaveBeenCalled();
 		expect(store.saveContact).not.toHaveBeenCalled();
 		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({
 			title: 'Key verified in person; not yet confirmed',
-			footer: 'Not confirmed: the card does not certify the contact key the codes showed.',
+			footer: 'Their profile card does not certify the key their phone showed: this is not confirmed as their account.',
 		}));
 	});
 

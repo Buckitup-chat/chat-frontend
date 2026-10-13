@@ -15,15 +15,6 @@
 			<div class="small" v-if="scanning">
 				Hold the phones face to face, 25–40 cm apart: closer, the front cameras do not focus.
 			</div>
-			<template v-if="outcome && outcome.kind !== 'expired'">
-				<div class="fw-bold" :class="outcome.kind === 'confirmed' ? 'text-success' : 'text-warning'">
-					{{ outcome.kind === 'confirmed' ? 'Contact confirmed' : 'Key verified in person; not yet confirmed' }}
-				</div>
-				<template v-if="outcome.sas">
-					<div class="_qrh_sas" data-test="sas">{{ outcome.sas.slice(0, 3) }} {{ outcome.sas.slice(3) }}</div>
-					<div class="text-secondary small">Compare: the other phone shows the same six digits.</div>
-				</template>
-			</template>
 			<div class="text-secondary small" v-if="outcome?.kind === 'expired'">
 				Session expired. Start again to make new codes.
 			</div>
@@ -33,8 +24,9 @@
 </template>
 
 <script setup>
-// The optical handshake v2 (docs/task-handshake-pq2.md): the camera, the QR
-// code on screen and the result. The protocol is the engine's
+// The optical handshake v2 (docs/task-handshake-pq2.md): the camera and the
+// QR code on screen; the result goes to the modal, which shows it. The
+// protocol is the engine's
 // (src/lib/handshake/engine.ts) and the module's (src/lib/pq/handshake.ts);
 // this component runs one engine per session.
 //
@@ -64,7 +56,7 @@ const props = defineProps({
 	},
 });
 
-const emit = defineEmits(['scanning', 'completed', 'expired']);
+const emit = defineEmits(['scanning', 'completed']);
 
 const qrCodeRef = ref(null);
 const qrScannerRef = ref(null);
@@ -135,7 +127,7 @@ const onScan = (text) => {
 
 const colorOf = (s) => {
 	if (s === 'B') return props.options.detectedColor;
-	if (s === 'C' || s === 'D' || s === 'done') return props.options.verifiedColor;
+	if (s === 'C' || s === 'D') return props.options.verifiedColor;
 	return props.options.scanningColor;
 };
 
@@ -197,7 +189,6 @@ const finished = (id, result) => {
 	if (result.kind === 'expired') {
 		clearCode();
 		stage.value = 'idle';
-		emit('expired', result.reason);
 		return;
 	}
 	// The last code stays on screen: the counterpart may still be reading it.
@@ -210,7 +201,6 @@ const finished = (id, result) => {
 		card: result.kind === 'confirmed' ? result.card : null,
 		sas: result.sas,
 		name: nameOf(result),
-		reason: result.kind === 'confirmed' ? null : result.reason,
 		cause: result.kind === 'confirmed' ? null : result.cause,
 	});
 };
@@ -269,9 +259,6 @@ const startSession = async () => {
 		setScanning(false);
 		return;
 	}
-	if (id !== session || current.isEnded) return;
-	// The session may have moved past reading while the camera started.
-	if (current.currentStage === 'done') stopCamera();
 };
 
 /** Ends the session: its codes verify against nothing from now on. */
@@ -294,7 +281,7 @@ const toggleScanner = async () => {
 	await startSession();
 };
 
-defineExpose({ toggleScanner, stopScan, startSession });
+defineExpose({ toggleScanner, stopScan });
 </script>
 
 <style lang="scss">
@@ -344,13 +331,6 @@ defineExpose({ toggleScanner, stopScan, startSession });
 			object-fit: cover;
 			transform: scaleX(-1);
 		}
-	}
-
-	._qrh_sas {
-		font-size: 2.5rem;
-		font-weight: 700;
-		letter-spacing: 0.15em;
-		font-variant-numeric: tabular-nums;
 	}
 }
 </style>
