@@ -131,7 +131,7 @@ describe('a node set', () => {
 		expect(() => checkNodeSet({ threshold: 2, nodes: many })).toThrow(NodeSetError);
 	});
 
-	it('refuses an entry that is not a key-derived id at an https URL without credentials', () => {
+	it('refuses an entry that is not a key-derived id at an https URL without credentials, query or fragment', () => {
 		for (const bad of [
 			'node-a@https://a.example/x',
 			`n_${'0'.repeat(32)}@http://a.example/x`,
@@ -144,6 +144,9 @@ describe('a node set', () => {
 			`n_${'0'.repeat(32)}@https://a.example`,
 			`n_${'0'.repeat(32)}@https:a.example/x`,
 			`n_${'0'.repeat(32)}@https://a.example\\x`,
+			// A route appended to it would land in the query or the fragment.
+			`n_${'0'.repeat(32)}@https://a.example/x?q=1`,
+			`n_${'0'.repeat(32)}@https://a.example/x#f`,
 		]) {
 			expect(() => parseNodeEntry(bad)).toThrow(NodeSetError);
 		}
