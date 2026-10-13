@@ -1,19 +1,21 @@
 // Relay credentials (docs/task-handshake-pq2.md §5a): kept in memory per
 // account, asked for again when less than 150 s remain, waited for at most
-// 1 s by a session, and "no relay" — never an error — whatever goes wrong.
+// 1 s by a session, and "no relay" — never an error — whatever goes wrong;
+// a failure is remembered for a minute, or as long as the server says.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const em = { isAuth: true, currentUserHash: 'u_' + 'a'.repeat(128) as string | null, signChallenge: async () => new Uint8Array([1]) };
 vi.mock('@/libs/EncryptionManagerPQ', () => ({ EncryptionManagerPQ: { getInstance: () => em } }));
 
 const {
-	_setRelaySourceForTests, clearRelayCredentials, credentialsOf, prefetchRelay, relayIceServers, RENEW_BEFORE_MS,
+	_setRelaySourceForTests, clearRelayCredentials, credentialsOf, prefetchRelay, relayIceServers, RENEW_BEFORE_MS, FAILURE_RETRY_MS,
 } = await import('@/lib/data/turnCredentials');
+type Answer = Awaited<ReturnType<Parameters<typeof _setRelaySourceForTests>[0] & {}>>;
 
 const relay = (tag: string): RTCIceServer[] => [{ urls: [`turn:relay.test:3478?${tag}`], username: tag, credential: 'c' }];
 
 let calls: string[];
-let answer: (account: string) => Promise<{ iceServers: RTCIceServer[]; expiresAt: number } | null>;
+let answer: (account: string) => Promise<Answer>;
 
 beforeEach(() => {
 	em.isAuth = true;
@@ -61,14 +63,44 @@ describe('relay credentials', () => {
 		expect(calls).toHaveLength(1);
 	});
 
-	it('a failure is no relay, and the next view asks again', async () => {
+	it('a failure is no relay, remembered for a minute: the scanner does not ask again right after the view did', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
 		answer = async () => { throw new TypeError('Failed to fetch'); };
-		expect(await relayIceServers()).toEqual([]);
-		answer = async () => null; // 503 turn_unavailable, 429, a body that is not credentials
-		expect(await relayIceServers()).toEqual([]);
-		answer = async () => ({ iceServers: relay('back'), expiresAt: Date.now() + 600_000 });
 		await prefetchRelay();
+		await vi.waitFor(() => expect(calls).toHaveLength(1));
+		expect(await relayIceServers()).toEqual([]);
+		expect(calls).toHaveLength(1);
+		answer = async () => ({ iceServers: relay('back'), expiresAt: Date.now() + 600_000 });
+		vi.setSystemTime(Date.now() + FAILURE_RETRY_MS + 1);
 		expect(await relayIceServers()).toEqual(relay('back'));
+		expect(calls).toHaveLength(2);
+	});
+
+	it('a refusal (503, a body that is not credentials) is remembered the same way, and a 429 for as long as it says', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		answer = async () => ({});
+		expect(await relayIceServers()).toEqual([]);
+		expect(await relayIceServers()).toEqual([]);
+		expect(calls).toHaveLength(1);
+		vi.setSystemTime(Date.now() + FAILURE_RETRY_MS + 1);
+		answer = async () => ({ retryAfterMs: 300_000 });
+		expect(await relayIceServers()).toEqual([]);
+		vi.setSystemTime(Date.now() + FAILURE_RETRY_MS + 1);
+		await prefetchRelay();
+		expect(await relayIceServers()).toEqual([]);
+		expect(calls).toHaveLength(2);
+		vi.setSystemTime(Date.now() + 300_000);
+		answer = async () => ({ iceServers: relay('back'), expiresAt: Date.now() + 600_000 });
+		expect(await relayIceServers()).toEqual(relay('back'));
+		expect(calls).toHaveLength(3);
+	});
+
+	it('a failure of one account does not hold back another', async () => {
+		answer = async () => ({});
+		expect(await relayIceServers()).toEqual([]);
+		em.currentUserHash = 'u_' + 'b'.repeat(128);
+		answer = async () => ({ iceServers: relay('other'), expiresAt: Date.now() + 600_000 });
+		expect(await relayIceServers()).toEqual(relay('other'));
 	});
 
 	it('belong to the account that asked: another account asks for its own, and a signed-out one gets none', async () => {
@@ -97,5 +129,30 @@ describe('relay credentials', () => {
 		expect(credentialsOf({ ...body, credential: undefined }, now)).toBeNull();
 		expect(credentialsOf({ error: 'turn_unavailable' }, now)).toBeNull();
 		expect(credentialsOf(null, now)).toBeNull();
+	});
+});
+
+describe('the endpoint client', () => {
+	it('reads a 429\'s retry_after, and asks nothing until it has passed', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		_setRelaySourceForTests(null); // the real endpoint client
+		const posts: string[] = [];
+		vi.stubGlobal('fetch', async (url: string) => {
+			if (url.endsWith('/challenge')) return new Response(JSON.stringify({ challenge_id: 'c', challenge: 'x' }));
+			posts.push(url);
+			return new Response(JSON.stringify({ error: 'rate_limited', retry_after: 120 }), { status: 429 });
+		});
+		try {
+			expect(await relayIceServers()).toEqual([]);
+			vi.setSystemTime(Date.now() + 100_000); // past the default minute, inside the server's two
+			await prefetchRelay();
+			expect(await relayIceServers()).toEqual([]);
+			expect(posts).toHaveLength(1);
+			vi.setSystemTime(Date.now() + 21_000);
+			expect(await relayIceServers()).toEqual([]);
+			expect(posts).toHaveLength(2);
+		} finally {
+			vi.unstubAllGlobals();
+		}
 	});
 });

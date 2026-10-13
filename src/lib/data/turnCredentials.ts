@@ -13,12 +13,16 @@
 // Credentials live in memory only, per account, and are asked for again when
 // less than 150 s remain: a session (90 s, then 15 s for the channel and 10 s
 // for the confirmation) must not outlive its credential, or the relay refuses
-// it mid-session.
+// it mid-session. A failure is remembered too, for a minute or the server's
+// Retry-After: opening the view and starting the scanner do not each pay for a
+// challenge, an ML-DSA signature and a POST that will fail the same way.
 /* global RTCIceServer -- a DOM type */
 import { api } from '@/api/client';
 import { proveChallenge } from '@/lib/pq/challengeProof';
 
 declare const ELECTRIC_API_URL: string;
+/** The dev server's static relay (vite.config.js), null in every build. */
+declare const HANDSHAKE_DEV_TURN: RTCIceServer | null;
 
 export interface RelayCredentials {
 	iceServers: RTCIceServer[];
@@ -26,11 +30,17 @@ export interface RelayCredentials {
 	expiresAt: number;
 }
 
+/** No credentials, and when to ask again (ms); without it, after FAILURE_RETRY_MS. */
+export interface RelayRefusal {
+	retryAfterMs?: number;
+}
+
 /** Where credentials come from: the backend endpoint, a dev-only static relay, or a test's stand-in. */
-export type RelaySource = (account: string) => Promise<RelayCredentials | null>;
+export type RelaySource = (account: string) => Promise<RelayCredentials | RelayRefusal>;
 
 export const RENEW_BEFORE_MS = 150_000;
 export const SESSION_WAIT_MS = 1_000;
+export const FAILURE_RETRY_MS = 60_000;
 const FETCH_TIMEOUT_MS = 10_000;
 /** The endpoint answers two URIs, UDP and TCP; the browser allocates a relay on every one it is given. */
 const MAX_URIS = 2;
@@ -43,9 +53,9 @@ const manager = async (): Promise<EncryptionManager> =>
 /** POST /electric/v1/turn_credentials, proved like ingest and read sessions. */
 const fromEndpoint: RelaySource = async (account) => {
 	const em = await manager();
-	if (!em.isAuth || em.currentUserHash !== account) return null;
+	if (!em.isAuth || em.currentUserHash !== account) return {};
 	const { challenge_id, challenge } = await api.getChallenge();
-	if (typeof challenge_id !== 'string' || typeof challenge !== 'string') return null;
+	if (typeof challenge_id !== 'string' || typeof challenge !== 'string') return {};
 	const signature = await proveChallenge(challenge, (message) => em.signChallenge(message));
 	const resp = await fetch(`${ELECTRIC_API_URL}/turn_credentials`, {
 		method: 'POST',
@@ -53,8 +63,16 @@ const fromEndpoint: RelaySource = async (account) => {
 		body: JSON.stringify({ user_hash: account, challenge_id, signature }),
 		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
 	});
-	if (!resp.ok) return null;
-	return credentialsOf(await resp.json(), Date.now());
+	if (resp.status === 429) return { retryAfterMs: await retryAfterOf(resp) };
+	if (!resp.ok) return {};
+	return credentialsOf(await resp.json(), Date.now()) ?? {};
+};
+
+/** A 429's wait: the body's retry_after, else the Retry-After header, in seconds. */
+const retryAfterOf = async (resp: Response): Promise<number | undefined> => {
+	const body = (await resp.json().catch(() => null)) as { retry_after?: unknown } | null;
+	const seconds = Number(body?.retry_after ?? resp.headers.get('Retry-After'));
+	return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
 };
 
 /** A 200 body as RTCIceServers, or null when it is not one. */
@@ -69,41 +87,44 @@ export const credentialsOf = (body: unknown, now: number): RelayCredentials | nu
 
 /**
  * A local TURN server with a static user, until the backend endpoint exists:
- * VITE_HANDSHAKE_TURN_URL, …_USER and …_PASS, e.g. a coturn container. Read
- * only on the dev server: Vite inlines any VITE_* value set at build time, so
- * without the guard a developer's .env.local or a hosting variable would put
- * the password into the deployed bundle. Goes when the endpoint lands.
+ * HANDSHAKE_TURN_URL, …_USER and …_PASS in the environment or .env.local, e.g.
+ * a coturn container. vite.config.js puts them in HANDSHAKE_DEV_TURN on the
+ * dev server only, and null into every build: no VITE_ prefix, so nothing
+ * inlines them into a bundle. Goes when the endpoint lands.
  */
 const devRelay = (): RelaySource | null => {
-	if (!import.meta.env.DEV) return null;
-	const url = import.meta.env.VITE_HANDSHAKE_TURN_URL as string | undefined;
-	if (!url) return null;
-	const relay: RTCIceServer = {
-		urls: url,
-		username: (import.meta.env.VITE_HANDSHAKE_TURN_USER as string | undefined) ?? '',
-		credential: (import.meta.env.VITE_HANDSHAKE_TURN_PASS as string | undefined) ?? '',
-	};
-	return async () => ({ iceServers: [relay], expiresAt: Number.POSITIVE_INFINITY });
+	const relay = typeof HANDSHAKE_DEV_TURN === 'undefined' ? null : HANDSHAKE_DEV_TURN;
+	return relay ? async () => ({ iceServers: [relay], expiresAt: Number.POSITIVE_INFINITY }) : null;
 };
 
 let source: RelaySource = devRelay() ?? fromEndpoint;
 let cached: { account: string; credentials: RelayCredentials } | null = null;
 let inflight: { account: string; promise: Promise<RelayCredentials | null> } | null = null;
+let failed: { account: string; until: number } | null = null;
 
 const usable = (account: string, now = Date.now()): RelayCredentials | null =>
 	cached && cached.account === account && cached.credentials.expiresAt - now >= RENEW_BEFORE_MS ? cached.credentials : null;
 
+/** A request for this account failed a moment ago: asking again now would fail the same way. */
+const backingOff = (account: string, now = Date.now()): boolean => failed?.account === account && now < failed.until;
+
 const request = (account: string): Promise<RelayCredentials | null> => {
 	if (inflight?.account === account) return inflight.promise;
-	const promise = source(account)
-		.catch((e: unknown) => {
+	const promise: Promise<RelayCredentials | null> = source(account)
+		.catch((e: unknown): RelayRefusal => {
 			console.warn('[relay] no relay credentials:', e instanceof Error ? e.message : e);
-			return null;
+			return {};
 		})
-		.then((credentials) => {
-			if (inflight?.promise === promise) inflight = null;
-			if (credentials) cached = { account, credentials };
-			return credentials;
+		.then((answer) => {
+			if (inflight?.promise !== promise) return null; // cleared meanwhile: logout, account switch
+			inflight = null;
+			if ('iceServers' in answer) {
+				cached = { account, credentials: answer };
+				failed = null;
+				return answer;
+			}
+			failed = { account, until: Date.now() + (answer.retryAfterMs ?? FAILURE_RETRY_MS) };
+			return null;
 		});
 	inflight = { account, promise };
 	return promise;
@@ -121,7 +142,7 @@ const currentAccount = async (): Promise<string | null> => {
 /** Starts a request unless a usable credential is cached or one is on its way. Never throws. */
 export const prefetchRelay = async (): Promise<void> => {
 	const account = await currentAccount();
-	if (account && !usable(account)) void request(account);
+	if (account && !usable(account) && !backingOff(account)) void request(account);
 };
 
 /**
@@ -132,10 +153,9 @@ export const relayIceServers = async (waitMs = SESSION_WAIT_MS): Promise<RTCIceS
 	const deadline = Date.now() + waitMs;
 	const account = await Promise.race([currentAccount(), timeout(waitMs, null)]);
 	if (!account) return [];
-	const ready = usable(account);
-	if (ready) return ready.iceServers;
-	const credentials = await Promise.race([request(account), timeout(Math.max(0, deadline - Date.now()), null)]);
-	return credentials && usable(account) ? credentials.iceServers : [];
+	if (usable(account) || backingOff(account)) return usable(account)?.iceServers ?? [];
+	await Promise.race([request(account), timeout(Math.max(0, deadline - Date.now()), null)]);
+	return usable(account)?.iceServers ?? [];
 };
 
 const timeout = <T>(ms: number, value: T): Promise<T> => new Promise((resolve) => setTimeout(() => resolve(value), ms));
@@ -144,6 +164,7 @@ const timeout = <T>(ms: number, value: T): Promise<T> => new Promise((resolve) =
 export const clearRelayCredentials = (): void => {
 	cached = null;
 	inflight = null;
+	failed = null;
 };
 
 export function _setRelaySourceForTests(next: RelaySource | null): void {

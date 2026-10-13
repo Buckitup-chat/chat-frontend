@@ -166,15 +166,16 @@ const userIdInput = ref();
 const { inputData } = defineProps({ inputData: { type: Object } });
 
 onMounted(async () => {
-	// The relay credentials are asked for here, one screen before the scanner:
-	// a session takes what is cached, or waits at most 1 s for them.
-	void prefetchRelay();
 	try {
 		const devices = await navigator.mediaDevices.enumerateDevices();
 		hasCamera.value = devices.some((device) => device.kind === 'videoinput');
 	} catch (error) {
 		console.error('Error checking camera availability:', error);
 	}
+	// The relay credentials are asked for here, one screen before the scanner
+	// and only when there is a camera to scan with: a session takes what is
+	// cached, or waits at most 1 s for them.
+	if (hasCamera.value) void prefetchRelay();
 
 	if (hasCamera.value && inputData?.startScan) {
 		setTimeout(() => toggleScanner(), 100);

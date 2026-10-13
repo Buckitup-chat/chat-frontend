@@ -111,9 +111,13 @@ describe('what the modal does with the handshake\'s result', () => {
 		prefetchRelay.mockClear();
 	});
 
-	it('asks for the relay credentials when it opens, one screen before the scanner', async () => {
+	it('asks for the relay credentials when it opens, one screen before the scanner — when there is a camera', async () => {
 		await mountModal();
 		expect(prefetchRelay).toHaveBeenCalledTimes(1);
+		prefetchRelay.mockClear();
+		Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { enumerateDevices: async () => [] } });
+		await mountModal();
+		expect(prefetchRelay).not.toHaveBeenCalled();
 	});
 
 	it('confirmed, and not a contact yet: confirms it with the verified card, and shows the six digits', async () => {
