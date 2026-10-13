@@ -1,0 +1,101 @@
+// @vitest-environment jsdom
+// Changing a finished backup (plan § 7.4, Controls): the waiting period and
+// the time to finish, revocation for good, and a spare piece handed to an
+// existing guardian — each signed by the owner and sent the way the backup pays.
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { setActivePinia, createPinia } from 'pinia';
+
+const OWNER = 'u_' + 'a'.repeat(128);
+const U = (c) => 'u_' + c.repeat(128);
+const ID = '0x' + 'ab'.repeat(32);
+const slots = {};
+const calls = [];
+const em = {
+	loadSlotJson: vi.fn(async (name) => slots[name] ?? null),
+	patchSlotJson: vi.fn(async (name, patch) => (slots[name] = { ...(slots[name] ?? {}), ...patch })),
+	exportVaultKeys: vi.fn(async () => ({ evm_skey: '11'.repeat(32) })),
+};
+const user = { currentUserHash: OWNER, contacts: [], contactsMap: {} };
+const sendMessage = vi.fn(async () => 'dmsg_spare');
+
+vi.mock('@/lib/recovery/chain', () => ({ RecoveryChain: class {} }));
+vi.mock('@/libs/EncryptionManagerPQ', () => ({ EncryptionManagerPQ: { getInstance: () => em } }));
+vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
+vi.mock('@/store/dialogs.store', () => ({ useDialogsStore: () => ({ sendMessage }) }));
+vi.mock('@/store/recoveryInvites.store', () => ({ useRecoveryInvitesStore: () => ({ roster: {}, deployment: null, load: async () => {} }) }));
+vi.mock('@/lib/recovery/deployments', async (orig) => ({
+	...(await orig()),
+	recoveryDeployment: () => ({ chainId: 11155111, secretRecovery: '0xd9ffd20f2db9c774b9f0237c4837f52dcbd937a7', relayerUrl: 'https://relay.example' }),
+}));
+vi.mock('@/lib/recovery/typedData', async (orig) => ({
+	...(await orig()),
+	signBound: async (_c, key, type, id, fields) => (calls.push({ sign: type, id, fields }), { body: { id, ...fields, signer: '0x1', deadline: 1n, signature: '0xs' } }),
+}));
+const gateway = (via) =>
+	new Proxy({}, { get: (_t, name) => async (body) => (calls.push({ via, call: name, body }), { status: 'PROCESSED' }) });
+vi.mock('@/lib/recovery/gateway', () => ({ relayerGateway: () => gateway('relayer'), directGateway: () => gateway('self') }));
+
+const { useRecoveryBackupStore } = await import('@/store/recoveryBackup.store');
+const { defaultSettings } = await import('@/lib/recovery/backupPlan');
+
+const guardians = [U('1'), U('2'), U('3')].map((userHash) => ({ userHash, metaAddress: 'st:eth:0x00' }));
+const done = (over = {}) => ({
+	runId: 'r1', label: 'bu-1', owner: '0x' + '2'.repeat(40), guardians, settings: defaultSettings(3, 3),
+	nodes: ['a', 'b', 'c'].map((c) => ({ id: 'n_' + c.repeat(32), url: `https://${c}.example/recovery/node` })),
+	step: 'done', wrapKey: '00'.repeat(32), splitId: '11'.repeat(16), shares: [null, null, null, 'U1BBUkU0', 'U1BBUkU1'], leaves: ['a', 'b', 'c', 'd', 'e'],
+	root: '00'.repeat(64), nodeShares: [], nodeOutcomes: {}, skippedNodes: [], sent: {}, startedAt: 1, updatedAt: 1, device: 'd',
+	secretId: ID, version: 2, fee: { kind: 'relayer' }, ...over,
+});
+
+beforeEach(async () => {
+	setActivePinia(createPinia());
+	for (const k of Object.keys(slots)) delete slots[k];
+	calls.length = 0;
+	sendMessage.mockClear();
+});
+
+const loaded = async (run) => {
+	slots.recovery_backup = { run };
+	const store = useRecoveryBackupStore();
+	await store.load();
+	return store;
+};
+
+describe('changing a finished backup', () => {
+	it('changes the wait and the time to finish on chain, then in the record; refuses times out of bounds', async () => {
+		const store = await loaded(done());
+		await store.setPolicy({ delaySec: 86400, windowSec: 2 * 86400 });
+		expect(calls).toEqual([
+			{ sign: 'SetRecoveryPolicy', id: ID, fields: { recoveryDelay: 86400n, recoveryWindow: 172800n } },
+			expect.objectContaining({ via: 'relayer', call: 'setRecoveryPolicy' }),
+		]);
+		expect(slots.recovery_backup.run.settings).toMatchObject({ delaySec: 86400, windowSec: 172800 });
+		await expect(store.setPolicy({ delaySec: 60, windowSec: 2 * 86400 })).rejects.toThrow(/delaySec/);
+	});
+
+	it('revokes for good, from the owner’s own address when the backup pays itself, and then refuses further changes', async () => {
+		const store = await loaded(done({ fee: { kind: 'self' } }));
+		await store.revoke();
+		expect(calls).toEqual([{ sign: 'RevokeSecret', id: ID, fields: {} }, expect.objectContaining({ via: 'self', call: 'revokeSecret' })]);
+		expect(slots.recovery_backup.run.revokedAt).toBeGreaterThan(0);
+		await expect(store.setPolicy({ delaySec: 86400, windowSec: 86400 })).rejects.toThrow(/revoked/);
+	});
+
+	it('hands a spare piece to a guardian of the backup, once, and to nobody else', async () => {
+		const store = await loaded(done());
+		await expect(store.giveSpare(U('9'))).rejects.toThrow(/only to a guardian/);
+		await store.giveSpare(U('2'));
+		const [peer, [part]] = sendMessage.mock.calls[0];
+		expect(peer).toBe(U('2'));
+		expect(part).toMatchObject({ kind: 'recovery_share', shareIndex: 4, shareB64: 'U1BBUkU0', version: 2, secretRef: expect.stringContaining(ID) });
+		expect(slots.recovery_backup.run.shares[3]).toBeNull();
+		expect(slots.recovery_backup.run.sparesGiven).toEqual({ 4: { guardian: U('2'), messageId: 'dmsg_spare' } });
+		await store.giveSpare(U('3'));
+		await expect(store.giveSpare(U('1'))).rejects.toThrow(/No spare/);
+	});
+
+	it('refuses with no finished backup', async () => {
+		const store = await loaded(done({ step: 'registered' }));
+		await expect(store.revoke()).rejects.toThrow(/no finished backup/);
+	});
+});

@@ -90,5 +90,26 @@ export const telegramReply = (botText: string, ownerKey: string, now = nowSec())
 	return `${wallet} ${personalSignHex(ownerKey, message)} ${ts}`;
 };
 
+const unsubscribeMessage = (wallet: string, id: string, ts: number) =>
+	['Backitup notifications unsubscribe', `wallet: ${wallet.toLowerCase()}`, `id: ${id}`, `ts: ${ts}`].join('\n');
+
+/** Deletes subscription `id` of the wallet. */
+export const unsubscribe = async (base: string, ownerKey: string, id: string, fetchImpl?: typeof fetch): Promise<void> => {
+	const wallet = walletOf(ownerKey);
+	const ts = nowSec();
+	const sig = personalSignHex(ownerKey, unsubscribeMessage(wallet, id, ts));
+	const q = new URLSearchParams({ wallet, ts: String(ts), sig });
+	await call(`${base.replace(/\/+$/, '')}/api/notifications/subscriptions/${encodeURIComponent(id)}?${q}`, { method: 'DELETE' }, fetchImpl);
+};
+
+/** The wallet's alert history, newest first as the server keeps it. */
+export const alertHistory = async (base: string, ownerKey: string, limit = 50, fetchImpl?: typeof fetch): Promise<unknown[]> => {
+	const wallet = walletOf(ownerKey);
+	const ts = nowSec();
+	const sig = personalSignHex(ownerKey, readMessage(wallet, ts));
+	const q = new URLSearchParams({ wallet, ts: String(ts), sig, limit: String(limit) });
+	return (await call(`${base.replace(/\/+$/, '')}/api/notifications?${q}`, {}, fetchImpl)) ?? [];
+};
+
 /** The wallet address the bot is sent first. */
 export const alertWallet = walletOf;

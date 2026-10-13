@@ -20,10 +20,10 @@ import { signAddSecret, signBound } from '@/lib/recovery/typedData';
 import { depositShare } from '@/lib/recovery/nodeClient';
 import { liveInviteId } from '@/lib/recovery/inviteThread';
 import { knownNodes, checkNode, syncedServerNode } from '@/lib/recovery/nodeDirectory';
-import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedError, advance, prepareRun, skipPendingNodes, canDiscard } from '@/lib/recovery/backupRun';
+import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedError, advance, prepareRun, skipPendingNodes, canDiscard, sharePartOf } from '@/lib/recovery/backupRun';
 import { settingsProblems } from '@/lib/recovery/backupPlan';
 import { setProblems } from '@/lib/recovery/nodeChoice';
-import { listSubscriptions, subscribeWebhook, telegramReply, alertWallet } from '@/lib/recovery/alerts';
+import { listSubscriptions, subscribeWebhook, telegramReply, alertWallet, unsubscribe, alertHistory } from '@/lib/recovery/alerts';
 
 export const BACKUP_SLOT = 'recovery_backup';
 export const NODES_SLOT = 'recovery_nodes';
@@ -455,6 +455,55 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		await save({ ...run.value, alerts });
 	};
 
+	// --- Changing a finished backup (plan § 7.4, Controls) ----------------------
+
+	const finished = () => {
+		const r = run.value;
+		if (r?.step !== 'done' || !r.secretId) throw new Error('There is no finished backup.');
+		if (r.revokedAt) throw new Error('This backup was revoked.');
+		return r;
+	};
+	const gatewayFor = (r, k) => (r.fee?.kind === 'self' ? directGateway(chainOf(), k) : relayerGateway(r.fee?.url || deployment.relayerUrl));
+
+	/** Changes the waiting period and the time to finish, on chain, then in the record. */
+	const setPolicy = async ({ delaySec, windowSec }) => {
+		const r = finished();
+		const bad = settingsProblems({ ...r.settings, delaySec, windowSec }, r.guardians.length, r.nodes.length).filter((p) => p.field === 'delaySec' || p.field === 'windowSec');
+		if (bad.length) throw new Error(`These times are out of bounds (${bad.map((p) => p.field).join(', ')}).`);
+		const k = await ownerKey();
+		const { body } = await signBound(chainOf(), k, 'SetRecoveryPolicy', r.secretId, { recoveryDelay: BigInt(delaySec), recoveryWindow: BigInt(windowSec) });
+		await gatewayFor(r, k).setRecoveryPolicy(body);
+		await save({ ...r, settings: { ...r.settings, delaySec, windowSec } });
+	};
+
+	/** Revokes the backup for good: no recovery can ever use it (pq_recovery_shares § Dying). */
+	const revoke = async () => {
+		const r = finished();
+		const k = await ownerKey();
+		const { body } = await signBound(chainOf(), k, 'RevokeSecret', r.secretId, {});
+		await gatewayFor(r, k).revokeSecret(body);
+		await save({ ...r, revokedAt: nowSec() });
+	};
+
+	/**
+	 * Hands one spare piece to a guardian already in the backup: a second index
+	 * of the same split, custody only — a spare never makes anyone a guardian
+	 * (pq_recovery_shares § Spares). It leaves the record once sent.
+	 */
+	const giveSpare = async (guardianHash) => {
+		const r = finished();
+		if (!r.guardians.some((g) => g.userHash === guardianHash)) throw new Error('A spare goes only to a guardian of this backup.');
+		const i = r.shares.findIndex((s, at) => at >= r.guardians.length && s);
+		if (i < 0) throw new Error('No spare pieces are left.');
+		const messageId = await $dialogs.sendMessage(guardianHash, [sharePartOf(r, i, secretRefOf(deployment, r.secretId), nowSec())]);
+		const shares = [...r.shares];
+		shares[i] = null;
+		await save({ ...r, shares, sparesGiven: { ...(r.sparesGiven ?? {}), [i + 1]: { guardian: guardianHash, messageId } } });
+	};
+
+	const removeSubscription = async (id) => unsubscribe(alertsBase(), await ownerKey(), id);
+	const history = async () => (alertsBase() ? alertHistory(alertsBase(), await ownerKey()) : []);
+
 	/** Whether this tab of this device is the one to run the backup (another only shows its progress). */
 	const runsHere = computed(() => !!run.value && run.value.device === deviceLabel() && !heldElsewhere.value);
 
@@ -485,6 +534,11 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		finishWithoutPendingNodes,
 		discard,
 		setAlerts,
+		setPolicy,
+		revoke,
+		giveSpare,
+		removeSubscription,
+		history,
 		runsHere,
 		heldElsewhere,
 		canTakeOver,

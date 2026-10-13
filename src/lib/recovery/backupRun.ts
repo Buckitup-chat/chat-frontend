@@ -61,6 +61,10 @@ export type NodeOutcome = { state: 'held' } | { state: 'staged' } | { state: 'fa
 export interface BackupRun {
 	/** Set when this run reshares an existing backup (RunInput.reshareOf). */
 	reshareOf?: { secretId: string; version: number };
+	/** Unix seconds the owner revoked the backup for good (plan § 7.4). */
+	revokedAt?: number;
+	/** Spare pieces handed to guardians of the backup, by share index. */
+	sparesGiven?: Record<string, { guardian: string; messageId: string }>;
 	runId: string;
 	/** The on-chain label: random, so the secret id links to nothing. */
 	label: string;
