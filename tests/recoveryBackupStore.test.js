@@ -28,7 +28,7 @@ vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 vi.mock('@/store/dialogs.store', () => ({ useDialogsStore: () => ({ sendMessage: vi.fn() }) }));
 vi.mock('@/store/recoveryInvites.store', () => ({ useRecoveryInvitesStore: () => ({ roster: {}, deployment: null, load: async () => {} }) }));
 
-const { useRecoveryBackupStore } = await import('@/store/recoveryBackup.store');
+const { useRecoveryBackupStore, recordLockName } = await import('@/store/recoveryBackup.store');
 const { defaultSettings } = await import('@/lib/recovery/backupPlan');
 
 const node = (tag, operator) => {
@@ -124,6 +124,17 @@ describe('one backup per account', () => {
 		expect(em.patchSlotJson).not.toHaveBeenCalled();
 	});
 
+	it('takes a new first backup in place of a revoked one', async () => {
+		const store = useRecoveryBackupStore();
+		slots.recovery_backup = { run: savedRun({ step: 'done', secretId: SECRET, version: 2, revokedAt: 5 }) };
+		await store.load();
+		await store.start(input());
+		expect(slots.recovery_backup.run).toMatchObject({ step: 'prepared', alerts: { channels: ['app', 'telegram'], skipped: false } });
+		expect(slots.recovery_backup.run.runId).not.toBe('r1');
+		expect(slots.recovery_backup.run).not.toHaveProperty('revokedAt');
+		await expect(store.start(input({ reshare: true }))).rejects.toThrow();
+	});
+
 	it('changes a finished backup only as a reshare of its secret, at its next version, kept beside the record', async () => {
 		const store = useRecoveryBackupStore();
 		await expect(store.start(input({ reshare: true }))).rejects.toThrow('There is no finished backup.');
@@ -193,6 +204,26 @@ describe('one backup per account', () => {
 		expect(promoted).toMatchObject({ runId: 'r2', label: 'bu-1', version: 4, splitId: 's2', fee: { kind: 'self' }, alerts: { channels: ['app', 'webhook'], skipped: false } });
 		expect(promoted.settings).toMatchObject({ spares: 1, delaySec: 7 * 86400, windowSec: 2 * 86400 });
 		expect(promoted.sparesGiven).toBeUndefined();
+	});
+
+	it('waits for a write of the record under way before it merges a done reshare into it', async () => {
+		const store = useRecoveryBackupStore();
+		slots.recovery_backup = { run: savedRun({ step: 'done', secretId: SECRET, version: 3 }), reshare: doneReshare() };
+		await store.load();
+		// Alerts being recorded: they read the record, then write it whole, under the record's lock.
+		let open;
+		const gate = new Promise((r) => (open = r));
+		const alerts = lockManager.request(recordLockName(OWNER), { mode: 'exclusive' }, async () => {
+			const record = slots.recovery_backup.run;
+			await gate;
+			slots.recovery_backup = { ...slots.recovery_backup, run: { ...record, alerts: { channels: ['app', 'webhook'], skipped: false } } };
+		});
+		const resumed = store.resume();
+		await flush();
+		open();
+		await Promise.all([alerts, resumed]);
+		expect(slots.recovery_backup.run).toMatchObject({ runId: 'r2', version: 4, alerts: { channels: ['app', 'webhook'], skipped: false } });
+		expect(slots.recovery_backup.reshare).toBeNull();
 	});
 
 	it('never puts a reshare over a revoked record', async () => {

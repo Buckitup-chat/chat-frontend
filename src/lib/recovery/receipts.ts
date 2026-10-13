@@ -10,6 +10,9 @@ import type { BackupRun } from './backupRun';
 /** A guardian's piece, as the backup screens show it. */
 export type Delivery = 'waiting' | 'sent' | 'delivered' | 'stored' | 'problem' | 'given_back' | 'dropped';
 
+/** A piece in these states no longer counts: each is a prompt to reshare, and its guardian is handed no spare. */
+export const LOST_DELIVERIES: readonly Delivery[] = ['problem', 'given_back', 'dropped'];
+
 /** What each state a guardian reports is to the owner: every kept-with-a-problem state is one problem, a prompt to reshare. */
 const DELIVERY_OF: Readonly<Record<ReportedState, Delivery>> = {
 	stored: 'stored',

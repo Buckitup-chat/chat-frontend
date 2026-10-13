@@ -40,13 +40,27 @@
 					<div v-if="actionError" class="cb-field-error">{{ actionError }}</div>
 				</template>
 
+				<!-- Revoked for good: nothing protects the account any more, and a new backup can take its place -->
+				<template v-if="state === 'done' && run.revokedAt">
+					<div class="cb-muted" data-test="revoked">This backup was revoked for good. No recovery can use it.</div>
+					<div class="d-flex gap-2">
+						<button class="btn btn-outline-dark flex-fill" @click="open('manage')">Manage</button>
+						<button class="btn btn-dark flex-fill" :disabled="!!createBlocked" data-test="create-new" @click="open('guardians')">Create a new backup</button>
+					</div>
+					<div v-if="createBlocked" class="text-secondary small" data-test="create-reason">{{ createBlocked }}</div>
+				</template>
+
 				<!-- 1.0 / 1.3: the backup exists -->
-				<template v-if="state === 'done'">
-					<HealthLine :view="health" :extra="healthExtra" />
+				<template v-else-if="state === 'done'">
+					<HealthLine :view="roster.health" :extra="healthExtra" />
+					<div v-if="roster.prompt && !active" class="cb-warn" data-test="reshare-prompt">
+						<span>{{ roster.prompt.text }}</span>
+						<div><button class="btn btn-sm btn-dark" data-test="reshare-cta" @click="open('reshare')">{{ roster.prompt.action }}</button></div>
+					</div>
 					<div v-if="!outsideAlerts" class="cb-warn" data-test="no-alerts">No alerts. You may not learn about an attempt in time to stop it.</div>
 					<div v-if="!active" class="d-flex gap-2">
 						<button v-if="!outsideAlerts" class="btn btn-outline-dark flex-fill" @click="open('alerts')">Set up alerts</button>
-						<button class="btn btn-dark flex-fill" @click="open('done')">Manage</button>
+						<button class="btn btn-dark flex-fill" data-test="manage" @click="open('manage')">Manage</button>
 					</div>
 				</template>
 			</template>
@@ -74,16 +88,18 @@
 <script setup>
 import { computed, inject, onMounted, onUnmounted, ref } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
+import { userPQStore } from '@/store/userPQ.store';
 import { canDiscard, stepNumber, unfinished } from '@/lib/recovery/backupRun';
 import HealthLine from './HealthLine.vue';
 import ContactAvatar from './ContactAvatar.vue';
 import errorMessage from '@/utils/errorMessage';
 import { plural } from '@/lib/recovery/backupPlan';
-import { STEP_LABELS, agoText, alertsText, hasOutsideAlerts, healthView } from './backupFlow';
+import { STEP_LABELS, agoText, alertsText, guardianName, hasOutsideAlerts, rosterView, sparesLeft } from './backupFlow';
 
 const ABOUT = 'Your keys are split between contacts you trust and a few independent nodes. Nobody can open your account alone.';
 
 const store = useRecoveryBackupStore();
+const $userPQ = userPQStore();
 const $modal = inject('$modal');
 
 const loadError = ref(null);
@@ -179,10 +195,10 @@ const discard = async () => {
 
 // --- Done ----------------------------------------------------------------------
 
-const health = computed(() => healthView(run.value, store.receipts));
+const roster = computed(() => rosterView(run.value, store.receipts, store.receiptDetails, (h) => guardianName(h, store.candidates, $userPQ)));
 const outsideAlerts = computed(() => hasOutsideAlerts(run.value?.alerts));
 const healthExtra = computed(() => {
-	const spares = plural(run.value?.settings?.spares ?? 0, 'spare piece');
+	const spares = plural(sparesLeft(run.value), 'spare piece');
 	return outsideAlerts.value ? `${spares} · alerts: ${alertsText(run.value.alerts.channels)}` : spares;
 });
 

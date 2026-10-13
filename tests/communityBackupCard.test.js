@@ -116,7 +116,13 @@ describe('with a run another device stopped moving', () => {
 
 describe('with a finished backup', () => {
 	const done = (alerts) => {
-		const run = makeRun({ step: 'done', settings: { threshold: 2, approvals: 3, spares: 2, delaySec: 86400 * 3, windowSec: 86400 * 7, nodeThreshold: 2 }, alerts });
+		const run = makeRun({
+			step: 'done',
+			settings: { threshold: 2, approvals: 3, spares: 2, delaySec: 86400 * 3, windowSec: 86400 * 7, nodeThreshold: 2 },
+			alerts,
+			// The guardians' pieces leave the record once sent; the spares stay.
+			shares: [null, null, null, 'U1A0', 'U1A1'],
+		});
 		run.sent = Object.fromEntries(run.guardians.map((g, i) => [g.userHash, { messageId: `m${i}`, shareIndex: i + 1 }]));
 		return run;
 	};
@@ -142,6 +148,42 @@ describe('with a finished backup', () => {
 		expect(w.findAll('.health-seg.held')).toHaveLength(1);
 		expect(w.findAll('.health-seg.way')).toHaveLength(1);
 		expect(w.text()).toContain('3 needed. Fewer than 3 guardians keep their piece: the backup stopped working.');
+	});
+
+	it('counts the spare pieces still in the record, and opens the roster from Manage', async () => {
+		H.store.run = done({ channels: ['app', 'telegram'], skipped: false });
+		H.store.run.shares[3] = null;
+		H.store.run.sparesGiven = { 4: { guardian: H.store.run.guardians[0].userHash, messageId: 'm' } };
+		const w = render();
+		expect(w.text()).toContain('3 pieces on the way · 1 spare piece · alerts');
+		await text(w, 'manage').trigger('click');
+		expect(opened).toEqual([{ id: 'community_backup', start: 'manage' }]);
+	});
+
+	it('says a revoked backup protects nothing, with no health line, and offers a new one once two guardians agree', async () => {
+		H.store.run = { ...done({ channels: ['app', 'telegram'], skipped: false }), revokedAt: 1_700_000_500 };
+		H.store.candidates = [candidate('Daria', 'agreed', 'd')];
+		const w = render();
+		expect(text(w, 'revoked').text()).toBe('This backup was revoked for good. No recovery can use it.');
+		expect(w.find('.health').exists()).toBe(false);
+		expect(text(w, 'no-alerts').exists()).toBe(false);
+		expect(text(w, 'create-new').attributes('disabled')).toBeDefined();
+		expect(text(w, 'create-reason').text()).toBe('Create backup needs 2 guardians who agreed. 1 more to go.');
+
+		H.store.candidates = [candidate('Daria', 'agreed', 'd'), candidate('Milo', 'agreed', 'm')];
+		await flushPromises();
+		await text(w, 'create-new').trigger('click');
+		expect(opened).toEqual([{ id: 'community_backup', start: 'guardians' }]);
+	});
+
+	it('asks for a reshare when a piece no longer counts, opening the reshare itself', async () => {
+		H.store.run = done({ channels: ['app', 'telegram'], skipped: false });
+		const [a, b, c] = H.store.run.guardians.map((g) => g.userHash);
+		H.store.receipts = { [a]: 'stored', [b]: 'stored', [c]: 'dropped' };
+		const w = render();
+		expect(text(w, 'reshare-prompt').text()).toContain('Guardian no longer keeps a piece that counts.');
+		await text(w, 'reshare-cta').trigger('click');
+		expect(opened).toEqual([{ id: 'community_backup', start: 'reshare' }]);
 	});
 
 	it('warns for as long as no channel outside the app is on', () => {

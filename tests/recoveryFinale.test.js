@@ -4,11 +4,11 @@
 // guardians suggested, without those whose piece was set aside — until the
 // backup no longer opens with what the recovery released, and the temporary
 // account is removed, retried at every sign-in until it is gone.
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { mount, flushPromises } from '@vue/test-utils';
-import { effectScope, nextTick, reactive } from 'vue';
-import { candidate, fakeBackupStore, hash, makeRun, node } from './helpers/communityBackup';
+import { nextTick, reactive } from 'vue';
+import { fakeBackupStore, hash, makeRun } from './helpers/communityBackup';
 
 const ORIGINAL = hash('o');
 const TEMP = hash('t');
@@ -19,7 +19,6 @@ vi.mock('@/store/recoveryRounds.store', () => ({ useRecoveryRoundsStore: () => (
 
 const { finaleDone, finaleKey, useRecoveryFinaleStore } = await import('@/store/recoveryFinale.store');
 const { default: Banner } = await import('@/components/RecoveryFinaleBanner.vue');
-const { createBackupDraft } = await import('@/components/recovery/backup/backupFlow');
 
 const SECRET = '0x' + 'ab'.repeat(32);
 const record = (over = {}) => ({ temporary: TEMP, secretId: SECRET, version: 2, round: 4, candidate: '0x5a', setAside: [hash('b')], at: 1, temporaryGone: true, ...over });
@@ -137,7 +136,8 @@ describe('the banner', () => {
 		const w = render();
 		expect(w.find('[data-test="finale"]').text()).toContain('Finish your recovery: renew your backup');
 		await w.find('[data-test="finale-renew"]').trigger('click');
-		expect(modal.value.open).toHaveBeenCalledWith({ id: 'community_backup', start: 'guardians', reshare: true, keep: [hash('a'), hash('c')] });
+		// The roster's reshare, filled in from the record, with the guardians to keep (Modal_Community_Backup → draft.beginReshare).
+		expect(modal.value.open).toHaveBeenCalledWith({ id: 'community_backup', start: 'reshare', keep: [hash('a'), hash('c')] });
 	});
 
 	it('has no way to dismiss it, follows a reshare in progress, and goes once it landed', async () => {
@@ -175,25 +175,5 @@ describe('the banner', () => {
 		await flushPromises();
 		expect(H.user.deleteAccount).toHaveBeenCalledWith(TEMP);
 		expect(w.find('[data-test="finale-temporary"]').exists()).toBe(false);
-	});
-});
-
-describe('the reshare it leads into', () => {
-	let scope;
-	afterEach(() => scope?.stop());
-
-	it('picks only the guardians to keep — also when the contacts arrive later — and starts as a reshare', async () => {
-		const store = fakeBackupStore({ candidates: [], nodes: [node({ operator: hash('x') }), node({ operator: hash('y') }), node({ operator: hash('z') })] });
-		scope = effectScope();
-		const draft = scope.run(() => createBackupDraft(store, { reshare: true, keep: [hash('a'), hash('c')] }));
-		expect(draft.state.selected).toEqual([]);
-		store.candidates = ['a', 'b', 'c', 'd'].map((c) => candidate(c.toUpperCase(), 'agreed', c));
-		await nextTick();
-		expect(draft.state.selected).toEqual([hash('a'), hash('c')]);
-		expect(draft.startPayload()).toMatchObject({ reshare: true, guardians: [{ userHash: hash('a') }, { userHash: hash('c') }] });
-		// A first backup suggests everyone who agreed, and starts as one.
-		const plain = scope.run(() => createBackupDraft(store));
-		expect(plain.state.selected).toHaveLength(4);
-		expect(plain.startPayload().reshare).toBeUndefined();
 	});
 });

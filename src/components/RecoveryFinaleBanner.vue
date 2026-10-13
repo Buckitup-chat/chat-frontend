@@ -30,13 +30,14 @@ import { computed, inject, onMounted } from 'vue';
 import { useRecoveryFinaleStore } from '@/store/recoveryFinale.store';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { unfinished } from '@/lib/recovery/backupRun';
+import { isLiveBackup } from '@/components/recovery/backup/backupFlow';
 
 const finale = useRecoveryFinaleStore();
 const $backup = useRecoveryBackupStore();
 const $modal = inject('$modal');
 
 const record = computed(() => finale.shown);
-const hasBackup = computed(() => $backup.run?.step === 'done' && !$backup.run.revokedAt);
+const hasBackup = computed(() => isLiveBackup($backup.run));
 const renewing = computed(() => unfinished($backup.current));
 
 onMounted(() => {
@@ -44,7 +45,8 @@ onMounted(() => {
 });
 
 const open = (start, extra = {}) => $modal.value.open({ id: 'community_backup', start, ...extra });
-const renew = () => (hasBackup.value ? open('guardians', { reshare: true, keep: finale.keepGuardians }) : open('guardians'));
+// The roster's reshare (Manage → Guardians → Review), filled in from the record with the guardians to keep.
+const renew = () => (hasBackup.value ? open('reshare', { keep: finale.keepGuardians }) : open('guardians'));
 </script>
 
 <style scoped>
