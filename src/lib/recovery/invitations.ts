@@ -90,7 +90,7 @@ export const answerInvite = async (
 	await deps.sendMessage(peerHash, [part], onStatus);
 	// The answer is in the dialog from here on, and the dialog is what the
 	// owner reads; a record that fails to write is not a failed answer.
-	const answer: GuardianAnswer = { owner: peerHash, deployment: invite.deployment, answer: accept ? 'accept' : 'decline' };
+	const answer: GuardianAnswer = { owner: peerHash, deployment: invite.deployment, answer: accept ? 'accept' : 'decline', at: Math.floor(Date.now() / 1000) };
 	try {
 		const slot = await deps.patchSlotJson(GUARDIAN_SLOT, { answers: { [invite.inviteId]: answer } });
 		return slot?.answers ?? {};

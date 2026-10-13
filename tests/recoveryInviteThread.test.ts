@@ -133,7 +133,7 @@ describe('the guardian’s view of an invitation', () => {
 	it('shows this account’s answer, from the dialog or its records; a decline wins', () => {
 		expect(asGuardian([invite('m1', OWNER), accept('m2')]).m1).toMatchObject({ answer: 'accept' });
 		expect(asGuardian([invite('m1', OWNER), accept('m2'), decline('m3')]).m1).toMatchObject({ answer: 'decline' });
-		expect(asGuardian([invite('m1', OWNER)], { answers: { [INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'decline' } } }).m1).toMatchObject({
+		expect(asGuardian([invite('m1', OWNER)], { answers: { [INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'decline', at: 1 } } }).m1).toMatchObject({
 			answer: 'decline',
 		});
 		expect(asGuardian([invite('m1', OWNER), accept('m2')]).m2).toMatchObject({ kind: 'reply', mine: true, problem: null });
@@ -203,7 +203,7 @@ describe('answering an invitation', () => {
 		expect(reply).toMatchObject({ kind: 'recovery_invite_reply', inviteId: INVITE, answer: 'accept', metaAddress: keys.metaAddress });
 		expect(checkInviteReply(reply, OWNER, GUARDIAN)).toEqual({ ok: true, answer: 'accept', metaAddress: keys.metaAddress });
 		expect(log).toEqual(['send', `patch:${GUARDIAN_SLOT}`]);
-		expect(slots[GUARDIAN_SLOT][0]).toEqual({ answers: { [INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'accept' } } });
+		expect(slots[GUARDIAN_SLOT][0]).toEqual({ answers: { [INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'accept', at: expect.any(Number) } } });
 	});
 
 	it('answers every owner with the same meta-address', async () => {
@@ -217,7 +217,7 @@ describe('answering an invitation', () => {
 		const { deps, sent } = fakeDeps({ patchSlotJson: async () => { throw new Error('slot unreadable'); } });
 		vi.spyOn(console, 'warn').mockImplementation(() => {});
 		await expect(answerInvite(deps, OWNER, { inviteId: INVITE, deployment: DEPLOYMENT }, false)).resolves.toEqual({
-			[INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'decline' },
+			[INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'decline', at: expect.any(Number) },
 		});
 		expect(sent).toHaveLength(1);
 	});

@@ -29,6 +29,8 @@ export interface GuardianAnswer {
 	owner: string;
 	deployment: string;
 	answer: 'accept' | 'decline';
+	/** Unix seconds: of this owner's invitations for a deployment, the latest answer stands. */
+	at: number;
 }
 
 export interface ThreadMessage {

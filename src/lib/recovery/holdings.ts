@@ -152,14 +152,14 @@ export const reportOf = (h: Holding): RecoveryHoldingPart | null => {
 
 /**
  * The owner's side: each guardian's latest word on the share they were sent,
- * from their `recovery_holding` messages in dialog order. Only the guardian
- * the share went to can state it, and only about that share.
+ * with its reason, from their `recovery_holding` messages in dialog order.
+ * Only the guardian the share went to can state it, and only about that share.
  */
-export const holdingStatesOf = (
+export const holdingReportsOf = (
 	messages: readonly { senderHash: string; parts: readonly { kind: string }[] }[],
 	sent: Record<string, { secretRef: string; version: number; splitId: string; shareIndex: number }>,
-): Record<string, ReportedState> => {
-	const out: Record<string, ReportedState> = {};
+): Record<string, { state: ReportedState; detail: string }> => {
+	const out: Record<string, { state: ReportedState; detail: string }> = {};
 	for (const m of messages) {
 		const expected = sent[m.senderHash];
 		if (!expected) continue;
@@ -167,9 +167,12 @@ export const holdingStatesOf = (
 			if (p.kind !== 'recovery_holding') continue;
 			const r = p as RecoveryHoldingPart;
 			if (r.secretRef !== expected.secretRef || r.version !== expected.version || r.splitId !== expected.splitId || r.shareIndex !== expected.shareIndex) continue;
-			if ((REPORTED_STATES as readonly string[]).includes(r.state)) out[m.senderHash] = r.state as ReportedState;
+			if ((REPORTED_STATES as readonly string[]).includes(r.state)) out[m.senderHash] = { state: r.state as ReportedState, detail: r.detail };
 		}
 	}
 	return out;
 };
 
+/** holdingReportsOf, the states alone. */
+export const holdingStatesOf = (...args: Parameters<typeof holdingReportsOf>): Record<string, ReportedState> =>
+	Object.fromEntries(Object.entries(holdingReportsOf(...args)).map(([guardian, r]) => [guardian, r.state]));
