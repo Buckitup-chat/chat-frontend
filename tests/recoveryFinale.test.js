@@ -82,6 +82,29 @@ describe('the finale store', () => {
 		expect(finale.shown).toBeTruthy();
 	});
 
+	it('lands once: the sign-in the import causes does not remove the temporary account a second time', async () => {
+		H.user.myLocalUsers.push({ user_hash: TEMP });
+		H.user.currentUserHash = TEMP;
+		let release;
+		const slow = new Promise((r) => (release = r));
+		H.user.deleteAccount = vi.fn(async (h) => {
+			await slow;
+			H.user.myLocalUsers = H.user.myLocalUsers.filter((u) => u.user_hash !== h);
+		});
+		H.user.importBackup = vi.fn(async (b) => {
+			H.user.currentUserHash = b.identity.user_hash;
+			return { status: 'active' };
+		});
+		const finale = useRecoveryFinaleStore();
+		const landing = finale.land({ identity: { user_hash: ORIGINAL }, keys: {} }, record({ temporaryGone: undefined }));
+		await flushPromises();
+		release();
+		await landing;
+		await flushPromises();
+		expect(H.user.deleteAccount).toHaveBeenCalledTimes(1);
+		expect(finale.record.temporaryGone).toBe(true);
+	});
+
 	it('suggests the backup\'s guardians without those whose piece was set aside', () => {
 		localStorage.setItem(finaleKey(ORIGINAL), JSON.stringify(record()));
 		signIn(ORIGINAL);

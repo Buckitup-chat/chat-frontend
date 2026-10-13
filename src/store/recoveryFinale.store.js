@@ -56,21 +56,28 @@ export const useRecoveryFinaleStore = defineStore('recoveryFinale', () => {
 	};
 
 	/** The temporary account goes from this device, keys and vault together; retried at every sign-in until it is gone. */
-	const destroyTemporary = async (owner = $userPQ.currentUserHash) => {
-		const r = readRecord(owner);
-		if (!r || r.temporaryGone) return;
-		destroying.value = true;
-		destroyError.value = null;
-		try {
-			await $userPQ.refreshMyLocalUsers?.();
-			if ($userPQ.getMyUserByHash(r.temporary)) await $userPQ.deleteAccount(r.temporary);
-			write(owner, { ...r, temporaryGone: true });
-		} catch (e) {
-			console.warn('[recovery] the temporary account could not be removed yet:', e);
-			destroyError.value = e?.message ?? String(e);
-		} finally {
-			destroying.value = false;
-		}
+	// One removal at a time: the landing and the sign-in it causes both ask for one.
+	let destroyingNow = null;
+	const destroyTemporary = (owner = $userPQ.currentUserHash) => {
+		destroyingNow ??= (async () => {
+			const r = readRecord(owner);
+			if (!r || r.temporaryGone) return;
+			destroying.value = true;
+			destroyError.value = null;
+			try {
+				await $userPQ.refreshMyLocalUsers?.();
+				if ($userPQ.getMyUserByHash(r.temporary)) await $userPQ.deleteAccount(r.temporary);
+				write(owner, { ...r, temporaryGone: true });
+			} catch (e) {
+				console.warn('[recovery] the temporary account could not be removed yet:', e);
+				destroyError.value = e?.message ?? String(e);
+			} finally {
+				destroying.value = false;
+			}
+		})().finally(() => {
+			destroyingNow = null;
+		});
+		return destroyingNow;
 	};
 
 	/**
