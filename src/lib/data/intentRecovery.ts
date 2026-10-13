@@ -398,6 +398,7 @@ export async function recoverIntents(
 	opts: {
 		materializeMessage?: (payload: DialogIntentPayload, token: SessionToken) => Promise<ReadyRowIntent | null>;
 		materializeStorage?: (payload: StorageIntentPayload, token: SessionToken) => Promise<ReadyRowIntent>;
+		applyContactAccess?: (entry: IntentEntry) => Promise<unknown>;
 	} = {}
 ): Promise<void> {
 	const token = currentSessionToken();
@@ -447,7 +448,13 @@ export async function recoverIntents(
 			if (!(await withIntentLock(entry.id, () => resumeIntentAfterUnlock(entry.id, userHash)))) continue;
 
 			const stored = entry.intent as StoredIntentPayload;
-			if (DIALOG_INTENT_KINDS.has(String(stored.kind))) {
+			if ((stored as { kind?: unknown }).kind === 'contact-access') {
+				if (!opts.applyContactAccess) {
+					console.warn('[intents] no contact-access handler registered, will retry later:', entry.id);
+					continue;
+				}
+				await opts.applyContactAccess(entry);
+			} else if (DIALOG_INTENT_KINDS.has(String(stored.kind))) {
 				if (!opts.materializeMessage) {
 					console.warn('[intents] no message materializer registered, will retry later:', entry.id);
 					continue;

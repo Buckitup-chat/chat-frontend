@@ -16,10 +16,11 @@ import {
 } from '@/lib/data/userCardIntent';
 import { VaultLockedError } from '@/lib/data/keyCustody';
 import {
-  startLeaderElection, stopLeaderElection, currentSessionUserHash, onOutboxWake, awaitServerAccepted, awaitDeliveryVerdict,
+  startLeaderElection, stopLeaderElection, currentSessionUserHash, onOutboxWake, onOutboxChange, awaitServerAccepted, awaitDeliveryVerdict,
   currentSessionToken, sameSessionToken,
 } from '@/lib/data/outbox';
 import { recoverIntents, signAndDispatchIntent } from '@/lib/data/intentRecovery';
+import { requestContactAccess, applyContactAccessIntent } from '@/lib/data/contactVouches';
 import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch } from '@/lib/data/userStorage';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
@@ -32,6 +33,10 @@ import { clearSessions } from '@/lib/data/readSession';
 import { resetGate } from '@/lib/data/accessGate';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
+
+const CONTACT_ACCESS_RETRY_MS = 5_000;
+const CONTACT_ACCESS_RETRY_MAX_MS = 60_000;
+const CONTACT_ACCESS_HURRY_MS = 500;
 
 const VAULT_KEY_OPTIONS = {
   // Only the fields local-data-lock's getLockKey() actually reads survive the
@@ -549,6 +554,7 @@ export class EncryptionManagerPQ extends EventTarget {
   #outboxOnlineListener = null;
   #outboxVisibleListener = null;
   #outboxWakeUnsubscribe = null;
+  #outboxChangeUnsubscribe = null;
 
   #signingKeyOf(userHash) {
     return async () => {
@@ -568,6 +574,7 @@ export class EncryptionManagerPQ extends EventTarget {
       recoverIntents(userHash, signingKey, {
         materializeMessage: materializeMessageIntent,
         materializeStorage: materializeStorageIntent,
+        applyContactAccess: async (entry) => this.#afterContactAccess(userHash, await applyContactAccessIntent(entry, this.#contactAccessSession(userHash))),
       })
     ).catch((e) =>
       console.warn('[EncryptionManagerPQ] intent recovery failed:', e)
@@ -600,6 +607,9 @@ export class EncryptionManagerPQ extends EventTarget {
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', this.#outboxVisibleListener);
     }
+    this.#outboxChangeUnsubscribe = onOutboxChange((changedUserHash) => {
+      if (changedUserHash === userHash && this.#contactAccessRetry) this.#hurryContactAccessRetry(userHash);
+    });
     this.#outboxWakeUnsubscribe = onOutboxWake((wokenUserHash) => {
       if (wokenUserHash === userHash) {
         drainPendingWrites(userHash, signSkey);
@@ -621,6 +631,10 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#outboxVisibleListener = null;
     this.#outboxWakeUnsubscribe?.();
     this.#outboxWakeUnsubscribe = null;
+    this.#outboxChangeUnsubscribe?.();
+    this.#outboxChangeUnsubscribe = null;
+    clearTimeout(this.#contactAccessRetry);
+    this.#contactAccessRetry = null;
   }
 
   async #clearAccountReadCache() {
@@ -694,7 +708,8 @@ export class EncryptionManagerPQ extends EventTarget {
 
   #normalizeKey(key) {
     if (!key) return null;
-    if (key instanceof Uint8Array) return key;
+    // A copy: logout zeroes the session's key, never the vault's cached one.
+    if (key instanceof Uint8Array) return new Uint8Array(key);
     if (typeof key === 'object' && !ArrayBuffer.isView(key)) {
       return new Uint8Array(Object.values(key).map(v => Number(v)));
     }
@@ -1047,10 +1062,11 @@ export class EncryptionManagerPQ extends EventTarget {
    * between the two leaves an unreferenced row rather than a map pointing at
    * nothing.
    */
-  async #ensureSlot(name, writeRow) {
+  async #ensureSlot(name, writeRow, { writeMap } = {}) {
     const { uuid, orphaned } = await this.#slots().ensureSlotUuid(name, {
       mint: randomSlotUuid,
       writeRow,
+      writeMap,
       recallPendingMint: () => kvGet(this.#pendingSlotMintKey(name)),
       rememberPendingMint: (uuid) => kvSet(this.#pendingSlotMintKey(name), uuid),
       forgetPendingMint: () => kvDelete(this.#pendingSlotMintKey(name)),
@@ -1220,6 +1236,11 @@ export class EncryptionManagerPQ extends EventTarget {
   // contact } }. An edit is a patch by user_hash (storageIntent
   // mergeJsonPatch): its fields merge into the stored contact, null deletes it.
 
+  async saveContacts(edits) {
+    const { value, status } = await this.saveSlotJson('contacts', { contacts: edits });
+    return { contacts: Object.values(value?.contacts ?? {}), status };
+  }
+
   /** Applies `edits` to the contacts the server holds; resolves to the accepted list. */
   async patchContacts(edits) {
     const record = await this.patchSlotJson('contacts', { contacts: edits });
@@ -1228,6 +1249,49 @@ export class EncryptionManagerPQ extends EventTarget {
 
   async loadContacts() {
     return Object.values((await this.loadSlotJson('contacts'))?.contacts ?? {});
+  }
+
+  async setContactAccess(issuerHash, subjectHash, granted) {
+    if (!issuerHash || this.#currentUserHash !== issuerHash || !this.#signSkey) return 'skipped';
+    return this.#afterContactAccess(issuerHash, await requestContactAccess(subjectHash, granted, this.#contactAccessSession(issuerHash)));
+  }
+
+  #contactAccessRetry = null;
+  #contactAccessRetryDelay = CONTACT_ACCESS_RETRY_MS;
+
+  #contactAccessSession(issuerHash) {
+    const session = currentSessionToken();
+    return {
+      issuerHash,
+      signingKey: this.#signingKeyOf(issuerHash),
+      stillCurrent: () => this.#currentUserHash === issuerHash && sameSessionToken(session, currentSessionToken()),
+    };
+  }
+
+  #afterContactAccess(issuerHash, result) {
+    if (result !== 'retry') {
+      this.#contactAccessRetryDelay = CONTACT_ACCESS_RETRY_MS;
+      return result;
+    }
+    if (this.#contactAccessRetry || this.#currentUserHash !== issuerHash) return result;
+    const delay = this.#contactAccessRetryDelay;
+    this.#contactAccessRetryDelay = Math.min(delay * 2, CONTACT_ACCESS_RETRY_MAX_MS);
+    this.#scheduleContactAccessRetry(issuerHash, delay);
+    return result;
+  }
+
+  #hurryContactAccessRetry(issuerHash) {
+    clearTimeout(this.#contactAccessRetry);
+    this.#contactAccessRetryDelay = CONTACT_ACCESS_RETRY_MS;
+    this.#scheduleContactAccessRetry(issuerHash, CONTACT_ACCESS_HURRY_MS);
+  }
+
+  #scheduleContactAccessRetry(issuerHash, delay) {
+    const session = currentSessionToken();
+    this.#contactAccessRetry = setTimeout(() => {
+      this.#contactAccessRetry = null;
+      if (this.#currentUserHash === issuerHash && sameSessionToken(session, currentSessionToken())) this.#recoverIntents(issuerHash);
+    }, delay);
   }
 
   // Named JSON slots
@@ -1253,6 +1317,32 @@ export class EncryptionManagerPQ extends EventTarget {
    * without a read-modify-write here. A value that is there and does not
    * decrypt fails the update instead of being overwritten.
    */
+  async saveSlotJson(name, patch) {
+    const userHash = this.#currentUserHash;
+    const signSkey = this.#signSkey;
+    if (!userHash || !signSkey || !this.#cryptSkey) throw new Error('No user is currently logged in');
+    const sameAccount = () => {
+      if (this.#currentUserHash !== userHash) throw new Error('The account changed before this write ran; nothing was written');
+    };
+    const statuses = [];
+    const save = async (uuid, jsonPatch, knownEmpty = false) => {
+      sameAccount();
+      statuses.push(await saveStorageJsonPatch({ userHash, uuid, jsonPatch, signSkey, knownEmpty }));
+    };
+    const mapped = await this.#slotUuid(name);
+    let slotUuid = null;
+    await this.#ensureSlot(name, async (uuid) => {
+      sameAccount();
+      const base = await this.#readJsonAt(uuid, `The ${name} slot`, { strict: true });
+      await save(uuid, patch, !mapped && base === null);
+      slotUuid = uuid;
+    }, { writeMap: (mapPatch) => save(this.#rootSlotUuid(), mapPatch) });
+    if (this.#currentUserHash !== userHash) throw new Error('The account changed while this write was out');
+    const value = await this.#readJsonAt(slotUuid, `The ${name} slot`, { strict: true });
+    const status = ['awaiting-approval', 'awaiting-recovery', 'queued'].find((s) => statuses.includes(s)) ?? 'synced';
+    return { value, status };
+  }
+
   async patchSlotJson(name, patch) {
     const userHash = this.#currentUserHash;
     const signSkey = this.#signSkey;

@@ -93,4 +93,11 @@ export const SIGNABLE: Record<string, SignableSchema> = {
 		uploader_hash: 'text',
 		owner_timestamp: 'int',
 	},
+	vouch_tokens: {
+		kind: 'text',
+		issuer_hash: 'text',
+		subject_hash: 'text',
+		owner_timestamp: 'int',
+		deleted_flag: 'bool',
+	},
 };

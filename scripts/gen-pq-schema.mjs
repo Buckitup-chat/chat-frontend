@@ -40,6 +40,7 @@ const SCHEMA_FILES = [
 	'dialog_message_receipt.ex',
 	'file.ex',
 	'file_chunk.ex',
+	'vouch_token.ex',
 ];
 
 const TYPE_MAP = {
