@@ -115,10 +115,19 @@ const otherError = computed(() => (!store.running && store.stopped && !['nodes_f
 const interrupted = computed(() => !!run.value && !isDone.value && !store.running && store.runsHere && !nodesFailed.value && !regPending.value && !otherError.value);
 const discardable = computed(() => !!run.value && canDiscard(run.value));
 
-const changing = computed(() => !!run.value?.reshareOf);
+/** The run shown is a reshare: remembered, since once done it is the record, which names no reshare. */
+const wasReshare = ref(false);
+watch(
+	() => run.value?.reshareOf,
+	(r) => {
+		if (r) wasReshare.value = true;
+	},
+	{ immediate: true },
+);
+const changing = computed(() => wasReshare.value);
 const title = computed(() => {
 	if (interrupted.value) return changing.value ? 'The change to your backup was not finished' : 'Your backup was not finished';
-	if (isDone.value) return 'Backup created';
+	if (isDone.value) return changing.value ? 'Backup changed' : 'Backup created';
 	return changing.value ? 'Changing your backup' : 'Creating your backup';
 });
 const existsText = computed(() =>
@@ -204,7 +213,7 @@ watch(
 	isDone,
 	(done) => {
 		if (done) {
-			draft.state.justFinished = true;
+			draft.state.justFinished = changing.value ? 'changed' : 'created';
 			nav.replace('done');
 		}
 	},

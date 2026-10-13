@@ -78,7 +78,7 @@
 </template>
 
 <script setup>
-import { computed, inject, onMounted, ref } from 'vue';
+import { computed, inject, onMounted, ref, watch } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { durationText } from '@/lib/recovery/backupPlan';
 import errorMessage from '@/utils/errorMessage';
@@ -97,12 +97,15 @@ const a = draft.state.alerts;
 const delaySec = computed(() => (setup ? draft.settings.value.delaySec : store.run?.settings?.delaySec));
 const delayWords = computed(() => (delaySec.value ? durationText(delaySec.value) : 'the waiting period'));
 
-// Channels already set up for this account count: the server lists kinds only.
+// The channels on are the server's list, kinds only: each reading of it sets them, on or off.
+const mirror = (list) => {
+	a.telegram = list.some((s) => s.kind === 'telegram');
+	a.webhook = list.some((s) => s.kind === 'webhook');
+};
+watch(() => store.subs, mirror);
 onMounted(async () => {
 	try {
-		const subs = await store.subscriptions();
-		if (subs.some((s) => s.kind === 'telegram')) a.telegram = true;
-		if (subs.some((s) => s.kind === 'webhook')) a.webhook = true;
+		mirror(await store.subscriptions());
 	} catch (e) {
 		console.warn('[recovery] alert channels could not be read:', e);
 	}

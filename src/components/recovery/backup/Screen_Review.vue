@@ -20,6 +20,8 @@
 	<template v-if="resharing">
 		<div v-if="joining.length" class="cb-small" data-test="joining">Joining: {{ joining.join(', ') }}</div>
 		<div v-if="leaving.length" class="cb-small" data-test="leaving">Leaving: {{ leaving.join(', ') }}</div>
+		<div v-if="nodesJoining.length" class="cb-small" data-test="nodes-joining">Nodes joining: {{ nodesJoining.join(', ') }}</div>
+		<div v-if="nodesLeaving.length" class="cb-small" data-test="nodes-leaving">Nodes leaving: {{ nodesLeaving.join(', ') }}</div>
 		<div class="cb-muted">Every guardian gets a new piece and the old pieces stop working. A guardian left out keeps nothing that works.</div>
 	</template>
 	<div class="cb-muted">If fewer than {{ needed }} guardians keep their piece, the backup stops working. You will see it here.</div>
@@ -41,7 +43,7 @@ import { neededGuardians, plural } from '@/lib/recovery/backupPlan';
 import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
 import ContactAvatar from './ContactAvatar.vue';
-import { CURRENCY, DRAFT, NAV, alertsText, amount, durationAdjective, feeText, guardianName, shortAddress } from './backupFlow';
+import { CURRENCY, DRAFT, NAV, alertsText, amount, durationAdjective, feeText, guardianName, nodeRefName, shortAddress } from './backupFlow';
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
@@ -54,6 +56,9 @@ const resharing = computed(() => draft.resharing.value);
 const nameOf = (h) => guardianName(h, store.candidates, $userPQ);
 const joining = computed(() => draft.joining.value.map(nameOf));
 const leaving = computed(() => draft.leaving.value.map(nameOf));
+const nodeName = (ref) => nodeRefName(ref, store.nodes, $userPQ);
+const nodesJoining = computed(() => draft.nodesJoining.value.map(nodeName));
+const nodesLeaving = computed(() => draft.nodesLeaving.value.map(nodeName));
 const needed = computed(() => neededGuardians(s.value));
 
 // Paying yourself: the balance is read again right before Create.

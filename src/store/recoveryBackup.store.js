@@ -26,7 +26,7 @@ import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedErro
 import { policyProblems, settingsProblems } from '@/lib/recovery/backupPlan';
 import { setProblems } from '@/lib/recovery/nodeChoice';
 import { listSubscriptions, subscribeWebhook, telegramReply, alertWallet, unsubscribe, alertHistory } from '@/lib/recovery/alerts';
-import { isReportOn, receiptOf, sentSharesOf } from '@/lib/recovery/receipts';
+import { LOST_DELIVERIES, isReportOn, receiptOf, sentSharesOf } from '@/lib/recovery/receipts';
 
 export const BACKUP_SLOT = 'recovery_backup';
 export const NODES_SLOT = 'recovery_nodes';
@@ -37,12 +37,16 @@ const FOLLOW_MS = 15_000;
 const RECEIPT_FRESH_MS = 2 * 60_000;
 /** How long one check of the nodes' holdings may take, all nodes at once. */
 const HOLDINGS_BUDGET_MS = 20_000;
+/** The nodes' holdings checked this recently are not checked again, unless asked to. */
+const HOLDINGS_FRESH_MS = 3 * 60_000;
 /** Guardian dialogs read at once for their receipts. */
 const RECEIPT_READS_AT_ONCE = 3;
 /** A run another device has not moved for this long may be continued here: that device may be lost. */
 export const TAKEOVER_AFTER_SEC = 10 * 60;
 /** One tab of one device drives an account's run at a time. */
 export const runLockName = (owner) => `buckitup:backup-run:${owner}`;
+/** One write onto the finished backup's record at a time, on this device: each reads the record and writes it whole. */
+export const recordLockName = (owner) => `buckitup:backup-record:${owner}`;
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 /** A name for this device, kept locally: the progress screen says which device runs a backup. */
@@ -115,11 +119,12 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		reshare.value = slot.reshare;
 	};
 
-	/** Reads the backup's slot, its nodes and the invitations; calls made while a read runs share it. */
+	/** Reads the backup's slot, its nodes and the invitations; calls for the same account while a read runs share it. */
 	let loading = null;
-	const load = () =>
-		(loading ??= (async () => {
-			const owner = $userPQ.currentUserHash;
+	const load = () => {
+		const owner = $userPQ.currentUserHash;
+		if (loading?.owner === owner) return loading.promise;
+		const promise = (async () => {
 			const [backup, nodes] = await Promise.all([em().loadSlotJson(BACKUP_SLOT), em().loadSlotJson(NODES_SLOT), $invites.load({ refresh: true }), checkHeld(owner)]);
 			if ($userPQ.currentUserHash !== owner) return;
 			clock.value = nowSec();
@@ -127,8 +132,11 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 			savedNodeUrls.value = nodes?.urls ?? [];
 			loaded.value = true;
 		})().finally(() => {
-			loading = null;
-		}));
+			if (loading?.promise === promise) loading = null;
+		});
+		loading = { owner, promise };
+		return promise;
+	};
 
 	/** Only the run's slot, for following a run another device or tab drives. */
 	const refreshRun = async () => {
@@ -237,17 +245,26 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	 */
 	const holdings = ref({ runId: null, byNode: {}, at: 0 });
 	let holdingsReading = null;
-	const checkHoldings = () => {
+	/**
+	 * Checks the holdings again, unless they were checked for this record
+	 * within HOLDINGS_FRESH_MS; `force` checks them anyway. A node holding a
+	 * newer version holds: a reshare is under way, or done on another device.
+	 * While a reshare is being made, a node without the version is
+	 * 'changing' rather than lost — it may be taking the new one.
+	 */
+	const checkHoldings = ({ force = false } = {}) => {
 		if (holdingsReading) return holdingsReading;
 		const r = run.value;
 		if (r?.step !== 'done' || r.revokedAt || !r.secretId) return Promise.resolve();
+		if (!force && holdings.value.runId === r.runId && Date.now() - holdings.value.at < HOLDINGS_FRESH_MS) return Promise.resolve();
 		const owner = $userPQ.currentUserHash;
 		holdingsReading = (async () => {
 			const signal = AbortSignal.timeout(HOLDINGS_BUDGET_MS);
 			const one = async (n) => {
 				try {
 					const version = await holdingOf(n, r.secretId, { signal, timeoutMs: HOLDINGS_BUDGET_MS / 2 });
-					return [n.id, version === r.version ? 'holds' : 'lost'];
+					if (version !== null && version >= r.version) return [n.id, 'holds'];
+					return [n.id, unfinished(reshare.value) ? 'changing' : 'lost'];
 				} catch {
 					return [n.id, 'unreachable'];
 				}
@@ -303,15 +320,9 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		if (r?.step !== 'done' || r.revokedAt) return;
 		const channels = channelsOf(list);
 		const same = (rec) => channels.join() === (rec.alerts?.channels ?? ['app']).join();
-		// This tab's copy settles the common case; a write is decided on the slot, under the lock.
+		// This tab's copy settles the common case; a write is decided on the record as the slot holds it.
 		if (same(r)) return;
-		await onFinished(
-			async (record, { patch }) => {
-				if (same(record)) return;
-				await patch(() => ({ alerts: { channels, skipped: false } }));
-			},
-			{ duringReshare: true },
-		);
+		await patchRecord($userPQ.currentUserHash, (record) => (same(record) ? null : { alerts: { channels, skipped: false } }));
 	};
 	const readSubs = async () => {
 		const owner = $userPQ.currentUserHash;
@@ -435,10 +446,32 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	const save = async (next) => {
 		if (!next.reshareOf) return writeSlot({ run: next });
 		if (next.step !== 'done') return writeSlot({ reshare: next });
-		const record = (await readSlot($userPQ.currentUserHash)).run;
-		if (!record || record.revokedAt) return writeSlot({ reshare: next });
-		return writeSlot({ run: promoteReshare(record, next), reshare: null });
+		const owner = $userPQ.currentUserHash;
+		return withRecordLock(owner, async () => {
+			const record = (await readSlot(owner)).run;
+			if (!record || record.revokedAt) return writeSlot({ reshare: next });
+			return writeSlot({ run: promoteReshare(record, next), reshare: null });
+		});
 	};
+
+	/** Runs `fn` holding the record's lock, waiting for it: a record write is short. */
+	const withRecordLock = (owner, fn) => {
+		const lm = locks();
+		return lm?.request ? lm.request(recordLockName(owner), { mode: 'exclusive' }, fn) : fn();
+	};
+	/**
+	 * Writes `changes(record)` onto the finished backup's record as the slot
+	 * holds it, under the record's lock — never the run's, so a change being
+	 * made does not hold it up; `changes` returning null writes nothing.
+	 * Throws RunAbortedError once another account is signed in.
+	 */
+	const patchRecord = (owner, changes) =>
+		withRecordLock(owner, async () => {
+			const fresh = finishedOf((await readSlot(owner)).run);
+			if ($userPQ.currentUserHash !== owner) throw new RunAbortedError();
+			const c = changes(fresh);
+			if (c) await writeSlot({ run: { ...fresh, ...c } });
+		});
 	/** Shows a run being made where it belongs, without writing it; a done reshare is shown by the write that promoted it. */
 	const place = (r) => {
 		if (!r?.reshareOf) run.value = r;
@@ -680,13 +713,14 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	 * Runs `fn(record, act)` on the finished backup as the slot holds it now,
 	 * under the run lock: two tabs never act on one record at once, and none
 	 * on a copy it kept from before another's change. Refused while a reshare
-	 * is being made, unless `duringReshare`. `act.alive()` says whether the
+	 * is being made. `act.alive()` says whether the
 	 * account is still the one signed in — after an await, nothing is sent or
 	 * written once it is not, and the action ends quietly — and
 	 * `act.patch(changes)` writes `changes(record)` onto the record as the slot
-	 * holds it at that moment: the fields an action changes, never a snapshot.
+	 * holds it at that moment (patchRecord): the fields an action changes,
+	 * never a snapshot.
 	 */
-	const onFinished = (fn, { duringReshare = false } = {}) => {
+	const onFinished = (fn) => {
 		const owner = $userPQ.currentUserHash;
 		const alive = () => $userPQ.currentUserHash === owner;
 		return withRunLock(owner, async (locked) => {
@@ -694,12 +728,8 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 			try {
 				const slot = await readSlot(owner);
 				const record = finishedOf(slot.run);
-				if (!duringReshare && unfinished(slot.reshare)) throw new Error('The backup is being changed: finish or discard the change first.');
-				const patch = async (changes) => {
-					const fresh = finishedOf((await readSlot(owner)).run);
-					if (!alive()) throw new RunAbortedError();
-					await writeSlot({ run: { ...fresh, ...changes(fresh) } });
-				};
+				if (unfinished(slot.reshare)) throw new Error('The backup is being changed: finish or discard the change first.');
+				const patch = (changes) => patchRecord(owner, changes);
 				return await fn(record, { alive, patch });
 			} catch (e) {
 				if (e instanceof RunAbortedError) return undefined;
@@ -729,7 +759,13 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	/** Records the alert channels set up once the backup exists, so its card stops warning. */
 	const setAlerts = async (alerts) => {
 		if (run.value?.step !== 'done') throw new Error('Alerts are recorded on a finished backup.');
-		await onFinished((_r, { patch }) => patch(() => ({ alerts })), { duringReshare: true });
+		// Alerts are not the run's: a change being made does not hold them up.
+		const owner = $userPQ.currentUserHash;
+		try {
+			await patchRecord(owner, () => ({ alerts }));
+		} catch (e) {
+			if (!(e instanceof RunAbortedError)) throw e;
+		}
 	};
 
 	/** Changes the waiting period and the time to finish, on chain, then in the record. */
@@ -757,6 +793,8 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	const giveSpare = (guardianHash) =>
 		onFinished(async (r, { alive, patch }) => {
 			if (!r.guardians.some((g) => g.userHash === guardianHash)) throw new Error('A spare goes only to a guardian of this backup.');
+			const word = heard.value.runId === r.runId ? heard.value.byGuardian[guardianHash]?.state : null;
+			if (LOST_DELIVERIES.includes(word)) throw new Error('This guardian no longer keeps their piece: a spare goes to one who does.');
 			const i = r.shares.findIndex((s, at) => at >= r.guardians.length && s);
 			if (i < 0) throw new Error('No spare pieces are left.');
 			const part = sharePartOf(r, i, secretRefOf(deployment, r.secretId), nowSec());

@@ -63,7 +63,7 @@
 
 <script setup>
 import { computed, inject } from 'vue';
-import { DELAY_BOUNDS, SPARES_BOUNDS, defaultSettings, durationText, plural, settingsProblems } from '@/lib/recovery/backupPlan';
+import { DELAY_BOUNDS, SPARES_BOUNDS, defaultSettings, durationText, plural } from '@/lib/recovery/backupPlan';
 import ScreenHeader from './ScreenHeader.vue';
 import Stepper from './Stepper.vue';
 import PolicyFields from './PolicyFields.vue';
@@ -83,7 +83,7 @@ const guardianCount = computed(() => draft.guardians.value.length);
 const maxThreshold = computed(() => Math.max(guardianCount.value, 2));
 
 const problems = computed(() =>
-	settingsProblems({ ...draft.settings.value, ...w }, guardianCount.value, draft.nodes.value.length).filter((p) => FIELDS.includes(p.field)),
+	draft.settingsIssues({ ...draft.settings.value, ...w }, guardianCount.value, draft.nodes.value.length).filter((p) => FIELDS.includes(p.field)),
 );
 const approvalsError = computed(() => {
 	const p = problems.value.find((x) => x.field === 'approvals');

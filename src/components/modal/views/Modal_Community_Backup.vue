@@ -88,10 +88,12 @@ const nav = {
 provide(DRAFT, draft);
 provide(NAV, nav);
 
+// The alert channels are read once each time the modal opens — marked before
+// any screen mounts and reads them — and changes made here refresh them.
+store.staleSubscriptions();
+
 onMounted(() => {
 	if (!store.loaded) store.load().catch((e) => console.warn('[recovery] backup could not be read:', e));
-	// The alert channels are read once each time the modal opens; changes made here refresh them.
-	store.staleSubscriptions();
 	if (first === 'guardians') refreshNodes();
 });
 </script>

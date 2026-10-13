@@ -27,6 +27,8 @@ const { default: Screen_Review } = await import('@/components/recovery/backup/Sc
 const { default: Screen_Done } = await import('@/components/recovery/backup/Screen_Done.vue');
 const { default: Screen_Alerts } = await import('@/components/recovery/backup/Screen_Alerts.vue');
 const { default: Modal } = await import('@/components/modal/views/Modal_Community_Backup.vue');
+const { default: Screen_Nodes } = await import('@/components/recovery/backup/Screen_Nodes.vue');
+const { default: Screen_Progress } = await import('@/components/recovery/backup/Screen_Progress.vue');
 
 const DARIA = candidate('Daria', 'agreed', 'a');
 const MILO = candidate('Milo', 'agreed', 'b');
@@ -103,7 +105,10 @@ describe('the roster', () => {
 		expect(at(w, 'reshare-prompt').text()).toContain('Ivan no longer keeps a piece that counts.');
 		expect(at(w, 'reshare-prompt-cta').text()).toBe('Reshare to replace');
 		await at(w, 'reshare-prompt-cta').trigger('click');
-		expect(draft.state.reshare).toEqual({ guardians: [DARIA, MILO, VITALII, IVAN].map((c) => c.userHash) });
+		expect(draft.state.reshare).toEqual({
+			guardians: [DARIA, MILO, VITALII, IVAN].map((c) => c.userHash),
+			nodes: NODES.map((n) => ({ id: n.descriptor.id, url: n.descriptor.url })),
+		});
 		expect(nav.go).toHaveBeenCalledWith('guardians');
 	});
 
@@ -421,11 +426,17 @@ describe('what the nodes hold now', () => {
 		const w = render(Screen_Manage);
 		await flushPromises();
 		expect(H.store.checkHoldings).toHaveBeenCalledTimes(1);
+		expect(H.store.checkHoldings).toHaveBeenLastCalledWith(undefined);
 		await vi.advanceTimersByTimeAsync(5 * 60_000);
 		expect(H.store.checkHoldings).toHaveBeenCalledTimes(2);
+		// The timer checks whatever the last check's age; so does Check again.
+		expect(H.store.checkHoldings).toHaveBeenLastCalledWith({ force: true });
+		await at(w, 'check-nodes').trigger('click');
+		expect(H.store.checkHoldings).toHaveBeenCalledTimes(3);
+		expect(H.store.checkHoldings).toHaveBeenLastCalledWith({ force: true });
 		w.unmount();
 		await vi.advanceTimersByTimeAsync(10 * 60_000);
-		expect(H.store.checkHoldings).toHaveBeenCalledTimes(2);
+		expect(H.store.checkHoldings).toHaveBeenCalledTimes(3);
 	});
 
 	it('shows a node that lost its part or does not answer, and asks for a reshare once a loss eats into the spare', () => {
@@ -503,5 +514,92 @@ describe('adding a channel to a finished backup', () => {
 		await flushPromises();
 		await at(w, 'tile-webhook').trigger('click');
 		expect(w.find('[aria-label="Webhook address"]').exists()).toBe(false);
+	});
+});
+
+describe('review fixes', () => {
+	beforeEach(() => setup());
+
+	it('a node checked while a change is being made reads as being changed, not lost', () => {
+		const [a, b, c] = NODES.map((n) => n.descriptor.id);
+		H.store.holdings = { runId: H.store.run.runId, byNode: { [a]: 'holds', [b]: 'changing', [c]: 'changing' }, at: 1 };
+		const w = render(Screen_Manage);
+		expect(all(w, 'node-row').map((r) => r.text())).toEqual([
+			expect.stringMatching(/holds its part$/), expect.stringMatching(/being changed$/), expect.stringMatching(/being changed$/),
+		]);
+		expect(at(w, 'node-prompt').exists()).toBe(false);
+	});
+
+	it('the modal marks the alert channels stale before its first screen reads them', async () => {
+		mount(Modal, { props: { inputData: { id: 'community_backup', start: 'manage' } }, global: { provide: { $mitt: { emit: vi.fn() } } } });
+		await flushPromises();
+		expect(H.store.subscriptions).toHaveBeenCalled();
+		expect(H.store.staleSubscriptions.mock.invocationCallOrder[0]).toBeLessThan(H.store.subscriptions.mock.invocationCallOrder[0]);
+	});
+
+	it('Alerts sets each channel from the server’s list, off as well as on, whenever it is read', async () => {
+		draft.state.alerts.telegram = true;
+		H.store.subs = [{ id: 'w1', kind: 'webhook', createdAt: 'x' }];
+		render(Screen_Alerts);
+		await flushPromises();
+		expect(draft.state.alerts).toMatchObject({ telegram: false, webhook: true });
+		H.store.subs = [{ id: 't1', kind: 'telegram', createdAt: 'x' }];
+		await flushPromises();
+		expect(draft.state.alerts).toMatchObject({ telegram: true, webhook: false });
+	});
+
+	it('a reshare keeps a backup node this device does not list now, as not answering, until the owner removes it', async () => {
+		const [gone, ...rest] = NODES;
+		H.store.nodes = [SPARE_NODE, ...rest];
+		draft.beginReshare(H.store.run);
+		expect(draft.nodes.value.map((n) => n.descriptor.id)).toEqual(NODES.map((n) => n.descriptor.id));
+
+		draft.state.nodesLoading = true;
+		expect(draft.blockReason.value).toBe('Looking for nodes…');
+		const loading = render(Screen_Nodes);
+		expect(all(loading, 'node-row').find((r) => r.text().includes(new URL(gone.descriptor.url).host)).text()).toContain('checking…');
+
+		draft.state.nodesLoading = false;
+		expect(draft.blockReason.value).toBe('The nodes need attention: open Change settings, then Nodes.');
+		const w = render(Screen_Nodes);
+		const row = all(w, 'node-row').find((r) => r.text().includes(new URL(gone.descriptor.url).host));
+		expect(row.text()).toContain('not answering now');
+		expect(all(w, 'node-problem').map((p) => p.text())).toEqual([expect.stringContaining('is not answering now. Remove it, or wait until it answers.')]);
+
+		await row.trigger('click');
+		await all(w, 'node-row').find((r) => r.text().includes(new URL(SPARE_NODE.descriptor.url).host)).trigger('click');
+		expect(draft.blockReason.value).toBeNull();
+		const r = render(Screen_Review);
+		expect(at(r, 'nodes-leaving').text()).toBe(`Nodes leaving: ${new URL(gone.descriptor.url).host}`);
+		expect(at(r, 'nodes-joining').text()).toBe(`Nodes joining: ${new URL(SPARE_NODE.descriptor.url).host}`);
+	});
+
+	it('a reshare does not judge the waiting period it keeps', async () => {
+		H.store.run.settings.delaySec = 60;
+		draft.beginReshare(H.store.run);
+		expect(draft.blockReason.value).toBeNull();
+		const a = render(Screen_Advanced);
+		expect(disabled(at(a, 'save'))).toBe(false);
+	});
+
+	it('offers no spare to a guardian whose piece no longer counts', () => {
+		H.store.receipts = { [DARIA.userHash]: 'stored', [MILO.userHash]: 'given_back', [VITALII.userHash]: 'problem', [IVAN.userHash]: 'dropped' };
+		const w = render(Screen_Manage);
+		expect(rowOf(w, 'Daria').find('[data-test="give-spare"]').exists()).toBe(true);
+		for (const name of ['Milo', 'Vitalii', 'Ivan']) expect(rowOf(w, name).find('[data-test="give-spare"]').exists()).toBe(false);
+	});
+
+	it('says the backup changed when the run it followed was a reshare, however it was opened', async () => {
+		H.store.reshare = makeRun({ runId: 'r2', step: 'registered', secretId: '0x1', version: 3, reshareOf: { secretId: '0x1', version: 2 } });
+		H.store.running = true;
+		const w = render(Screen_Progress);
+		expect(w.text()).toContain('Changing your backup');
+		H.store.run = { ...H.store.run, runId: 'r2', version: 3 };
+		H.store.reshare = null;
+		H.store.running = false;
+		await flushPromises();
+		expect(nav.replace).toHaveBeenCalledWith('done');
+		expect(draft.state.justFinished).toBe('changed');
+		expect(at(render(Screen_Done), 'created').text()).toBe('Backup changed. Every piece has been sent.');
 	});
 });

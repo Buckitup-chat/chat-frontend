@@ -2,7 +2,7 @@
 	<ScreenHeader title="Community backup" />
 
 	<template v-if="run && run.step === 'done'">
-		<div v-if="draft.state.justFinished" class="cb-ok" data-test="created">{{ draft.resharing.value ? 'Backup changed.' : 'Backup created.' }} Every piece has been sent.</div>
+		<div v-if="draft.state.justFinished" class="cb-ok" data-test="created">{{ draft.state.justFinished === 'changed' ? 'Backup changed.' : 'Backup created.' }} Every piece has been sent.</div>
 
 		<HealthLine :view="roster.health" />
 

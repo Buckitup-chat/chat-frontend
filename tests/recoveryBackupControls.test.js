@@ -53,7 +53,8 @@ vi.mock('@/lib/recovery/alerts', async (orig) => ({
 vi.mock('@/lib/recovery/nodeClient', async (orig) => ({ ...(await orig()), holdingOf: (...a) => H.holdingOf(...a) }));
 vi.mock('@/lib/recovery/nodeDirectory', async (orig) => ({ ...(await orig()), knownNodes: (...a) => H.knownNodes(...a) }));
 
-const { useRecoveryBackupStore } = await import('@/store/recoveryBackup.store');
+const { useRecoveryBackupStore, runLockName, recordLockName } = await import('@/store/recoveryBackup.store');
+const { secretRefIn } = await import('@/lib/recovery/deployments');
 const { defaultSettings } = await import('@/lib/recovery/backupPlan');
 
 const guardians = [U('1'), U('2'), U('3')].map((userHash) => ({ userHash, metaAddress: 'st:eth:0x00' }));
@@ -177,6 +178,45 @@ describe('while a reshare is being made', () => {
 	});
 });
 
+describe('alerts recorded while this tab drives a change', () => {
+	it('do not wait for the run, only for another write of the record', async () => {
+		slots.recovery_backup = { run: done(), reshare: resharing() };
+		const store = useRecoveryBackupStore();
+		await store.load();
+		let releaseRun;
+		const running = navigator.locks.request(runLockName(OWNER), { mode: 'exclusive' }, () => new Promise((r) => (releaseRun = r)));
+		await store.setAlerts({ channels: ['app', 'telegram'], skipped: false });
+		expect(slots.recovery_backup.run.alerts).toEqual({ channels: ['app', 'telegram'], skipped: false });
+
+		// A write of the record under way — a reshare being promoted — goes first.
+		let releaseRecord;
+		const writing = navigator.locks.request(recordLockName(OWNER), { mode: 'exclusive' }, () => new Promise((r) => (releaseRecord = r)));
+		const saved = store.setAlerts({ channels: ['app', 'webhook'], skipped: false });
+		await new Promise((r) => setTimeout(r, 0));
+		expect(slots.recovery_backup.run.alerts.channels).toEqual(['app', 'telegram']);
+		releaseRecord();
+		await saved;
+		expect(slots.recovery_backup.run.alerts.channels).toEqual(['app', 'webhook']);
+		releaseRun();
+		await Promise.all([running, writing]);
+	});
+});
+
+describe('a spare piece', () => {
+	it('goes to no guardian who said their piece no longer counts', async () => {
+		const record = done({ deployment: 'eip155:11155111:0xd9ffd20f2db9c774b9f0237c4837f52dcbd937a7', sent: { [U('2')]: { messageId: 'm2', shareIndex: 2 } } });
+		const store = await loaded(record);
+		store.noteGuardianMessages(U('2'), [
+			{ senderHash: U('2'), parts: [{ kind: 'recovery_holding', secretRef: secretRefIn(record.deployment, ID), version: 2, splitId: record.splitId, shareIndex: 2, state: 'given_back', detail: '' }] },
+		]);
+		expect(store.receipts[U('2')]).toBe('given_back');
+		await expect(store.giveSpare(U('2'))).rejects.toThrow('no longer keeps their piece');
+		expect(sendMessage).not.toHaveBeenCalled();
+		await store.giveSpare(U('3'));
+		expect(sendMessage).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe('another account signed in during a change', () => {
 	it('sends and writes nothing more for the one that started it', async () => {
 		const store = await loaded(done());
@@ -278,9 +318,21 @@ describe('the nodes’ holdings', () => {
 		expect(asked).toEqual(record.nodes.slice(0, 3).map((n) => [n.id, ID]));
 		expect(store.holdings).toMatchObject({ runId: 'r1', byNode: { [record.nodes[0].id]: 'holds', [record.nodes[1].id]: 'lost', [record.nodes[2].id]: 'unreachable' } });
 
+		// Checked this recently, a check is not made again unless forced.
 		H.holdingOf = async () => null;
 		await store.checkHoldings();
+		expect(Object.values(store.holdings.byNode)).toEqual(['holds', 'lost', 'unreachable']);
+		await store.checkHoldings({ force: true });
 		expect(Object.values(store.holdings.byNode)).toEqual(['lost', 'lost', 'lost']);
+	});
+
+	it('count a newer version as held, and judge none lost while a reshare is being made', async () => {
+		slots.recovery_backup = { run: done(), reshare: resharing() };
+		const store = useRecoveryBackupStore();
+		await store.load();
+		H.holdingOf = async (node) => (node.url.startsWith('https://a.') ? 3 : node.url.startsWith('https://b.') ? 1 : null);
+		await store.checkHoldings();
+		expect(Object.values(store.holdings.byNode)).toEqual(['holds', 'changing', 'changing']);
 	});
 
 	it('are not asked of a revoked backup', async () => {
@@ -292,6 +344,18 @@ describe('the nodes’ holdings', () => {
 });
 
 describe('reads made at once', () => {
+	it('share a read of the backup only within one account', async () => {
+		slots.recovery_backup = { run: done() };
+		const store = useRecoveryBackupStore();
+		em.loadSlotJson.mockClear();
+		const first = store.load();
+		user.currentUserHash = U('9');
+		const second = store.load();
+		await Promise.all([first, second]);
+		expect(em.loadSlotJson.mock.calls.filter(([name]) => name === 'recovery_backup')).toHaveLength(2);
+		expect(store.loaded).toBe(true);
+	});
+
 	it('share one read of the backup, and one check of the nodes', async () => {
 		slots.recovery_backup = { run: done() };
 		const store = useRecoveryBackupStore();

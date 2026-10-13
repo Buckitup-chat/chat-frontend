@@ -45,6 +45,7 @@
 					<span v-if="g.hint" class="cb-small" data-test="roster-hint">{{ g.hint }}</span>
 					<span>
 						<button
+							v-if="!g.lost"
 							class="cb-link small"
 							:disabled="changing || !spares || giving !== null"
 							:title="changing ? FINISH_CHANGE_FIRST : !spares ? 'No spare pieces are left.' : ''"
@@ -68,7 +69,10 @@
 		<button class="btn btn-outline-dark w-100" :disabled="changing" data-test="reshare" @click="reshare">Add or drop guardians, change pieces needed</button>
 
 		<!-- Nodes -->
-		<div class="cb-section">Nodes · {{ nodes.needed }} of {{ run.nodes.length }} needed</div>
+		<div class="cb-section d-flex align-items-baseline gap-2">
+			<span class="flex-grow-1">Nodes · {{ nodes.needed }} of {{ run.nodes.length }} needed</span>
+			<button class="cb-link small" :disabled="checking" data-test="check-nodes" @click="checkHoldings({ force: true })">{{ checking ? 'Checking…' : 'Check again' }}</button>
+		</div>
 		<div class="cb-group">
 			<div v-for="n in nodes.rows" :key="n.id" class="cb-setting" data-test="node-row">
 				<span class="flex-grow-1 d-flex flex-column gap-1">
@@ -269,7 +273,12 @@ const remove = async (sub) => {
 
 // --- What the nodes hold now ----------------------------------------------------------
 
-const checkHoldings = () => store.checkHoldings().catch((e) => console.warn('[recovery] the nodes\' holdings could not be checked:', e));
+const checking = ref(false);
+const checkHoldings = async (opts) => {
+	checking.value = true;
+	await store.checkHoldings(opts).catch((e) => console.warn('[recovery] the nodes\' holdings could not be checked:', e));
+	checking.value = false;
+};
 let holdingsTimer = null;
 let left = false;
 
@@ -279,7 +288,7 @@ onMounted(async () => {
 	store.refreshReceipts().catch((e) => console.warn('[recovery] the guardians\' receipts could not be read:', e));
 	loadSubs();
 	checkHoldings();
-	holdingsTimer = setInterval(checkHoldings, HOLDINGS_EVERY_MS);
+	holdingsTimer = setInterval(() => checkHoldings({ force: true }), HOLDINGS_EVERY_MS);
 });
 onBeforeUnmount(() => {
 	left = true;
