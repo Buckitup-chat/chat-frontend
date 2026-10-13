@@ -152,6 +152,7 @@
 
 import { userPQStore } from '@/store/userPQ.store';
 import { useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
+import { useRecoveryHelpStore } from '@/store/recoveryHelp.store';
 import { initPersistence } from '@/lib/data/persistence';
 
 import { userStore } from '@/store/user.store';
@@ -228,5 +229,7 @@ watch(
 		$userPQ.initialize();
 		// The shares this account keeps as a guardian: read again on chain every few minutes (plan § 7.3).
 		useRecoveryHoldingsStore().watchWhileOpen();
+		// The pieces this account approved returning go by themselves once the send gate opens (plan § 7.5).
+		useRecoveryHelpStore().watchWhileOpen();
 	});
 </script>

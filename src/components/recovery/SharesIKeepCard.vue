@@ -32,6 +32,19 @@
 				</div>
 				<div class="cb-small">Each piece is listed under the contact who sent it: the network does not say whose backup it belongs to.</div>
 			</template>
+			<!-- The way back: a contact who lost every device asks this guardian for their piece (plan § 7.5). -->
+			<button v-if="help.deployment && help.helpable.length" class="btn btn-dark" data-test="help-someone" @click="openHelp()">Help someone recover</button>
+			<div v-if="help.list.length" class="cb-list" data-test="helping">
+				<div class="cb-small fw-semibold">Recoveries you help with</div>
+				<div v-for="s in help.list" :key="s.key" class="cb-row sk-row" data-test="help-row">
+					<ContactAvatar :hash="s.owner" small />
+					<span class="cb-row-main">
+						<span class="cb-row-name">{{ nameOf(s.owner) }}</span>
+						<span :class="helpNeedsYou(s) ? 'cb-status-warn' : s.step === 'sent' ? 'cb-status-ok' : 'cb-small'" data-test="help-state">{{ helpStateText(s) }}</span>
+					</span>
+					<button v-if="s.step === 'ready'" class="btn btn-sm btn-dark" data-test="help-make" @click="openHelp(s.key)">Make the piece</button>
+				</div>
+			</div>
 			<div v-if="actionError" class="cb-field-error" data-test="action-error">{{ actionError }}</div>
 			<div v-if="notice" class="cb-small" data-test="notice">{{ notice }}</div>
 		</div>
@@ -49,10 +62,17 @@ import { holdsBytes } from '@/lib/recovery/holdings';
 import errorMessage from '@/utils/errorMessage';
 import ContactAvatar from './backup/ContactAvatar.vue';
 import { confirmGiveBack, givenBackOffline, keptStateIsProblem, keptStateText } from './holdingWords';
+import { helpNeedsYou, helpStateText } from './help/helpWords';
+import { useRecoveryHelpStore } from '@/store/recoveryHelp.store';
 
 const store = useRecoveryHoldingsStore();
 const $userPQ = userPQStore();
 const $swal = inject('$swal');
+const $modal = inject('$modal', null);
+const help = useRecoveryHelpStore();
+
+/** Opens the help: a new one, or the piece to make for a help returned by hand. */
+const openHelp = (sessionKey = null) => $modal?.value?.open({ id: 'recovery_help', ...(sessionKey ? { sessionKey } : {}) });
 
 const loadError = ref(null);
 const actionError = ref(null);
@@ -75,7 +95,11 @@ const load = async () => {
 		loadError.value = errorMessage(e);
 	}
 };
-onMounted(load);
+onMounted(() => {
+	load();
+	help.load().catch((e) => console.warn('[recovery] the recoveries you help with could not be read:', e));
+	help.tick().catch((e) => console.warn('[recovery] a piece could not be sent:', e));
+});
 
 /** The dialog peer's name: whose claim the holding is. */
 const nameOf = (userHash) =>

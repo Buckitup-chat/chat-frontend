@@ -7,10 +7,11 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { reactive } from 'vue';
 
 vi.mock('vue-boring-avatars', () => ({ default: { template: '<span />' } }));
-const H = vi.hoisted(() => ({ store: null }));
+const H = vi.hoisted(() => ({ store: null, help: null }));
 const OWNER = 'u_' + 'o'.repeat(128);
 const STRANGER = 'u_' + 's'.repeat(128);
 vi.mock('@/store/recoveryHoldings.store', () => ({ useRecoveryHoldingsStore: () => H.store }));
+vi.mock('@/store/recoveryHelp.store', () => ({ useRecoveryHelpStore: () => H.help }));
 vi.mock('@/store/userPQ.store', () => ({
 	userPQStore: () => ({ contactsMap: { [OWNER]: { name: 'Daria' } }, getUserByHash: () => null }),
 }));
@@ -21,7 +22,8 @@ const share = (over = {}) => ({ secretRef: 'x/0x1', version: 2, splitId: 's', sh
 const held = (key, over = {}) => ({ key, owner: OWNER, share: share(), messageId: 'm', state: 'stored', detail: '', updatedAt: 1, ...over });
 
 let swal;
-const render = () => mount(Card, { global: { provide: { $swal: swal } } });
+let modal;
+const render = () => mount(Card, { global: { provide: { $swal: swal, $modal: modal } } });
 const rows = (w) => w.findAll('[data-test="kept-row"]');
 
 beforeEach(() => {
@@ -33,6 +35,8 @@ beforeEach(() => {
 		giveBack: vi.fn(async () => ({ queued: false })),
 	});
 	swal = { fire: vi.fn(async () => ({ isConfirmed: true })) };
+	modal = { value: { open: vi.fn() } };
+	H.help = reactive({ deployment: {}, helpable: [], list: [], load: vi.fn(async () => {}), tick: vi.fn(async () => null) });
 });
 
 describe('Shares I keep', () => {
@@ -107,5 +111,38 @@ describe('Shares I keep', () => {
 		await flushPromises();
 		expect(w.find('[data-test="notice"]').text()).toBe('Your copy is removed. Daria is told when you are online again.');
 		expect(w.find('[data-test="action-error"]').exists()).toBe(false);
+	});
+});
+
+describe('helping someone recover', () => {
+	it('opens the help when a piece can be returned, and applies the send gate when shown', async () => {
+		let w = render();
+		await flushPromises();
+		expect(w.find('[data-test="help-someone"]').exists()).toBe(false);
+		expect(H.help.tick).toHaveBeenCalled();
+		H.help.helpable = [held('k1')];
+		w = render();
+		await flushPromises();
+		await w.find('[data-test="help-someone"]').trigger('click');
+		expect(modal.value.open).toHaveBeenCalledWith({ id: 'recovery_help' });
+	});
+
+	it('lists each help with where it stands, and the piece to make for one returned by hand', async () => {
+		H.help.list = [
+			{ key: 'a', owner: OWNER, mode: 'dialog', step: 'approved' },
+			{ key: 'b', owner: OWNER, mode: 'text', step: 'ready' },
+			{ key: 'c', owner: STRANGER, mode: 'dialog', step: 'stopped', reason: 'the recovery was stopped' },
+			{ key: 'd', owner: OWNER, mode: 'dialog', step: 'sent' },
+		];
+		const w = render();
+		await flushPromises();
+		expect(w.findAll('[data-test="help-row"]').map((r) => r.text())).toEqual([
+			expect.stringMatching(/Daria.*your piece goes to them once the waiting period is over/),
+			expect.stringMatching(/Daria.*ready: make the piece.*Make the piece/),
+			expect.stringMatching(/stopped: the recovery was stopped/),
+			expect.stringMatching(/Daria.*your piece was sent/),
+		]);
+		await w.find('[data-test="help-make"]').trigger('click');
+		expect(modal.value.open).toHaveBeenCalledWith({ id: 'recovery_help', sessionKey: 'b' });
 	});
 });

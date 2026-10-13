@@ -94,6 +94,14 @@ export const modalRegistry = {
 		icon: '_icon_contacts',
 	},
 
+	// A guardian helping someone back in (plan § 7.5).
+	recovery_help: {
+		header: false,
+		modalStatic: true,
+		component: 'Modal_Recovery_Help',
+		modalClass: 'modal-md',
+	},
+
 	account_activate: {
 		header: false,
 		component: 'Modal_Account_Activate',
