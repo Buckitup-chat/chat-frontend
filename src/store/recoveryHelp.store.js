@@ -74,8 +74,10 @@ export const useRecoveryHelpStore = defineStore('recoveryHelp', () => {
 		loadedFor = me;
 	};
 
-	const put = async (session) => {
-		const me = $userPQ.currentUserHash;
+	/** Records `session` in `owner`'s slot — the account signed in unless named — and refuses once another is signed in. */
+	const put = async (session, owner = $userPQ.currentUserHash) => {
+		const me = owner;
+		if ($userPQ.currentUserHash !== me) throw new HelpError('The account changed; nothing was recorded');
 		const next = { ...session, updatedAt: nowSec() };
 		const slot = await em().patchSlotJson(HELP_SLOT, sessionsPatch({ [session.key]: next }));
 		if ($userPQ.currentUserHash !== me) throw new HelpError('The account changed; nothing was recorded');
@@ -248,8 +250,10 @@ export const useRecoveryHelpStore = defineStore('recoveryHelp', () => {
 				await load();
 				const due = Object.values(sessions.value).filter((s) => s.step === 'approved' || s.step === 'ready');
 				if (due.length) await $holdings.load();
+				// Every send and every write is this account's: after each wait the account is checked again, and the pass ends once it changed.
+				const still = () => $userPQ.currentUserHash === me;
 				for (const s of due) {
-					if ($userPQ.currentUserHash !== me) return null;
+					if (!still()) return null;
 					let gate;
 					try {
 						gate = await gateOf(s);
@@ -258,22 +262,25 @@ export const useRecoveryHelpStore = defineStore('recoveryHelp', () => {
 						next = Math.min(next ?? 60, 60);
 						continue;
 					}
+					if (!still()) return null;
 					if (gate.kind === 'wait') {
 						next = Math.min(next ?? Infinity, nextCheckIn(gate, nowSec(), deployment.blockTime));
 					} else if (gate.kind === 'stop') {
-						await put({ ...s, step: 'stopped', reason: gate.reason });
+						await put({ ...s, step: 'stopped', reason: gate.reason }, me);
 					} else if (s.mode === 'dialog') {
 						let part;
 						try {
 							part = returnFor(s);
 						} catch (e) {
-							await put({ ...s, step: 'stopped', reason: e.message });
+							await put({ ...s, step: 'stopped', reason: e.message }, me);
 							continue;
 						}
+						if (!still()) return null;
 						await $dialogs.sendMessage(s.peer, [part]);
-						await put({ ...s, step: 'sent', sentAt: nowSec() });
+						if (!still()) return null;
+						await put({ ...s, step: 'sent', sentAt: nowSec() }, me);
 					} else if (s.step !== 'ready') {
-						await put({ ...s, step: 'ready' });
+						await put({ ...s, step: 'ready' }, me);
 					}
 				}
 			} finally {

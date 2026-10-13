@@ -178,6 +178,26 @@ describe('the send gate', () => {
 		expect(returnsTo(TEMP)).toHaveLength(1);
 	});
 
+	it('sends nothing and writes nothing once another account signs in while the gate is read', async () => {
+		await help(0);
+		await help(1);
+		w.clock.now += 601;
+		const read = w.chain.readSecret;
+		w.chain.readSecret = async (id) => {
+			user.currentUserHash = w.guardians[2].userHash;
+			H.me = 2;
+			return read(id);
+		};
+		try {
+			await store.tick();
+		} finally {
+			w.chain.readSecret = read;
+		}
+		expect(returnsTo(TEMP)).toEqual([]);
+		expect(H.slots[2]).toBeUndefined();
+		expect(Object.values(H.slots[1].sessions)[0]).toMatchObject({ step: 'approved' });
+	});
+
 	it('stops for good after a veto, and sends nothing', async () => {
 		await help(0);
 		await help(1);
