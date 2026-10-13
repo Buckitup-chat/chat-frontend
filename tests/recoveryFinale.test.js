@@ -33,7 +33,7 @@ beforeEach(() => {
 		myLocalUsers: [{ user_hash: ORIGINAL }],
 		refreshMyLocalUsers: vi.fn(async () => {}),
 		getMyUserByHash: (h) => H.user.myLocalUsers.find((u) => u.user_hash === h),
-		deleteAccount: vi.fn(async (h) => {
+		destroyAccount: vi.fn(async ({ userHash: h }) => {
 			H.user.myLocalUsers = H.user.myLocalUsers.filter((u) => u.user_hash !== h);
 		}),
 	});
@@ -62,14 +62,14 @@ describe('the finale store', () => {
 		const finale = useRecoveryFinaleStore();
 		signIn(ORIGINAL);
 		await flushPromises();
-		expect(H.user.deleteAccount).toHaveBeenCalledWith(TEMP);
+		expect(H.user.destroyAccount).toHaveBeenCalledWith({ userHash: TEMP, vaultId: null });
 		expect(finale.record.temporaryGone).toBe(true);
 		expect(JSON.parse(localStorage.getItem(finaleKey(ORIGINAL))).temporaryGone).toBe(true);
 	});
 
 	it('keeps trying when the removal fails, and says why', async () => {
 		H.user.myLocalUsers.push({ user_hash: TEMP });
-		H.user.deleteAccount = vi.fn(async () => {
+		H.user.destroyAccount = vi.fn(async () => {
 			throw new Error('vault busy');
 		});
 		localStorage.setItem(finaleKey(ORIGINAL), JSON.stringify(record({ temporaryGone: false })));
@@ -86,7 +86,7 @@ describe('the finale store', () => {
 		H.user.currentUserHash = TEMP;
 		let release;
 		const slow = new Promise((r) => (release = r));
-		H.user.deleteAccount = vi.fn(async (h) => {
+		H.user.destroyAccount = vi.fn(async ({ userHash: h }) => {
 			await slow;
 			H.user.myLocalUsers = H.user.myLocalUsers.filter((u) => u.user_hash !== h);
 		});
@@ -100,7 +100,35 @@ describe('the finale store', () => {
 		release();
 		await landing;
 		await flushPromises();
-		expect(H.user.deleteAccount).toHaveBeenCalledTimes(1);
+		expect(H.user.destroyAccount).toHaveBeenCalledTimes(1);
+		expect(finale.record.temporaryGone).toBe(true);
+	});
+
+	it('keeps the vault\'s id from the landing, and destroys by it at every sign-in even once the card is gone', async () => {
+		H.user.myLocalUsers.push({ user_hash: TEMP, vaultId: 'vault-7' });
+		H.user.currentUserHash = TEMP;
+		H.user.destroyAccount = vi.fn(async ({ userHash: h }) => {
+			// The card went, the vault did not clear.
+			H.user.myLocalUsers = H.user.myLocalUsers.filter((u) => u.user_hash !== h);
+			throw new Error('The account\'s vault on this device did not clear.');
+		});
+		H.user.importBackup = vi.fn(async (b) => {
+			H.user.currentUserHash = b.identity.user_hash;
+			return { status: 'active' };
+		});
+		const finale = useRecoveryFinaleStore();
+		await finale.land({ identity: { user_hash: ORIGINAL }, keys: {} }, record({ temporaryGone: undefined }));
+		await flushPromises();
+		expect(finale.record).toMatchObject({ temporaryVaultId: 'vault-7', temporaryGone: false });
+		expect(finale.shown).toBeTruthy();
+
+		// The next sign-in tries again, by the vault's id.
+		H.user.destroyAccount = vi.fn(async () => {});
+		signIn(null);
+		await flushPromises();
+		signIn(ORIGINAL);
+		await flushPromises();
+		expect(H.user.destroyAccount).toHaveBeenCalledWith({ userHash: TEMP, vaultId: 'vault-7' });
 		expect(finale.record.temporaryGone).toBe(true);
 	});
 
@@ -162,7 +190,7 @@ describe('the banner', () => {
 
 	it('offers to remove a temporary account that is still here', async () => {
 		localStorage.setItem(finaleKey(ORIGINAL), JSON.stringify(record({ temporaryGone: false })));
-		H.user.deleteAccount = vi.fn(async () => {
+		H.user.destroyAccount = vi.fn(async () => {
 			throw new Error('vault busy');
 		});
 		H.user.myLocalUsers.push({ user_hash: TEMP });
@@ -170,10 +198,10 @@ describe('the banner', () => {
 		const w = render();
 		await flushPromises();
 		expect(w.find('[data-test="finale-temporary"]').exists()).toBe(true);
-		H.user.deleteAccount = vi.fn(async () => {});
+		H.user.destroyAccount = vi.fn(async () => {});
 		await w.find('[data-test="finale-destroy"]').trigger('click');
 		await flushPromises();
-		expect(H.user.deleteAccount).toHaveBeenCalledWith(TEMP);
+		expect(H.user.destroyAccount).toHaveBeenCalledWith({ userHash: TEMP, vaultId: null });
 		expect(w.find('[data-test="finale-temporary"]').exists()).toBe(false);
 	});
 });

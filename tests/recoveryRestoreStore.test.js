@@ -50,6 +50,7 @@ const user = reactive({
 		user.myLocalUsers = user.myLocalUsers.filter((u) => u.user_hash !== hash);
 		H.vault.delete(hash);
 	},
+	destroyAccount: async ({ userHash }) => user.deleteAccount(userHash),
 	refreshMyLocalUsers: async () => undefined,
 	getMyUserByHash: (hash) => user.myLocalUsers.find((u) => u.user_hash === hash),
 	getUserByHash: (hash) => H.cards?.[hash],

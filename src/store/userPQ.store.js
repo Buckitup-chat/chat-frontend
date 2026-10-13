@@ -253,6 +253,16 @@ export const userPQStore = defineStore('userPQ', () => {
     console.log(`[userStore] Account ${userHash} deleted`);
   };
 
+  // The strict removal a recovery's temporary account needs (recoveryFinale):
+  // throws unless the vault is verifiably cleared, and finds the vault by id
+  // once its card is gone.
+  const destroyAccount = async ({ userHash, vaultId = null }) => {
+    if (!em.value) throw new Error('Not initialized');
+    await em.value.destroyUserVault({ userHash, vaultId });
+    if (currentUser.value?.user_hash === userHash) currentUser.value = null;
+    await refreshMyLocalUsers();
+  };
+
   const refreshAllData = async () => {
     await refreshMyLocalUsers();
   };
@@ -530,6 +540,7 @@ export const userPQStore = defineStore('userPQ', () => {
     logout,
     endSession,
     deleteAccount,
+    destroyAccount,
     updateCurrentUserName,
     updateCurrentUserProfile,
     refreshMyLocalUsers,

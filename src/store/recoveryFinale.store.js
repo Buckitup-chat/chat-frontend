@@ -65,8 +65,8 @@ export const useRecoveryFinaleStore = defineStore('recoveryFinale', () => {
 			destroying.value = true;
 			destroyError.value = null;
 			try {
-				await $userPQ.refreshMyLocalUsers?.();
-				if ($userPQ.getMyUserByHash(r.temporary)) await $userPQ.deleteAccount(r.temporary);
+				// Gone only once its vault is verifiably cleared — the card alone going proves nothing.
+				await $userPQ.destroyAccount({ userHash: r.temporary, vaultId: r.temporaryVaultId ?? null });
 				write(owner, { ...r, temporaryGone: true });
 			} catch (e) {
 				console.warn('[recovery] the temporary account could not be removed yet:', e);
@@ -90,7 +90,9 @@ export const useRecoveryFinaleStore = defineStore('recoveryFinale', () => {
 	 */
 	const land = async (backup, info) => {
 		const owner = backup.identity.user_hash;
-		write(owner, { ...info, at: nowSec(), temporaryGone: false });
+		// The vault's id is kept with the finale: it finds the vault again even once the card is gone.
+		const temporaryVaultId = $userPQ.getMyUserByHash(info.temporary)?.vaultId ?? null;
+		write(owner, { ...info, temporaryVaultId, at: nowSec(), temporaryGone: false });
 		const result = await $userPQ.importBackup({ identity: backup.identity, keys: backup.keys });
 		if (result.status === 'active' && $userPQ.currentUserHash === owner) {
 			record.value = readRecord(owner);

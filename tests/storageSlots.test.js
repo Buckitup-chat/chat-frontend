@@ -11,9 +11,18 @@ let refuseTombstones; // the server rejecting deletions, as it may any write
 let onRowWritten;     // hook run after each write; a test switches accounts from it
 let cards = new Map();
 
+let clearMode = 'clears'; // 'clears' | 'throws' | 'keeps': a vault whose clear fails, or claims to and does not
 const makeVault = (id) => {
 	const data = new Map();
-	return { id, async set(k, v) { data.set(k, v); }, async get(k) { return data.get(k); } };
+	return {
+		id,
+		async set(k, v) { data.set(k, v); },
+		async get(k) { return data.get(k); },
+		async clear() {
+			if (clearMode === 'throws') throw new Error('locked');
+			if (clearMode === 'clears') data.clear();
+		},
+	};
 };
 
 vi.mock('@lo-fi/local-vault', () => ({
@@ -100,6 +109,7 @@ const memoryStore = () => {
 
 beforeEach(() => {
 	cards = new Map();
+	clearMode = 'clears';
 	_setIntentStorageForTests(memoryStore());
 	setOutboxStorage(memoryStore());
 	_setAcceptedSnapshotStorageForTests(memoryStore());
@@ -216,6 +226,43 @@ describe('user_storage slot addressing', () => {
 		await em.patchContacts({ b: { user_hash: 'b' } });
 		expect([...rows.keys()].sort()).toEqual(afterFirst);
 		expect(await em.loadContacts()).toHaveLength(2);
+	});
+});
+
+describe('destroying an account on this device', () => {
+	// The temporary account of a recovery, then the recovered one signed in on top of it.
+	const twoAccounts = async () => {
+		const em = new EncryptionManagerPQ();
+		const temp = await em.createUserVault({ name: 'Recovering account' });
+		await em.saveRecoveryProgress({ v: 1, candidateKey: '0x' + '11'.repeat(32) });
+		await em.createUserVault({ name: 'Me' });
+		const seed = await em.guardianMetaSeed();
+		return { em, temp, seed };
+	};
+
+	it('clears its vault — keys and the recovery\'s candidate key — then drops its card, and leaves the signed-in account its own vault', async () => {
+		const { em, temp, seed } = await twoAccounts();
+		const vault = vaults.get(temp.vaultId);
+		await em.destroyUserVault({ userHash: temp.user_hash });
+		for (const k of ['crypt_skey', 'sign_skey', 'evm_skey', 'recovery_progress']) expect(await vault.get(k)).toBeUndefined();
+		expect(await rawStore.get(`local-vault-${temp.vaultId}`)).toBeUndefined();
+		expect((await em.getLocalUserCards()).map((c) => c.user_hash)).not.toContain(temp.user_hash);
+		expect(await em.guardianMetaSeed()).toBe(seed);
+	});
+
+	it('keeps the card and the vault entry when the vault does not clear, and finds the vault by its id once the card is gone', async () => {
+		const { em, temp } = await twoAccounts();
+		clearMode = 'throws';
+		await expect(em.destroyUserVault({ userHash: temp.user_hash })).rejects.toThrow('locked');
+		clearMode = 'keeps';
+		await expect(em.destroyUserVault({ userHash: temp.user_hash })).rejects.toThrow(/did not clear/);
+		expect((await em.getLocalUserCards()).map((c) => c.user_hash)).toContain(temp.user_hash);
+		expect(await vaults.get(temp.vaultId).get('crypt_skey')).toBeDefined();
+
+		clearMode = 'clears';
+		await em.destroyUserVault({ userHash: 'u_' + 'f'.repeat(128), vaultId: temp.vaultId });
+		expect(await vaults.get(temp.vaultId).get('crypt_skey')).toBeUndefined();
+		expect(await rawStore.get(`local-vault-${temp.vaultId}`)).toBeUndefined();
 	});
 });
 
