@@ -7,7 +7,7 @@ import { computed, ref, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { RecoveryChain } from '@/lib/recovery/chain';
-import { recoveryDeployment } from '@/lib/recovery/deployments';
+import { maybeRecoveryDeployment } from '@/lib/recovery/deployments';
 import { directGateway, relayerGateway } from '@/lib/recovery/gateway';
 import { signBound } from '@/lib/recovery/typedData';
 import { acknowledged, alertOf } from '@/lib/recovery/rounds';
@@ -20,13 +20,7 @@ const ackKey = (owner) => `buckitup:recovery-ack:${owner}`;
 
 export const useRecoveryRoundsStore = defineStore('recoveryRounds', () => {
 	const $userPQ = userPQStore();
-	const deployment = (() => {
-		try {
-			return recoveryDeployment();
-		} catch {
-			return null;
-		}
-	})();
+	const deployment = maybeRecoveryDeployment();
 	let chain = null;
 	const chainOf = () => (chain ??= new RecoveryChain(deployment));
 

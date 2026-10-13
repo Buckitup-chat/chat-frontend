@@ -151,6 +151,20 @@ export interface RecoveryShareReturnPart extends Extensible {
 	nodeSet: NodeSet | null;
 }
 
+/** Where a guardian's share stands: stored, kept with a problem, given back or dropped (07 § recovery_holding). */
+export interface RecoveryHoldingPart extends Extensible {
+	kind: 'recovery_holding';
+	secretRef: string;
+	version: number;
+	splitId: string;
+	/** 1-based. */
+	shareIndex: number;
+	/** stored | unverified | unreachable | unrequested | given_back | dropped; any other value is ignored by the owner. */
+	state: string;
+	/** Why, for the states other than stored; empty otherwise. */
+	detail: string;
+}
+
 /** A recovering account's proof that it holds the on-chain candidate key (07 § recovery_binding). */
 export interface RecoveryBindingPart extends Extensible {
 	kind: 'recovery_binding';
@@ -226,6 +240,7 @@ export type ContentPart =
 	| RecoverySharePart
 	| RecoveryShareReturnPart
 	| RecoveryBindingPart
+	| RecoveryHoldingPart
 	| RecoveryInvitePart
 	| RecoveryInviteReplyPart
 	| UnknownPart;
@@ -291,6 +306,10 @@ const encodePart = (part: ContentPart): unknown => {
 					...withNodeSet(part.nodeSet, part.rest),
 				],
 			};
+		case 'recovery_holding':
+			return {
+				recovery_holding: [part.secretRef, part.version, part.splitId, part.shareIndex, part.state, part.detail, ...(part.rest ?? [])],
+			};
 		case 'recovery_binding':
 			return {
 				recovery_binding: [part.secretRef, part.candidate, part.userHash, part.signatureB64, ...(part.rest ?? [])],
@@ -317,6 +336,7 @@ const RECOVERY_LABELS = {
 	recovery_share: '🔐 recovery share',
 	recovery_share_return: '🔐 recovery share returned',
 	recovery_binding: '🔐 recovery binding',
+	recovery_holding: '🔐 backup piece status',
 	recovery_invite: '🛡 guardian invitation',
 	recovery_invite_reply: '🛡 guardian invitation answered',
 } as const;
@@ -472,6 +492,7 @@ const decodeValue = (value: unknown): ContentPart[] => {
 			if (type === 'recovery_share') return [decodeRecoveryShare(obj.recovery_share)];
 			if (type === 'recovery_share_return') return [decodeRecoveryShareReturn(obj.recovery_share_return)];
 			if (type === 'recovery_binding') return [decodeRecoveryBinding(obj.recovery_binding)];
+			if (type === 'recovery_holding') return [decodeRecoveryHolding(obj.recovery_holding)];
 			if (type === 'recovery_invite') return [decodeRecoveryInvite(obj.recovery_invite)];
 			if (type === 'recovery_invite_reply') return [decodeRecoveryInviteReply(obj.recovery_invite_reply)];
 			return [{ kind: 'unknown', type, value: obj[type] }];
@@ -553,6 +574,11 @@ const decodeRecoveryShareReturn = (r: unknown): RecoveryShareReturnPart => {
 const decodeRecoveryBinding = (r: unknown): RecoveryBindingPart => {
 	if (!head(r, 'ssss')) throw new ContentDecodeError('malformed recovery_binding envelope');
 	return { kind: 'recovery_binding', secretRef: r[0], candidate: r[1], userHash: r[2], signatureB64: r[3], ...tailOf(r, 4) };
+};
+
+const decodeRecoveryHolding = (r: unknown): RecoveryHoldingPart => {
+	if (!head(r, 'sisiss')) throw new ContentDecodeError('malformed recovery_holding envelope');
+	return { kind: 'recovery_holding', secretRef: r[0], version: r[1], splitId: r[2], shareIndex: r[3], state: r[4], detail: r[5], ...tailOf(r, 6) };
 };
 
 const decodeRecoveryInvite = (r: unknown): RecoveryInvitePart => {

@@ -92,6 +92,8 @@ const load = async () => {
 	loadError.value = null;
 	try {
 		await store.load();
+		// What the guardians said about their pieces: the health line counts the stored ones.
+		if (store.run?.step === 'done') store.refreshReceipts().catch((e) => console.warn('[recovery] the guardians\' receipts could not be read:', e));
 	} catch (e) {
 		loadError.value = errorMessage(e);
 	}
@@ -171,7 +173,7 @@ const discard = async () => {
 
 // --- Done ----------------------------------------------------------------------
 
-const health = computed(() => healthView(run.value));
+const health = computed(() => healthView(run.value, store.receipts));
 const outsideAlerts = computed(() => hasOutsideAlerts(run.value?.alerts));
 const healthExtra = computed(() => {
 	const spares = plural(run.value?.settings?.spares ?? 0, 'spare piece');

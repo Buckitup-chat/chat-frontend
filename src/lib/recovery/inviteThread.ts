@@ -29,6 +29,14 @@ export interface GuardianAnswer {
 	owner: string;
 	deployment: string;
 	answer: 'accept' | 'decline';
+	/**
+	 * The invitation's message id, a UUIDv7: which of an owner's invitations
+	 * is the newest (invitations.consentedIn). Absent from answers recorded
+	 * before it was kept.
+	 */
+	inviteMessageId?: string;
+	/** Unix seconds of the answer; absent from answers recorded before it was kept. */
+	at?: number;
 }
 
 export interface ThreadMessage {
@@ -43,6 +51,8 @@ export type InviteView =
 	| {
 			kind: 'received_invite';
 			inviteId: string;
+			/** The invitation's message: its id orders it among the owner's invitations. */
+			messageId: string;
 			deployment: string;
 			/** Why it can only be declined, if it can. */
 			blocker: 'not_confirmed' | 'unreachable' | 'superseded' | null;
@@ -186,7 +196,7 @@ export const inviteViews = (ctx: ThreadContext, judged?: Map<string, JudgedInvit
 					? 'superseded'
 					: !ctx.peerConfirmed ? 'not_confirmed' : !ctx.approvesOn(inv.deployment) ? 'unreachable' : null;
 				const answer = myAnswers.get(inv.inviteId) ?? ctx.answers?.[inv.inviteId]?.answer ?? null;
-				out[m.id] = { kind: 'received_invite', inviteId: inv.inviteId, deployment: inv.deployment, blocker, answer };
+				out[m.id] = { kind: 'received_invite', inviteId: inv.inviteId, messageId: m.id, deployment: inv.deployment, blocker, answer };
 			}
 		}
 		for (const part of repliesIn(m)) {

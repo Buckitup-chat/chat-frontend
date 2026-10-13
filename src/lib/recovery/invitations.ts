@@ -7,7 +7,11 @@ import type { RecoveryInvitePart, RecoveryInviteReplyPart } from '@/lib/pq/conte
 import { inviteProof, metaKeysOf, newInviteId } from './guardianInvite';
 import type { GuardianAnswer, Roster, RosterAnswer, RosterInvite } from './inviteThread';
 
-/** The owner's roster slot; the guardian's slot for its answers and, later, its holdings. */
+/**
+ * The owner's roster slot; the guardian's slot for its answers and its
+ * holdings. Their maps are written by key (storageIntent's `$keyed`), so
+ * another device's entries stay.
+ */
 export const ROSTER_SLOT = 'recovery_roster';
 export const GUARDIAN_SLOT = 'guardian';
 
@@ -43,14 +47,14 @@ export const sendInvite = async (
 	const inviteId = newInviteId();
 	const messageId = await deps.newMessageId();
 	const invite: RosterInvite = { contact: peerHash, deployment: deps.deployment, messageId };
-	const roster = await deps.patchSlotJson(ROSTER_SLOT, { invites: { [inviteId]: invite } } satisfies Roster);
+	const roster = await deps.patchSlotJson(ROSTER_SLOT, { $keyed: ['invites'], invites: { [inviteId]: invite } });
 	const part: RecoveryInvitePart = { kind: 'recovery_invite', inviteId, deployment: deps.deployment };
 	try {
 		await deps.sendMessage(peerHash, [part], onStatus, messageId);
 	} catch (e) {
 		// Never captured, so never sent: left in the roster it would be the
 		// newest invitation and supersede the one the contact answered.
-		await deps.patchSlotJson(ROSTER_SLOT, { invites: { [inviteId]: null } }).catch((undo) => console.error('[recovery] an unsent invitation stays in the roster:', inviteId, undo));
+		await deps.patchSlotJson(ROSTER_SLOT, { $keyed: ['invites'], invites: { [inviteId]: null } }).catch((undo) => console.error('[recovery] an unsent invitation stays in the roster:', inviteId, undo));
 		throw e;
 	}
 	return { inviteId, roster: roster ?? {} };
@@ -66,7 +70,7 @@ export const sendInvite = async (
 export const answerInvite = async (
 	deps: InvitationDeps,
 	peerHash: string,
-	invite: { inviteId: string; deployment: string },
+	invite: { inviteId: string; deployment: string; messageId?: string },
 	accept: boolean,
 	onStatus?: (status: string, cause?: unknown) => void,
 ): Promise<Record<string, GuardianAnswer>> => {
@@ -90,9 +94,15 @@ export const answerInvite = async (
 	await deps.sendMessage(peerHash, [part], onStatus);
 	// The answer is in the dialog from here on, and the dialog is what the
 	// owner reads; a record that fails to write is not a failed answer.
-	const answer: GuardianAnswer = { owner: peerHash, deployment: invite.deployment, answer: accept ? 'accept' : 'decline' };
+	const answer: GuardianAnswer = {
+		owner: peerHash,
+		deployment: invite.deployment,
+		answer: accept ? 'accept' : 'decline',
+		...(invite.messageId ? { inviteMessageId: invite.messageId } : {}),
+		at: Math.floor(Date.now() / 1000),
+	};
 	try {
-		const slot = await deps.patchSlotJson(GUARDIAN_SLOT, { answers: { [invite.inviteId]: answer } });
+		const slot = await deps.patchSlotJson(GUARDIAN_SLOT, answersPatch({ [invite.inviteId]: answer }));
 		return slot?.answers ?? {};
 	} catch (e) {
 		console.warn('[recovery] the answer was sent but not recorded:', invite.inviteId, e);
@@ -100,6 +110,43 @@ export const answerInvite = async (
 	}
 };
 
+/**
+ * The patch recording guardian answers by invitation: a decline is final for
+ * its invitation — a decline at any time withdraws (§ Inviting) — so a stale
+ * device's acceptance never replaces it (storageIntent `$sticky`).
+ */
+export const answersPatch = (answers: Record<string, GuardianAnswer>) => ({
+	$keyed: ['answers'],
+	$sticky: { answers: { answer: ['decline'] } },
+	answers,
+});
+
+/** An answer's place among an owner's invitations: `[inviteMessageId, at, inviteId]`, compared in order. */
+const answerOrder = (inviteId: string, a: GuardianAnswer): [string, number, string] => [a.inviteMessageId ?? '', a.at ?? 0, inviteId];
+const later = (x: [string, number, string], y: [string, number, string]): boolean =>
+	x[0] !== y[0] ? x[0] > y[0] : x[1] !== y[1] ? x[1] > y[1] : x[2] > y[2];
+
+/**
+ * Whether this guardian consents to keep `owner`'s pieces on `namespace`
+ * (§ Inviting, step 3), decided as the owner decides it: by the live
+ * invitation — the newest one from that owner for that deployment that this
+ * guardian answered — and the answer to it, recorded once per invitation with
+ * a decline final. An answer to an invitation since superseded changes
+ * nothing. Invitations order by their message id (UUIDv7: the order they
+ * were sent); answers recorded without it fall back to their `at`, then
+ * their invitation id, and sort before every answer that has it — one
+ * order, whatever order the slot lists them in.
+ */
+export const consentedIn = (answers: Record<string, GuardianAnswer> | undefined, owner: string, namespace: string): boolean => {
+	let live: { order: [string, number, string]; answer: GuardianAnswer } | null = null;
+	for (const [inviteId, a] of Object.entries(answers ?? {})) {
+		if (a.owner !== owner || a.deployment !== namespace) continue;
+		const order = answerOrder(inviteId, a);
+		if (!live || later(order, live.order)) live = { order, answer: a };
+	}
+	return live?.answer.answer === 'accept';
+};
+
 /** Records the owner's judged outcomes (inviteThread.rosterAnswersDue). */
 export const recordRosterAnswers = async (deps: Pick<InvitationDeps, 'patchSlotJson'>, answers: Record<string, RosterAnswer>): Promise<Roster> =>
-	(await deps.patchSlotJson(ROSTER_SLOT, { answers } satisfies Roster)) ?? {};
+	(await deps.patchSlotJson(ROSTER_SLOT, { $keyed: ['answers'], answers })) ?? {};

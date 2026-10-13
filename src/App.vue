@@ -139,6 +139,7 @@
 <script setup>
 
 import { userPQStore } from '@/store/userPQ.store';
+import { useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
 import { initPersistence } from '@/lib/data/persistence';
 
 import { userStore } from '@/store/user.store';
@@ -210,5 +211,7 @@ watch(
 		await initPersistence();
 
 		$userPQ.initialize();
+		// The shares this account keeps as a guardian: read again on chain every few minutes (plan § 7.3).
+		useRecoveryHoldingsStore().watchWhileOpen();
 	});
 </script>

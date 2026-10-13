@@ -5,6 +5,7 @@
 import { bytesToHex, randomBytes } from '@noble/hashes/utils';
 import { CURVE } from '@noble/secp256k1';
 import { SigningKey } from 'ethers';
+import { checkStealthAddress } from 'backitup-secret-recovery-sdk/lib/keys/stealth';
 import { hkdfDerive } from '@/lib/pq/hkdf';
 import { personalSign, personalSigner } from './evmSign';
 
@@ -68,6 +69,22 @@ const proofMessage = (inviteId: string, ownerUserHash: string, guardianUserHash:
 /** The acceptance proof: the spending key signs the invitation and both identities. */
 export const inviteProof = (keys: MetaKeys, inviteId: string, ownerUserHash: string, guardianUserHash: string): string =>
 	personalSign(keys.spendingPrivateKey, proofMessage(inviteId, ownerUserHash, guardianUserHash));
+
+/**
+ * Whether a guardian slot on chain — its stealth address and the ephemeral
+ * key the owner derived it from — is addressed to these keys: the viewing
+ * key derives the same address (§ Dying, a dropped guardian finding no slot).
+ */
+export const slotIsMine = (keys: MetaKeys, stealthAddress: string, ephemeralPubKey: string): boolean => {
+	const spendingPublicKey = spendingKeyOf(keys.metaAddress);
+	if (!spendingPublicKey) return false;
+	try {
+		return checkStealthAddress({ viewingPrivateKey: keys.viewingPrivateKey, spendingPublicKey }, ephemeralPubKey)?.toLowerCase() === stealthAddress.toLowerCase();
+	} catch {
+		// An ephemeral key that is no point derives nothing: not this guardian's slot.
+		return false;
+	}
+};
 
 export interface InviteReply {
 	inviteId: string;

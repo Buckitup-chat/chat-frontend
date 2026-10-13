@@ -131,6 +131,19 @@ describe('with a finished backup', () => {
 		expect(w.text()).toContain('Manage');
 	});
 
+	it('reads the guardians’ receipts when shown, and counts as holders only the pieces stored', async () => {
+		H.store.run = done({ channels: ['app', 'telegram'], skipped: false });
+		const [a, b, c] = H.store.run.guardians.map((g) => g.userHash);
+		H.store.receipts = { [a]: 'stored', [b]: 'delivered', [c]: 'given_back' };
+		const w = render();
+		await flushPromises();
+		expect(H.store.refreshReceipts).toHaveBeenCalledTimes(1);
+		expect(w.find('.health-count').text()).toBe('1 of 3');
+		expect(w.findAll('.health-seg.held')).toHaveLength(1);
+		expect(w.findAll('.health-seg.way')).toHaveLength(1);
+		expect(w.text()).toContain('3 needed. Fewer than 3 guardians keep their piece: the backup stopped working.');
+	});
+
 	it('warns for as long as no channel outside the app is on', () => {
 		H.store.run = done({ channels: ['app'], skipped: true });
 		const w = render();

@@ -9,8 +9,11 @@
 		<div class="cb-list">
 			<div v-for="g in rows" :key="g.userHash" class="cb-row" data-test="roster-row">
 				<ContactAvatar :hash="g.userHash" />
-				<span class="cb-row-main"><span class="cb-row-name">{{ g.name }}</span></span>
-				<span :class="g.state === 'stored' ? 'cb-status-ok' : 'cb-small'">{{ ROSTER_TEXT[g.state] }}</span>
+				<span class="cb-row-main">
+					<span class="cb-row-name">{{ g.name }}</span>
+					<span v-if="g.hint" class="cb-small" data-test="roster-hint">{{ g.hint }}</span>
+				</span>
+				<span :class="g.state === 'stored' ? 'cb-status-ok' : g.hint ? 'cb-status-warn' : 'cb-small'">{{ ROSTER_TEXT[g.state] }}</span>
 			</div>
 		</div>
 
@@ -43,10 +46,18 @@ import { userPQStore } from '@/store/userPQ.store';
 import ScreenHeader from './ScreenHeader.vue';
 import HealthLine from './HealthLine.vue';
 import ContactAvatar from './ContactAvatar.vue';
-import { DRAFT, NAV, alertsText, guardianDelivery, guardianName, hasOutsideAlerts, healthView } from './backupFlow';
+import { DRAFT, NAV, alertsText, deliveryHint, guardianDelivery, guardianName, hasOutsideAlerts, healthView } from './backupFlow';
 
 // The top of the roster (design 9.1); phase 7.4 builds the roster in full.
-const ROSTER_TEXT = { stored: 'holds a piece', delivered: 'delivered', sent: 'sent', waiting: 'waiting for keys' };
+const ROSTER_TEXT = {
+	stored: 'holds a piece',
+	delivered: 'delivered',
+	sent: 'sent',
+	waiting: 'waiting for keys',
+	problem: 'has a problem',
+	given_back: 'gave it back',
+	dropped: 'dropped it',
+};
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
@@ -54,13 +65,17 @@ const store = useRecoveryBackupStore();
 const $userPQ = userPQStore();
 
 const run = computed(() => store.run);
-const health = computed(() => healthView(run.value));
+const health = computed(() => healthView(run.value, store.receipts));
 const outsideAlerts = computed(() => hasOutsideAlerts(run.value?.alerts));
 const rows = computed(() =>
-	(run.value?.guardians ?? []).map((g) => ({
-		userHash: g.userHash,
-		name: guardianName(g.userHash, store.candidates, $userPQ),
-		state: guardianDelivery(run.value, g.userHash),
-	})),
+	(run.value?.guardians ?? []).map((g) => {
+		const state = guardianDelivery(run.value, g.userHash, store.receipts);
+		return {
+			userHash: g.userHash,
+			name: guardianName(g.userHash, store.candidates, $userPQ),
+			state,
+			hint: deliveryHint(state, store.receiptDetails?.[g.userHash]?.detail),
+		};
+	}),
 );
 </script>

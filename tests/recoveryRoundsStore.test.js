@@ -17,7 +17,7 @@ vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: { getInstance: () => ({ loadSlotJson: async () => slot, exportVaultKeys: async () => ({ evm_skey: '0c'.repeat(32) }) }) },
 }));
-vi.mock('@/lib/recovery/deployments', () => ({ recoveryDeployment: () => ({ chainId: 11155111, relayerUrl: 'https://relay.example' }) }));
+vi.mock('@/lib/recovery/deployments', () => ({ maybeRecoveryDeployment: () => ({ chainId: 11155111, relayerUrl: 'https://relay.example' }) }));
 vi.mock('@/lib/recovery/chain', () => ({
 	RecoveryChain: class {
 		readSecret = async () => ({ revoked: false, recoveryRound: 4n, executeAfter: 0n, recoveryWindow: 3600n, recoveryRecipient: '0x' + '00'.repeat(20) });
