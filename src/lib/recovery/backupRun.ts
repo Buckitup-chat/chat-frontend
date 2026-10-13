@@ -59,6 +59,8 @@ export type NodeOutcome = { state: 'held' } | { state: 'staged' } | { state: 'fa
 
 /** The run, and once done the backup's record. Secret material is kept here, encrypted under the owner's account. */
 export interface BackupRun {
+	/** Set when this run reshares an existing backup (RunInput.reshareOf). */
+	reshareOf?: { secretId: string; version: number };
 	runId: string;
 	/** The on-chain label: random, so the secret id links to nothing. */
 	label: string;
@@ -116,6 +118,12 @@ export interface RunInput {
 	nodes: NodeRef[];
 	device: string;
 	now: number;
+	/**
+	 * A reshare of an existing backup: the same secret on chain at its next
+	 * version, under a new S, a new split and new node shares, so the old
+	 * version's bytes open nothing (§ Dying). Absent for a first backup.
+	 */
+	reshareOf?: { secretId: string; version: number };
 }
 
 /** The node set as a share names it: the threshold and each node as `<id>@<url>`. */
@@ -151,6 +159,7 @@ export const prepareRun = (input: RunInput): BackupRun => {
 		startedAt: input.now,
 		updatedAt: input.now,
 		device: input.device,
+		...(input.reshareOf ? { reshareOf: { ...input.reshareOf } } : {}),
 	};
 };
 
@@ -206,6 +215,8 @@ export interface RunDeps {
 	publishVault: (wrapKey: Uint8Array, json: string) => Promise<string>;
 	/** Signs addSecret as the owner and submits it; resolves to the secret id and the dispatch. */
 	register: (fields: { label: string; shares: ShareInput[]; threshold: bigint; recoveryDelay: bigint; recoveryWindow: bigint }) => Promise<{ id: string; txHash?: string }>;
+	/** Signs reshare of secret `id` as its owner and submits it. */
+	reshare: (fields: { id: string; shares: ShareInput[]; threshold: bigint }) => Promise<{ txHash?: string }>;
 	/** The secret's id for this owner and label, without the chain. */
 	secretIdOf: (owner: string, label: string) => string;
 	/** The secret's version once on chain, else null; throws when the chain does not answer. */
@@ -278,8 +289,13 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 	}
 
 	if (run.step === 'published' || run.step === 'submitted') {
-		const id = deps.secretIdOf(run.owner, run.label);
-		let version = await deps.readVersion(id);
+		const id = run.reshareOf ? run.reshareOf.secretId : deps.secretIdOf(run.owner, run.label);
+		// A reshare is on chain once the secret reaches the version after the one it replaced.
+		const readVersion = async () => {
+			const v = await deps.readVersion(id);
+			return v !== null && run.reshareOf && v <= run.reshareOf.version ? null : v;
+		};
+		let version = await readVersion();
 		// The step and its time are saved before the registration leaves: a run
 		// that stops after the broadcast waits for it rather than sending again
 		// blindly. One not on chain after REGISTRATION_WAIT_MS is handed over
@@ -290,17 +306,19 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 			if (!run.shareInputs) await step({ shareInputs: shareInputsOf(run) });
 			await step({ step: 'submitted', secretId: id, submittedAt: deps.now() });
 			try {
-				const { txHash } = await deps.register({
-					label: run.label,
-					shares: run.shareInputs!,
-					threshold: BigInt(run.settings.approvals),
-					recoveryDelay: BigInt(run.settings.delaySec),
-					recoveryWindow: BigInt(run.settings.windowSec),
-				});
+				const { txHash } = run.reshareOf
+					? await deps.reshare({ id, shares: run.shareInputs!, threshold: BigInt(run.settings.approvals) })
+					: await deps.register({
+							label: run.label,
+							shares: run.shareInputs!,
+							threshold: BigInt(run.settings.approvals),
+							recoveryDelay: BigInt(run.settings.delaySec),
+							recoveryWindow: BigInt(run.settings.windowSec),
+						});
 				await step({ txHash });
 			} catch (e) {
 				if (e instanceof RunInterruptedError) throw e;
-				version = await deps.readVersion(id);
+				version = await readVersion();
 				if (version === null) {
 					// Not handed over: the next attempt may submit at once.
 					await step({ submittedAt: 0 });
@@ -310,7 +328,7 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 		}
 		const deadline = deps.now() * 1000 + REGISTRATION_WAIT_MS;
 		while (version === null) {
-			version = await deps.readVersion(id);
+			version = await readVersion();
 			if (version !== null) break;
 			if (deps.now() * 1000 >= deadline) {
 				throw new RunStoppedError(run, 'registration_pending', 'The network has not confirmed the registration yet.');

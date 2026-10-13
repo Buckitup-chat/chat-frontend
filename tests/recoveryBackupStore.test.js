@@ -122,6 +122,14 @@ describe('one backup per account', () => {
 		await expect(store.start(input())).rejects.toThrow('already has a backup');
 		expect(em.patchSlotJson).not.toHaveBeenCalled();
 	});
+
+	it('changes a finished backup only as a reshare of its secret, at its next version', async () => {
+		const store = useRecoveryBackupStore();
+		await expect(store.start(input({ reshare: true }))).rejects.toThrow('There is no finished backup to change.');
+		slots.recovery_backup = { run: savedRun({ step: 'done', secretId: '0x' + 'ab'.repeat(32), version: 3, fee: { kind: 'self' } }) };
+		await store.start(input({ reshare: true, fee: undefined }));
+		expect(slots.recovery_backup.run).toMatchObject({ step: 'prepared', reshareOf: { secretId: '0x' + 'ab'.repeat(32), version: 3 }, fee: { kind: 'self' } });
+	});
 });
 
 describe('two tabs', () => {

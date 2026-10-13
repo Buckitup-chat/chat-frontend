@@ -16,7 +16,7 @@ import { publishVault } from '@/lib/recovery/vault';
 import { RecoveryChain } from '@/lib/recovery/chain';
 import { recoveryDeployment, deploymentNamespace, secretIdOf, secretRefOf } from '@/lib/recovery/deployments';
 import { directGateway, relayerGateway } from '@/lib/recovery/gateway';
-import { signAddSecret } from '@/lib/recovery/typedData';
+import { signAddSecret, signBound } from '@/lib/recovery/typedData';
 import { depositShare } from '@/lib/recovery/nodeClient';
 import { liveInviteId } from '@/lib/recovery/inviteThread';
 import { knownNodes, checkNode, syncedServerNode } from '@/lib/recovery/nodeDirectory';
@@ -294,6 +294,14 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 				const { txHash } = await gateway.addSecret(body);
 				return { id, txHash };
 			},
+			reshare: async ({ id, shares, threshold }) => {
+				await ours(runId);
+				const k = await key();
+				const { body } = await signBound(chain, k, 'Reshare', id, { shares, threshold });
+				alive();
+				const gateway = fee?.kind === 'self' ? directGateway(chain, k) : relayerGateway(fee?.url || deployment.relayerUrl);
+				return gateway.reshare(body);
+			},
 			secretIdOf,
 			readVersion: async (id) => {
 				const secret = await chain.readSecret(id);
@@ -365,9 +373,15 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	 * the screens are not the only way to this call, and what it registers
 	 * cannot be taken back.
 	 */
-	const start = async ({ guardians, settings, nodes: chosen, fee, alerts }) => {
+	const start = async ({ guardians, settings, nodes: chosen, fee, alerts, reshare = false }) => {
 		if (!deployment) throw new Error('This app names no network to back up on.');
-		refuseExisting(run.value);
+		// A reshare replaces a finished backup with its next version; a first backup needs none.
+		const checkBase = (r) => {
+			if (!reshare) return refuseExisting(r);
+			if (r?.step !== 'done' || !r.secretId || !r.version) throw new Error('There is no finished backup to change.');
+		};
+		// This tab's copy can refuse at once; only the slot, read under the lock, can tell a reshare it may go ahead.
+		if (!reshare) checkBase(run.value);
 		const problems = [
 			...settingsProblems(settings, guardians.length, chosen.length).map((p) => `${p.field}: ${p.reason}`),
 			...setProblems(chosen, settings.nodeThreshold, guardians.map((g) => g.userHash)).map((p) => p.kind),
@@ -377,9 +391,10 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		let markSaved;
 		const saved = new Promise((resolve) => (markSaved = resolve));
 		const driving = drive(async (latest, write) => {
-			refuseExisting(latest);
+			checkBase(latest);
 			const prepared = {
 				...prepareRun({
+					...(reshare ? { reshareOf: { secretId: latest.secretId, version: latest.version } } : {}),
 					deployment: deploymentNamespace(deployment),
 					owner,
 					guardians,
@@ -388,8 +403,8 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 					device: deviceLabel(),
 					now: nowSec(),
 				}),
-				fee,
-				alerts,
+				fee: fee ?? latest?.fee,
+				alerts: alerts ?? latest?.alerts,
 			};
 			await write(prepared);
 			markSaved();

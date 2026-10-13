@@ -69,6 +69,12 @@ const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number; saveDe
 			registered.set(id, { version: 1, fields });
 			return { id, txHash: '0xtx' };
 		},
+		reshare: async (fields) => {
+			const prev = registered.get(fields.id);
+			if (!prev) throw new Error('SecretDoesNotExist');
+			registered.set(fields.id, { version: prev.version + 1, fields });
+			return { txHash: '0xreshare' };
+		},
 		secretIdOf: (owner, label) => `0x${bytesToHex(new TextEncoder().encode(owner + label)).slice(0, 64)}`,
 		readVersion: async (id) => {
 			reads++;
@@ -309,5 +315,38 @@ describe('node outcomes', () => {
 		const err = await advance(newRun(), net.deps).catch((e) => e);
 		expect(err).toBeInstanceOf(RunAbortedError);
 		expect(Object.values(net.saved.at(-1)!.nodeOutcomes).some((o) => o.state === 'failed')).toBe(false);
+	});
+});
+
+describe('a reshare', () => {
+	it('moves the same secret to its next version under a new S, and sends the new shares', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const reshared = prepareRun({
+			deployment: 'eip155:11155111:0xd9ff',
+			owner: OWNER,
+			guardians: GUARDIANS.slice(0, 3).map(({ userHash, metaAddress }) => ({ userHash, metaAddress })),
+			settings: defaultSettings(3, 5),
+			nodes: NODES,
+			device: 'laptop',
+			now: 2000,
+			reshareOf: { secretId: first.secretId!, version: first.version! },
+		});
+		expect(reshared.wrapKey).not.toBe(first.wrapKey);
+		const done = await advance(reshared, net.deps);
+		expect(done).toMatchObject({ step: 'done', secretId: first.secretId, version: 2 });
+		expect(net.registered.size).toBe(1);
+		expect(net.sent.slice(4).map((s) => s.part.version)).toEqual([2, 2, 2]);
+		expect(net.deposits.filter((d) => d.version === 2)).toHaveLength(NODES.length);
+	});
+
+	it('waits for the next version, not the one it replaces', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const run = { ...prepareRun({ deployment: 'x', owner: OWNER, guardians: GUARDIANS.slice(0, 3).map(({ userHash, metaAddress }) => ({ userHash, metaAddress })), settings: defaultSettings(3, 5), nodes: NODES, device: 'd', now: 1, reshareOf: { secretId: first.secretId!, version: first.version! } }), step: 'submitted' as const, submittedAt: 1000 };
+		// Submitted, not yet mined: the chain still shows version 1, which is not this reshare.
+		const stopped = await advance(run, { ...net.deps, reshare: async () => ({}) }).catch((e) => e);
+		expect(stopped).toBeInstanceOf(RunStoppedError);
+		expect(stopped.reason).toBe('registration_pending');
 	});
 });
