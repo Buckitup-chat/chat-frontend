@@ -122,6 +122,26 @@ describe('the temporary account', () => {
 		expect(w.nodeCalls).toEqual([]);
 	});
 
+	it('reads a version\'s guardians and root once, and an approval once it is recorded', async () => {
+		const calls = { guardiansAt: 0, shareAt: 0, hasApproved: 0 };
+		const counted = { ...w.chain };
+		for (const k of Object.keys(calls) as (keyof typeof calls)[]) {
+			const real = (w.chain as any)[k];
+			(counted as any)[k] = (...args: unknown[]) => (calls[k]++, real(...args));
+		}
+		const run = async () => (progress = (await restorePass(progress, { ...deps(), chain: counted }, memo)).progress);
+		w.send(w.guardians[0].userHash, TEMP, [{ kind: 'text', text: helpRequestText(w.secretRef) }]);
+		await run();
+		vote(0, candidateOf(progress.candidateKey), true);
+		await run();
+		await run();
+		await run();
+		expect(calls.guardiansAt).toBe(1);
+		expect(calls.shareAt).toBe(w.guardians.length);
+		// Every guardian on the first pass in voting, then only those not yet seen approving.
+		expect(calls.hasApproved).toBe(w.guardians.length + 2 * (w.guardians.length - 1));
+	});
+
 	it('names the sender of a return that does not check, and does not count it', async () => {
 		w.send(w.guardians[0].userHash, TEMP, [{ kind: 'text', text: helpRequestText(w.secretRef) }]);
 		await pass();

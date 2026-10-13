@@ -14,7 +14,7 @@ import { decodeContent, encodeContent, type RecoveryBindingPart, type RecoverySh
 import { fromBase64, toBase64, toBytes } from '@/lib/pq/signature';
 
 export const RECOVERY_RETURN_SALT = 'buckitup/recovery-return/v1';
-const BLOCK_TAG = 'BUCKITUP-SHARE';
+export const BLOCK_TAG = 'BUCKITUP-SHARE';
 const BINDING_TAG = 'BUCKITUP-BINDING';
 const USER_HASH = /^u_[0-9a-f]{128}$/;
 /** An ML-KEM-1024 ciphertext. */
@@ -100,6 +100,9 @@ export const parseReturnBlock = (text: string): ReturnBlock => {
 	if (kemCipherText.length !== KEM_CT_BYTES) throw new ManualReturnError('The piece is damaged: part of it is missing or was changed on the way.');
 	return { kemCipherText, sealed, guardian, signature, signed: parts.slice(0, 4).join('.') };
 };
+
+/** Whether pasted text is meant as a block (and not, say, a request or a binding). */
+export const looksLikeReturnBlock = (text: string): boolean => compact(text).startsWith(`${BLOCK_TAG}.`);
 
 /** Whether the block is signed by the account whose ML-DSA public key is `signPkey`. */
 export const blockSignedBy = (block: ReturnBlock, signPkey: string | Uint8Array): boolean => {

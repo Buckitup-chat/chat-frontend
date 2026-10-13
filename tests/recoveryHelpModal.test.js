@@ -62,6 +62,28 @@ describe('helping in the app', () => {
 		expect(H.store.approve).not.toHaveBeenCalled();
 	});
 
+	it('reads their dialog again only after the last read ended, and stops when closed', async () => {
+		let release;
+		H.store.bindingOf = vi.fn(() => new Promise((r) => (release = r)));
+		const w = render();
+		await flushPromises();
+		await w.find('[data-test="help-code"]').setValue(TEMP);
+		w.find('[data-test="help-ask"]').trigger('click');
+		await flushPromises();
+		expect(H.store.bindingOf).toHaveBeenCalledTimes(1);
+		// A slow read: no second one starts beside it.
+		await vi.advanceTimersByTimeAsync(12_000);
+		expect(H.store.bindingOf).toHaveBeenCalledTimes(1);
+		release(null);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(4000);
+		expect(H.store.bindingOf).toHaveBeenCalledTimes(2);
+		w.unmount();
+		release(null);
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(H.store.bindingOf).toHaveBeenCalledTimes(2);
+	});
+
 	it('approves the candidate it checked only when the words match', async () => {
 		H.store.bindingOf = vi.fn(async () => ({ candidate: '0x5a', peer: TEMP, words }));
 		const w = render();

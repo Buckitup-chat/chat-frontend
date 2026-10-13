@@ -13,7 +13,7 @@ import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { useRecoveryFinaleStore } from '@/store/recoveryFinale.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
-import { peersWhoWrote } from '@/lib/data/inboundDialogs';
+import { followPeersWhoWrote, peersWhoWrote } from '@/lib/data/inboundDialogs';
 import { RecoveryChain } from '@/lib/recovery/chain';
 import { deploymentNamespace, maybeRecoveryDeployment } from '@/lib/recovery/deployments';
 import { parseSecretRef } from '@/lib/recovery/holdings';
@@ -22,6 +22,7 @@ import { fetchVault } from '@/lib/recovery/vault';
 import { bindingFor, canRestart, findSecretRef } from '@/lib/recovery/restoring';
 import { newMemo, newProgress, restarted, restorePass, wrapKeyFrom } from '@/lib/recovery/restoreFlow';
 import { bindingText, blockSignedBy, parseReturnBlock, readReturnBlock } from '@/lib/recovery/manualReturn';
+import { nameOf as accountName } from '@/components/recovery/backup/backupFlow';
 import errorMessage from '@/utils/errorMessage';
 
 /** The temporary account this device is recovering with, if any. */
@@ -69,9 +70,7 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 			progress.value = null;
 			view.value = null;
 			lastError.value = null;
-			pendingRead?.forget();
-			pendingRead = null;
-			pendingBlock.value = null;
+			rejectBlock();
 			memo = newMemo();
 		},
 	);
@@ -172,12 +171,7 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 		return bindingText(bindingFor(progress.value.candidateKey, secretRef, progress.value.userHash));
 	};
 
-	/** The binding as text for the backup this recovery follows, for a guardian outside the app. */
-	const bindingAsText = computed(() =>
-		progress.value && view.value?.secretRef ? bindingText(bindingFor(progress.value.candidateKey, view.value.secretRef, progress.value.userHash)) : null,
-	);
-
-	const nameOf = (hash) => $userPQ.getUserByHash?.(hash)?.name || `${hash.slice(0, 10)}…`;
+	const nameOf = (hash) => accountName(hash, $userPQ);
 
 	/**
 	 * A share pasted as text: decapsulated with this account's key and its
@@ -257,14 +251,18 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 	};
 
 	let timer = null;
+	let unfollow = null;
+	/** A look on the watch's own beat; none once enough pieces are here — the person opens the account from there. */
+	const due = () => !view.value?.ready;
 	const onVisible = () => {
-		if (document.visibilityState === 'visible' && nowSec() - checkedAt.value >= CHECK_MS / 2000) check();
+		if (document.visibilityState === 'visible' && due() && nowSec() - checkedAt.value >= CHECK_MS / 2000) check();
 	};
-	/** Looks again every CHECK_MS while the screen is shown and visible. */
+	/** Looks again every CHECK_MS while the screen is shown and visible, following who writes to the temporary account. */
 	const startWatching = () => {
 		if (timer) return;
+		if (active.value) unfollow = followPeersWhoWrote($userPQ.currentUserHash);
 		timer = setInterval(() => {
-			if (typeof document === 'undefined' || document.visibilityState === 'visible') check();
+			if ((typeof document === 'undefined' || document.visibilityState === 'visible') && due()) check();
 		}, CHECK_MS);
 		document.addEventListener('visibilitychange', onVisible);
 		check();
@@ -272,6 +270,8 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 	const stopWatching = () => {
 		clearInterval(timer);
 		timer = null;
+		unfollow?.();
+		unfollow = null;
 		document.removeEventListener('visibilitychange', onVisible);
 	};
 
@@ -295,7 +295,6 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 		pendingBlock,
 		opening,
 		openError,
-		bindingAsText,
 		begin,
 		load,
 		check,

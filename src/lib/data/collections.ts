@@ -202,6 +202,43 @@ export function resetUserStorageCollection() {
 	userStorageOwner = null;
 }
 
+// ---------- dialogs others opened with an account ----------
+
+// The dialog_keys rows naming an account as peer: who opened a dialog with it
+// (chat repo: pq_dialogs § Participation). A recovering device's temporary
+// account follows them to find the guardians who wrote to it; one collection
+// per account, kept live while followed, instead of a fresh read every pass.
+const inboundKeys = new Map<string, ReturnType<typeof buildInboundKeys>>();
+
+const buildInboundKeys = (userHash: string) => {
+	const link = createShapeLink();
+	const coll = createCollection(
+		electricCollectionOptions<DialogKeyRow>({
+			id: `dk-in-${userHash.slice(0, 24)}`,
+			shapeOptions: {
+				url: electricUrl('/shapes'),
+				params: { table: 'dialog_keys', where: `peer_hash = '${assertUserHash(userHash)}'` },
+				...shapeDefaults,
+				headers: { Authorization: () => bearerFor('dialog_keys') },
+				...gatedStream(link, 'dialog_keys'),
+			},
+			getKey: (r) => `${r.dialog_hash}|${r.sender_hash}`,
+			gcTime: DIALOG_GC_MS,
+		}),
+	);
+	registerShapeLink(coll, link);
+	return coll;
+};
+
+export function getInboundDialogKeysCollection(userHash: string) {
+	let coll = inboundKeys.get(userHash);
+	if (!coll) {
+		coll = buildInboundKeys(userHash);
+		inboundKeys.set(userHash, coll);
+	}
+	return coll;
+}
+
 // ---------- per-dialog collections ----------
 
 export interface DialogCollections {

@@ -72,6 +72,10 @@ export const nodeRefName = (ref, known, $userPQ) => {
 	return node ? nodeOwnerName(node.descriptor, $userPQ) : hostOf(ref.url);
 };
 
+/** An account's name, as this device knows it: a contact's, else its card's, else the start of its user_hash. */
+export const nameOf = (userHash, $userPQ) =>
+	$userPQ?.contactsMap?.[userHash]?.name || $userPQ?.getUserByHash?.(userHash)?.name || `${userHash.slice(0, 10)}…`;
+
 /** A guardian's name: as a candidate, else as a contact. */
 export const guardianName = (userHash, candidates, $userPQ) =>
 	candidates?.find((c) => c.userHash === userHash)?.name || $userPQ?.contactsMap?.[userHash]?.name || 'Guardian';

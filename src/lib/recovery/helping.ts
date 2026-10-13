@@ -8,8 +8,6 @@ import type { ContentPart, RecoveryBindingPart } from '@/lib/pq/content';
 import type { SecretState } from './chain';
 import { checkBinding } from './recoveryBinding';
 
-export { helpRequestText } from './restoring';
-
 /** The parts of one message of the dialog peer, oldest message first. */
 export interface PeerMessage {
 	messageId: string;

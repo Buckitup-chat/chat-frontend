@@ -5,10 +5,9 @@
 // and — once this device may decrypt — ask the nodes the shares name for
 // the node half. The dialogs, the chain and the nodes come in as functions,
 // so a test drives a whole recovery with fakes that keep their contract.
-import { getBytes } from 'ethers';
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
 import type { ContentPart, RecoveryShareReturnPart } from '@/lib/pq/content';
-import type { SecretState } from './chain';
+import { guardianChainReads, type SecretState } from './chain';
 import { parseSecretRef } from './holdings';
 import { NodeError, type NodeRef } from './nodeClient';
 import { assembleWrapKey, usableNodeShares } from './recovering';
@@ -78,7 +77,7 @@ export interface RestoreChain {
 export interface RestoreDeps {
 	/** The namespace (`eip155:<chain>:<contract>`) this build reaches; null when it names none. */
 	namespace: string | null;
-	/** Who opened a dialog with the temporary account. */
+	/** Who opened a dialog with the temporary account: each once, not the account itself. */
 	peersWhoWrote: () => Promise<string[]>;
 	/** A peer's messages with text and returned shares, oldest first; null when the dialog could not be read now. */
 	readPeer: (peer: string) => Promise<{ messageId: string; parts: ContentPart[] }[] | null>;
@@ -90,16 +89,25 @@ export interface RestoreDeps {
 	now: () => number;
 }
 
-/** What one pass learnt that the next keeps in memory: the roots read, and the nodes' answers for this candidate. */
+/**
+ * What one pass learnt that the next keeps in memory — what cannot change:
+ * a version's guardians and root (none, too: slots are written once),
+ * approvals recorded in a round, and the nodes' answers for this candidate.
+ */
 export interface RestoreMemo {
+	/** By `<id>|<version>`. */
+	guardians: Map<string, string[]>;
+	/** By `<id>|<version>`; null when the version's slots carry none. */
 	roots: Map<string, Uint8Array | null>;
+	/** `<round>|<candidate>|<guardian>` of every approval seen. */
+	approved: Set<string>;
 	/** By `<candidate>|<node id>`. */
 	releases: Map<string, { version: number; share: string }>;
 	/** By `<candidate>|<node id>`: why it did not release, and when it was last asked. */
 	nodeFailures: Map<string, { reason: string; at: number }>;
 }
 
-export const newMemo = (): RestoreMemo => ({ roots: new Map(), releases: new Map(), nodeFailures: new Map() });
+export const newMemo = (): RestoreMemo => ({ guardians: new Map(), roots: new Map(), approved: new Set(), releases: new Map(), nodeFailures: new Map() });
 
 /** A node that did not release is asked again after this long. */
 export const NODE_RETRY_SEC = 60;
@@ -123,7 +131,6 @@ export interface RestoreView {
 	approvals: number | null;
 	returns: ReturnsJudged | null;
 	nodes: NodeStatus[];
-	nodeThreshold: number | null;
 	/** Node shares that combine: one per x-coordinate. */
 	nodeShares: number;
 	/** Enough of both halves to put S together. */
@@ -141,7 +148,6 @@ const emptyView = (candidate: string): RestoreView => ({
 	approvals: null,
 	returns: null,
 	nodes: [],
-	nodeThreshold: null,
 	nodeShares: 0,
 	ready: false,
 });
@@ -166,9 +172,8 @@ export const restorePass = async (progress: RestoreProgress, deps: RestoreDeps, 
 	// Requests and returns, from every dialog a guardian opened.
 	const received: ReceivedReturn[] = p.typedReturns.map((r) => ({ sender: r.sender, via: 'text' as const, part: r.part }));
 	const requests: HelpRequest[] = [];
-	const peers = (await deps.peersWhoWrote()).filter((peer) => peer !== me);
 	await Promise.all(
-		[...new Set(peers)].map(async (peer) => {
+		(await deps.peersWhoWrote()).map(async (peer) => {
 			const messages = await deps.readPeer(peer);
 			for (const m of messages ?? []) {
 				for (const part of m.parts) {
@@ -185,14 +190,16 @@ export const restorePass = async (progress: RestoreProgress, deps: RestoreDeps, 
 
 	// Every guardian is answered for the backup they asked about, once per candidate.
 	const answered = { ...p.answered };
+	let changed = false;
 	const newest = new Map<string, HelpRequest>();
 	for (const r of requests) newest.set(`${r.peer}|${r.secretRef}`, r);
 	for (const [key, r] of newest) {
 		if (answered[key] === candidate) continue;
 		await deps.sendBinding(r.peer, [bindingFor(p.candidateKey, r.secretRef, me)]);
 		answered[key] = candidate;
+		changed = true;
 	}
-	if (Object.keys(answered).length !== Object.keys(p.answered).length || Object.entries(answered).some(([k, v]) => p.answered[k] !== v)) {
+	if (changed) {
 		p = { ...p, answered };
 		await deps.save(p);
 	}
@@ -226,25 +233,35 @@ export const restorePass = async (progress: RestoreProgress, deps: RestoreDeps, 
 	}
 	const version = Number(secret.version);
 	view.version = version;
+	const versionKey = `${ref.id}|${version}`;
+	const guardiansOf = async () => {
+		if (!memo.guardians.has(versionKey)) memo.guardians.set(versionKey, await deps.chain.guardiansAt(ref.id, secret.version));
+		return memo.guardians.get(versionKey)!;
+	};
 	if (round.phase === 'voting') {
-		const guardians = await deps.chain.guardiansAt(ref.id, secret.version);
-		const votes = await Promise.all(guardians.map((g) => deps.chain.hasApproved(ref.id, candidate, g)));
+		// An approval cannot be taken back within its round: one seen is not asked again.
+		const votes = await Promise.all(
+			(await guardiansOf()).map(async (g) => {
+				const key = `${round.round}|${candidate}|${g}`;
+				if (memo.approved.has(key)) return true;
+				const yes = await deps.chain.hasApproved(ref.id, candidate, g);
+				if (yes) memo.approved.add(key);
+				return yes;
+			}),
+		);
 		view.approvals = votes.filter(Boolean).length;
 	}
 
 	// The returns, against the root of the version the round runs on.
-	const rootKey = `${ref.id}|${version}`;
-	if (!memo.roots.has(rootKey) || memo.roots.get(rootKey) === null) {
-		const guardians = await deps.chain.guardiansAt(ref.id, secret.version);
-		const slots = await Promise.all(guardians.map((g) => deps.chain.shareAt(ref.id, secret.version, g)));
-		memo.roots.set(rootKey, rootFromSlots(slots.map((s) => getBytes(s.shareEncrypted))));
+	if (!memo.roots.has(versionKey)) {
+		const reads = guardianChainReads({ ...deps.chain, guardiansAt: guardiansOf }, async () => null);
+		memo.roots.set(versionKey, rootFromSlots(await reads.slotsAt(ref.id, version)));
 	}
-	const returns = judgeReturns(received, { secretRef, version, round: round.round, candidate }, memo.roots.get(rootKey) ?? null);
+	const returns = judgeReturns(received, { secretRef, version, round: round.round, candidate }, memo.roots.get(versionKey) ?? null);
 	view.returns = returns;
 
 	// The node half, from the set the verified shares name, once this device may decrypt.
 	const nodes = nodesOf(returns.nodeSet);
-	view.nodeThreshold = returns.nodeSet?.threshold ?? null;
 	const usable = () => usableNodeShares(releasesFor(memo, candidate, nodes, version).map((r) => r.share)).shares.length;
 	if (nodes.length && round.phase === 'window' && usable() < returns.nodeSet!.threshold && (await deps.chain.canDecrypt(candidate, ref.id))) {
 		// All of them, in the set's order, until the node threshold: the spares count.

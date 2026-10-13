@@ -7,7 +7,7 @@
 // signatures, stealth keys and slot are real.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { reactive } from 'vue';
+import { nextTick, reactive } from 'vue';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
@@ -27,7 +27,13 @@ const user = reactive({ currentUserHash: null, getUserByHash: (h) => H.cards[h] 
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({
-		readPeerParts: async (peer, kinds) => ({ messages: H.world.inbox(user.currentUserHash, peer, kinds), delivered: [] }),
+		// As the dialogs store reads: with newestMatch, only the newest message with a part it accepts, and those parts.
+		readPeerParts: async (peer, kinds, { newestMatch = null } = {}) => {
+			const all = H.world.inbox(user.currentUserHash, peer, kinds);
+			if (!newestMatch) return { messages: all, delivered: [] };
+			const m = [...all].reverse().find((x) => x.parts.some(newestMatch));
+			return { messages: m ? [{ ...m, parts: m.parts.filter(newestMatch) }] : [], delivered: [] };
+		},
 		sendMessage: async (peer, parts) => H.world.send(user.currentUserHash, peer, parts),
 	}),
 }));
@@ -37,7 +43,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
 		getInstance: () => ({
 			// Each guardian's own slot.
-			loadSlotJson: async () => H.slots[H.me] ?? null,
+			loadSlotJson: async () => (H.slowLoad ? H.slowLoad : H.slots[H.me] ?? null),
 			patchSlotJson: async (_name, patch) => (H.slots[H.me] = stripPatchDirectives(mergeJsonPatch(H.slots[H.me] ?? null, patch))),
 			guardianMetaSeed: async () => bytesToHex(new Uint8Array(32).fill(H.me + 1)),
 			signChallenge: async (bytes) => ml_dsa87.sign(bytes, H.signer.secretKey),
@@ -230,6 +236,29 @@ describe('returning by hand', () => {
 		const { session } = await store.askByText({ holdingKey });
 		expect(() => store.typedBinding(session, bindingText(bindingFor(KEY, w.secretRef, TEMP)))).toThrow(/not on this server/);
 	});
+});
+
+it('watches with one turn at a time, also when an account change looks again mid-turn', async () => {
+	vi.useFakeTimers();
+	try {
+		as(0);
+		let release;
+		H.slowLoad = new Promise((r) => (release = r));
+		store.watchWhileOpen();
+		await vi.advanceTimersByTimeAsync(0);
+		// A turn is reading the slot; another account signs in, which looks again at once.
+		user.currentUserHash = w.guardians[1].userHash;
+		await nextTick();
+		H.slowLoad = null;
+		release(null);
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(vi.getTimerCount()).toBe(1);
+		store.stopWatching();
+		expect(vi.getTimerCount()).toBe(0);
+	} finally {
+		vi.useRealTimers();
+	}
 });
 
 it('keeps its records in its own slot', () => {

@@ -15,7 +15,7 @@
 		<!-- 2. The words -->
 		<div v-if="view?.words" class="cb-block" data-test="words">
 			<div class="cb-section">2. Read these words to your guardian</div>
-			<ol class="rs-words">
+			<ol class="cb-words">
 				<li v-for="(w, i) in view.words" :key="i">{{ w }}</li>
 			</ol>
 			<div class="cb-small">Their screen shows the same ten words if the request really comes from this device. Guardians who asked: {{ askedBy }}.</div>
@@ -79,6 +79,7 @@ import { useRecoveryRestoreStore } from '@/store/recoveryRestore.store';
 import { canRestart } from '@/lib/recovery/restoring';
 import errorMessage from '@/utils/errorMessage';
 import CopyField from '../backup/CopyField.vue';
+import { hostOf } from '../backup/backupFlow';
 import ContactAvatar from '../backup/ContactAvatar.vue';
 import ManualReturnPanel from './ManualReturnPanel.vue';
 import { nodeStateText, phaseText } from './restoreWords';
@@ -119,17 +120,10 @@ const pieces = computed(() => {
 const countLine = computed(() => {
 	const v = view.value;
 	if (!v?.returns?.threshold) return '';
-	const nodes = v.nodeThreshold ? ` · nodes ${v.nodeShares} of ${v.nodeThreshold}` : '';
+	const need = v.returns.nodeSet?.threshold;
+	const nodes = need ? ` · nodes ${v.nodeShares} of ${need}` : '';
 	return `· ${v.returns.distinct} of ${v.returns.threshold}${nodes}`;
 });
-const hostOf = (url) => {
-	try {
-		return new URL(url).host;
-	} catch {
-		return url;
-	}
-};
-
 const busy = ref(false);
 const restart = async () => {
 	busy.value = true;
@@ -187,31 +181,5 @@ const abandon = async () => {
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
-}
-.cb-title {
-	font-weight: 700;
-	font-size: 20px;
-}
-.cb-block {
-	background: #f2f2f2;
-	border-radius: 14px;
-	padding: 14px;
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-}
-.cb-section {
-	font-weight: 600;
-	font-size: 14px;
-}
-.rs-words {
-	display: grid;
-	grid-template-columns: repeat(2, 1fr);
-	gap: 4px 16px;
-	margin: 0;
-	padding-left: 1.5rem;
-	font-family: ui-monospace, monospace;
-	font-size: 16px;
-	font-weight: 600;
 }
 </style>

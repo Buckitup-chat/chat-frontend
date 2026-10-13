@@ -83,4 +83,52 @@
 		font-size: 12px;
 		color: #9a9c9d;
 	}
+	// A screen's title and its grey blocks, with a section line inside one.
+	.cb-title {
+		font-weight: 700;
+		font-size: 17px;
+		line-height: 1.25;
+	}
+	.cb-block {
+		background: #f2f2f2;
+		border-radius: 14px;
+		padding: 14px;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.cb-section {
+		font-weight: 600;
+		font-size: 13px;
+		color: #333;
+	}
+	.cb-icon-btn {
+		border: 0;
+		background: transparent;
+		padding: 2px;
+		line-height: 0;
+		span {
+			display: inline-block;
+			width: 1.1rem;
+			height: 1.1rem;
+		}
+	}
+	// What two people compare on a call: ten words, six digits.
+	.cb-words {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 4px 16px;
+		margin: 0;
+		padding-left: 1.5rem;
+		font-family: ui-monospace, monospace;
+		font-size: 16px;
+		font-weight: 600;
+	}
+	.cb-digits {
+		font-family: ui-monospace, monospace;
+		font-size: 28px;
+		font-weight: 700;
+		letter-spacing: 4px;
+		text-align: center;
+	}
 }

@@ -64,6 +64,7 @@ import ContactAvatar from './backup/ContactAvatar.vue';
 import { confirmGiveBack, givenBackOffline, keptStateIsProblem, keptStateText } from './holdingWords';
 import { helpNeedsYou, helpStateText } from './help/helpWords';
 import { useRecoveryHelpStore } from '@/store/recoveryHelp.store';
+import { nameOf as accountName } from './backup/backupFlow';
 
 const store = useRecoveryHoldingsStore();
 const $userPQ = userPQStore();
@@ -97,13 +98,11 @@ const load = async () => {
 };
 onMounted(() => {
 	load();
-	help.load().catch((e) => console.warn('[recovery] the recoveries you help with could not be read:', e));
 	help.tick().catch((e) => console.warn('[recovery] a piece could not be sent:', e));
 });
 
 /** The dialog peer's name: whose claim the holding is. */
-const nameOf = (userHash) =>
-	$userPQ.contactsMap?.[userHash]?.name || $userPQ.getUserByHash?.(userHash)?.name || `${userHash.slice(0, 10)}…`;
+const nameOf = (userHash) => accountName(userHash, $userPQ);
 
 const rows = computed(() =>
 	store.list.map((h) => ({

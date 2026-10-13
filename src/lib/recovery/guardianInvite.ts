@@ -2,7 +2,7 @@
 // pq_recovery_shares § Inviting). The owner needs the guardian's stealth
 // meta-address to derive their slot; it travels in the dialog, inside a reply
 // that proves the replier holds its keys.
-import { bytesToHex, randomBytes } from '@noble/hashes/utils';
+import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
 import { CURVE } from '@noble/secp256k1';
 import { SigningKey } from 'ethers';
 import { checkStealthAddress } from 'backitup-secret-recovery-sdk/lib/keys/stealth';
@@ -45,6 +45,12 @@ export const metaKeysOf = (seed: Uint8Array): MetaKeys => {
 		viewingPrivateKey,
 		metaAddress: ('0x' + compressed(spendingPrivateKey) + compressed(viewingPrivateKey)).toLowerCase(),
 	};
+};
+
+/** The guardian's meta keys from the seed in the account's vault, or null while it has none. */
+export const metaKeysFromVault = async (vault: { guardianMetaSeed: () => Promise<string | null> }): Promise<MetaKeys | null> => {
+	const seed = await vault.guardianMetaSeed();
+	return seed ? metaKeysOf(hexToBytes(seed)) : null;
 };
 
 /** The spending key's compressed public key, or null unless both halves are points on the curve. */

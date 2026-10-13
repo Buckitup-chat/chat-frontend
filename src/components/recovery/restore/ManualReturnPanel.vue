@@ -18,7 +18,7 @@
 		<!-- The digits: nothing is opened until the person says they match. -->
 		<div v-if="store.pendingBlock" class="cb-warn" data-test="digits">
 			<div>Ask {{ store.pendingBlock.name }} to read the six digits their app shows. Do they match these?</div>
-			<div class="rs-digits" data-test="digits-value">{{ store.pendingBlock.digits }}</div>
+			<div class="cb-digits" data-test="digits-value">{{ store.pendingBlock.digits }}</div>
 			<div class="d-flex gap-2">
 				<button class="btn btn-dark flex-fill" :disabled="busy" data-test="digits-match" @click="match">They match</button>
 				<button class="btn btn-outline-danger flex-fill" :disabled="busy" data-test="digits-differ" @click="differ">They differ</button>
@@ -36,6 +36,7 @@ import { ref } from 'vue';
 import { useRecoveryRestoreStore } from '@/store/recoveryRestore.store';
 import errorMessage from '@/utils/errorMessage';
 import CopyField from '../backup/CopyField.vue';
+import { looksLikeReturnBlock } from '@/lib/recovery/manualReturn';
 
 const store = useRecoveryRestoreStore();
 const shown = ref(false);
@@ -51,7 +52,7 @@ const read = async () => {
 	notice.value = null;
 	try {
 		const text = pasted.value;
-		if (/BUCKITUP-SHARE/.test(text)) {
+		if (looksLikeReturnBlock(text)) {
 			await store.readBlock(text);
 		} else {
 			answer.value = await store.typeRequest(text);
@@ -89,12 +90,5 @@ const differ = () => {
 .rs-paste {
 	font-family: ui-monospace, monospace;
 	font-size: 12px;
-}
-.rs-digits {
-	font-family: ui-monospace, monospace;
-	font-size: 28px;
-	font-weight: 700;
-	letter-spacing: 4px;
-	text-align: center;
 }
 </style>

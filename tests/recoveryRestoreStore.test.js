@@ -73,7 +73,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 		}),
 	},
 }));
-vi.mock('@/lib/data/inboundDialogs', () => ({ peersWhoWrote: async (me) => H.world.wrote(me) }));
+vi.mock('@/lib/data/inboundDialogs', () => ({ peersWhoWrote: async (me) => H.world.wrote(me), followPeersWhoWrote: () => () => {} }));
 vi.mock('@/lib/recovery/deployments', async (orig) => ({ ...(await orig()), maybeRecoveryDeployment: () => DEPLOYMENT }));
 vi.mock('@/lib/recovery/chain', async (orig) => ({
 	...(await orig()),
@@ -97,7 +97,7 @@ vi.mock('@/lib/recovery/vault', () => ({
 vi.mock('@/store/recoveryBackup.store', () => ({ useRecoveryBackupStore: () => reactive({ run: null }) }));
 vi.mock('@/store/recoveryRounds.store', () => ({ useRecoveryRoundsStore: () => ({ acknowledge: (a) => H.acks.push(a) }) }));
 
-const { RECOVERING_KEY, useRecoveryRestoreStore } = await import('@/store/recoveryRestore.store');
+const { CHECK_MS, RECOVERING_KEY, useRecoveryRestoreStore } = await import('@/store/recoveryRestore.store');
 const { finaleKey } = await import('@/store/recoveryFinale.store');
 
 let w;
@@ -175,6 +175,30 @@ describe('a recovery through the dialogs', () => {
 		expect(H.acks).toEqual([{ secretId: w.id, round: Number(w.state.round), recipient: elected }]);
 	});
 
+	it('stops looking on its own beat once enough pieces are here', async () => {
+		ask(0);
+		await store.check();
+		quorumAndWindow();
+		for (const i of [0, 1]) w.send(w.guardians[i].userHash, TEMP, [returnOf(w.shareOf(i), Number(w.state.round), candidate(), w.clock.now)]);
+		await store.check();
+		expect(store.view.ready).toBe(true);
+		const listeners = { addEventListener: () => {}, removeEventListener: () => {}, visibilityState: 'visible' };
+		vi.stubGlobal('document', listeners);
+		vi.useFakeTimers();
+		try {
+			const reads = vi.spyOn(w.chain, 'readSecret');
+			store.startWatching();
+			await vi.advanceTimersByTimeAsync(0);
+			const first = reads.mock.calls.length;
+			await vi.advanceTimersByTimeAsync(CHECK_MS * 3);
+			expect(reads.mock.calls.length).toBe(first);
+			store.stopWatching();
+		} finally {
+			vi.useRealTimers();
+			vi.unstubAllGlobals();
+		}
+	});
+
 	it('does not open the account short of the pieces', async () => {
 		ask(0);
 		await store.check();
@@ -219,7 +243,6 @@ describe('a share returned by hand', () => {
 		const text = await store.typeRequest(`from my guardian: ${w.secretRef}`);
 		expect(checkBinding(parseBindingText(text), { secretRef: w.secretRef, dialogPeerUserHash: TEMP })).toBe(candidate());
 		expect(store.view.secretRef).toBe(w.secretRef);
-		expect(store.bindingAsText).toBe(text);
 	});
 
 	it('counts nothing until the six digits are confirmed, and nothing when they differ', async () => {

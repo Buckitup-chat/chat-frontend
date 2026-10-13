@@ -6,7 +6,7 @@
 // nodes that release only while canDecrypt holds for the key that signed the
 // request — encrypted to that key — and dialogs that hand a message only to
 // its recipient.
-import { SigningKey, Wallet, computeAddress, hashMessage, verifyMessage, verifyTypedData } from 'ethers';
+import { SigningKey, Wallet, hashMessage, verifyMessage, verifyTypedData } from 'ethers';
 import * as secp from '@noble/secp256k1';
 import { hmac } from '@noble/hashes/hmac';
 import { sha256 } from '@noble/hashes/sha256';
@@ -36,7 +36,7 @@ export const DEPLOYMENT: Deployment = {
 export const NAMESPACE = `eip155:${DEPLOYMENT.chainId}:${DEPLOYMENT.secretRecovery.toLowerCase()}`;
 export const hashOf = (c: string) => 'u_' + c.repeat(128);
 
-export interface Guardian {
+interface Guardian {
 	userHash: string;
 	keys: MetaKeys;
 	/** Their stealth slot of the backup, and the key it derives. */
@@ -45,7 +45,7 @@ export interface Guardian {
 }
 
 /** ECIES as the SDK encrypts a release (pq_recovery_services § Nodes, "The wire forms of v3"). */
-export const eciesTo = async (recipientPublicKey: Uint8Array, plaintext: string): Promise<string> => {
+const eciesTo = async (recipientPublicKey: Uint8Array, plaintext: string): Promise<string> => {
 	const eph = secp.utils.randomPrivateKey();
 	const px = secp.getSharedSecret(eph, recipientPublicKey).slice(1, 33);
 	const hash = sha512(px);
@@ -98,7 +98,6 @@ export const makeWorld = () => {
 	};
 	const approvals = new Map<string, Set<string>>();
 	const nonces = new Map<string, bigint>();
-	const log: string[] = [];
 	const lower = (a: string) => a.toLowerCase();
 	const isGuardian = (a: string) => guardians.some((g) => lower(g.stealthAddress) === lower(a));
 	const roundState = (): RoundState => {
@@ -153,7 +152,6 @@ export const makeWorld = () => {
 		s.recipient = '0x' + '00'.repeat(20);
 		s.executeAfter = 0n;
 		approvals.clear();
-		log.push(`initiate ${lower(signer)}`);
 	};
 	const approve = (signer: string, candidate: string) => {
 		if (!isGuardian(signer)) throw new Error('NotGuardian');
@@ -162,7 +160,6 @@ export const makeWorld = () => {
 		if (set.has(lower(signer))) throw new Error('AlreadyApproved');
 		set.add(lower(signer));
 		approvals.set(lower(candidate), set);
-		log.push(`approve ${lower(signer)} ${lower(candidate)}`);
 		if (BigInt(set.size) >= s.quorum) {
 			s.recipient = candidate;
 			s.executeAfter = BigInt(clock.now) + s.delay;
@@ -171,7 +168,6 @@ export const makeWorld = () => {
 	const cancel = () => {
 		s.active = false;
 		s.executeAfter = 0n;
-		log.push('cancel');
 	};
 
 	// ----------------------------- the relayer -----------------------------
@@ -240,7 +236,6 @@ export const makeWorld = () => {
 
 	return {
 		clock,
-		owner,
 		run,
 		id,
 		secretRef,
@@ -252,7 +247,6 @@ export const makeWorld = () => {
 		initiate,
 		approve,
 		cancel,
-		log,
 		relayer,
 		relayed,
 		nodeFetch,
@@ -263,7 +257,6 @@ export const makeWorld = () => {
 		inbox,
 		wrote,
 		shareOf,
-		addressOf: (key: string) => lower(computeAddress(new SigningKey(key).publicKey)),
 	};
 };
 export type World = ReturnType<typeof makeWorld>;

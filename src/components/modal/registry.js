@@ -1,10 +1,5 @@
-// Every modal the app can open, and the single question of whether one can be
-// opened at all.
-//
-// open() returns early on an unknown id, so an entry missing from this table is
-// not merely hidden — no emitter can reach it. That makes the table the
-// authority on reachability, and the thing a screen asks before rendering a
-// button whose only job is to open one.
+// Every modal the app can open. open() returns early on an unknown id, so an
+// entry missing from this table is not merely hidden — no emitter can reach it.
 
 export const modalRegistry = {
 	add_contact: {
@@ -139,6 +134,3 @@ export const modalRegistry = {
 		icon: '_icon_contacts',
 	},
 };
-
-/** Whether this modal exists in this build. */
-export const isModalAvailable = (id) => Object.hasOwn(modalRegistry, id);

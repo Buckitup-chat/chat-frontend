@@ -37,7 +37,6 @@ const baseView = (over = {}) => ({
 	approvals: null,
 	returns: null,
 	nodes: [],
-	nodeThreshold: null,
 	nodeShares: 0,
 	ready: false,
 	...over,
@@ -164,13 +163,12 @@ describe('the progress screen', () => {
 				setAside: [{ sender: G2, via: 'dialog', reason: 'it was released to another device' }],
 				distinct: 1,
 				threshold: 2,
-				nodeSet: null,
+				nodeSet: { threshold: 2, nodes: [] },
 			},
 			nodes: [
 				{ node: { id: 'n_a', url: 'https://a.example/recovery/node' }, state: 'released' },
 				{ node: { id: 'n_b', url: 'https://b.example/recovery/node' }, state: 'failed', detail: 'it does not answer' },
 			],
-			nodeThreshold: 2,
 			nodeShares: 1,
 		});
 		w = render();

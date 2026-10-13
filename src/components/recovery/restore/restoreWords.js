@@ -1,14 +1,6 @@
 // What the recovery screens say: the round's phase for the person recovering,
 // and how long is left. Pure, so the words are tested once.
-
-/** "3 days", "5 hours", "12 minutes", "less than a minute". */
-export const timeLeft = (sec) => {
-	const s = Math.max(0, Math.round(sec));
-	if (s >= 2 * 86400) return `${Math.floor(s / 86400)} days`;
-	if (s >= 2 * 3600) return `${Math.floor(s / 3600)} hours`;
-	if (s >= 120) return `${Math.floor(s / 60)} minutes`;
-	return s >= 60 ? 'a minute' : 'less than a minute';
-};
+import { span } from '@/lib/recovery/rounds';
 
 /** The round as the person recovering reads it: a title and a line under it. */
 export const phaseText = (round, approvals, now) => {
@@ -23,13 +15,13 @@ export const phaseText = (round, approvals, now) => {
 			};
 		case 'timelock':
 			return {
-				title: `Approved. Pieces come back in ${timeLeft(round.executeAfter - now)}`,
+				title: `Approved. Pieces come back in ${span(round.executeAfter - now)}`,
 				body: 'This wait lets you stop the recovery from a device you still have, if it is not you.',
 			};
 		case 'window':
 			return {
 				title: 'Your guardians are sending their pieces',
-				body: `The pieces can be collected for ${timeLeft(round.expiresAt - now)} more.`,
+				body: `The pieces can be collected for ${span(round.expiresAt - now)} more.`,
 			};
 		case 'elsewhere':
 			return { title: 'The guardians approved another device', body: 'If that was not you, start over and ask your guardians to check the words again.' };

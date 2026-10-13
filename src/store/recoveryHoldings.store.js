@@ -8,7 +8,6 @@
 // to its owner once.
 import { defineStore } from 'pinia';
 import { computed, ref, watch } from 'vue';
-import { hexToBytes } from '@noble/hashes/utils';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
@@ -16,7 +15,7 @@ import { mergeJsonPatch, stripPatchDirectives, withNamedLock } from '@/lib/data/
 import { StorageNotOnServerError } from '@/lib/data/userStorage';
 import { RecoveryChain, guardianChainReads } from '@/lib/recovery/chain';
 import { deploymentNamespace, maybeRecoveryDeployment } from '@/lib/recovery/deployments';
-import { metaKeysOf } from '@/lib/recovery/guardianInvite';
+import { metaKeysFromVault } from '@/lib/recovery/guardianInvite';
 import { GUARDIAN_SLOT, consentedIn } from '@/lib/recovery/invitations';
 import { holdsBytes } from '@/lib/recovery/holdings';
 import { anyUnhandled, giveBack as giveBackHolding, holdingsPatch, receiveShares, secretsToCheck, sweepDue, sweepHoldings } from '@/lib/recovery/keeping';
@@ -70,10 +69,7 @@ export const useRecoveryHoldingsStore = defineStore('recoveryHoldings', () => {
 	);
 
 	const em = () => EncryptionManagerPQ.getInstance();
-	const metaKeys = async () => {
-		const seed = await em().guardianMetaSeed();
-		return seed ? metaKeysOf(hexToBytes(seed)) : null;
-	};
+	const metaKeys = () => metaKeysFromVault(em());
 
 	/** Takes `slot`, read or written when the change stamp was `stamp`, as this tab's view of `owner`'s slot. */
 	const take = (owner, slot, stamp) => {

@@ -10,7 +10,6 @@
 // own account. A piece returned by hand is sealed on request, at the gate.
 import { defineStore } from 'pinia';
 import { computed, ref, watch } from 'vue';
-import { hexToBytes } from '@noble/hashes/utils';
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
@@ -20,9 +19,10 @@ import { RecoveryChain } from '@/lib/recovery/chain';
 import { deploymentNamespace, maybeRecoveryDeployment } from '@/lib/recovery/deployments';
 import { gatewayOf } from '@/lib/recovery/gateway';
 import { findMySlot } from '@/lib/recovery/guardianSlot';
-import { metaKeysOf } from '@/lib/recovery/guardianInvite';
+import { metaKeysFromVault } from '@/lib/recovery/guardianInvite';
 import { holdsBytes, parseSecretRef } from '@/lib/recovery/holdings';
-import { helpRequestText, latestBinding, nextCheckIn, roundMove, sendGate } from '@/lib/recovery/helping';
+import { latestBinding, nextCheckIn, roundMove, sendGate } from '@/lib/recovery/helping';
+import { helpRequestText } from '@/lib/recovery/restoring';
 import { parseBindingText, sealReturnBlock } from '@/lib/recovery/manualReturn';
 import { checkBinding, recoveryWords } from '@/lib/recovery/recoveryBinding';
 import { returnOf } from '@/lib/recovery/recovering';
@@ -53,27 +53,25 @@ export const useRecoveryHelpStore = defineStore('recoveryHelp', () => {
 	let pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 	const sessions = ref({});
-	const loaded = ref(false);
 	let loadedFor = null;
 
 	watch(
 		() => $userPQ.currentUserHash,
 		() => {
 			sessions.value = {};
-			loaded.value = false;
 			loadedFor = null;
 			kick();
 		},
 	);
 
-	const load = async ({ refresh = false } = {}) => {
+	/** Reads the help slot once per account; this tab's writes keep it current after. */
+	const load = async () => {
 		const me = $userPQ.currentUserHash;
-		if (!me || (loadedFor === me && !refresh)) return;
+		if (!me || loadedFor === me) return;
 		const slot = await em().loadSlotJson(HELP_SLOT);
 		if ($userPQ.currentUserHash !== me) return;
 		sessions.value = slot?.sessions ?? {};
 		loadedFor = me;
-		loaded.value = true;
 	};
 
 	const put = async (session) => {
@@ -138,7 +136,8 @@ export const useRecoveryHelpStore = defineStore('recoveryHelp', () => {
 	 * what came back; the person reads theirs out.
 	 */
 	const bindingOf = async (session) => {
-		const read = await $dialogs.readPeerParts(session.peer, ['recovery_binding']);
+		// Only the newest binding for this backup counts: the rows before it are not decrypted.
+		const read = await $dialogs.readPeerParts(session.peer, ['recovery_binding'], { newestMatch: (p) => p.secretRef === session.secretRef });
 		if (!read) throw new HelpError('Their messages could not be read just now. Try again in a moment.');
 		const found = latestBinding(read.messages, { secretRef: session.secretRef, peer: session.peer });
 		if (!found) return null;
@@ -160,9 +159,9 @@ export const useRecoveryHelpStore = defineStore('recoveryHelp', () => {
 	};
 
 	const metaKeys = async () => {
-		const seed = await em().guardianMetaSeed();
-		if (!seed) throw new HelpError('This account has no guardian keys.');
-		return metaKeysOf(hexToBytes(seed));
+		const keys = await metaKeysFromVault(em());
+		if (!keys) throw new HelpError('This account has no guardian keys.');
+		return keys;
 	};
 
 	const landed = async (check, what) => {
@@ -316,20 +315,23 @@ export const useRecoveryHelpStore = defineStore('recoveryHelp', () => {
 
 	let timer = null;
 	let watching = false;
-	const loop = async () => {
+	/** Bumped by every kick: a turn of an older generation, still awaiting its tick, does not schedule another. */
+	let generation = 0;
+	const loop = async (gen) => {
 		let next = null;
 		try {
 			next = await tick();
 		} catch (e) {
 			console.warn('[recovery] a piece could not be sent:', e);
 		}
-		if (watching) timer = setTimeout(loop, next === null || next === Infinity ? IDLE_MS : next * 1000);
+		if (watching && gen === generation) timer = setTimeout(() => loop(gen), next === null || next === Infinity ? IDLE_MS : next * 1000);
 	};
 	/** Looks now rather than at the next turn: another account signed in. */
 	const kick = () => {
 		if (!watching) return;
 		clearTimeout(timer);
-		timer = setTimeout(loop, 0);
+		const gen = ++generation;
+		timer = setTimeout(() => loop(gen), 0);
 	};
 	/** While the app is open, applies the gate as often as the chain is worth asking; once, however often called. */
 	const watchWhileOpen = () => {
@@ -352,7 +354,6 @@ export const useRecoveryHelpStore = defineStore('recoveryHelp', () => {
 		deployment,
 		sessions,
 		list,
-		loaded,
 		helpable,
 		load,
 		ask,

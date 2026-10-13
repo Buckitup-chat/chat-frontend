@@ -74,7 +74,8 @@ export const acknowledged = (alert: RoundAlert, ack: Record<string, RoundAck | u
 /** "0x7a3F…c91E": enough of an address to tell one device from another. */
 const shortAddress = (a: string): string => `${a.slice(0, 6)}…${a.slice(-4)}`;
 
-const span = (sec: number): string => {
+/** A time left in words: "3 days", "5 hours", "12 minutes", "a minute". */
+export const span = (sec: number): string => {
 	const s = Math.max(0, Math.round(sec));
 	if (s >= 2 * 86400) return `${Math.floor(s / 86400)} days`;
 	if (s >= 2 * 3600) return `${Math.floor(s / 3600)} hours`;

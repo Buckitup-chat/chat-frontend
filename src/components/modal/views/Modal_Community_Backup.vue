@@ -137,39 +137,10 @@ onMounted(() => {
 		font-size: 12px;
 		color: $grey_dark;
 	}
-	.cb-title {
-		font-weight: 700;
-		font-size: 17px;
-		line-height: 1.25;
-	}
-	.cb-icon-btn {
-		border: 0;
-		background: transparent;
-		padding: 2px;
-		line-height: 0;
-		span {
-			display: inline-block;
-			width: 1.1rem;
-			height: 1.1rem;
-		}
-	}
-	.cb-block {
-		background: #f2f2f2;
-		border-radius: 14px;
-		padding: 14px;
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
 	.cb-headline {
 		font-weight: 700;
 		font-size: 20px;
 		line-height: 1.25;
-	}
-	.cb-section {
-		font-weight: 600;
-		font-size: 13px;
-		color: #333;
 	}
 	.cb-row {
 		&.pickable {

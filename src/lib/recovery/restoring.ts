@@ -3,12 +3,12 @@
 // a guardian's request with, where the round stands for that candidate, and
 // which returned shares count. Pure: the chain's answers and the dialogs'
 // parts come in, verdicts go out. What combines them into S is recovering.ts.
-import { SigningKey, computeAddress } from 'ethers';
 import * as secp from '@noble/secp256k1';
 import { bytesToHex } from '@noble/hashes/utils';
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
 import type { RecoveryBindingPart, RecoveryShareReturnPart } from '@/lib/pq/content';
 import { canonicalCandidate, signBinding } from './recoveryBinding';
+import { addressOf } from './evmSign';
 import { checkReturn, type CheckedReturn, type ExpectedReturn } from './recovering';
 import { parseNodeEntry, type NodeSet } from './nodeSet';
 import type { NodeRef } from './nodeClient';
@@ -35,7 +35,7 @@ export const helpRequestText = (secretRef: string): string =>
 export const newCandidateKey = (): string => '0x' + bytesToHex(secp.utils.randomPrivateKey());
 
 /** The candidate address of `key`, lowercase. */
-export const candidateOf = (key: string): string => computeAddress(new SigningKey(key).publicKey).toLowerCase();
+export const candidateOf = addressOf;
 
 /** The answer to a guardian's request: this account's binding to the candidate (§ Returning, step 3). */
 export const bindingFor = (candidateKey: string, secretRef: string, userHash: string): RecoveryBindingPart => ({
@@ -108,7 +108,7 @@ export const roundViewOf = (secret: SecretState, state: RoundState, candidate: s
 	const view = { round, quorum: Number(secret.threshold), executeAfter, expiresAt };
 	const ours = secret.recoveryRecipient?.toLowerCase() === canonicalCandidate(candidate);
 	let phase: RestorePhase;
-	if (state === RoundState.None) phase = seenRound !== null && seenRound === round ? 'stopped' : 'none';
+	if (state === RoundState.None) phase = seenRound === round ? 'stopped' : 'none';
 	else if (state === RoundState.Voting) phase = 'voting';
 	else if (state === RoundState.Expired || (expiresAt && now >= expiresAt)) phase = 'expired';
 	else phase = ours ? (state === RoundState.TimeLock ? 'timelock' : 'window') : 'elsewhere';

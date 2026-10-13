@@ -3,8 +3,7 @@
 // docs/INTEGRATION.md § 9.5). The owner is told when a recovery of their
 // secret starts and when it reaches quorum — the veto path, so a backup is not
 // finished without a channel or an explicit skip (plan § 7.2).
-import { personalSignHex } from './evmSign';
-import { SigningKey, computeAddress } from 'ethers';
+import { addressOf, personalSignHex } from './evmSign';
 
 export type AlertKind = 'telegram' | 'webhook';
 
@@ -23,7 +22,7 @@ export class AlertsError extends Error {
 	}
 }
 
-const walletOf = (ownerKey: string) => computeAddress(new SigningKey(ownerKey).publicKey).toLowerCase();
+const walletOf = addressOf;
 
 export const subscribeMessage = (wallet: string, channel: AlertKind, target: string, ts: number): string =>
 	['Backitup notifications subscribe', `wallet: ${wallet.toLowerCase()}`, `channel: ${channel}`, `target: ${target}`, `ts: ${ts}`].join('\n');
