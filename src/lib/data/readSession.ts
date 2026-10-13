@@ -10,7 +10,7 @@
 // reload nor logout. A server restart drops all sessions; a 401 on a locally
 // valid token triggers a fresh open.
 
-import { toBase64 } from '@/lib/pq/signature';
+import { proveChallenge } from '@/lib/pq/challengeProof';
 import { markShapeBlocked, markShapeUnblocked, isShapeBlocked } from './accessGate';
 
 declare const ELECTRIC_API_URL: string;
@@ -160,10 +160,8 @@ async function requestSession(
 ): Promise<ReadSessionEntry | null | typeof UNKNOWN_USER> {
 	const challengeResp = await fetchChallenge();
 	if (stale()) return null;
-	const challengeBytes = new TextEncoder().encode(challengeResp.challenge);
-	const sigBytes: Uint8Array = await em.signChallenge(challengeBytes);
+	const signature = await proveChallenge(challengeResp.challenge, (message) => em.signChallenge(message));
 	if (stale()) return null;
-	const signature = toBase64(sigBytes).replace(/=+$/, '');
 
 	const resp = await fetch(`${ELECTRIC_API_URL}/read_session`, {
 		method: 'POST',

@@ -30,6 +30,7 @@ import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
 import { clearSessions } from '@/lib/data/readSession';
+import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
@@ -681,6 +682,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#slotResolver = null;
     resetUserStorageCollection();
     clearSessions();
+    clearRelayCredentials();
     resetGate();
 
     if (hadActiveAccount) await this.#clearAccountReadCache();

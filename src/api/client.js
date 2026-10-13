@@ -4,10 +4,11 @@ import {
   deriveSignHash,
   toBase64,
 } from "@/lib/pq/signature";
+import { proveChallenge } from "@/lib/pq/challengeProof";
 
-// Challenge signatures travel unpadded; row columns are padded base64. The
-// canonical payload builder and the padded encoder both live in the protocol
-// module — see src/lib/pq/signature.ts.
+// Row columns are padded base64; the canonical payload builder and the padded
+// encoder both live in the protocol module — see src/lib/pq/signature.ts. The
+// challenge proof is src/lib/pq/challengeProof.ts.
 const encodeBase64 = (bytes, padded = false) => {
   if (!bytes) return "";
   const result = toBase64(bytes);
@@ -27,8 +28,7 @@ const timedFetch = (url, init = {}) =>
 export const api = {
   ingestWithAuthEach: async (mutations, signSkey) => {
     const challengeResp = await api.getChallenge();
-    const challengeSig = ml_dsa87.sign(new TextEncoder().encode(challengeResp.challenge), signSkey);
-    const signature = encodeBase64(challengeSig);
+    const signature = await proveChallenge(challengeResp.challenge, (message) => ml_dsa87.sign(message, signSkey));
 
     return timedFetch(`${ELECTRIC_API_URL}/ingest_each`, {
       method: "POST",
