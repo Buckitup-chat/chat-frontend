@@ -12,8 +12,6 @@ import errorMessage from '@/utils/errorMessage';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { useRecoveryInvitesStore } from '@/store/recoveryInvites.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
-import { fromBase64 } from '@/lib/pq/signature';
-import { publishVault } from '@/lib/recovery/vault';
 import { RecoveryChain } from '@/lib/recovery/chain';
 import { maybeRecoveryDeployment, deploymentNamespace, secretIdOf, secretRefOf } from '@/lib/recovery/deployments';
 import { gatewayOf } from '@/lib/recovery/gateway';
@@ -519,9 +517,11 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 			exportAccount: () => $userPQ.exportBackup(),
 			publishVault: async (wrapKey, json) => {
 				await ours(runId);
-				const signSkey = fromBase64((await em().exportVaultKeys()).sign_skey);
-				alive();
-				return publishVault({ userHash: owner, signSkey, wrapKey, json });
+				return em().publishRecoveryVault(wrapKey, json);
+			},
+			retireVaults: async (keep) => {
+				await ours(runId);
+				await em().retireRecoveryVaults({ keep });
 			},
 			register: async (fields) => {
 				await ours(runId);
@@ -782,7 +782,12 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		);
 
 	/** Revokes the backup for good: no recovery can ever use it (pq_recovery_shares § Dying). */
-	const revoke = () => ownerAct('RevokeSecret', 'revokeSecret', () => ({}), () => ({ revokedAt: nowSec() }));
+	const revoke = async () => {
+		const owner = $userPQ.currentUserHash;
+		await ownerAct('RevokeSecret', 'revokeSecret', () => ({}), () => ({ revokedAt: nowSec() }));
+		// Revoked, the vaults open nothing that matters on chain; retired, nothing is left to read at all.
+		if ($userPQ.currentUserHash === owner && run.value?.revokedAt) await em().retireRecoveryVaults();
+	};
 
 	/**
 	 * Hands one spare piece to a guardian already in the backup: a second index

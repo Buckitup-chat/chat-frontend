@@ -283,8 +283,14 @@ export interface RunDeps {
 	/** Persists the run; the next step waits for it. */
 	save: (run: BackupRun) => Promise<void>;
 	exportAccount: () => Promise<BackupContents>;
-	/** Seals `json` under `wrapKey` and stores it where the key alone finds it; resolves to its uuid. */
+	/** Seals `json` under `wrapKey` and stores it where the key alone finds it, as the account's current vault; resolves to its uuid. */
 	publishVault: (wrapKey: Uint8Array, json: string) => Promise<string>;
+	/**
+	 * Tombstones the account's earlier vaults, all but `keep`: their keys —
+	 * and, after a recovery, the pieces returned and the node half released —
+	 * would otherwise still open the account.
+	 */
+	retireVaults: (keep: string) => Promise<void>;
 	/** Signs addSecret as the owner and submits it; resolves to the secret id and the dispatch. */
 	register: (fields: { label: string; shares: ShareInput[]; threshold: bigint; recoveryDelay: bigint; recoveryWindow: bigint }) => Promise<{ id: string; txHash?: string }>;
 	/** Signs reshare of secret `id` as its owner and submits it. */
@@ -459,6 +465,10 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 		const failed = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
 		if (failed) throw failed.reason;
 		if (nodesPending(run).length) throw new RunStoppedError(run, 'nodes_failed', 'Some nodes did not take their part.');
+		// Only now, with this version on chain and every piece out, does the old vault stop being the way
+		// back: retired any earlier, a reshare that never landed would strand the owner. A failure stops the
+		// run short of done, and continuing it retires again.
+		await deps.retireVaults(run.vaultUuid!);
 		await step((r) => ({ step: 'done', ...scrubbed(r) }));
 	}
 	return run;

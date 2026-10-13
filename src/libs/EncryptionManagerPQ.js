@@ -1125,48 +1125,63 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   /**
-   * Seals the account under a wrap key and publishes it where only that key
-   * can find it (lib/recovery/vault). The root record names the current vault
-   * and every earlier one not yet retired: the keys inside never change, so a
-   * vault left live would keep an old set of shares able to open the account,
-   * and a tombstone that fails is kept on the list for the next attempt
-   * rather than forgotten.
+   * Seals the account under a wrap key, publishes it where only that key can
+   * find it (lib/recovery/vault), and records it in the root as the current
+   * vault; the one it replaces joins the root's stale list. Nothing is
+   * retired here: until the backup the new vault belongs to is on chain and
+   * its shares are out, the previous one is still the owner's way back
+   * (retireRecoveryVaults).
    *
-   * Vault first, root second, tombstones last. A crash before the root write
-   * leaves the new vault live and unreferenced, which is safe only because
-   * the caller hands its key to nobody before this returns; a failure after
-   * the root write leaves the previous
-   * backup usable, since nothing is retired until the new one is on record.
+   * Vault first, root second. A crash before the root write leaves the new
+   * vault live and unreferenced, which is safe only because the caller hands
+   * its key to nobody before this returns. Resolves to the vault's uuid.
    */
   async publishRecoveryVault(wrapKey, json) {
     const userHash = this.#currentUserHash;
     if (!userHash || !this.#signSkey || !this.#cryptSkey) {
       throw new Error('No user is currently logged in');
     }
-    // Each root patch is signed with whatever account is current when it is
-    // written; one switched in between would get this account's vault list.
-    const sameAccount = () => {
-      if (this.#currentUserHash !== userHash) throw new Error('The account changed while the backup was being written');
-    };
     // A root that is there but does not decrypt would fail the patch only
     // after the vault is already live; refuse before publishing anything.
     await this.#readRoot({ strict: true });
     const uuid = await publishVault({ userHash, signSkey: this.#signSkey, wrapKey, json });
-    sameAccount();
+    this.#sameAccount(userHash);
     // Only the address: mergeJsonPatch moves the vault it replaces onto
     // staleVaults against the base the patch actually lands on.
     await this.#writeRootPatch({ vaultUuid: uuid });
-    await this.#retireStaleVaults(sameAccount);
+    return uuid;
   }
 
-  /** Tombstones every vault the root lists as retired-pending; the ones that
-   * fail stay listed for the next attempt, and the failure is reported. */
-  async #retireStaleVaults(check) {
-    check();
-    const root = (await this.#readRoot({ strict: true })) || {};
+  #sameAccount(userHash) {
+    // Each root patch is signed with whatever account is current when it is
+    // written; one switched in between would get this account's vault list.
+    if (this.#currentUserHash !== userHash) throw new Error('The account changed while the backup was being written');
+  }
+
+  /**
+   * Tombstones every vault the root lists as stale, but `keep`: the keys
+   * inside a vault never change, so one left live keeps an old set of shares
+   * — and, after a recovery, the pieces returned and the node half released —
+   * able to open the account. With `keep` null (a revoked backup) the
+   * current vault goes too. A tombstone that fails stays on the list for the
+   * next attempt, and the failure is reported.
+   */
+  async retireRecoveryVaults({ keep = null } = {}) {
+    const userHash = this.#currentUserHash;
+    if (!userHash || !this.#signSkey || !this.#cryptSkey) {
+      throw new Error('No user is currently logged in');
+    }
+    let root = (await this.#readRoot({ strict: true })) || {};
+    if (keep === null && typeof root.vaultUuid === 'string') {
+      this.#sameAccount(userHash);
+      await this.#writeRootPatch({ vaultUuid: null });
+      root = (await this.#readRoot({ strict: true })) || {};
+    }
     const retired = [];
     let failure = null;
     for (const uuid of root.staleVaults ?? []) {
+      if (uuid === keep) continue;
+      this.#sameAccount(userHash);
       try {
         await this.#tombstoneRow(uuid);
         retired.push(uuid);
@@ -1175,10 +1190,10 @@ export class EncryptionManagerPQ extends EventTarget {
       }
     }
     if (retired.length) {
-      check();
+      this.#sameAccount(userHash);
       await this.#writeRootPatch({ retiredVaults: retired });
     }
-    if (failure) throw new Error('An earlier backup could not be retired; create the backup again to retry.', { cause: failure });
+    if (failure) throw new Error('An earlier backup could not be retired; try again.', { cause: failure });
   }
 
   // Update User Storage

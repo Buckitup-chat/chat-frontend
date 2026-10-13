@@ -11,16 +11,17 @@ import { makeFakeLockManager } from './helpers/fakeWebLocks';
 const OWNER = 'u_' + 'a'.repeat(128);
 const U = (c) => 'u_' + c.repeat(128);
 
+const published = [];
 const slots = {};
 const em = {
 	loadSlotJson: vi.fn(async (name) => slots[name] ?? null),
 	patchSlotJson: vi.fn(async (name, patch) => (slots[name] = { ...(slots[name] ?? {}), ...patch })),
 	exportVaultKeys: vi.fn(async () => ({ evm_skey: '11'.repeat(32) })),
+	publishRecoveryVault: vi.fn(async (wrapKey, json) => (published.push({ wrapKey, json }), 'vault-uuid')),
+	retireRecoveryVaults: vi.fn(async () => {}),
 };
 // By default step 2 waits on the account's export: a run started here stays at step 1.
 const user = { currentUserHash: OWNER, contacts: [], contactsMap: {}, exportBackup: vi.fn(() => new Promise(() => {})) };
-const published = vi.hoisted(() => []);
-vi.mock('@/lib/recovery/vault', () => ({ publishVault: async (v) => (published.push(v), 'vault-uuid') }));
 // The chain never answers: a run that reaches registration waits there.
 vi.mock('@/lib/recovery/chain', () => ({ RecoveryChain: class { readSecret() { return new Promise(() => {}); } } }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({ EncryptionManagerPQ: { getInstance: () => em } }));

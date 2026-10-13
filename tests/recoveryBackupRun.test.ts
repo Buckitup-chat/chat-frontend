@@ -50,6 +50,8 @@ const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number; saveDe
 	const deposits: { node: string; share: string; version: number }[] = [];
 	const sent: { guardian: string; part: RecoverySharePart }[] = [];
 	const vaults: { key: string; json: string }[] = [];
+	/** Each retirement, with the step the run had reached and the shares out by then. */
+	const retired: { keep: string; step: string; sent: number; deposits: number }[] = [];
 	let reads = 0;
 	let clock = 1000;
 	const deps: RunDeps = {
@@ -63,6 +65,10 @@ const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number; saveDe
 		publishVault: async (key, json) => {
 			vaults.push({ key: bytesToHex(key), json });
 			return 'vault-uuid';
+		},
+		retireVaults: async (keep) => {
+			const last = saved.at(-1)!;
+			retired.push({ keep, step: last.step, sent: sent.length, deposits: deposits.length });
 		},
 		register: async (fields) => {
 			const id = deps.secretIdOf(OWNER, fields.label);
@@ -95,7 +101,7 @@ const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number; saveDe
 		},
 		secretRefOf: (id) => `eip155:11155111:0xd9ff/${id}`,
 	};
-	return { deps, saved, registered, deposits, sent, vaults, tick: (sec: number) => (clock += sec) };
+	return { deps, saved, registered, deposits, sent, vaults, retired, tick: (sec: number) => (clock += sec) };
 };
 
 describe('a prepared run', () => {
@@ -338,6 +344,39 @@ describe('a reshare', () => {
 		expect(net.registered.size).toBe(1);
 		expect(net.sent.slice(4).map((s) => s.part.version)).toEqual([2, 2, 2]);
 		expect(net.deposits.filter((d) => d.version === 2)).toHaveLength(NODES.length);
+	});
+
+	it('retires the vault it replaces only once it is on chain and every piece is out, keeping its own', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const sent = net.sent.length;
+		const deposits = net.deposits.length;
+		const done = await advance({ ...resharing(first), vaultUuid: undefined }, { ...net.deps, publishVault: async () => 'vault-2' });
+		expect(done.step).toBe('done');
+		expect(net.retired.at(-1)).toEqual({ keep: 'vault-2', step: 'registered', sent: sent + 3, deposits: deposits + NODES.length });
+	});
+
+	it('retires nothing for a reshare that has not landed, or whose pieces are not all out', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const retiredBefore = net.retired.length;
+		const pending = await advance(resharing(first), { ...net.deps, reshare: async () => ({}) }).catch((e) => e);
+		expect(pending.reason).toBe('registration_pending');
+		const down = await advance(resharing(first), { ...fakeNetwork({ down: [NODES[0].id] }).deps, readVersion: net.deps.readVersion, reshare: net.deps.reshare, retireVaults: net.deps.retireVaults }).catch((e) => e);
+		expect(down.reason).toBe('nodes_failed');
+		expect(net.retired).toHaveLength(retiredBefore);
+	});
+
+	it('stops short of done when the old vault could not be retired, and retires it when continued', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		let refuse = true;
+		const deps = { ...net.deps, retireVaults: async (keep: string) => (refuse ? Promise.reject(new Error('rejected')) : net.deps.retireVaults(keep)) };
+		await expect(advance(resharing(first), deps)).rejects.toThrow('rejected');
+		const stopped = net.saved.at(-1)!;
+		expect(stopped.step).toBe('registered');
+		refuse = false;
+		expect((await advance(stopped, deps)).step).toBe('done');
 	});
 
 	it('waits for the next version, not the one it replaces', async () => {

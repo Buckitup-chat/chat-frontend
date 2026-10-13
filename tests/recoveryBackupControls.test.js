@@ -15,6 +15,8 @@ const em = {
 	loadSlotJson: vi.fn(async (name) => slots[name] ?? null),
 	patchSlotJson: vi.fn(async (name, patch) => (slots[name] = { ...(slots[name] ?? {}), ...patch })),
 	exportVaultKeys: vi.fn(async () => ({ evm_skey: '11'.repeat(32) })),
+	publishRecoveryVault: vi.fn(async () => 'vault-uuid'),
+	retireRecoveryVaults: vi.fn(async () => {}),
 };
 const user = { currentUserHash: OWNER, contacts: [], contactsMap: {} };
 const sendMessage = vi.fn(async () => 'dmsg_spare');
@@ -104,6 +106,8 @@ describe('changing a finished backup', () => {
 		await store.revoke();
 		expect(calls).toEqual([{ sign: 'RevokeSecret', id: ID, fields: {} }, expect.objectContaining({ via: 'self', call: 'revokeSecret' })]);
 		expect(slots.recovery_backup.run.revokedAt).toBeGreaterThan(0);
+		// Every vault goes, the current one too: nothing is left to read.
+		expect(em.retireRecoveryVaults).toHaveBeenCalledWith();
 		await expect(store.setPolicy({ delaySec: 86400, windowSec: 86400 })).rejects.toThrow(/revoked/);
 	});
 

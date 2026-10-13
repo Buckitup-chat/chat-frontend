@@ -2,6 +2,7 @@
 // profile or contacts write actually land on?
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { deriveVaultLocator } from '@/lib/pq/vaultEnvelope';
+import { fetchVault, VaultLookupError } from '@/lib/recovery/vault';
 
 let rows;          // uuid -> value_b64, null once tombstoned  (stand-in for the server + local KV)
 let vaults;
@@ -66,6 +67,8 @@ vi.mock('@/lib/data/userStorage', () => ({
 	// The real merge, so the fake lands a patch on its base the way the
 	// materializer does (slot map and vault list included).
 	putStorageJsonPatch: (opts) => landJsonPatch(opts),
+	// The public read a recovering device makes: every live row at the address.
+	getPublicStorageRowsByUuid: async (uuid) => (rows.get(uuid) ? [{ uuid, user_hash: 'any', value_b64: rows.get(uuid), deleted_flag: false }] : []),
 	saveStorageJsonPatch: async (opts) => { await landJsonPatch(opts); return 'synced'; },
 }));
 
@@ -220,30 +223,50 @@ describe('the recovery vault', () => {
 	const key = () => crypto.getRandomValues(new Uint8Array(32));
 	const at = (s) => rows.get(deriveVaultLocator(s));
 
-	it('lands at the address the key derives, and the next backup retires it', async () => {
+	const backup = (v) => JSON.stringify({ identity: { user_hash: 'u_' + 'a'.repeat(128) }, keys: { v } });
+
+	it('lands at the address the key derives, and the one it replaces stays until it is retired', async () => {
 		const em = await login();
 		const s1 = key();
-		await em.publishRecoveryVault(s1, '{"v":1}');
+		const first = await em.publishRecoveryVault(s1, backup(1));
+		expect(first).toBe(deriveVaultLocator(s1));
 		expect(at(s1)).toBeTruthy();
 		expect(at(s1)).not.toContain('"v":1');
 
+		// A reshare publishes its vault before it is on chain: the old one is still the way back.
 		const s2 = key();
-		await em.publishRecoveryVault(s2, '{"v":2}');
-		expect(at(s1)).toBeNull();
-		expect(at(s2)).toBeTruthy();
+		const second = await em.publishRecoveryVault(s2, backup(2));
+		expect((await fetchVault(s1)).keys.v).toBe(1);
+
+		// Its shares are out: the old key — and whatever was released with it — opens nothing.
+		await em.retireRecoveryVaults({ keep: second });
+		await expect(fetchVault(s1)).rejects.toBeInstanceOf(VaultLookupError);
+		expect((await fetchVault(s2)).keys.v).toBe(2);
+	});
+
+	it('retires the current vault too once the backup is revoked', async () => {
+		const em = await login();
+		const s1 = key();
+		await em.publishRecoveryVault(s1, backup(1));
+		const s2 = key();
+		await em.publishRecoveryVault(s2, backup(2));
+		await em.retireRecoveryVaults();
+		await expect(fetchVault(s1)).rejects.toBeInstanceOf(VaultLookupError);
+		await expect(fetchVault(s2)).rejects.toBeInstanceOf(VaultLookupError);
 	});
 
 	it('keeps a vault it could not retire on the list and retries it next time', async () => {
 		const em = await login();
 		const s1 = key();
 		await em.publishRecoveryVault(s1, '{}');
+		const keep = await em.publishRecoveryVault(key(), '{}');
 
 		refuseTombstones = true;
-		await expect(em.publishRecoveryVault(key(), '{}')).rejects.toThrow(/could not be retired/);
+		await expect(em.retireRecoveryVaults({ keep })).rejects.toThrow(/could not be retired/);
 		expect(at(s1)).toBeTruthy();
 
 		refuseTombstones = false;
-		await em.publishRecoveryVault(key(), '{}');
+		await em.retireRecoveryVaults({ keep });
 		expect(at(s1)).toBeNull();
 	});
 
