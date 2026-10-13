@@ -6,6 +6,7 @@ import { metaKeysOf } from '@/lib/recovery/guardianInvite';
 import { defaultSettings } from '@/lib/recovery/backupPlan';
 import { prepareRun, shareInputsOf } from '@/lib/recovery/backupRun';
 import { findMySlot } from '@/lib/recovery/guardianSlot';
+import { guardianChainReads } from '@/lib/recovery/chain';
 
 const keys = [1, 2, 3].map((n) => metaKeysOf(new Uint8Array(32).fill(n)));
 const run = prepareRun({
@@ -34,5 +35,22 @@ describe('a guardian’s own slot', () => {
 
 	it('is not found for someone dropped from the version', async () => {
 		expect(await findMySlot(chain, '0x', 1, metaKeysOf(new Uint8Array(32).fill(9)))).toBeNull();
+	});
+});
+
+describe('a pass’s reads of the slots', () => {
+	it('find this guardian’s slot from slots read once, and say whether one is theirs', async () => {
+		let listed = 0;
+		const counting = { ...chain, guardiansAt: async () => (listed++, inputs.map((s) => s.stealthAddress)), readSecret: async () => null };
+		const reads = guardianChainReads(counting, async () => keys[1]);
+		expect(await reads.mySlot('0x', 1)).toEqual({ stealthAddress: inputs[1].stealthAddress, ephemeralPubKey: inputs[1].ephemeralPubKey });
+		expect(await reads.addressedToMe('0x', 1)).toBe(true);
+		expect(listed).toBe(1);
+		const stranger = guardianChainReads(counting, async () => metaKeysOf(new Uint8Array(32).fill(9)));
+		expect(await stranger.mySlot('0x', 1)).toBeNull();
+		expect(await stranger.addressedToMe('0x', 1)).toBe(false);
+		const keyless = guardianChainReads(counting, async () => null);
+		expect(await keyless.addressedToMe('0x', 1)).toBeNull();
+		expect(await keyless.mySlot('0x', 1)).toBeNull();
 	});
 });

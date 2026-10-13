@@ -45,14 +45,21 @@ const call = async (url: string, init: Parameters<typeof fetch>[1] = {}, fetchIm
 	return body;
 };
 
-/** The wallet's subscriptions on the server at `base` — kinds only, never targets. */
-export const listSubscriptions = async (base: string, ownerKey: string, fetchImpl?: typeof fetch): Promise<Subscription[]> => {
+/** `path` on the notification server at `base`. */
+const endpoint = (base: string, path: string) => `${base.replace(/\/+$/, '')}/api/notifications${path}`;
+
+/** A read of the wallet's own records at `path`, signed with the read message; `extra` joins the query. */
+const signedGet = async (base: string, ownerKey: string, path: string, extra: Record<string, string> = {}, fetchImpl?: typeof fetch) => {
 	const wallet = walletOf(ownerKey);
 	const ts = nowSec();
 	const sig = personalSignHex(ownerKey, readMessage(wallet, ts));
-	const q = new URLSearchParams({ wallet, ts: String(ts), sig });
-	return (await call(`${base.replace(/\/+$/, '')}/api/notifications/subscriptions?${q}`, {}, fetchImpl)) ?? [];
+	const q = new URLSearchParams({ wallet, ts: String(ts), sig, ...extra });
+	return (await call(`${endpoint(base, path)}?${q}`, {}, fetchImpl)) ?? [];
 };
+
+/** The wallet's subscriptions on the server at `base` — kinds only, never targets. */
+export const listSubscriptions = (base: string, ownerKey: string, fetchImpl?: typeof fetch): Promise<Subscription[]> =>
+	signedGet(base, ownerKey, '/subscriptions', {}, fetchImpl);
 
 /**
  * Subscribes a webhook. Resolves to its signing secret, which the server shows
@@ -63,7 +70,7 @@ export const subscribeWebhook = async (base: string, ownerKey: string, target: s
 	const ts = nowSec();
 	const sig = personalSignHex(ownerKey, subscribeMessage(wallet, 'webhook', target, ts));
 	return call(
-		`${base.replace(/\/+$/, '')}/api/notifications/subscriptions`,
+		endpoint(base, '/subscriptions'),
 		{ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ wallet, kind: 'webhook', target, ts, sig }) },
 		fetchImpl,
 	);
@@ -99,17 +106,12 @@ export const unsubscribe = async (base: string, ownerKey: string, id: string, fe
 	const ts = nowSec();
 	const sig = personalSignHex(ownerKey, unsubscribeMessage(wallet, id, ts));
 	const q = new URLSearchParams({ wallet, ts: String(ts), sig });
-	await call(`${base.replace(/\/+$/, '')}/api/notifications/subscriptions/${encodeURIComponent(id)}?${q}`, { method: 'DELETE' }, fetchImpl);
+	await call(`${endpoint(base, `/subscriptions/${encodeURIComponent(id)}`)}?${q}`, { method: 'DELETE' }, fetchImpl);
 };
 
 /** The wallet's alert history, newest first as the server keeps it. */
-export const alertHistory = async (base: string, ownerKey: string, limit = 50, fetchImpl?: typeof fetch): Promise<unknown[]> => {
-	const wallet = walletOf(ownerKey);
-	const ts = nowSec();
-	const sig = personalSignHex(ownerKey, readMessage(wallet, ts));
-	const q = new URLSearchParams({ wallet, ts: String(ts), sig, limit: String(limit) });
-	return (await call(`${base.replace(/\/+$/, '')}/api/notifications?${q}`, {}, fetchImpl)) ?? [];
-};
+export const alertHistory = (base: string, ownerKey: string, limit = 50, fetchImpl?: typeof fetch): Promise<unknown[]> =>
+	signedGet(base, ownerKey, '', { limit: String(limit) }, fetchImpl);
 
 /** The wallet address the bot is sent first. */
 export const alertWallet = walletOf;

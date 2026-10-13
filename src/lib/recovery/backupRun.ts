@@ -33,7 +33,7 @@ import type { BackupContents } from '@/lib/backupContents';
 import { deliveryRecord, deliveryTag, splitFriendsHalf } from './shareSplit';
 import type { BackupSettings } from './backupPlan';
 import type { NodeRef } from './nodeClient';
-import type { ShareInput } from './gateway';
+import type { Fee, ShareInput } from './gateway';
 
 export type RunStep = 'prepared' | 'published' | 'submitted' | 'registered' | 'done' | 'discarded';
 
@@ -49,6 +49,35 @@ export const stepNumber = (run: BackupRun): number => {
 /** Steps 1–2 can be discarded: nothing is on chain yet. */
 export const canDiscard = (run: BackupRun): boolean => run.step === 'prepared' || run.step === 'published';
 
+/** Whether `run` is still being made: neither finished nor dropped. */
+export const unfinished = (run: BackupRun | null | undefined): run is BackupRun => !!run && run.step !== 'done' && run.step !== 'discarded';
+
+/**
+ * The backup slot. `run` is the backup's record — the first run until it is
+ * done — and `reshare` the next version while it is being made: the record
+ * stays as it is, the backup on chain, until the reshare is done and takes
+ * its place.
+ */
+export interface BackupSlot {
+	run?: BackupRun | null;
+	reshare?: BackupRun | null;
+}
+
+/** The run being made, if any: an unfinished reshare, else an unfinished record. */
+export const activeRun = (slot: BackupSlot | null | undefined): BackupRun | null =>
+	unfinished(slot?.reshare) ? slot!.reshare! : unfinished(slot?.run) ? slot!.run! : null;
+
+/**
+ * The secret the owner's backup has on chain, and how owner actions on it
+ * pay: the record's, a reshare in progress changing nothing; null before
+ * the secret is registered, and once it is revoked.
+ */
+export const registeredSecretOf = (slot: BackupSlot | null | undefined): { secretId: string; fee?: Fee } | null => {
+	const r = slot?.run;
+	if (!r?.secretId || r.revokedAt || (r.step !== 'registered' && r.step !== 'done')) return null;
+	return { secretId: r.secretId, fee: r.fee };
+};
+
 export interface RunGuardian {
 	userHash: string;
 	/** From their acceptance (§ Inviting); the slot is derived from it. */
@@ -57,10 +86,16 @@ export interface RunGuardian {
 
 export type NodeOutcome = { state: 'held' } | { state: 'staged' } | { state: 'failed'; error: string; at: number };
 
+/** What a reshare moves on from: the secret, and the version it replaces. */
+export interface ReshareOf {
+	secretId: string;
+	version: number;
+}
+
 /** The run, and once done the backup's record. Secret material is kept here, encrypted under the owner's account. */
 export interface BackupRun {
 	/** Set when this run reshares an existing backup (RunInput.reshareOf). */
-	reshareOf?: { secretId: string; version: number };
+	reshareOf?: ReshareOf;
 	/** Unix seconds the owner revoked the backup for good (plan § 7.4). */
 	revokedAt?: number;
 	/** Spare pieces handed to guardians of the backup, by share index. */
@@ -109,7 +144,7 @@ export interface BackupRun {
 	/** The device that runs it; another shows its progress rather than starting a second. */
 	device: string;
 	/** How the registration is paid: the free service (optionally another one), or the owner's own address. */
-	fee?: { kind: 'relayer'; url?: string } | { kind: 'self' };
+	fee?: Fee;
 	/** The alert channels set up with it, or that the owner skipped them. */
 	alerts?: { channels: ('app' | 'telegram' | 'webhook')[]; skipped: boolean };
 }
@@ -127,7 +162,7 @@ export interface RunInput {
 	 * version, under a new S, a new split and new node shares, so the old
 	 * version's bytes open nothing (§ Dying). Absent for a first backup.
 	 */
-	reshareOf?: { secretId: string; version: number };
+	reshareOf?: ReshareOf;
 }
 
 /** The node set as a share names it: the threshold and each node as `<id>@<url>`. */

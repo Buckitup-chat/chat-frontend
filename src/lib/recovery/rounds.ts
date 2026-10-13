@@ -4,6 +4,7 @@
 // defence is the timelock and a veto from any device still in their hands,
 // so a live round shows over every screen until it ends or the owner says it
 // is theirs. Pure: the chain's answers come in, the banner's words go out.
+import { ZeroAddress } from 'ethers';
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
 import type { SecretState } from './chain';
 
@@ -28,8 +29,6 @@ const PHASES: Partial<Record<RoundState, RoundPhase>> = {
 	[RoundState.Window]: 'window',
 };
 
-const ZERO = '0x0000000000000000000000000000000000000000';
-
 /** The alert for `secret` in `state`, or null when no round is live (none, or expired) or the secret is revoked. */
 export const alertOf = (secretId: string, secret: SecretState | null, state: RoundState): RoundAlert | null => {
 	const phase = PHASES[state];
@@ -42,7 +41,7 @@ export const alertOf = (secretId: string, secret: SecretState | null, state: Rou
 		phase,
 		executeAfter,
 		expiresAt: voting ? 0 : executeAfter + Number(secret.recoveryWindow),
-		recipient: !voting && secret.recoveryRecipient && secret.recoveryRecipient !== ZERO ? secret.recoveryRecipient : null,
+		recipient: !voting && secret.recoveryRecipient && secret.recoveryRecipient !== ZeroAddress ? secret.recoveryRecipient : null,
 	};
 };
 

@@ -258,6 +258,15 @@ export interface GuardianChain {
 	shareAt: (id: string, version: bigint, stealthAddress: string) => Promise<{ ephemeralPubKey: string; shareEncrypted: string }>;
 }
 
+/** The reads that list a version's guardian slots. */
+export type SlotReader = Pick<GuardianChain, 'guardiansAt' | 'shareAt'>;
+
+/** A guardian slot addressed to this guardian: its stealth address and the ephemeral key it derives from. */
+export interface SlotFound {
+	stealthAddress: string;
+	ephemeralPubKey: string;
+}
+
 /** A secret as the keeping rules read it (holdings.ts SecretOnChain). */
 export interface SecretSeen {
 	version: number;
@@ -304,15 +313,24 @@ export const guardianChainReads = (
 			const addresses = await c.guardiansAt(id, BigInt(version));
 			return Promise.all(addresses.map(async (address) => ({ address, ...(await c.shareAt(id, BigInt(version), address)) })));
 		});
+	const mine = (listed: Awaited<ReturnType<typeof slotsOf>>, keys: MetaKeys): SlotFound | null => {
+		const s = listed.find((x) => slotIsMine(keys, x.address, x.ephemeralPubKey));
+		return s ? { stealthAddress: s.address, ephemeralPubKey: s.ephemeralPubKey } : null;
+	};
 	return {
 		readSecret,
 		slotsAt: async (id: string, version: number) => (await slotsOf(id, version)).map((s) => getBytes(s.shareEncrypted)),
+		/** This guardian's slot of `version`, or null: none addressed to their keys, or no keys. */
+		mySlot: async (id: string, version: number): Promise<SlotFound | null> => {
+			const keys = await metaKeys();
+			return keys ? mine(await slotsOf(id, version), keys) : null;
+		},
+		/** Whether a slot of `version` is this guardian's; null while none are listed or without the keys. */
 		addressedToMe: async (id: string, version: number): Promise<boolean | null> => {
 			const listed = await slotsOf(id, version);
 			if (!listed.length) return null;
 			const keys = await metaKeys();
-			if (!keys) return null;
-			return listed.some((s) => slotIsMine(keys, s.address, s.ephemeralPubKey));
+			return keys ? !!mine(listed, keys) : null;
 		},
 	};
 };
