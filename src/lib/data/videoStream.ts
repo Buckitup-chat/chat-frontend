@@ -16,6 +16,8 @@
 import { fromBase64 } from '@/lib/pq/signature';
 import { CHUNK_SIZE } from '@/lib/pq/fileCrypto';
 import { downloadFile, type DownloadProgress } from './fileTransfer';
+import { FileVerificationError, readVerifiedFile, type ChunkHashes } from './fileIntegrity';
+import { fileKey } from './fileKey';
 import { getCachedMedia, putCachedMedia } from './mediaCache';
 import { bearerFor, openSession } from './readSession';
 
@@ -23,6 +25,8 @@ declare const ELECTRIC_API_URL: string;
 
 export interface VideoRef {
 	fileId: string;
+	/** The sender of the message carrying the video: the manifest and chunks must be theirs. */
+	uploaderHash: string;
 	encSecretB64: string;
 	size: number;
 	mimeType: string;
@@ -35,8 +39,15 @@ export interface VideoSource {
 	release: () => void;
 }
 
-/** Registration payloads for every live session, keyed by session id. */
-const active = new Map<string, Record<string, unknown>>();
+interface Session {
+	/** What the worker is sent, re-sent after a worker restart; its `chunkHashes` grow as chunks are verified. */
+	registration: Record<string, unknown> & { chunkHashes: Record<number, string> };
+	hashes: ChunkHashes;
+	onFailed?: (e: unknown) => void;
+}
+
+/** Every live session, keyed by session id. */
+const active = new Map<string, Session>();
 let listenersInstalled = false;
 
 const post = (message: unknown) => navigator.serviceWorker.controller?.postMessage(message);
@@ -45,17 +56,35 @@ const installListeners = () => {
 	if (listenersInstalled) return;
 	listenersInstalled = true;
 	navigator.serviceWorker.addEventListener('message', (event) => {
-		const msg = event.data as { type?: string; sessionId?: string };
-		if (msg?.type === 'need-session' && msg.sessionId && active.has(msg.sessionId)) {
-			post(active.get(msg.sessionId));
-		} else if (msg?.type === 'need-token' && msg.sessionId && active.has(msg.sessionId)) {
+		const msg = event.data as { type?: string; sessionId?: string; index?: number };
+		const session = msg?.sessionId ? active.get(msg.sessionId) : undefined;
+		if (msg?.type === 'need-session' && session) {
+			post(session.registration);
+		} else if (msg?.type === 'need-chunk-hash' && session && Number.isInteger(msg.index)) {
+			// The worker plays a chunk only with the hash its signed row gives;
+			// a refused row is the whole video refused.
+			const { sessionId, index } = msg as { sessionId: string; index: number };
+			session.hashes.expected(index).then(
+				(hash) => {
+					session.registration.chunkHashes[index] = hash;
+					post({ type: 'chunk-hash', sessionId, index, hash });
+				},
+				(e) => {
+					session.onFailed?.(e);
+					post({ type: 'chunk-hash', sessionId, index, hash: null });
+				},
+			);
+		} else if (msg?.type === 'chunk-refused' && session && Number.isInteger(msg.index)) {
+			// The worker held a chunk's bytes to their verified hash and they failed.
+			session.onFailed?.(new FileVerificationError(String(session.registration.fileId), 'invalid', 'its bytes are not the ones the uploader signed', msg.index));
+		} else if (msg?.type === 'need-token' && session) {
 			void openSession('file_chunk').then((token) => {
 				post({ type: 'token', sessionId: msg.sessionId, token: token || '' });
 			});
 		}
 	});
 	navigator.serviceWorker.addEventListener('controllerchange', () => {
-		for (const registration of active.values()) post(registration);
+		for (const session of active.values()) post(session.registration);
 	});
 };
 
@@ -112,10 +141,24 @@ export const openVideo = async (
 		 * and the resolved full URL replaces it at the end.
 		 */
 		onPartial?: (url: string) => void;
+		/**
+		 * Streaming path: a chunk failed after playback started — refused
+		 * (isRefusedFile: the video could not be verified) or not verifiable
+		 * yet (a later playback may pass).
+		 */
+		onFailed?: (e: unknown) => void;
 		signal?: AbortSignal;
 	} = {},
 ): Promise<VideoSource> => {
 	if (await ensureWorker()) {
+		// The worker decrypts what it fetches but does not verify signatures:
+		// it holds each chunk to the hash verified here (fileIntegrity.ts),
+		// asking for each as it plays. The manifest and the first chunk are
+		// verified now, so a refused file is refused at open.
+		const file = await readVerifiedFile(video.fileId, video.uploaderHash, { signal: opts.signal });
+		if (!file) throw new Error('file manifest not found');
+		if (file.manifest.deleted) throw new Error('file was deleted by its uploader');
+		const first = await file.hashes.expected(0);
 		const sessionId = crypto.randomUUID();
 		const bearer = bearerFor('file_chunk');
 		const registration = {
@@ -128,8 +171,9 @@ export const openVideo = async (
 			mimeType: video.mimeType,
 			baseUrl: ELECTRIC_API_URL,
 			token: bearer ? bearer.replace('Bearer ', '') : '',
+			chunkHashes: { 0: first } as Record<number, string>,
 		};
-		active.set(sessionId, registration);
+		active.set(sessionId, { registration, hashes: file.hashes, onFailed: opts.onFailed });
 		post(registration);
 		return {
 			url: `/encrypted-video/${sessionId}`,
@@ -145,13 +189,14 @@ export const openVideo = async (
 	// media cache keeps it across dialog switches, and re-entering the chat
 	// replays without downloading again. The cache owns the URL; release is
 	// a no-op on this path.
-	const cached = getCachedMedia(video.fileId);
+	const cached = getCachedMedia(fileKey(video));
 	if (cached) return { url: cached, streaming: false, release: () => {} };
 
 	const prefix: Uint8Array[] = [];
 	let partialUrl: string | null = null;
 	const bytes = await downloadFile({
 		fileId: video.fileId,
+		uploaderHash: video.uploaderHash,
 		encSecretB64: video.encSecretB64,
 		onProgress: opts.onProgress,
 		onChunk: (index, plain) => {
@@ -165,7 +210,7 @@ export const openVideo = async (
 		},
 		signal: opts.signal,
 	});
-	const url = putCachedMedia(video.fileId, bytes, video.mimeType || 'video/mp4');
+	const url = putCachedMedia(fileKey(video), bytes, video.mimeType || 'video/mp4');
 	if (partialUrl) URL.revokeObjectURL(partialUrl);
 	return { url, streaming: false, release: () => {} };
 };

@@ -1,5 +1,9 @@
 <template>
-  <div class="chat-window d-flex flex-column w-100 h-100">
+  <div class="chat-window d-flex flex-column w-100 h-100"
+    @dragenter="onDragEnter" @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop"
+    @dragstart="onPageDragStart" @dragend="onPageDragEnd">
+    <!-- Files dropped anywhere over the dialog send as the attach button does. -->
+    <div v-if="dropActive" class="drop-overlay">Drop to send to {{ title }}</div>
     <!-- Header -->
     <div class="chat-header d-flex align-items-center justify-content-between px-3 py-2 border-bottom">
       <div class="d-flex align-items-center text-dark">
@@ -18,6 +22,9 @@
              without a peer there is no dialog to attest. -->
         <button v-if="peerHash" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Sign a checkpoint of this dialog's history"
           :disabled="checkpointSigning" @click="emit('createCheckpoint')">🔏</button>
+        <!-- Only a contact confirmed in person can be asked (pq_recovery_shares § Inviting). -->
+        <button v-if="peerHash && canInvite" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Ask to be your guardian"
+          :disabled="inviting" @click="emit('inviteGuardian')">🛡</button>
         <div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')">
           <div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>
         </div>
@@ -90,27 +97,28 @@
                  played over the buffer the browser has actually decrypted. -->
             <div v-for="v in videosOf(msg)" :key="v.fileId" class="msg-video">
               <div class="msg-video-frame" :style="{ aspectRatio: v.widthAspect + ' / ' + v.heightAspect }"
-                :role="videos[v.fileId]?.url ? undefined : 'button'"
-                @click="!videos[v.fileId]?.url && videos[v.fileId]?.status !== 'opening' && emit('playVideo', v)">
+                :role="videos[fileKey(v)]?.url ? undefined : 'button'"
+                @click="!refusedFile(v) && !videos[fileKey(v)]?.url && videos[fileKey(v)]?.status !== 'opening' && emit('playVideo', v)">
                 <img v-if="thumbUrl(v)" class="msg-image-blur" :src="thumbUrl(v)" alt="" />
-                <video v-if="videos[v.fileId]?.url" class="msg-video-el"
-                  :src="videos[v.fileId].url" controls playsinline
+                <video v-if="videos[fileKey(v)]?.url" class="msg-video-el"
+                  :src="videos[fileKey(v)].url" controls playsinline
                   @loadedmetadata="restoreVideoPosition(v.fileId, $event)"
                   @timeupdate="onVideoTime(v.fileId, $event)"
                   @progress="onVideoTime(v.fileId, $event)"></video>
-                <div v-else-if="videos[v.fileId]?.status === 'opening'" class="msg-video-play" aria-hidden="true">
+                <div v-else-if="videos[fileKey(v)]?.status === 'opening'" class="msg-video-play" aria-hidden="true">
                   <span class="msg-video-spinner"></span>
                 </div>
                 <div v-else class="msg-video-play" aria-hidden="true">
                   <span class="msg-video-triangle"></span>
                 </div>
-                <div v-if="videos[v.fileId]?.status === 'error'" class="msg-image-progress _err">
+                <div v-if="refusedFile(v)" class="msg-image-progress _err">This video could not be verified</div>
+                <div v-else-if="videos[fileKey(v)]?.status === 'error'" class="msg-image-progress _err">
                   video failed — tap to retry
                 </div>
                 <!-- Duration travels in the envelope (07 §"video" pos 7), so the
                      badge shows before any chunk arrives; while playing the
                      native controls own the timeline. -->
-                <span v-if="!videos[v.fileId]?.url && v.durationSeconds" class="msg-video-duration">
+                <span v-if="!videos[fileKey(v)]?.url && v.durationSeconds" class="msg-video-duration">
                   {{ fmtDuration(v.durationSeconds) }}
                 </span>
               </div>
@@ -118,8 +126,8 @@
                    grows with the chunks regardless of playback (the player's
                    own controls already show the timeline), and leaves at
                    100%. -->
-              <div v-if="downloadingVideo(videos[v.fileId])" class="msg-video-load">
-                <div class="msg-video-load-fill" :style="{ width: loadPercent(videos[v.fileId]) + '%' }"></div>
+              <div v-if="downloadingVideo(videos[fileKey(v)])" class="msg-video-load">
+                <div class="msg-video-load-fill" :style="{ width: loadPercent(videos[fileKey(v)]) + '%' }"></div>
               </div>
             </div>
 
@@ -130,12 +138,13 @@
               :style="{ aspectRatio: imagesOf(msg)[0].widthAspect + ' / ' + imagesOf(msg)[0].heightAspect }"
               @click="openLightbox(msg, 0)">
               <img v-if="thumbUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbUrl(imagesOf(msg)[0])" alt="" />
-              <img v-if="images[imagesOf(msg)[0].fileId]?.url" class="msg-image-full"
-                :src="images[imagesOf(msg)[0].fileId].url" :alt="imagesOf(msg)[0].name" />
-              <div v-if="images[imagesOf(msg)[0].fileId]?.status === 'downloading'" class="msg-image-progress">
-                {{ images[imagesOf(msg)[0].fileId].done }} / {{ images[imagesOf(msg)[0].fileId].total }} chunks
+              <img v-if="images[fileKey(imagesOf(msg)[0])]?.url" class="msg-image-full"
+                :src="images[fileKey(imagesOf(msg)[0])].url" :alt="imagesOf(msg)[0].name" />
+              <div v-if="refusedFile(imagesOf(msg)[0])" class="msg-image-progress _err">This image could not be verified</div>
+              <div v-else-if="images[fileKey(imagesOf(msg)[0])]?.status === 'downloading'" class="msg-image-progress">
+                {{ images[fileKey(imagesOf(msg)[0])].done }} / {{ images[fileKey(imagesOf(msg)[0])].total }} chunks
               </div>
-              <div v-else-if="images[imagesOf(msg)[0].fileId]?.status === 'error'" class="msg-image-progress _err">
+              <div v-else-if="images[fileKey(imagesOf(msg)[0])]?.status === 'error'" class="msg-image-progress _err">
                 image failed — tap to retry
               </div>
             </div>
@@ -148,7 +157,8 @@
               <div v-for="(im, i) in visibleImages(msg)" :key="im.fileId" class="msg-gallery-cell"
                 @click="openLightbox(msg, i)">
                 <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
-                <img v-if="images[im.fileId]?.url" class="msg-image-full" :src="images[im.fileId].url" :alt="im.name" />
+                <img v-if="images[fileKey(im)]?.url" class="msg-image-full" :src="images[fileKey(im)].url" :alt="im.name" />
+                <div v-if="refusedFile(im)" class="msg-image-progress _err">could not be verified</div>
                 <div v-if="overflowCount(msg) && i === visibleImages(msg).length - 1" class="msg-gallery-more">
                   +{{ overflowCount(msg) }}
                 </div>
@@ -165,63 +175,68 @@
               <div class="msg-file-body" role="button" @click="emit('showFileState', f, msg)">
                 <div class="msg-file-name">{{ f.name }}</div>
                 <div class="msg-file-meta">
-                  <template v-if="downloads[f.fileId]?.status === 'downloading'">
-                    {{ fmtSize(f.size) }} · chunk {{ downloads[f.fileId].done }} of {{ downloads[f.fileId].total }}
+                  <template v-if="refusedFile(f)">
+                    {{ fmtSize(f.size) }} · <span class="msg-file-err">This file could not be verified</span>
                   </template>
-                  <template v-else-if="downloads[f.fileId]?.status === 'error'">
+                  <template v-else-if="downloads[fileKey(f)]?.status === 'downloading'">
+                    {{ fmtSize(f.size) }} · chunk {{ downloads[fileKey(f)].done }} of {{ downloads[fileKey(f)].total }}
+                  </template>
+                  <template v-else-if="downloads[fileKey(f)]?.status === 'error'">
                     {{ fmtSize(f.size) }} · <span class="msg-file-err">download failed — tap to retry</span>
                   </template>
-                  <template v-else-if="downloads[f.fileId]?.status === 'done'">
+                  <template v-else-if="downloads[fileKey(f)]?.status === 'done'">
                     {{ fmtSize(f.size) }} · saved
                   </template>
                   <template v-else>{{ fmtSize(f.size) }}</template>
                 </div>
               </div>
-              <template v-if="playableAudioType(f)">
-                <span v-if="audios[f.fileId]?.status === 'loading'" class="msg-file-spinner" title="Loading audio"></span>
-                <button v-else-if="audios[f.fileId]?.status !== 'ready'" type="button"
-                  class="msg-file-action msg-audio-toggle" title="Play" @click="playAudio(f)">
-                  <svg class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9l7-4.5z" /></svg>
-                </button>
+              <template v-if="!refusedFile(f)">
+                <template v-if="playableAudioType(f)">
+                  <span v-if="audios[fileKey(f)]?.status === 'loading'" class="msg-file-spinner" title="Loading audio"></span>
+                  <button v-else-if="audios[fileKey(f)]?.status !== 'ready'" type="button"
+                    class="msg-file-action msg-audio-toggle" title="Play" @click="playAudio(f)">
+                    <svg class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9l7-4.5z" /></svg>
+                  </button>
+                </template>
+                <button v-if="downloads[fileKey(f)]?.status !== 'downloading'" type="button"
+                  class="msg-file-action" @click="emit('downloadFile', f)"
+                  :title="downloads[fileKey(f)]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
+                <span v-else class="msg-file-spinner"></span>
               </template>
-              <button v-if="downloads[f.fileId]?.status !== 'downloading'" type="button"
-                class="msg-file-action" @click="emit('downloadFile', f)"
-                :title="downloads[f.fileId]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
-              <span v-else class="msg-file-spinner"></span>
             </div>
 
             <!-- Audio plays from its decrypted bytes, fetched on Play only. -->
-            <template v-if="playableAudioType(f)">
-              <div v-if="audios[f.fileId]?.status === 'loading'" class="msg-audio-note">
-                Loading audio<template v-if="audios[f.fileId].total"> · chunk {{ audios[f.fileId].done }} of {{ audios[f.fileId].total }}</template>
+            <template v-if="playableAudioType(f) && !refusedFile(f)">
+              <div v-if="audios[fileKey(f)]?.status === 'loading'" class="msg-audio-note">
+                Loading audio<template v-if="audios[fileKey(f)].total"> · chunk {{ audios[fileKey(f)].done }} of {{ audios[fileKey(f)].total }}</template>
               </div>
-              <div v-else-if="audios[f.fileId]?.status === 'error'" class="msg-audio-note msg-file-err">
-                {{ audios[f.fileId].message }}
+              <div v-else-if="audios[fileKey(f)]?.status === 'error'" class="msg-audio-note msg-file-err">
+                {{ audios[fileKey(f)].message }}
               </div>
-              <template v-else-if="audios[f.fileId]?.status === 'ready'">
-                <audio :ref="(el) => setAudioElement(f.fileId, el)" preload="auto" :src="audios[f.fileId].url"
-                  @loadedmetadata="trackAudio(f.fileId, $event)" @durationchange="trackAudio(f.fileId, $event)"
-                  @timeupdate="trackAudio(f.fileId, $event)" @play="trackAudio(f.fileId, $event)"
-                  @pause="trackAudio(f.fileId, $event)" @ended="trackAudio(f.fileId, $event)"
-                  @error="audioErrors = { ...audioErrors, [f.fileId]: true }"></audio>
+              <template v-else-if="audios[fileKey(f)]?.status === 'ready'">
+                <audio :ref="(el) => setAudioElement(fileKey(f), el)" preload="auto" :src="audios[fileKey(f)].url"
+                  @loadedmetadata="trackAudio(fileKey(f), $event)" @durationchange="trackAudio(fileKey(f), $event)"
+                  @timeupdate="trackAudio(fileKey(f), $event)" @play="trackAudio(fileKey(f), $event)"
+                  @pause="trackAudio(fileKey(f), $event)" @ended="trackAudio(fileKey(f), $event)"
+                  @error="audioErrors = { ...audioErrors, [fileKey(f)]: true }"></audio>
                 <div class="msg-audio-player">
                   <button type="button" class="msg-file-action msg-audio-toggle"
-                    :title="audioPlayback[f.fileId]?.playing ? 'Pause' : 'Play'"
-                    @click="toggleAudio(f.fileId)">
-                    <svg v-if="audioPlayback[f.fileId]?.playing" class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.5h2.5v9H4.5zM9 3.5h2.5v9H9z" /></svg>
+                    :title="audioPlayback[fileKey(f)]?.playing ? 'Pause' : 'Play'"
+                    @click="toggleAudio(fileKey(f))">
+                    <svg v-if="audioPlayback[fileKey(f)]?.playing" class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.5h2.5v9H4.5zM9 3.5h2.5v9H9z" /></svg>
                     <svg v-else class="msg-audio-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9l7-4.5z" /></svg>
                   </button>
                   <input type="range" class="msg-audio-seek" min="0" step="1"
-                    :max="audioPlayback[f.fileId]?.duration || 0" :value="audioPlayback[f.fileId]?.current || 0"
-                    :disabled="!audioPlayback[f.fileId]?.duration"
+                    :max="audioPlayback[fileKey(f)]?.duration || 0" :value="audioPlayback[fileKey(f)]?.current || 0"
+                    :disabled="!audioPlayback[fileKey(f)]?.duration"
                     :aria-label="'Seek in ' + f.name"
-                    :aria-valuetext="fmtTime(audioPlayback[f.fileId]?.current) + ' of ' + fmtTime(audioPlayback[f.fileId]?.duration)"
-                    @input="seekAudio(f.fileId, $event.target.value)" />
+                    :aria-valuetext="fmtTime(audioPlayback[fileKey(f)]?.current) + ' of ' + fmtTime(audioPlayback[fileKey(f)]?.duration)"
+                    @input="seekAudio(fileKey(f), $event.target.value)" />
                   <span class="msg-audio-time">
-                    {{ fmtTime(audioPlayback[f.fileId]?.current) }} / {{ fmtTime(audioPlayback[f.fileId]?.duration) }}
+                    {{ fmtTime(audioPlayback[fileKey(f)]?.current) }} / {{ fmtTime(audioPlayback[fileKey(f)]?.duration) }}
                   </span>
                 </div>
-                <div v-if="audioErrors[f.fileId]" class="msg-audio-note msg-file-err">
+                <div v-if="audioErrors[fileKey(f)]" class="msg-audio-note msg-file-err">
                   This browser cannot play this file. Download it instead.
                 </div>
               </template>
@@ -249,7 +264,9 @@
               class="msg-checkpoint" @click="emit('checkpointInfo', { part: cp, messageId: msg.id })">
               🔏 History checkpoint · tap to compare
             </button>
-            <div v-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
+            <RecoveryInviteCard v-if="invites[msg.id]" :view="invites[msg.id]" :peer-name="title" :busy="inviting"
+              @answer="(answer) => emit('answerInvite', answer)" />
+            <div v-else-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
             <div v-else class="message-text text-break">
               {{ msg.text }}
             </div>
@@ -332,12 +349,17 @@
         </div>
         <button type="button" class="btn btn-sm btn-light rounded-circle" @click="cancelReply" title="Cancel reply">✕</button>
       </div>
+      <div v-if="dropNotice" class="drop-notice">{{ dropNotice }}</div>
       <form @submit.prevent="submitMessage" class="d-flex align-items-center m-0">
-        <input ref="fileInput" type="file" multiple class="d-none" @change="onFilePicked" />
-        <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
-          style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;" title="Attach a file" @click="fileInput?.click()">📎</button>
+        <template v-if="canSendFiles">
+          <input ref="fileInput" type="file" multiple class="d-none" @change="onFilePicked" />
+          <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
+            style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;" title="Attach a file" @click="fileInput?.click()">
+            <i class="bi bi-paperclip"></i>
+          </button>
+        </template>
         <input type="text" class="form-control me-2 rounded-pill px-3" v-model="newMessage"
-          placeholder="Type a message..." />
+          placeholder="Type a message..." @paste="onPaste" />
         <button type="submit"
           class="btn btn-primary rounded-circle d-flex align-items-center justify-content-center border-0"
           style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;">
@@ -357,20 +379,21 @@
       </div>
       <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _prev" @click.stop="stepLightbox(-1)">‹</button>
       <div class="lightbox-frame">
-        <img v-if="images[currentFrame.part.fileId]?.url"
-          :src="images[currentFrame.part.fileId].url" :alt="currentFrame.part.name" />
+        <img v-if="images[fileKey(currentFrame.part)]?.url"
+          :src="images[fileKey(currentFrame.part)].url" :alt="currentFrame.part.name" />
         <img v-else-if="thumbUrl(currentFrame.part)" class="_blur" :src="thumbUrl(currentFrame.part)" alt="" />
-        <div v-if="images[currentFrame.part.fileId]?.status === 'downloading'" class="msg-image-progress">
-          {{ images[currentFrame.part.fileId].done }} / {{ images[currentFrame.part.fileId].total }} chunks
+        <div v-if="refusedFile(currentFrame.part)" class="msg-image-progress _err">This image could not be verified</div>
+        <div v-else-if="images[fileKey(currentFrame.part)]?.status === 'downloading'" class="msg-image-progress">
+          {{ images[fileKey(currentFrame.part)].done }} / {{ images[fileKey(currentFrame.part)].total }} chunks
         </div>
       </div>
       <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _next" @click.stop="stepLightbox(1)">›</button>
       <div v-if="currentFrame.caption" class="lightbox-caption">{{ currentFrame.caption }}</div>
       <div v-if="allDialogImages.length > 1" class="lightbox-strip">
         <button v-for="(it, i) in allDialogImages" :key="it.part.fileId" type="button"
-          class="lightbox-thumb" :class="{ _active: i === lightbox.index, _pending: !images[it.part.fileId]?.url }"
+          class="lightbox-thumb" :class="{ _active: i === lightbox.index, _pending: !images[fileKey(it.part)]?.url }"
           @click.stop="jumpLightbox(i)">
-          <img v-if="images[it.part.fileId]?.url || thumbUrl(it.part)" :src="images[it.part.fileId]?.url || thumbUrl(it.part)" alt="" />
+          <img v-if="images[fileKey(it.part)]?.url || thumbUrl(it.part)" :src="images[fileKey(it.part)]?.url || thumbUrl(it.part)" alt="" />
         </button>
       </div>
     </div>
@@ -413,10 +436,12 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { fileKey } from '@/lib/data/fileKey';
 import { contentToText, quoteSnapshot } from '@/lib/pq/content';
 import { thumbHashToDataURL } from 'thumbhash';
 import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
+import RecoveryInviteCard from './RecoveryInviteCard.vue';
 import { useMenu } from '@/composables/useMenu';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
 import { playableAudioType } from '@/composables/useAudioPlayback';
@@ -450,6 +475,19 @@ const props = defineProps({
     type: String,
     default: ''
   },
+  /** Guardian invitation and reply views by message id (inviteThread.inviteViews). */
+  invites: {
+    type: Object,
+    default: () => ({})
+  },
+  canInvite: {
+    type: Boolean,
+    default: false
+  },
+  inviting: {
+    type: Boolean,
+    default: false
+  },
   checkpointSigning: {
     type: Boolean,
     default: false
@@ -467,6 +505,11 @@ const props = defineProps({
     default: () => ({})
   },
   availability: {
+    type: Object,
+    default: () => ({})
+  },
+  /** fileKey → true for a file whose manifest or chunks contradict the uploader's signatures (docs/invariants.md §6a). */
+  refused: {
     type: Object,
     default: () => ({})
   },
@@ -492,7 +535,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo', 'inviteGuardian', 'answerInvite']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -651,8 +694,8 @@ const setAudioElement = (fileId, el) => {
   else audioElements.delete(fileId);
 };
 const playAudio = (part) => {
-  playWhenReady.add(part.fileId);
-  audioErrors.value = { ...audioErrors.value, [part.fileId]: false };
+  playWhenReady.add(fileKey(part));
+  audioErrors.value = { ...audioErrors.value, [fileKey(part)]: false };
   emit('playAudio', part);
 };
 watch(() => props.audios, async (audios) => {
@@ -703,10 +746,13 @@ const checkpointsOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'check
 /** Availability only shows while it is genuinely partial — a complete file
  *  needs no explanation, and an unknown manifest is not a claim to make. */
 const partial = (part) => {
-  const a = props.availability[part.fileId];
+  const a = props.availability[fileKey(part)];
   if (!a || a.unknown || a.deleted || !a.total) return null;
   return a.present < a.total ? a : null;
 };
+/** A file whose manifest or chunks contradict the uploader's signatures:
+ *  refused, so no download button — another attempt gets the same answer. */
+const refusedFile = (part) => !!props.refused[fileKey(part)];
 const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
 const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 
@@ -773,7 +819,7 @@ const openLightbox = (msg, localIndex) => {
   const parts = imagesOf(msg);
   if (!parts.length) return;
   const target = parts[Math.min(localIndex, parts.length - 1)];
-  const globalIndex = allDialogImages.value.findIndex((it) => it.part.fileId === target.fileId);
+  const globalIndex = allDialogImages.value.findIndex((it) => it.part === target);
   if (globalIndex < 0) return;
   lightbox.value = { index: globalIndex };
   // The carousel asks for whatever frame it shows: one that never arrived
@@ -797,12 +843,13 @@ const jumpLightbox = (index) => {
 const thumbCache = new Map();
 const thumbUrl = (im) => {
   if (!im.thumbHashB64) return '';
-  if (thumbCache.has(im.fileId)) return thumbCache.get(im.fileId);
+  // By the hash itself: each message carries its own, unverified, blur.
+  if (thumbCache.has(im.thumbHashB64)) return thumbCache.get(im.thumbHashB64);
   let url = '';
   try {
     url = thumbHashToDataURL(fromBase64(im.thumbHashB64));
   } catch { /* a malformed hash just means no blur */ }
-  thumbCache.set(im.fileId, url);
+  thumbCache.set(im.thumbHashB64, url);
   return url;
 };
 
@@ -812,17 +859,100 @@ const fmtSize = (n) => {
   return `${n} B`;
 };
 
-const fileInput = ref(null);
-const onFilePicked = (e) => {
-  const files = Array.from(e.target.files || []);
-  e.target.value = '';
+// Only a dialog takes files: a room mounts this window with no peer and no
+// handler, and a file sent there would vanish.
+const canSendFiles = computed(() => !!props.peerHash);
+
+// Everything picked, dropped or pasted at once travels as ONE composed
+// message, captioned by whatever sits in the input (board screen 02: the
+// caption is typed in the same field).
+const sendFiles = (files) => {
   if (!files.length) return;
-  // Everything picked travels as ONE composed message, captioned by whatever
-  // sits in the input (board screen 02: the caption is typed in the same field).
   emit('sendFile', files, newMessage.value.trim());
   newMessage.value = '';
   dropDraft();
 };
+
+const fileInput = ref(null);
+const onFilePicked = (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  sendFiles(files);
+};
+
+// ---------- drag and drop, paste (desktop) ----------
+
+// dragenter/dragleave fire for every child crossed: the overlay shows while
+// the count is above zero.
+const dragDepth = ref(0);
+const dropActive = computed(() => dragDepth.value > 0);
+const dropNotice = ref('');
+let noticeTimer = null;
+
+// A drag that started in the page — a picture in a message, which Chrome
+// drags as a file — is not a file from outside, and dropping it back must
+// not send it.
+let dragFromPage = false;
+const onPageDragStart = () => { dragFromPage = true; };
+const onPageDragEnd = () => { dragFromPage = false; };
+
+/** A drag of files from outside. Text, links and the upload queue carry no 'Files'. */
+const carriesFiles = (e) => !dragFromPage && Array.from(e.dataTransfer?.types || []).includes('Files');
+
+const showDropNotice = (text) => {
+  dropNotice.value = text;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => (dropNotice.value = ''), 5000);
+};
+
+const onDragEnter = (e) => {
+  if (!carriesFiles(e) || !canSendFiles.value) return;
+  e.preventDefault();
+  dragDepth.value++;
+};
+
+// Cancelling dragover is what makes this a drop target; anywhere else the
+// app-wide guard (fileDropGuard.ts) keeps the browser from opening the file.
+const onDragOver = (e) => {
+  if (!carriesFiles(e) || !canSendFiles.value) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+};
+
+const onDragLeave = () => {
+  if (dragDepth.value) dragDepth.value--;
+};
+
+const onDrop = (e) => {
+  if (!carriesFiles(e) || !canSendFiles.value) return;
+  e.preventDefault();
+  dragDepth.value = 0;
+  // A folder arrives as a File with no content; it is named and left out
+  // rather than sent empty or lost without a word.
+  const folders = [];
+  const files = [];
+  // The items list also holds the drag's text entries; only file items line up with files.
+  const items = Array.from(e.dataTransfer.items || []).filter((it) => it.kind === 'file');
+  Array.from(e.dataTransfer.files || []).forEach((file, i) => {
+    if (items[i]?.webkitGetAsEntry?.()?.isDirectory) folders.push(file.name);
+    else files.push(file);
+  });
+  if (folders.length) showDropNotice(`Folders can't be sent — drop the files inside: ${folders.join(', ')}`);
+  sendFiles(files);
+};
+
+// A screenshot pasted into the input sends like a dropped file; pasted text
+// stays text — including a copy from Word or Excel, which carries a picture
+// of the selection beside the text.
+const onPaste = (e) => {
+  const files = Array.from(e.clipboardData?.files || []);
+  const isText = Array.from(e.clipboardData?.types || []).includes('text/plain');
+  if (!files.length || isText || !canSendFiles.value) return;
+  e.preventDefault();
+  sendFiles(files);
+};
+
+onBeforeUnmount(() => clearTimeout(noticeTimer));
 
 // 1:1 dialog: the only two authors are me and the peer the window shows.
 const quoteAuthorName = (hash) => (hash === props.myHash ? 'Me' : props.title);
@@ -1004,7 +1134,21 @@ watch(() => props.messages, () => {
 
 .chat-window {
   background: transparent;
+  position: relative;
 }
+
+/* ---------- drag and drop ---------- */
+.drop-overlay {
+  position: absolute; inset: 8px; z-index: 20;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px dashed #0d6efd; border-radius: 16px;
+  background: rgba(255, 255, 255, .88);
+  font-size: 15px; font-weight: 600; color: #0d6efd;
+  /* the overlay must not swallow the drag events it is shown for */
+  pointer-events: none;
+}
+.drop-notice { margin: 0 4px 6px; font-size: 12px; color: #a15c00; }
+.attach-btn .bi { font-size: 18px; color: #5a5a5a; }
 
 .chat-header {
   background-color: #ffffff;

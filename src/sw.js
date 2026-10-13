@@ -15,6 +15,7 @@
 import { precacheAndRoute, createHandlerBoundToURL, cleanupOutdatedCaches } from 'workbox-precaching';
 import { NavigationRoute, registerRoute } from 'workbox-routing';
 import { parseRange, planChunks } from '@/lib/pq/videoRange';
+import { chunkDataHash } from '@/lib/pq/fileCrypto';
 
 self.skipWaiting();
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
@@ -45,11 +46,22 @@ self.addEventListener('message', (event) => {
 			mimeType: msg.mimeType,
 			baseUrl: msg.baseUrl,
 			token: msg.token || null,
+			// Index → the hash its bytes must have, as the page verified it.
+			chunkHashes: { ...msg.chunkHashes },
+			// Index → requests waiting for the page to answer for it.
+			hashWaiters: new Map(),
 			cache: new Map(),
 			key: null,
 		});
 	} else if (msg.type === 'unregister') {
 		sessions.delete(msg.sessionId);
+	} else if (msg.type === 'chunk-hash' && msg.sessionId) {
+		const s = sessions.get(msg.sessionId);
+		if (s) {
+			if (msg.hash) s.chunkHashes[msg.index] = msg.hash;
+			for (const wake of s.hashWaiters.get(msg.index) ?? []) wake();
+			s.hashWaiters.delete(msg.index);
+		}
 	} else if (msg.type === 'token' && msg.sessionId) {
 		const s = sessions.get(msg.sessionId);
 		if (s) s.token = msg.token || null;
@@ -85,6 +97,27 @@ const requestToken = async (session, sessionId) => {
 	return session.token;
 };
 
+const tellPages = async (message) => {
+	for (const c of await self.clients.matchAll({ type: 'window' })) c.postMessage(message);
+};
+
+// GCM would accept any of this file's chunks at any index. The page verifies
+// the uploader's signatures and answers, per index, the hash its bytes must
+// have; no answer within 10 s and the chunk is not served.
+const expectedHash = async (session, index, sessionId) => {
+	if (!session.chunkHashes[index]) {
+		const answered = new Promise((wake) => {
+			const timer = setTimeout(wake, 10_000);
+			session.hashWaiters.set(index, [...(session.hashWaiters.get(index) ?? []), () => { clearTimeout(timer); wake(); }]);
+		});
+		await tellPages({ type: 'need-chunk-hash', sessionId, index });
+		await answered;
+	}
+	const expected = session.chunkHashes[index];
+	if (!expected) throw new Error(`chunk ${index}: could not be verified`);
+	return expected;
+};
+
 const fetchChunk = (session, index) => {
 	const headers = session.token ? { Authorization: `Bearer ${session.token}` } : undefined;
 	return fetch(`${session.baseUrl}/file_chunk/${session.fileId}/${index}`, { headers });
@@ -97,6 +130,7 @@ const getChunk = async (session, index, sessionId) => {
 		session.cache.set(index, hit);
 		return hit;
 	}
+	const expected = await expectedHash(session, index, sessionId);
 	const sentToken = session.token;
 	let r = await fetchChunk(session, index);
 	if (r.status === 401) {
@@ -106,8 +140,13 @@ const getChunk = async (session, index, sessionId) => {
 	}
 	if (!r.ok) throw new Error(`chunk ${index}: HTTP ${r.status}`);
 	const blob = new Uint8Array(await r.arrayBuffer());
-	// nonce(12) || ciphertext || tag — GCM failing means the bytes are not
-	// what the sender encrypted, and nothing unverified is ever served.
+	if (chunkDataHash(blob) !== expected) {
+		// The page owns the verdict and the UI: tell it, then end the stream.
+		await tellPages({ type: 'chunk-refused', sessionId, index });
+		throw new Error(`chunk ${index}: could not be verified`);
+	}
+	// nonce(12) || ciphertext || tag — the signed bytes of chunk `index`,
+	// decrypted; nothing unverified is ever served.
 	const plain = new Uint8Array(await crypto.subtle.decrypt(
 		{ name: 'AES-GCM', iv: blob.slice(0, 12) },
 		await importKey(session),

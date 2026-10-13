@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { webcrypto } from 'node:crypto';
+import { chunkDataHash } from '@/lib/pq/fileCrypto';
+import { loadWorker } from './helpers/swHarness';
 
 vi.mock('workbox-precaching', () => ({
 	precacheAndRoute: () => {},
@@ -21,32 +23,6 @@ const FILE_ID = 'file-1';
 let fetches: Array<{ url: string; authorization: string | null; index: number }>;
 let pageInbox: any[];
 
-const loadWorker = async () => {
-	const listeners: Record<string, Listener[]> = {};
-	const clients: Array<{ postMessage: (m: any) => void }> = [];
-	vi.stubGlobal('self', {
-		addEventListener: (type: string, fn: Listener) => (listeners[type] ??= []).push(fn),
-		skipWaiting: () => {},
-		clients: { claim: async () => {}, matchAll: async () => clients },
-		__WB_MANIFEST: [],
-	});
-	vi.resetModules();
-	await import('@/sw.js');
-	const dispatch = (type: string, event: any) => listeners[type]?.forEach((fn) => fn(event));
-	return {
-		clients,
-		postToWorker: (data: any) => dispatch('message', { data }),
-		request: (path: string, range?: string): Promise<Response> => {
-			let responded: Promise<Response> | null = null;
-			dispatch('fetch', {
-				request: new Request(`https://app.test${path}`, { headers: range ? { range } : {} }),
-				respondWith: (p: Promise<Response>) => { responded = p; },
-			});
-			if (!responded) throw new Error('worker did not handle the request');
-			return responded;
-		},
-	};
-};
 
 const encrypt = async (secret: Uint8Array, plain: Uint8Array) => {
 	const key = await webcrypto.subtle.importKey('raw', secret, { name: 'AES-GCM' }, false, ['encrypt']);
@@ -58,10 +34,14 @@ const encrypt = async (secret: Uint8Array, plain: Uint8Array) => {
 	return blob;
 };
 
+/** The hashes the page verified for the backend's chunks; a session registers with them. */
+let hashes: string[] = [];
+
 type ChunkReply = (index: number, authorization: string | null) => Response | Promise<Response>;
 
 const installBackend = async (secret: Uint8Array, reply?: ChunkReply) => {
 	const blobs = await Promise.all(PLAINS.map((p) => encrypt(secret, p)));
+	hashes = blobs.map(chunkDataHash);
 	const accept: ChunkReply = (index, authorization) =>
 		authorization === 'Bearer fresh-token'
 			? new Response(blobs[index], { status: 200 })
@@ -93,6 +73,7 @@ const register = (worker: Awaited<ReturnType<typeof loadWorker>>, secret: Uint8A
 	worker.postToWorker({
 		type: 'register', sessionId, fileId: FILE_ID, encSecret: secret, chunkSize: CHUNK,
 		totalSize: CHUNK * PLAINS.length, mimeType: 'video/mp4', baseUrl: 'https://api.test', token,
+		chunkHashes: { ...hashes },
 	});
 
 const rangeOf = (index: number) => `bytes=${index * CHUNK}-${index * CHUNK + CHUNK - 1}`;
@@ -270,6 +251,10 @@ describe('E. multi-tab ownership of need-token (real videoStream.ts)', () => {
 		}));
 		vi.doMock('@/lib/data/fileTransfer', () => ({ downloadFile: async () => { throw new Error('fallback not expected'); } }));
 		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: async () => null, putCachedMedia: async () => {} }));
+		vi.doMock('@/lib/data/fileIntegrity', async (importOriginal) => ({
+			...(await importOriginal<typeof import('@/lib/data/fileIntegrity')>()),
+			readVerifiedFile: async () => ({ manifest: { fileId: FILE_ID, chunkCount: 2, deleted: false }, hashes: { expected: async (i: number) => hashes[i] } }),
+		}));
 
 		const swListeners: Record<string, Listener[]> = {};
 		const toWorker: any[] = [];
@@ -289,13 +274,14 @@ describe('E. multi-tab ownership of need-token (real videoStream.ts)', () => {
 	};
 
 	const settle = () => new Promise((r) => setTimeout(r, 50));
-	const video = { fileId: FILE_ID, encSecretB64: 'AAAA', size: 16, mimeType: 'video/mp4' };
+	const video = { fileId: FILE_ID, uploaderHash: 'u_' + 'a'.repeat(128), encSecretB64: 'AAAA', size: 16, mimeType: 'video/mp4' };
 	const idOf = (source: { url: string }) => source.url.split('/').pop()!;
 
 	afterEach(() => {
 		vi.doUnmock('@/lib/data/readSession');
 		vi.doUnmock('@/lib/data/fileTransfer');
 		vi.doUnmock('@/lib/data/mediaCache');
+		vi.doUnmock('@/lib/data/fileIntegrity');
 	});
 
 	it('E1 the owning tab answers with the requested sessionId, and only it opens a file_chunk session', async () => {

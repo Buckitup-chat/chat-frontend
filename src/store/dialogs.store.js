@@ -46,6 +46,9 @@ const safeBase64Decode = (str, fieldName) => {
     return result;
 };
 
+/** Content parts whose bytes travel as a file (fileTransfer.ts). */
+const MEDIA_KINDS = new Set(['file', 'image', 'video']);
+
 export const useDialogsStore = defineStore('dialogs', () => {
     const $userPQ = userPQStore();
 
@@ -986,11 +989,11 @@ export const useDialogsStore = defineStore('dialogs', () => {
     const openVideoSource = (part, opts) => openVideo(part, opts);
 
     /** How much of an attachment this node can serve (§2.4). */
-    const getFileAvailability = (fileId) => fileAvailability(fileId);
+    const getFileAvailability = (part) => fileAvailability(part.fileId, part.uploaderHash);
 
     /** Downloads and decrypts an attachment; progress in chunks (§2.3). */
     const fetchFile = (filePart, { onProgress, signal } = {}) =>
-        downloadFile({ fileId: filePart.fileId, encSecretB64: filePart.encSecretB64, onProgress, signal });
+        downloadFile({ fileId: filePart.fileId, uploaderHash: filePart.uploaderHash, encSecretB64: filePart.encSecretB64, onProgress, signal });
 
     /**
      * Deletes own message (§3.2): a new revision with deleted_flag and no
@@ -1029,7 +1032,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
             const jsonStr = await DialogCrypto.decryptContent(key, row.content_b64);
             // Deletion tombstones carry empty content by design (07: an empty
             // content_b64 is only valid alongside deleted_flag) — not a format error.
-            const parts = jsonStr ? decodeContent(jsonStr) : [];
+            // A file is its sender's: its manifest and chunks must be signed by
+            // the author of this row (fileIntegrity.ts).
+            const parts = (jsonStr ? decodeContent(jsonStr) : []).map((p) =>
+                (MEDIA_KINDS.has(p.kind) ? { ...p, uploaderHash: row.sender_hash } : p));
 
             return {
                 ...row,
@@ -1048,6 +1054,54 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 text: unsupported ? "Unsupported message format" : "Decryption failed",
             };
         }
+    };
+
+    /**
+     * The original revisions of `messageIds` — the archived row each began
+     * as, whose parent_sign_hash is null — decoded, by message id. Some
+     * content counts as first sent, whatever later edits or a deletion made
+     * of the row: a guardian's reply to an invitation (pq_recovery_shares
+     * § Inviting). A message whose original is not here yet, or not yet
+     * verifiable or decryptable, maps to null and can be asked again; one
+     * whose original is forged maps to no parts. Settled answers are kept: an
+     * original never changes. Cleared with the session.
+     */
+    const firstRevisions = new Map();
+    const firstRevisionsOf = async (dialogHash, messageIds) => {
+        const out = new Map();
+        const wanted = new Set();
+        for (const id of messageIds) {
+            const known = firstRevisions.get(`${dialogHash}|${id}`);
+            if (known) out.set(id, known);
+            else wanted.add(id);
+        }
+        if (!wanted.size) return out;
+        const colls = getDialogCollections(dialogHash);
+        const versionsState = await settled(colls.versions);
+        const live = colls.versions.toArray.filter((v) => wanted.has(v.message_id));
+        const cached = versionsState.state === 'failed'
+            ? (await readDialogRows('dialog_messages_versions', dialogHash)).filter((r) => wanted.has(r.message_id))
+            : [];
+        const originals = mergeLiveWithCached('dialog_messages_versions', live, cached, (r) => `${r.message_id}|${r.sign_hash}`)
+            .filter((r) => !r.parent_sign_hash);
+        for (const id of wanted) {
+            out.set(id, null);
+            const row = originals.find((r) => r.message_id === id);
+            if (!row) continue;
+            const verdict = await verifyReplicatedRow('dialog_messages_versions', row, getVerifiedSignPkey);
+            let parts = null;
+            if (verdict.status === 'invalid') parts = [];
+            else if (verdict.status === 'verified') {
+                const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
+                const json = key && row.content_b64 ? await DialogCrypto.decryptContent(key, row.content_b64).catch(() => null) : null;
+                if (json) parts = decodeContent(json);
+            }
+            if (parts) {
+                firstRevisions.set(`${dialogHash}|${id}`, parts);
+                out.set(id, parts);
+            }
+        }
+        return out;
     };
 
     /**
@@ -1127,6 +1181,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         checkpointAlerts.value = new Map();
         senderMsgKeys.value = {};
         decryptedRefsCache.clear();
+        firstRevisions.clear();
         dialogGates.clear();
         ownSentMessageIds.clear();
         optimisticItems.value = new Map();
@@ -1863,6 +1918,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         getFileAvailability,
         openVideoSource,
         getMessageHistory,
+        firstRevisionsOf,
         createDialogCheckpoint,
         verifyDialogCheckpoint,
         compareDialogCheckpoint,

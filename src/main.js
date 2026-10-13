@@ -1,6 +1,7 @@
 // First: the page moves under the build base before anything creates the router.
 import './enterBase';
 import { createApp } from 'vue';
+import { installFileDropGuard } from '@/lib/fileDropGuard';
 
 import App from './App.vue';
 import { listenForInstallPrompt } from './composables/useInstallPrompt';
@@ -98,6 +99,7 @@ app.component('InfoTooltip', InfoTooltip);
 // (when enabled) elects a writer via BrowserCollectionCoordinator. A second
 // tab is no different from a second device, which the protocol must survive
 // anyway — signed rows, monotonic owner_timestamps, idempotent replays.
+installFileDropGuard();
 app.mount('#app');
 
 // Offline shell: precached build + encrypted-video streaming (src/sw.js).
