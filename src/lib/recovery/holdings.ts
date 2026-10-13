@@ -60,13 +60,14 @@ export interface KeepingContext {
  * Where a share just received stands. It is kept whatever the answer — a
  * share is never dropped on arrival — and every state but `pending` is told
  * to the owner: a share that does not verify may be the owner's client's
- * fault, and the owner has to hear it.
+ * fault, and the owner has to hear it. The detail travels to the owner, so it
+ * names "the guardian" rather than "you".
  */
 export const judgeShare = async (owner: string, share: Omit<RecoverySharePart, 'kind'>, ctx: KeepingContext): Promise<{ state: HoldingState; detail: string }> => {
 	const ref = parseSecretRef(share.secretRef);
-	if (!ref) return { state: 'unverified', detail: 'it names no secret this app can read' };
-	if (!ctx.reachable(ref.namespace)) return { state: 'unreachable', detail: 'it is for a network this app cannot reach' };
-	if (!ctx.consented(owner, ref.namespace)) return { state: 'unrequested', detail: 'you did not agree to be their guardian on this network' };
+	if (!ref) return { state: 'unverified', detail: 'it names no secret the guardian\'s app can read' };
+	if (!ctx.reachable(ref.namespace)) return { state: 'unreachable', detail: 'it is for a network the guardian\'s app cannot reach' };
+	if (!ctx.consented(owner, ref.namespace)) return { state: 'unrequested', detail: 'the guardian has not agreed to keep pieces on this network' };
 	const secret = await ctx.readSecret(ref.id);
 	// A version the chain does not show yet is read again later, not reported.
 	if (!secret || share.version > secret.version) return { state: 'pending', detail: '' };
@@ -140,7 +141,7 @@ export const shouldDrop = async (h: Holding, all: readonly Holding[], ctx: Dying
 	);
 	if (replaced) return 'a newer version replaced it';
 	const mine = await ctx.addressedToMe(ref.id, secret.version);
-	return mine === false ? 'you are no longer a guardian of this backup' : null;
+	return mine === false ? 'the backup no longer lists this guardian' : null;
 };
 
 /** The message telling the owner where `h` stands, or null when they already know. */

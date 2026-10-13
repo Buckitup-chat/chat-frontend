@@ -264,7 +264,10 @@
               class="msg-checkpoint" @click="emit('checkpointInfo', { part: cp, messageId: msg.id })">
               🔏 History checkpoint · tap to compare
             </button>
-            <RecoveryInviteCard v-if="invites[msg.id]" :view="invites[msg.id]" :peer-name="title" :busy="inviting"
+            <RecoveryShareCard v-if="shares[msg.id] && shares[msg.id].kind !== 'holding'" :view="shares[msg.id]" :peer-name="title"
+              :busy="givingBack" @give-back="(key) => emit('giveBackShare', key)" />
+            <RecoveryHoldingLine v-else-if="shares[msg.id]" :view="shares[msg.id]" :peer-name="title" />
+            <RecoveryInviteCard v-else-if="invites[msg.id]" :view="invites[msg.id]" :peer-name="title" :busy="inviting"
               @answer="(answer) => emit('answerInvite', answer)" />
             <div v-else-if="msg._deleted" class="message-text fst-italic text-muted">Message deleted</div>
             <div v-else class="message-text text-break">
@@ -442,6 +445,8 @@ import { thumbHashToDataURL } from 'thumbhash';
 import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import RecoveryInviteCard from './RecoveryInviteCard.vue';
+import RecoveryShareCard from './RecoveryShareCard.vue';
+import RecoveryHoldingLine from './RecoveryHoldingLine.vue';
 import { useMenu } from '@/composables/useMenu';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
 import { playableAudioType } from '@/composables/useAudioPlayback';
@@ -481,6 +486,15 @@ const props = defineProps({
     default: () => ({})
   },
   canInvite: {
+    type: Boolean,
+    default: false
+  },
+  /** Backup pieces and their reports by message id (useRecoveryShares.views). */
+  shares: {
+    type: Object,
+    default: () => ({})
+  },
+  givingBack: {
     type: Boolean,
     default: false
   },
@@ -535,7 +549,7 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo', 'inviteGuardian', 'answerInvite']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo', 'inviteGuardian', 'answerInvite', 'giveBackShare']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);

@@ -73,7 +73,7 @@ describe('dropping a share', () => {
 	it('drops once the replacement is held, or the new version has no slot for this guardian', async () => {
 		const replacement = holding({ share: { ...share, version: 2 } });
 		expect(await shouldDrop(holding(), [holding(), replacement], dying(2))).toMatch(/newer version/);
-		expect(await shouldDrop(holding(), [holding()], dying(2, { mine: false }))).toMatch(/no longer a guardian/);
+		expect(await shouldDrop(holding(), [holding()], dying(2, { mine: false }))).toMatch(/no longer lists this guardian/);
 	});
 });
 

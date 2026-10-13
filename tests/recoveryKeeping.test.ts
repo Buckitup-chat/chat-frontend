@@ -241,7 +241,7 @@ describe('the periodic pass', () => {
 
 		seed = seeds[0];
 		await sweepHoldings(deps());
-		expect(holdings()[KEY]).toMatchObject({ state: 'dropped', detail: 'you are no longer a guardian of this backup' });
+		expect(holdings()[KEY]).toMatchObject({ state: 'dropped', detail: 'the backup no longer lists this guardian' });
 	});
 
 	it('leaves a share for a network this build cannot reach to the guardian', async () => {
