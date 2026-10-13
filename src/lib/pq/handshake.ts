@@ -9,7 +9,7 @@ import { concatBytes, randomBytes } from '@noble/hashes/utils';
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { base64urlDecode, decode as decodeQwbp } from 'qwbp';
-import { hkdfDerive } from './hkdf';
+import { hkdfDerive, sixDigits } from './hkdf';
 import { cardVouchesForContactKey, verifyUserCard } from './verifyCard';
 import { toBase64, toBase64Url, toBytes } from './signature';
 import type { UserCardRow } from '@/lib/data/types';
@@ -165,17 +165,15 @@ const boundToChannel = (T: Uint8Array, fps: Fingerprints): Uint8Array => {
 export const pqMessage = (T: Uint8Array, fps: Fingerprints): Uint8Array =>
 	concatBytes(utf8(PQ_TAG), boundToChannel(T, fps));
 
-/** Four bytes as a big-endian number, mod 10^6, zero-padded: the six digits a screen shows. */
-export const sixDigits = (out: Uint8Array): string => {
-	const n = new DataView(out.buffer, out.byteOffset, 4).getUint32(0);
-	return String(n % 1_000_000).padStart(6, '0');
-};
-
 /** The six digits both screens show. They cover the fingerprints, so a swapped channel changes them. */
 export const sasOf = (T: Uint8Array, fps: Fingerprints): string =>
 	sixDigits(hkdfDerive(boundToChannel(T, fps), SAS_SALT, 'sas', 4));
 
 // ---------- the optical signature ----------
+
+/** ECDSA secp256k1 over SHA-256(T), compact r‖s: what EncryptionManagerPQ.signContactChallenge(T) makes with the account's key. */
+export const signOptical = async (T: Uint8Array, contactSkey: Uint8Array): Promise<Uint8Array> =>
+	(await secp.signAsync(sha256(T), contactSkey)).toCompactRawBytes();
 
 /** Verifies `sig` (compact r‖s) over SHA-256(T) under a compressed secp256k1 key. */
 export const verifyOptical = (sig: Uint8Array, T: Uint8Array, contactPkey: Uint8Array): boolean => {

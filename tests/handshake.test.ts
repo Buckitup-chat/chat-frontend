@@ -11,7 +11,7 @@ import { bytesToHex, concatBytes } from '@noble/hashes/utils';
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import {
-	checkConfirm, confirmMessage, encode, parse, pqMessage, sasOf, sessionTag, transcript, verifyOptical, type Message,
+	checkConfirm, confirmMessage, encode, parse, pqMessage, sasOf, sessionTag, signOptical, transcript, verifyOptical, type Message,
 	type Party,
 } from '@/lib/pq/handshake';
 import { fromBase64 } from '@/lib/pq/signature';
@@ -28,7 +28,6 @@ const partyOf = (id: TestIdentity, nonce: Uint8Array): Party => ({
 	contactPkey: fromBase64(id.card.contact_pkey as string),
 	nonce,
 });
-const signOptical = async (T: Uint8Array, skey: Uint8Array) => (await secp.signAsync(sha256(T), skey)).toCompactRawBytes();
 
 // Two fixed identities (ML-DSA-87 and secp256k1 keys from fixed seeds) and fixed nonces.
 const alice = makeTestIdentity(7, 'Alice');
@@ -157,7 +156,10 @@ describe('the optical signature', () => {
 	const T = transcript(A, B);
 
 	it('verifies under the key that signed T', async () => {
-		expect(verifyOptical(await signOptical(T, alice.contactSk), T, A.contactPkey)).toBe(true);
+		const sig = await signOptical(T, alice.contactSk);
+		expect(sig).toHaveLength(64);
+		expect(secp.verify(sig, sha256(T), A.contactPkey)).toBe(true); // ECDSA over SHA-256(T), by noble directly
+		expect(verifyOptical(sig, T, A.contactPkey)).toBe(true);
 	});
 
 	it('does not verify under another key, another nonce, another counterpart, or as a PQ1 signature of the bare nonce', async () => {

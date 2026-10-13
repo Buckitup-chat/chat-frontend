@@ -8,12 +8,12 @@
 // URL, comes in sessionStorage under 'pq2.impostor'.
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex, randomBytes } from '@noble/hashes/utils';
-import { sha256 } from '@noble/hashes/sha256';
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { api } from '@/api/client';
 import { HandshakeEngine, type Outcome, type HandshakeIdentity } from '@/lib/handshake/engine';
+import { signOptical } from '@/lib/pq/handshake';
 import { QwbpChannel } from '@/lib/handshake/qwbpChannel';
 import type { UserCardRow } from '@/lib/data/types';
 
@@ -62,7 +62,7 @@ const claimed = impostor ? (JSON.parse(impostor) as UserCardRow) : null;
 const identity: HandshakeIdentity = {
 	userHash: claimed?.user_hash ?? me.userHash,
 	contactPkey: me.contactPkey,
-	signOptical: async (T) => (await secp.signAsync(sha256(T), me.contactSkey)).toCompactRawBytes(),
+	signOptical: (T) => signOptical(T, me.contactSkey),
 	signPq: async (M) => ml_dsa87.sign(M, me.signSkey),
 	signedCard: async () => claimed ?? me.card,
 };

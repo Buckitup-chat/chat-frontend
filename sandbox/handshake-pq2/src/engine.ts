@@ -8,15 +8,15 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { equalBytes } from '@noble/post-quantum/utils.js';
 import { toBytes } from '@/lib/pq/signature';
 import type { UserCardRow } from '@/lib/data/types';
-import type { Identity } from './identity';
+import { signPq, type Identity } from './identity';
 import {
 	checkProof, decodeProof, encodeFrame, encodeProof, fromBase45, nameBytesOf, parseFrame, proofMessage, senderTag,
 	sessionCode, split, toBase45, type Frame,
 } from './frames';
 import {
-	checkConfirm, comparisonCode, confirmMessage, encode, newNonce, parse, pqMessage, sessionTag, signOptical, signPq,
-	transcript, verifyOptical, type Message, type Party,
-} from './protocol';
+	checkConfirm, confirmMessage, encode, newNonce, parse, pqMessage, sasOf, sessionTag, signOptical, transcript,
+	verifyOptical, type Fingerprints, type Message, type Party,
+} from '@/lib/pq/handshake';
 
 export interface ChannelLink {
 	send(text: string): void;
@@ -100,7 +100,7 @@ export class HandshakeEngine {
 	private myPayload: Uint8Array | null = null;
 	private peerPayload: Uint8Array | null = null;
 	/** Once both payloads are known: what the channel must carry, and the six digits. */
-	private confirmation: { M: Uint8Array; message: string; code: string } | null = null;
+	private confirmation: { fps: Fingerprints; message: string; code: string } | null = null;
 	private link: ChannelLink | null = null;
 	private busy = false;
 	private started = 0;
@@ -278,12 +278,12 @@ export class HandshakeEngine {
 			[this.me.userHash]: this.conn!.fingerprintOf(this.myPayload!),
 			[peer.userHash]: this.conn!.fingerprintOf(this.peerPayload!),
 		};
-		const M = pqMessage(this.T!, this.me.userHash, peer.userHash, fps);
+		const M = pqMessage(this.T!, fps);
 		const card = this.o.claim?.card ?? this.o.identity.card;
 		this.confirmation = {
-			M,
+			fps,
 			message: confirmMessage(card, signPq(M, this.o.identity.signSkey)),
-			code: comparisonCode(this.T!, this.me.userHash, peer.userHash, fps),
+			code: sasOf(this.T!, fps),
 		};
 		const fp = (hash: string) => `${bytesToHex(fps[hash]).slice(0, 8)}…`;
 		this.log(`both bootstrap payloads known (fingerprints ${fp(this.me.userHash)} / ${fp(peer.userHash)}) — waiting for the channel`);
@@ -310,11 +310,11 @@ export class HandshakeEngine {
 
 	/** The channel is open and M is signed: send ours, and wait for theirs. */
 	private sendConfirmation(): void {
-		const { M, message, code } = this.confirmation!;
+		const { fps, message, code } = this.confirmation!;
 		const peer = this.peer!;
 		this.link!.onMessage((raw) => {
 			if (this.ended) return;
-			const verdict = checkConfirm(raw, peer, M);
+			const verdict = checkConfirm(raw, peer, this.T!, fps);
 			if (verdict.ok) {
 				this.log(`confirmed: ${verdict.card.name} — card valid, key certified, post-quantum signature ok`);
 				this.finish({ kind: 'confirmed', peerName: verdict.card.name, peerHash: peer.userHash, code, card: verdict.card });

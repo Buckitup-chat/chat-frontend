@@ -4,7 +4,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import { randomBytes } from '@noble/hashes/utils';
 import { hmac } from '@noble/hashes/hmac';
 import { sha3_256 } from '@noble/hashes/sha3';
-import { hkdfDerive } from './hkdf';
+import { hkdfDerive, sixDigits } from './hkdf';
 import { sealWithKey, assertSealed, openSealed, VaultEnvelopeError } from './vaultEnvelope';
 import { toBase64, fromBase64, toBase64Url } from './signature';
 
@@ -67,10 +67,9 @@ export const parseInvite = (text: string): LinkInvite => {
 const sessionFrom = (sharedSecret: Uint8Array, room: string): LinkSession => {
 	const key = hkdfDerive(sharedSecret, DEVICE_LINK_SALT, `seal|${room}`, 32);
 	const macKey = hkdfDerive(sharedSecret, DEVICE_LINK_SALT, `mac|${room}`, 32);
-	const tag = hkdfDerive(sharedSecret, DEVICE_LINK_SALT, `sas|${room}`, 4);
+	const sas = sixDigits(hkdfDerive(sharedSecret, DEVICE_LINK_SALT, `sas|${room}`, 4));
 	sharedSecret.fill(0);
-	const n = ((tag[0] << 24) | (tag[1] << 16) | (tag[2] << 8) | tag[3]) >>> 0;
-	return { key, macKey, sas: String(n % 1_000_000).padStart(6, '0') };
+	return { key, macKey, sas };
 };
 
 /**

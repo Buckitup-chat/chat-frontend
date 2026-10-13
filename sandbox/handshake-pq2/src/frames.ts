@@ -15,8 +15,8 @@
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex, concatBytes } from '@noble/hashes/utils';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { hkdfDerive } from '@/lib/pq/hkdf';
-import { SAS_SALT, SIG_BYTES, sixDigits, verifyOptical } from './protocol';
+import { hkdfDerive, sixDigits } from '@/lib/pq/hkdf';
+import { SAS_SALT, SIG_BYTES, verifyOptical } from '@/lib/pq/handshake';
 
 export const PROOF_TAG = 'buckitup/handshake/v2/pq-qr\n';
 export const FRAME_PREFIX = 'PQ2:F:';

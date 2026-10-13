@@ -7,13 +7,12 @@
 // false (phones on different networks). A message sent before the other end
 // listens waits for it, as on a real data channel (linkOf). A payload is a
 // real QWBP packet: the engine takes its fingerprint with QWBP's own parser.
-import { sha256 } from '@noble/hashes/sha256';
 import { randomBytes } from '@noble/hashes/utils';
-import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { decode, encode } from 'qwbp';
 import { equalBytes } from '@noble/post-quantum/utils.js';
 import { fromBase64 } from '@/lib/pq/signature';
+import { signOptical } from '@/lib/pq/handshake';
 import type { ChannelAdapter, ChannelLink, HandshakeIdentity } from '@/lib/handshake/engine';
 import type { UserCardRow } from '@/lib/data/types';
 import type { TestIdentity } from './signedFixtures';
@@ -22,7 +21,7 @@ import type { TestIdentity } from './signedFixtures';
 export const handshakeIdentity = (id: TestIdentity, overrides: Partial<HandshakeIdentity> = {}): HandshakeIdentity => ({
 	userHash: id.userHash,
 	contactPkey: fromBase64(id.card.contact_pkey as string),
-	signOptical: async (T) => (await secp.signAsync(sha256(T), id.contactSk)).toCompactRawBytes(),
+	signOptical: (T) => signOptical(T, id.contactSk),
 	signPq: async (M) => ml_dsa87.sign(M, id.signSkey),
 	signedCard: async () => id.card as UserCardRow,
 	...overrides,

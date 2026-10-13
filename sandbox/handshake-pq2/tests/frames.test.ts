@@ -5,9 +5,9 @@ import {
 	checkProof, decodeProof, encodeFrame, encodeProof, fromBase45, nameBytesOf, parseFrame, proofMessage, toBase45,
 	type FrameProof,
 } from '../src/frames';
-import { signOptical, signPq, transcript } from '../src/protocol';
+import { signOptical, transcript } from '@/lib/pq/handshake';
 import { toBytes } from '@/lib/pq/signature';
-import { createIdentity, type Identity } from '../src/identity';
+import { createIdentity, signPq, type Identity } from '../src/identity';
 
 const utf8 = (s: string) => new TextEncoder().encode(s);
 
