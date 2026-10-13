@@ -24,6 +24,7 @@ import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedErro
 import { settingsProblems } from '@/lib/recovery/backupPlan';
 import { setProblems } from '@/lib/recovery/nodeChoice';
 import { listSubscriptions, subscribeWebhook, telegramReply, alertWallet } from '@/lib/recovery/alerts';
+import { receiptOf, sentSharesOf } from '@/lib/recovery/receipts';
 
 export const BACKUP_SLOT = 'recovery_backup';
 export const NODES_SLOT = 'recovery_nodes';
@@ -83,6 +84,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		loaded.value = false;
 		stopped.value = null;
 		heldElsewhere.value = false;
+		heard.value = { runId: null, byGuardian: {} };
 	});
 
 	const em = () => EncryptionManagerPQ.getInstance();
@@ -233,6 +235,59 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	const addWebhook = async (url) => subscribeWebhook(alertsBase(), await ownerKey(), url);
 	const telegramLine = async (botText) => telegramReply(botText, await ownerKey());
 	const walletForBot = async () => alertWallet(await ownerKey());
+
+	// --- What the guardians say ------------------------------------------
+
+	/** The guardians' word on the run's pieces (receipts.ts), by userHash; for one run, so another starts from nothing. */
+	const heard = ref({ runId: null, byGuardian: {} });
+	const receiptDetails = computed(() => (heard.value.runId && heard.value.runId === run.value?.runId ? heard.value.byGuardian : {}));
+	/** userHash → Delivery: what backupFlow.guardianDelivery and healthView take. */
+	const receipts = computed(() => Object.fromEntries(Object.entries(receiptDetails.value).map(([g, r]) => [g, r.state])));
+	const hear = (runId, guardian, receipt) => {
+		const byGuardian = heard.value.runId === runId ? heard.value.byGuardian : {};
+		heard.value = { runId, byGuardian: { ...byGuardian, [guardian]: receipt } };
+	};
+
+	/**
+	 * Reads what each guardian the run sent a piece to has said about it, in
+	 * their dialog, one dialog at a time; `only` reads one guardian's. A
+	 * dialog that cannot be read now keeps what was heard before.
+	 */
+	let reading = null;
+	const refreshReceipts = async ({ only = null } = {}) => {
+		if (!only && reading) return reading;
+		const owner = $userPQ.currentUserHash;
+		const pass = (async () => {
+			if (!loaded.value) await load();
+			const current = run.value;
+			const sent = sentSharesOf(current);
+			for (const guardian of Object.keys(sent)) {
+				if (only && guardian !== only) continue;
+				const read = await $dialogs.readPeerParts(guardian, ['recovery_holding'], { deliveredOf: [sent[guardian].messageId] });
+				if ($userPQ.currentUserHash !== owner) return;
+				const receipt = read && receiptOf(guardian, sent[guardian], read);
+				if (receipt) hear(current.runId, guardian, receipt);
+			}
+		})();
+		if (only) return pass;
+		reading = pass.finally(() => {
+			reading = null;
+		});
+		return reading;
+	};
+
+	/**
+	 * What an open dialog with `guardian` shows of their word on the run's
+	 * piece ({ senderHash, parts } in dialog order): read from the page,
+	 * without a second read of the dialog.
+	 */
+	const noteGuardianMessages = (guardian, messages) => {
+		const current = run.value;
+		const sent = sentSharesOf(current)[guardian];
+		if (!sent) return;
+		const receipt = receiptOf(guardian, sent, { messages, delivered: [] });
+		if (receipt) hear(current.runId, guardian, receipt);
+	};
 
 	// --- The run -------------------------------------------------------------
 
@@ -474,5 +529,9 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		heldElsewhere,
 		canTakeOver,
 		takeOver,
+		receipts,
+		receiptDetails,
+		refreshReceipts,
+		noteGuardianMessages,
 	};
 });

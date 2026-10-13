@@ -104,18 +104,41 @@ export const hasOutsideAlerts = (alerts) => !!alerts?.channels?.some((c) => c !=
 // --- Delivery and health ----------------------------------------------------------
 
 /**
- * Where guardian `userHash`'s piece stands: 'waiting' | 'sent' | 'delivered' | 'stored'.
- *
- * Phase 7.3 hook: `receipts` will carry what the guardians' apps report
- * (delivered, stored). Until then only `run.sent` is known, so a guardian is
- * 'sent' or 'waiting'.
+ * Where guardian `userHash`'s piece stands (receipts.ts Delivery): what the
+ * guardian said about it in their dialog, else what the run knows — 'sent'
+ * or 'waiting'. `receipts` is the backup store's, by userHash.
  */
 export const guardianDelivery = (run, userHash, receipts = {}) => receipts[userHash] ?? (run?.sent?.[userHash] ? 'sent' : 'waiting');
 
+/** A piece's state in a list row. */
+export const DELIVERY_WORDS = {
+	waiting: 'waiting',
+	sent: 'sent',
+	delivered: 'delivered',
+	stored: 'stored',
+	problem: 'problem',
+	given_back: 'given back',
+	dropped: 'dropped',
+};
+
+/**
+ * What the owner is told under a guardian whose piece no longer counts:
+ * kept with a problem, given back or dropped — each a prompt to reshare (the
+ * reshare itself is the roster's, plan § 7.4). Null for the other states.
+ */
+export const deliveryHint = (state, detail = '') => {
+	const reshare = 'A reshare replaces this piece.';
+	if (state === 'problem') return `${detail ? `They report: ${detail}.` : 'They report a problem with it.'} ${reshare}`;
+	if (state === 'given_back') return `They gave it back. ${reshare}`;
+	if (state === 'dropped') return `They no longer keep it${detail ? `: ${detail}` : ''}. ${reshare}`;
+	return null;
+};
+
 /**
  * The health line of a finished backup: holders are the guardians whose piece
- * is 'stored'. Pieces sent but not yet stored are "on the way": a fresh backup
- * reads as arriving, not as broken.
+ * is 'stored'. Pieces sent or delivered but not yet stored are "on the way":
+ * a fresh backup reads as arriving, not as broken. A piece with a problem,
+ * given back or dropped is neither.
  */
 export const healthView = (run, receipts = {}) => {
 	const guardians = run?.guardians ?? [];

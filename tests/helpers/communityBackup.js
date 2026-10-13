@@ -99,6 +99,9 @@ export const fakeBackupStore = (over = {}) =>
 		finishWithoutPendingNodes: vi.fn(async () => {}),
 		discard: vi.fn(async () => {}),
 		setAlerts: vi.fn(async () => {}),
+		receipts: {},
+		receiptDetails: {},
+		refreshReceipts: vi.fn(async () => {}),
 		...over,
 	});
 

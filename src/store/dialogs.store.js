@@ -1349,6 +1349,64 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return scanInFlight;
     };
 
+    // ---------- a peer's parts, read in the background ----------
+
+    /**
+     * The parts of `kinds` in the live messages `peerHash` sent in their
+     * dialog, oldest first: [{ messageId, senderHash, parts }], with
+     * `delivered` — the ids among `deliveredOf` that the peer's verified
+     * delivered receipt names. Read without joining the warm set, through the
+     * gate like the feed (a row that does not verify is not read), within a
+     * time budget: null when the dialog could not be read in time, or another
+     * account is signed in by then. For screens that need a few facts from
+     * dialogs that are not open — the owner's backup reads its guardians'
+     * word on their pieces (pq_recovery_shares § Holding).
+     */
+    const PEER_READ_BUDGET_MS = 15_000;
+    const readPeerParts = async (peerHash, kinds, { deliveredOf = [] } = {}) => {
+        const me = $userPQ.currentUserHash;
+        const dialogHash = getDialogHash(peerHash);
+        if (!dialogHash || !peerHash || peerHash === me) return null;
+        const wanted = new Set(kinds);
+        const read = withDialogCollections(dialogHash, async (colls) => {
+            await colls.messages.preload().catch(() => { });
+            const rows = colls.messages.toArray
+                .filter((r) => r.sign_hash)
+                .sort((a, b) => feedOrderKey(a.message_id, a.owner_timestamp) - feedOrderKey(b.message_id, b.owner_timestamp));
+            // Oldest first, as the feed admits: parents before their children.
+            for (const row of rows) await admitMessageRow(row, colls);
+            const messages = [];
+            for (const row of rows) {
+                if (row.sender_hash !== peerHash || row.deleted_flag || !isRowAdmitted(dialogHash, row)) continue;
+                const decrypted = await decryptMessageRow(row, colls);
+                const parts = (decrypted.parts || []).filter((p) => wanted.has(p.kind));
+                if (parts.length) messages.push({ messageId: row.message_id, senderHash: row.sender_hash, parts });
+            }
+            const delivered = [];
+            if (deliveredOf.length) {
+                await colls.receipts.preload().catch(() => { });
+                for (const r of colls.receipts.toArray) {
+                    if (r.peer_hash !== peerHash || r.type !== 'delivered' || !deliveredOf.includes(r.message_id)) continue;
+                    if (await admitReceiptRow(r)) delivered.push(r.message_id);
+                }
+            }
+            return { messages, delivered: [...new Set(delivered)] };
+        });
+        let budget;
+        try {
+            const out = await Promise.race([
+                read,
+                new Promise((_, reject) => { budget = setTimeout(() => reject(new Error('read budget exceeded')), PEER_READ_BUDGET_MS); }),
+            ]);
+            return $userPQ.currentUserHash === me ? out : null;
+        } catch (e) {
+            console.warn('[dialogs] the peer\'s messages could not be read:', peerHash, e?.message || e);
+            return null;
+        } finally {
+            clearTimeout(budget);
+        }
+    };
+
     // ---------- signed DAG checkpoint (src/lib/pq/checkpoint.ts) ----------
     //
     // A checkpoint attests "this device held this causally complete local
@@ -1919,6 +1977,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         openVideoSource,
         getMessageHistory,
         firstRevisionsOf,
+        readPeerParts,
         createDialogCheckpoint,
         verifyDialogCheckpoint,
         compareDialogCheckpoint,

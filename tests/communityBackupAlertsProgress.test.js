@@ -200,6 +200,16 @@ describe('Progress', () => {
 		w.unmount();
 	});
 
+	it('marks each guardian by what they said about their piece', () => {
+		H.store.run = registered({ n1: { state: 'held' } }, { sent: { [hash('a')]: { messageId: 'm1', shareIndex: 1 }, [hash('b')]: { messageId: 'm2', shareIndex: 2 }, [hash('c')]: { messageId: 'm3', shareIndex: 3 } } });
+		H.store.receipts = { [hash('a')]: 'stored', [hash('b')]: 'delivered', [hash('c')]: 'given_back' };
+		const w = render(Screen_Progress);
+		const rows = w.findAll('[data-test="guardian-outcome"]');
+		expect(rows.map((r) => r.text())).toEqual([expect.stringMatching(/Daria.*stored/), expect.stringMatching(/Milo.*delivered/), expect.stringMatching(/Vitalii.*given back/)]);
+		expect(rows.map((r) => r.findAll('.pg-tick.on').length)).toEqual([3, 2, 2]);
+		w.unmount();
+	});
+
 	it('on another device shows the banner instead of Continue', () => {
 		H.store.run = makeRun({ step: 'published', device: 'laptop-1' });
 		H.store.runsHere = false;

@@ -50,7 +50,7 @@
 							<span class="d-flex gap-1">
 								<span v-for="i in 3" :key="i" class="pg-tick" :class="{ on: i <= r.ticks }"></span>
 							</span>
-							<span class="pg-state" :class="{ stored: r.state === 'stored' }">{{ r.state }}</span>
+							<span class="pg-state" :class="{ stored: r.state === 'stored' }">{{ DELIVERY_WORDS[r.state] }}</span>
 						</div>
 					</div>
 				</template>
@@ -90,8 +90,9 @@ import { canDiscard, canFinishWithoutPending, nodesDone, nodesPending, stepNumbe
 import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
 import Check from './Check.vue';
-import { DRAFT, NAV, STEP_LABELS, agoText, guardianDelivery, guardianName, hostOf, nodeOwnerName } from './backupFlow';
-const TICKS = { waiting: 0, sent: 1, delivered: 2, stored: 3 };
+import { DELIVERY_WORDS, DRAFT, NAV, STEP_LABELS, agoText, guardianDelivery, guardianName, hostOf, nodeOwnerName } from './backupFlow';
+// sent → delivered → stored; a piece that no longer counts shows how far it got before.
+const TICKS = { waiting: 0, sent: 1, delivered: 2, stored: 3, problem: 2, given_back: 2, dropped: 2 };
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
@@ -168,7 +169,7 @@ const nodesFailedText = computed(() => {
 
 const guardianRows = computed(() =>
 	(run.value?.guardians ?? []).map((g) => {
-		const state = guardianDelivery(run.value, g.userHash);
+		const state = guardianDelivery(run.value, g.userHash, store.receipts);
 		return { userHash: g.userHash, name: guardianName(g.userHash, store.candidates, $userPQ), state, ticks: TICKS[state] };
 	}),
 );
