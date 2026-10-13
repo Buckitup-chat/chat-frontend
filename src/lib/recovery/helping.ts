@@ -45,8 +45,9 @@ export const latestBinding = (messages: readonly PeerMessage[], expected: { secr
 export type RoundMove = 'initiate' | 'approve' | 'approved' | 'closed';
 
 export const roundMove = (state: RoundState, approvedThisCandidate: boolean): RoundMove => {
-	if (approvedThisCandidate) return 'approved';
+	// The state first: an approval left from a vetoed or expired round belongs to no round now.
 	if (state === RoundState.None || state === RoundState.Expired) return 'initiate';
+	if (approvedThisCandidate) return 'approved';
 	if (state === RoundState.Voting) return 'approve';
 	return 'closed';
 };

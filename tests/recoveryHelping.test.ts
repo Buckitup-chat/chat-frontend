@@ -44,6 +44,9 @@ describe('the round', () => {
 		expect(roundMove(RoundState.Window, false)).toBe('closed');
 		expect(roundMove(RoundState.Voting, true)).toBe('approved');
 		expect(roundMove(RoundState.Window, true)).toBe('approved');
+		// An approval left from a vetoed or expired round does not stand for a new one.
+		expect(roundMove(RoundState.None, true)).toBe('initiate');
+		expect(roundMove(RoundState.Expired, true)).toBe('initiate');
 	});
 });
 
