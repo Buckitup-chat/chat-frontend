@@ -20,7 +20,8 @@
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run lint && npm test",
     "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright test",
-    "test:e2e:headed": "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright test --headed"
+    "test:e2e:headed": "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright test --headed",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@electric-sql/client": "^1.4.1",
@@ -86,6 +87,7 @@
     "fake-indexeddb": "^6.2.5",
     "globals": "^16.0.0",
     "jsdom": "^27.0.1",
+    "patch-package": "^8.0.1",
     "prettier": "^3.6.0",
     "sass": "1.77.6",
     "typescript": "~5.8.0",

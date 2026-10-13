@@ -1,0 +1,255 @@
+diff --git a/node_modules/qwbp/dist/connection.d.ts b/node_modules/qwbp/dist/connection.d.ts
+index 073e9c9..8cbdd49 100644
+--- a/node_modules/qwbp/dist/connection.d.ts
++++ b/node_modules/qwbp/dist/connection.d.ts
+@@ -130,6 +130,12 @@ export declare class QWBPConnection {
+      */
+     private addRemoteCandidates;
+     private waitForIceGathering;
++    /**
++     * Collects the candidates as they are gathered and hands them to
++     * `select`, until it returns a list: at the latest when gathering
++     * completes or 2 s have passed, when it is asked for a final one
++     */
++    private gatherSelected;
+     private setupDataChannelListeners;
+     private setupConnectionListeners;
+     private startTimeout;
+diff --git a/node_modules/qwbp/dist/connection.js b/node_modules/qwbp/dist/connection.js
+index 0305244..ca1018e 100644
+--- a/node_modules/qwbp/dist/connection.js
++++ b/node_modules/qwbp/dist/connection.js
+@@ -12,7 +12,7 @@
+  * @packageDocumentation
+  */
+ import { DEFAULT_ICE_SERVERS, DEFAULT_TIMEOUT, DEFAULT_MAX_CANDIDATES, } from './constants.js';
+-import { encode, extractCandidatesFromSDP } from './encoder.js';
++import { encode, extractCandidatesFromSDP, parseGatheredCandidate } from './encoder.js';
+ import { decode, isValidPacket } from './decoder.js';
+ import { QWBPConnectionError, QWBPTimeoutError, QWBPSelfConnectionError, QWBPIceError, } from './errors.js';
+ import { extractFingerprintFromSDP, deriveCredentials, compareFingerprints, generateSAS, } from './crypto.js';
+@@ -21,6 +21,11 @@ import { ConnectionState, Role, } from './types.js';
+ /**
+  * Patches ice-ufrag and ice-pwd in an SDP string
+  */
++/**
++ * How long selectCandidates may wait for its list before it is asked for a
++ * final one: one slow or blocked transport must not hold up the code
++ */
++const SELECTION_TIMEOUT = 2000;
+ function patchSdpCredentials(sdp, ufrag, pwd) {
+     return sdp
+         .replace(/a=ice-ufrag:\S+/g, `a=ice-ufrag:${ufrag}`)
+@@ -124,11 +129,21 @@ export class QWBPConnection {
+             type: 'offer',
+             sdp: patchedOffer,
+         });
+-        // Wait for ICE gathering to complete
+-        await this.waitForIceGathering(this.pc);
+-        // Extract candidates from complete SDP
+-        const completeSdp = this.pc.localDescription.sdp;
+-        this.localCandidates = extractCandidatesFromSDP(completeSdp, this.options.maxCandidates);
++        if (this.options.selectCandidates) {
++            // The hook's list, as soon as it is complete; gathering goes on
++            const selected = await this.gatherSelected(this.pc, this.options.selectCandidates);
++            if (this.state === ConnectionState.Closed) {
++                throw new QWBPConnectionError('Connection closed during gathering', this.state);
++            }
++            this.localCandidates = selected.slice(0, this.options.maxCandidates);
++        }
++        else {
++            // Wait for ICE gathering to complete
++            await this.waitForIceGathering(this.pc);
++            // Extract candidates from complete SDP
++            const completeSdp = this.pc.localDescription.sdp;
++            this.localCandidates = extractCandidatesFromSDP(completeSdp, this.options.maxCandidates);
++        }
+         this.setState(ConnectionState.Displaying);
+         // Start session timeout
+         this.startTimeout();
+@@ -405,6 +420,65 @@ export class QWBPConnection {
+             };
+         });
+     }
++    /**
++     * Collects the candidates as they are gathered and hands them to
++     * `select`, until it returns a list: at the latest when gathering
++     * completes or SELECTION_TIMEOUT has passed, when it is asked for a final
++     * one
++     */
++    gatherSelected(pc, select) {
++        return new Promise((resolve) => {
++            const gathered = [];
++            const seen = new Set();
++            let done = false;
++            const add = (line) => {
++                const candidate = parseGatheredCandidate(line);
++                if (!candidate)
++                    return;
++                const key = `${candidate.protocol} ${candidate.type} ${candidate.ip} ${candidate.port}`;
++                if (seen.has(key))
++                    return;
++                seen.add(key);
++                gathered.push(candidate);
++            };
++            const offer = (final) => {
++                if (done)
++                    return;
++                let list = null;
++                try {
++                    list = select(gathered.slice(), final);
++                }
++                catch (error) {
++                    this.options.onError?.(error);
++                }
++                if (!list && !final)
++                    return;
++                done = true;
++                clearTimeout(timer);
++                resolve(list ?? []);
++            };
++            const timer = setTimeout(() => offer(true), SELECTION_TIMEOUT);
++            // Candidates the description already holds
++            for (const line of (pc.localDescription?.sdp ?? '').split(/\r?\n/)) {
++                add(line);
++            }
++            pc.onicecandidate = (event) => {
++                if (!event.candidate) {
++                    // null candidate = end of gathering
++                    offer(true);
++                    return;
++                }
++                add(event.candidate.candidate);
++                offer(false);
++            };
++            pc.onicegatheringstatechange = () => {
++                if (pc.iceGatheringState === 'complete') {
++                    offer(true);
++                }
++            };
++            offer(pc.iceGatheringState === 'complete');
++        });
++    }
+     setupDataChannelListeners(channel) {
+         channel.onopen = () => {
+             this.setState(ConnectionState.Connected);
+diff --git a/node_modules/qwbp/dist/encoder.d.ts b/node_modules/qwbp/dist/encoder.d.ts
+index 60517dd..0c05e36 100644
+--- a/node_modules/qwbp/dist/encoder.d.ts
++++ b/node_modules/qwbp/dist/encoder.d.ts
+@@ -7,7 +7,7 @@
+  * @packageDocumentation
+  */
+ import { QWBPEncodeError } from './errors.js';
+-import type { QWBPCandidate } from './types.js';
++import type { QWBPCandidate, QWBPGatheredCandidate } from './types.js';
+ export { QWBPEncodeError };
+ /**
+  * Encodes a QWBP packet
+@@ -42,6 +42,12 @@ export declare function encode(fingerprint: Uint8Array, candidates: QWBPCandidat
+  * @returns Array of QWBP candidates
+  */
+ export declare function extractCandidatesFromSDP(sdp: string, maxCandidates?: number): QWBPCandidate[];
++/**
++ * Parses one candidate, as an SDP line (`a=candidate:…`) or as an
++ * RTCIceCandidate's `candidate` string, keeping every type: host, srflx,
++ * prflx and relay
++ */
++export declare function parseGatheredCandidate(line: string): QWBPGatheredCandidate | null;
+ export declare const QWBPEncoder: {
+     encode: typeof encode;
+     extractCandidatesFromSDP: typeof extractCandidatesFromSDP;
+diff --git a/node_modules/qwbp/dist/encoder.js b/node_modules/qwbp/dist/encoder.js
+index 332f6cd..82ddd9f 100644
+--- a/node_modules/qwbp/dist/encoder.js
++++ b/node_modules/qwbp/dist/encoder.js
+@@ -352,6 +352,37 @@ function parseCandidateLine(line) {
+     }
+     return candidate;
+ }
++/**
++ * Parses one candidate, as an SDP line (`a=candidate:…`) or as an
++ * RTCIceCandidate's `candidate` string, keeping every type: host, srflx,
++ * prflx and relay
++ */
++export function parseGatheredCandidate(line) {
++    const match = line.match(/(?:^|a=)candidate:\S+\s+\d+\s+(\w+)\s+\d+\s+(\S+)\s+(\d+)\s+typ\s+(\w+)/);
++    if (!match)
++        return null;
++    const [, protocol, ip, portStr, type] = match;
++    const protocolLower = protocol.toLowerCase();
++    const typeLower = type.toLowerCase();
++    if (protocolLower !== 'udp' && protocolLower !== 'tcp')
++        return null;
++    if (!['host', 'srflx', 'prflx', 'relay'].includes(typeLower))
++        return null;
++    const port = parseInt(portStr, 10);
++    if (isNaN(port) || port < 1 || port > 65535)
++        return null;
++    const candidate = { ip, port, type: typeLower, protocol: protocolLower };
++    if (protocolLower === 'tcp') {
++        const tcpTypeMatch = line.match(/tcptype\s+(\w+)/);
++        if (tcpTypeMatch) {
++            const tcpType = tcpTypeMatch[1].toLowerCase();
++            if (tcpType === 'active' || tcpType === 'passive' || tcpType === 'so') {
++                candidate.tcpType = tcpType;
++            }
++        }
++    }
++    return candidate;
++}
+ // Export as namespace for convenient usage
+ export const QWBPEncoder = {
+     encode,
+diff --git a/node_modules/qwbp/dist/index.d.ts b/node_modules/qwbp/dist/index.d.ts
+index a7b7e53..b533709 100644
+--- a/node_modules/qwbp/dist/index.d.ts
++++ b/node_modules/qwbp/dist/index.d.ts
+@@ -13,6 +13,6 @@ export { decode, isValidPacket, QWBPDecoder } from './decoder.js';
+ export { deriveCredentials, extractFingerprintFromSDP, formatFingerprint, compareFingerprints, generateSessionId, generateSAS, base64urlEncode, base64urlDecode, } from './crypto.js';
+ export { reconstructSDP, buildCandidateString, validateSDP, SDPReconstructor, } from './sdp.js';
+ export { AddressFamily, Protocol, CandidateType, TcpType, Role, ConnectionState, } from './types.js';
+-export type { QWBPCandidate, QWBPPacket, IceCredentials, PeerInfo, QWBPOptions, ReconstructedSDP, } from './types.js';
++export type { QWBPCandidate, QWBPGatheredCandidate, QWBPPacket, IceCredentials, PeerInfo, QWBPOptions, ReconstructedSDP, } from './types.js';
+ export { MAGIC_BYTE, PROTOCOL_VERSION, FINGERPRINT_SIZE, HEADER_SIZE, MIN_PACKET_SIZE, IPV4_CANDIDATE_SIZE, IPV6_CANDIDATE_SIZE, DEFAULT_TIMEOUT, DEFAULT_MAX_CANDIDATES, DEFAULT_ICE_SERVERS, CANDIDATE_PRIORITIES, QR_ERROR_CORRECTION_LEVEL, } from './constants.js';
+ //# sourceMappingURL=index.d.ts.map
+\ No newline at end of file
+diff --git a/node_modules/qwbp/dist/types.d.ts b/node_modules/qwbp/dist/types.d.ts
+index 04b63ee..59d1653 100644
+--- a/node_modules/qwbp/dist/types.d.ts
++++ b/node_modules/qwbp/dist/types.d.ts
+@@ -69,6 +69,17 @@ export interface QWBPCandidate {
+ /**
+  * Decoded QWBP packet
+  */
++/**
++ * A candidate as gathered, before selection: relay and peer-reflexive
++ * candidates included, with their real type
++ */
++export interface QWBPGatheredCandidate {
++    ip: string;
++    port: number;
++    type: 'host' | 'srflx' | 'prflx' | 'relay';
++    protocol: 'udp' | 'tcp';
++    tcpType?: 'passive' | 'active' | 'so';
++}
+ export interface QWBPPacket {
+     /** Protocol version (currently 0) */
+     version: number;
+@@ -113,6 +124,16 @@ export interface QWBPOptions {
+     onDataChannel?: (channel: RTCDataChannel) => void;
+     /** Callback when error occurs */
+     onError?: (error: Error) => void;
++    /**
++     * Chooses the candidates the payload carries, in place of the built-in
++     * selection (host candidates, then the first srflx). Called with every
++     * candidate gathered so far, relay included, each time one arrives:
++     * returns the list to encode once it is complete, or null to wait for
++     * more. Called with `final` true when gathering completes or 2 s after it
++     * started, whichever comes first; it must return a list then. The list is
++     * cut to `maxCandidates`.
++     */
++    selectCandidates?: (gathered: QWBPGatheredCandidate[], final: boolean) => QWBPCandidate[] | null;
+ }
+ /**
+  * Result of SDP reconstruction
