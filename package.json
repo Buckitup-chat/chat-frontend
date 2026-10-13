@@ -21,6 +21,7 @@
     "check": "npm run typecheck && npm run lint && npm test",
     "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright test",
     "test:e2e:headed": "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright test --headed",
+    "test:handshake": "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright node scripts/handshake-check/check.mjs",
     "postinstall": "patch-package"
   },
   "dependencies": {
