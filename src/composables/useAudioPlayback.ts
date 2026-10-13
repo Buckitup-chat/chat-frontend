@@ -1,4 +1,5 @@
 import { ref, watch, onScopeDispose, type WatchSource } from 'vue';
+import { fileKey } from '@/lib/data/fileKey';
 
 const AUDIO_TYPES: Record<string, string> = {
 	mp3: 'audio/mpeg',
@@ -16,6 +17,7 @@ const PLAYABLE_MIME = new Set([...Object.values(AUDIO_TYPES), 'audio/mp3', 'audi
 interface FileRef {
 	kind?: string;
 	fileId: string;
+	uploaderHash?: string;
 	name?: string;
 	mimeType?: string;
 }
@@ -45,6 +47,7 @@ const failureMessage = (e: unknown): string => {
 	return 'This file could not be loaded.';
 };
 
+/** Audio of the dialog's file parts, by fileKey. */
 export function useAudioPlayback(fetchFile: FetchFile, resetOn: WatchSource<unknown>) {
 	const audios = ref<Record<string, AudioState>>({});
 	let urls: string[] = [];
@@ -64,7 +67,7 @@ export function useAudioPlayback(fetchFile: FetchFile, resetOn: WatchSource<unkn
 
 	const load = async (part: FileRef) => {
 		const type = playableAudioType(part);
-		const id = part.fileId;
+		const id = fileKey(part);
 		const current = audios.value[id];
 		if (!type || inFlight.has(id) || current?.status === 'ready') return;
 

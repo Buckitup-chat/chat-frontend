@@ -24,9 +24,9 @@ import {
 } from '@/lib/pq/fileCrypto';
 import { sendMutationsAndAwaitShape } from './ingest';
 import { getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
-import { readShapeOnce } from './shapeRead';
-import { wireBool } from '@/lib/pq/schema';
 import { bearerFor, openSession } from './readSession';
+import { assertChunkBytes, isRefusedFile, readChunkRows, readVerifiedFile } from './fileIntegrity';
+import type { SignPkeyResolver } from './rowVerification';
 
 declare const ELECTRIC_API_URL: string; // the chunk endpoints below are not shapes
 
@@ -61,18 +61,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Resume needs the stored sign_b64, not just presence: a re-encrypted chunk
  * gets a fresh nonce and therefore a different hash — the manifest must bind
  * the bytes that are actually on the device. */
-const existingChunks = async (fileId: string): Promise<Map<number, { sign_b64: string }>> => {
-	const out = new Map<number, { sign_b64: string }>();
-	try {
-		const rows = await readShapeOnce<{ chunk_index: number | string; sign_b64: string }>(
-			'file_chunks', `file_id='${fileId}'`,
-		);
-		for (const row of rows) out.set(Number(row.chunk_index), { sign_b64: row.sign_b64 });
-	} catch {
-		/* unreachable shape = empty map; the PUTs below are idempotent anyway */
-	}
-	return out;
-};
+// An unreachable shape reads as an empty map; the PUTs below are idempotent anyway.
+const existingChunks = (fileId: string): Promise<Map<number, Record<string, unknown>>> =>
+	readChunkRows(fileId).catch(() => new Map());
 
 const putChunk = async (
 	fileId: string,
@@ -127,7 +118,7 @@ export const uploadFile = async (opts: {
 
 	// A fresh-where snapshot (see existingChunks) reflects the device's actual
 	// state, so one read suffices for both the fresh and the resume path.
-	const already = opts.resuming ? await existingChunks(fileId) : new Map<number, { sign_b64: string }>();
+	const already = opts.resuming ? await existingChunks(fileId) : new Map<number, Record<string, unknown>>();
 
 	for (let i = 0; i < total; i++) {
 		signal?.throwIfAborted();
@@ -136,7 +127,7 @@ export const uploadFile = async (opts: {
 		if (stored) {
 			// The device already holds these bytes; the manifest must bind
 			// their stored signature — re-encrypting would change the hash.
-			chunkSignHashes.push(toBase64(sha3_512(fromBase64(stored.sign_b64))));
+			chunkSignHashes.push(toBase64(sha3_512(fromBase64(stored.sign_b64 as string))));
 			onProgress?.({ fileId, done: i + 1, total });
 			continue;
 		}
@@ -171,7 +162,7 @@ export const uploadFile = async (opts: {
 		// Seed the local chunk cache: the sender should never re-download
 		// bytes it just encrypted. Fire-and-forget — caching must not slow
 		// or fail the upload.
-		void putCachedChunk(fileId, i, encrypted);
+		void putCachedChunk(fileId, i, encrypted, dataHash);
 		onProgress?.({ fileId, done: i + 1, total });
 	}
 
@@ -222,20 +213,27 @@ export interface FileAvailability {
  * Partial availability is a normal state in a network without internet, not
  * an error: manifests replicate ahead of bytes, and the missing chunks come
  * on their own. The counts come from the same rows the sync protocol uses —
- * the signed manifest for the total, the chunk rows for what is here.
+ * the manifest for the total, the chunk rows for what is here. Both are the
+ * uploader's: the manifest must verify under `uploaderHash`, the sender of
+ * the message carrying the file, and a chunk counts only if its row is the
+ * one the manifest lists. A manifest that fails is refused with a
+ * FileVerificationError; one that cannot be checked yet counts as not arrived.
  */
-export const fileAvailability = async (fileId: string): Promise<FileAvailability> => {
-	const manifests = await readShapeOnce<Record<string, unknown>>('files', `file_id='${fileId}'`).catch(() => []);
-	const manifest = manifests.find((v) => v.file_id === fileId);
-	if (!manifest) return { present: 0, total: 0, unknown: true, deleted: false };
-
-	const chunks = await existingChunks(fileId);
-	return {
-		present: chunks.size,
-		total: Number(manifest.chunk_count) || 0,
-		unknown: false,
-		deleted: wireBool(manifest.deleted_flag),
-	};
+export const fileAvailability = async (
+	fileId: string,
+	uploaderHash: string,
+	opts: { resolveSignPkey?: SignPkeyResolver } = {},
+): Promise<FileAvailability> => {
+	const unknown: FileAvailability = { present: 0, total: 0, unknown: true, deleted: false };
+	let file;
+	try {
+		file = await readVerifiedFile(fileId, uploaderHash, opts);
+	} catch (e) {
+		if (isRefusedFile(e)) throw e;
+		return unknown;
+	}
+	if (!file) return unknown;
+	return { present: file.hashes.listedPresent(), total: file.manifest.chunkCount, unknown: false, deleted: file.manifest.deleted };
 };
 
 export interface DownloadProgress {
@@ -245,36 +243,44 @@ export interface DownloadProgress {
 }
 
 /**
- * Fetches and decrypts a file. chunkCount comes from the files manifest;
- * integrity is end-to-end — GCM authentication fails on any corrupted chunk,
- * independent of what any device claimed about the bytes.
+ * Fetches and decrypts a file. The count and order of its chunks are the
+ * uploader's — `uploaderHash`, the sender of the message carrying it: the
+ * manifest and each chunk's row must verify, and each
+ * chunk's bytes must hash to what its row says (fileIntegrity.ts) — GCM
+ * alone would accept any of the file's chunks at any index. A file that
+ * fails is refused with a FileVerificationError before anything more is
+ * fetched, and nothing of it is cached.
  */
 export const downloadFile = async (opts: {
 	fileId: string;
+	uploaderHash: string;
 	encSecretB64: string;
 	onProgress?: (p: DownloadProgress) => void;
 	/** Each decrypted chunk as it lands — lets a consumer start before the end. */
 	onChunk?: (index: number, plain: Uint8Array) => void;
 	signal?: AbortSignal;
+	resolveSignPkey?: SignPkeyResolver;
 }): Promise<Uint8Array> => {
 	const { fileId, encSecretB64, onProgress, signal } = opts;
 	const secret = fromBase64(encSecretB64);
 
-	const manifests = await readShapeOnce<Record<string, unknown>>('files', `file_id='${fileId}'`, signal);
-	const manifest = manifests.find((v) => v.file_id === fileId);
-	if (!manifest) throw new Error('file manifest not found');
-	if (wireBool(manifest.deleted_flag)) throw new Error('file was deleted by its uploader');
-	const total = Number(manifest.chunk_count);
+	const file = await readVerifiedFile(fileId, opts.uploaderHash, { signal, resolveSignPkey: opts.resolveSignPkey });
+	if (!file) throw new Error('file manifest not found');
+	if (file.manifest.deleted) throw new Error('file was deleted by its uploader');
+	const { hashes } = file;
+	const total = file.manifest.chunkCount;
 
 	requestPersistentStorage();
 	const parts: Uint8Array[] = [];
 	let size = 0;
 	for (let i = 0; i < total; i++) {
 		signal?.throwIfAborted();
+		const expected = await hashes.expected(i);
 		// Disk before network: chunks are immutable, so a cached one is
 		// exactly the one the device would serve — a reload or a lost uplink
-		// reassembles from here.
-		let encrypted = await getCachedChunk(fileId, i);
+		// reassembles from here. The cache answers only for the signed hash; a
+		// copy stored under another is fetched again and overwritten.
+		let encrypted = await getCachedChunk(fileId, i, expected);
 		const fromCache = !!encrypted;
 		if (!encrypted) {
 			const fetchChunk = () => {
@@ -291,11 +297,12 @@ export const downloadFile = async (opts: {
 			}
 			if (!r.ok) throw new Error(`chunk ${i} unavailable: HTTP ${r.status}`);
 			encrypted = new Uint8Array(await r.arrayBuffer());
+			assertChunkBytes(fileId, i, expected, encrypted);
 		}
 		const plain = await decryptChunk(secret, encrypted);
-		// Cache only what decrypted: GCM passing is the integrity check, and
-		// a corrupt fetch must not poison future loads.
-		if (!fromCache) void putCachedChunk(fileId, i, encrypted);
+		// Cached only once it is the signed chunk and decrypts: a bad fetch
+		// must not poison future loads.
+		if (!fromCache) void putCachedChunk(fileId, i, encrypted, expected);
 		parts.push(plain);
 		size += plain.length;
 		opts.onChunk?.(i, plain);

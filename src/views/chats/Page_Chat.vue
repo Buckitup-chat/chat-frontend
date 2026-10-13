@@ -3,8 +3,8 @@
         <ChatWindow ref="chatWindowRef" :title="chatName" :avatarUrl="avatarUrl" :avatarHash="avatarHash" :messages="displayMessages"
             :showAuthorName="false" :my-hash="$userPQ.currentUserHash" :peer-hash="peerHash" :reactions="displayReactions"
             :version-counts="versionCountByMsgId"
-            :downloads="downloadsByFileId" :images="imagesByFileId"
-            :availability="availabilityByFileId" :videos="videosByFileId" :audios="audiosByFileId"
+            :downloads="downloadsByKey" :images="imagesByKey"
+            :availability="availabilityByKey" :videos="videosByKey" :audios="audiosByKey" :refused="refusedFiles"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.discardFailedItem(id)"
             @show-image="handleShowImage" @play-video="handlePlayVideo" @play-audio="handlePlayAudio"
@@ -26,8 +26,9 @@
             :reactions-by-version="editHistory.reactionsByVersion"
             @close="editHistory = null" />
         <FileStateModal v-if="fileState" :part="fileState.part"
-            :availability="availabilityByFileId[fileState.part.fileId] || null"
-            :log="backfillLog(fileState.part.fileId)"
+            :availability="availabilityByKey[fileKey(fileState.part)] || null"
+            :refused="!!refusedFiles[fileKey(fileState.part)]"
+            :log="backfillLog(fileKey(fileState.part))"
             :from="fileState.msg?.isMine ? 'me' : chatName"
             :sent-at="fileState.msg?.timestamp || ''"
             :checking="fileStateChecking"
@@ -53,6 +54,8 @@ import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
 import { useAudioPlayback } from '@/composables/useAudioPlayback';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
+import { isRefusedFile } from '@/lib/data/fileIntegrity';
+import { fileKey } from '@/lib/data/fileKey';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
 import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
 import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
@@ -702,37 +705,49 @@ const handleSendFile = (files, caption) => {
     });
 };
 
+// Files whose manifest or chunks contradict their sender's signatures
+// (docs/invariants.md §6a), by fileKey. One record for every way a file is
+// shown — row, picture, video, the state screen — and no handler starts on
+// one again: another attempt gets the same bytes and the same answer. The
+// media maps below (*ByKey) are keyed by fileKey too.
+const refusedFiles = ref({});
+const refuseOn = (e, key) => {
+    if (!isRefusedFile(e)) return false;
+    refusedFiles.value = { ...refusedFiles.value, [key]: true };
+    return true;
+};
+
 // §1.3: images fetch themselves — the picture IS the message, so waiting for
 // a tap would leave the bubble showing a blur nobody asked to resolve.
 // Decrypted bytes live in the module-level media cache: chunks are immutable,
 // so re-entering the dialog reuses the picture instead of re-downloading it.
-const imagesByFileId = ref({});
+const imagesByKey = ref({});
 
 const fetchImage = async (part) => {
-    const id = part.fileId;
-    if (imagesByFileId.value[id]?.url || imagesByFileId.value[id]?.status === 'downloading') return;
+    const id = fileKey(part);
+    if (refusedFiles.value[id] || imagesByKey.value[id]?.url || imagesByKey.value[id]?.status === 'downloading') return;
 
     const cached = getCachedMedia(id);
     if (cached) {
-        imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'done', url: cached } };
+        imagesByKey.value = { ...imagesByKey.value, [id]: { status: 'done', url: cached } };
         return;
     }
 
-    imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'downloading', done: 0, total: 0 } };
+    imagesByKey.value = { ...imagesByKey.value, [id]: { status: 'downloading', done: 0, total: 0 } };
     try {
         const bytes = await $dialogs.fetchFile(part, {
             onProgress: (p) => {
-                const cur = imagesByFileId.value[id];
+                const cur = imagesByKey.value[id];
                 if (cur?.status === 'downloading') {
-                    imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'downloading', done: p.done, total: p.total } };
+                    imagesByKey.value = { ...imagesByKey.value, [id]: { status: 'downloading', done: p.done, total: p.total } };
                 }
             },
         });
         const url = putCachedMedia(id, bytes, part.mimeType || 'image/*');
-        imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'done', url } };
+        imagesByKey.value = { ...imagesByKey.value, [id]: { status: 'done', url } };
     } catch (e) {
         console.error('Image download failed:', e);
-        imagesByFileId.value = { ...imagesByFileId.value, [id]: { status: 'error' } };
+        imagesByKey.value = { ...imagesByKey.value, [id]: refuseOn(e, id) ? {} : { status: 'error' } };
     }
 };
 
@@ -752,23 +767,25 @@ const handleShowImage = (part) => fetchImage(part);
 // Per-dialog view state resets; the media cache underneath persists, so a
 // return to this dialog repopulates instantly from it.
 watch(dialogHash, () => {
-    imagesByFileId.value = {};
+    imagesByKey.value = {};
 });
 
 // §2.4: how much of each attachment this node can serve. Checked once per
 // attachment when it first appears — the answer only changes as chunks
 // arrive, and a download attempt refreshes it.
-const availabilityByFileId = ref({});
+const availabilityByKey = ref({});
 const availabilityAsked = new Set();
 
-const checkAvailability = async (fileId) => {
+const checkAvailability = async (part) => {
+    const key = fileKey(part);
     try {
-        const a = await $dialogs.getFileAvailability(fileId);
-        availabilityByFileId.value = { ...availabilityByFileId.value, [fileId]: a };
+        const a = await $dialogs.getFileAvailability(part);
+        availabilityByKey.value = { ...availabilityByKey.value, [key]: a };
         // Screen 05, backfill progress: what this client has observed, when.
-        if (!a.unknown) recordAvailability(fileId, a.present, a.total);
+        if (!a.unknown) recordAvailability(key, a.present, a.total);
     } catch (e) {
-        console.warn('Availability check failed for', fileId, e);
+        console.warn('Availability check failed for', part.fileId, e);
+        refuseOn(e, key);
     }
 };
 
@@ -779,81 +796,91 @@ const fileStateChecking = ref(false);
 
 const handleShowFileState = (part, msg) => {
     fileState.value = { part, msg };
-    checkAvailability(part.fileId);
+    checkAvailability(part);
 };
 
 // One button, two honest meanings: complete → download; partial → re-poll
 // the counts now (the closest a client can get to "prioritize this").
 const handleFileStateAction = async () => {
     const st = fileState.value;
-    if (!st) return;
-    const a = availabilityByFileId.value[st.part.fileId];
+    const key = st && fileKey(st.part);
+    if (!st || refusedFiles.value[key]) return;
+    const a = availabilityByKey.value[key];
     if (a && !a.unknown && a.present >= a.total) {
         fileState.value = null;
         await handleDownloadFile(st.part);
         return;
     }
     fileStateChecking.value = true;
-    try { await checkAvailability(st.part.fileId); }
+    try { await checkAvailability(st.part); }
     finally { fileStateChecking.value = false; }
 };
 
 watch(() => decryptedMessages.value, (msgs) => {
     for (const m of msgs || []) {
         for (const p of m.parts || []) {
-            if ((p.kind === 'file' || p.kind === 'image') && !availabilityAsked.has(p.fileId)) {
-                availabilityAsked.add(p.fileId);
-                checkAvailability(p.fileId);
+            const key = fileKey(p);
+            if ((p.kind === 'file' || p.kind === 'image') && !availabilityAsked.has(key)) {
+                availabilityAsked.add(key);
+                checkAvailability(p);
             }
         }
     }
 });
 
 watch(dialogHash, () => {
-    availabilityByFileId.value = {};
+    availabilityByKey.value = {};
     availabilityAsked.clear();
 });
 
 // §1.4: a video opens on demand — streaming through the Service Worker when
 // it is available, or as a downloaded blob when it is not.
-const videosByFileId = ref({});
+const videosByKey = ref({});
 const videoSources = new Map();
 
 const handlePlayVideo = async (part) => {
-    const id = part.fileId;
-    if (videosByFileId.value[id]?.url) return;
-    videosByFileId.value = { ...videosByFileId.value, [id]: { status: 'opening' } };
+    const id = fileKey(part);
+    if (refusedFiles.value[id] || videosByKey.value[id]?.url) return;
+    videosByKey.value = { ...videosByKey.value, [id]: { status: 'opening' } };
     try {
         const source = await $dialogs.openVideoSource(part, {
             onProgress: (p) => {
-                const cur = videosByFileId.value[id] || {};
-                videosByFileId.value = {
-                    ...videosByFileId.value,
+                const cur = videosByKey.value[id] || {};
+                videosByKey.value = {
+                    ...videosByKey.value,
                     [id]: { ...cur, status: cur.url ? cur.status : 'opening', done: p.done, total: p.total },
                 };
             },
             // §1.4, playback starts from the first chunk: the prefix becomes a
             // playable src immediately; the full file replaces it when done.
             onPartial: (url) => {
-                videosByFileId.value = {
-                    ...videosByFileId.value,
-                    [id]: { ...videosByFileId.value[id], status: 'ready', url, partial: true },
+                videosByKey.value = {
+                    ...videosByKey.value,
+                    [id]: { ...videosByKey.value[id], status: 'ready', url, partial: true },
                 };
+            },
+            // A chunk that failed while streaming ends this playback and its
+            // session: refused for good, or a failure the user may retry.
+            onFailed: (e) => {
+                videoSources.get(id)?.release();
+                videoSources.delete(id);
+                videosByKey.value = { ...videosByKey.value, [id]: refuseOn(e, id) ? {} : { status: 'error' } };
             },
         });
         videoSources.set(id, source);
-        videosByFileId.value = {
-            ...videosByFileId.value,
+        videosByKey.value = {
+            ...videosByKey.value,
             [id]: { status: 'ready', url: source.url, streaming: source.streaming, partial: false },
         };
     } catch (e) {
         console.error('Video open failed:', e);
-        videosByFileId.value = { ...videosByFileId.value, [id]: { status: 'error' } };
+        videosByKey.value = { ...videosByKey.value, [id]: refuseOn(e, id) ? {} : { status: 'error' } };
     }
 };
 
-const { audios: audiosByFileId, load: handlePlayAudio } = useAudioPlayback(
-    $dialogs.fetchFile,
+const { audios: audiosByKey, load: handlePlayAudio } = useAudioPlayback(
+    // A refusal joins the record every other view of a file reads.
+    (part, opts) => $dialogs.fetchFile(part, opts).catch((e) => { refuseOn(e, fileKey(part)); throw e; }),
     () => [dialogHash.value, $userPQ.currentUserHash],
 );
 
@@ -861,15 +888,16 @@ const { audios: audiosByFileId, load: handlePlayAudio } = useAudioPlayback(
 // map entry in the worker, downloaded videos live in the media cache — both
 // cheap to keep, and re-entering the chat replays without re-fetching.
 
-const downloadsByFileId = ref({});
+const downloadsByKey = ref({});
 
 const handleDownloadFile = async (filePart) => {
-    const fileId = filePart.fileId;
-    downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'downloading', done: 0, total: 0 } };
+    const key = fileKey(filePart);
+    if (refusedFiles.value[key]) return;
+    downloadsByKey.value = { ...downloadsByKey.value, [key]: { status: 'downloading', done: 0, total: 0 } };
     try {
         const bytes = await $dialogs.fetchFile(filePart, {
             onProgress: (p) => {
-                downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'downloading', done: p.done, total: p.total } };
+                downloadsByKey.value = { ...downloadsByKey.value, [key]: { status: 'downloading', done: p.done, total: p.total } };
             },
         });
         // Decrypted client-side; hand the plaintext to the browser's save flow.
@@ -880,13 +908,13 @@ const handleDownloadFile = async (filePart) => {
         a.download = filePart.name || 'file';
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'done' } };
+        downloadsByKey.value = { ...downloadsByKey.value, [key]: { status: 'done' } };
     } catch (e) {
         console.error('Download failed:', e);
-        downloadsByFileId.value = { ...downloadsByFileId.value, [fileId]: { status: 'error' } };
+        downloadsByKey.value = { ...downloadsByKey.value, [key]: refuseOn(e, key) ? {} : { status: 'error' } };
         // A failure usually means chunks are still travelling — re-read the
         // counts so the row can say how far along it is instead of just "failed".
-        checkAvailability(fileId);
+        checkAvailability(filePart);
     }
 };
 
