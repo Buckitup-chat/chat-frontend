@@ -136,6 +136,18 @@ describe('readPeerParts', () => {
 		expect(stored.messages.map((m) => m.messageId)).toEqual([id(1)]);
 	});
 
+	it('with after, leaves out what the peer wrote before that message', async () => {
+		// Ids carry their authoring time (UUIDv7): these three were written in this order.
+		const at = (ms) => `dmsg_0192aa${ms}0-0000-7000-8000-000000000000`;
+		seed(
+			await message(peer, peerKey, 1, [holding('given_back')], { message_id: at(1) }),
+			await message(me, myKey, 3, [{ kind: 'text', text: 'the share' }], { message_id: at(3) }),
+		);
+		expect((await store.readPeerParts(peer.userHash, ['recovery_holding'], { newestMatch: () => true, after: at(3) })).messages).toEqual([]);
+		seed(await message(peer, peerKey, 5, [holding('stored')], { message_id: at(5) }));
+		expect((await store.readPeerParts(peer.userHash, ['recovery_holding'], { newestMatch: () => true, after: at(3) })).messages.map((m) => m.messageId)).toEqual([at(5)]);
+	});
+
 	it('names a message delivered only on the peer\'s own verified receipt', async () => {
 		seed(await message(me, myKey, 1, [{ kind: 'text', text: 'share' }]), await message(me, myKey, 2, [{ kind: 'text', text: 'other' }]));
 		const forged = receipt(peer, id(2), 'delivered');

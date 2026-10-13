@@ -124,6 +124,17 @@ describe('the backup store’s receipts', () => {
 		}
 	});
 
+	it('lets the background read learn delivered when an open dialog had nothing to say about the piece', async () => {
+		dialogs[G('a')] = { messages: [], delivered: ['ma'] };
+		const store = useRecoveryBackupStore();
+		await store.load();
+		store.noteGuardianMessages(G('a'), [{ senderHash: G('a'), parts: [word('stored', { shareIndex: 7 })] }]);
+		await store.refreshReceipts();
+		expect(readPeerParts.mock.calls.map(([peer]) => peer)).toContain(G('a'));
+		expect(store.receipts[G('a')]).toBe('delivered');
+		expect(readPeerParts.mock.calls.find(([peer]) => peer === G('a'))[2].after).toBe('ma');
+	});
+
 	it('takes an open dialog’s messages as they are, and forgets what was heard for another run', async () => {
 		const store = useRecoveryBackupStore();
 		await store.load();

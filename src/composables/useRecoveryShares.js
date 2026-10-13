@@ -11,7 +11,7 @@ import { GiveBackError } from '@/lib/recovery/keeping';
 import { sentSharesOf } from '@/lib/recovery/receipts';
 import { feedOrderKey } from '@/lib/data/feedOrder';
 import { guardianDelivery } from '@/components/recovery/backup/backupFlow';
-import { confirmGiveBack } from '@/components/recovery/holdingWords';
+import { confirmGiveBack, givenBackOffline } from '@/components/recovery/holdingWords';
 
 const envelopeOf = ({ kind: _kind, ...share }) => share;
 const RECOVERY_KINDS = new Set(['recovery_share', 'recovery_holding']);
@@ -118,7 +118,8 @@ export function useRecoveryShares({ peerHash, messages, peerName, swal, isAlive 
 		if (!(await confirmGiveBack(swal, peerName.value)) || !isAlive()) return;
 		givingBack.value = true;
 		try {
-			await $holdings.giveBack(key);
+			const { queued } = await $holdings.giveBack(key);
+			if (queued && isAlive()) swal.fire({ icon: 'info', title: 'Given back', text: givenBackOffline(peerName.value) });
 		} catch (e) {
 			if (isAlive()) swal.fire({ icon: 'error', title: 'The piece was not given back', text: e instanceof GiveBackError ? e.message : String(e?.message ?? e) });
 		} finally {

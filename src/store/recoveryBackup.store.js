@@ -244,8 +244,11 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	const receipts = computed(() => Object.fromEntries(Object.entries(receiptDetails.value).map(([g, r]) => [g, r.state])));
 	/** When each guardian's word was last taken, by `<runId>|<guardian>`: a read this fresh is not made again. */
 	const lastHeard = new Map();
-	const hear = (runId, guardian, receipt) => {
-		lastHeard.set(`${runId}|${guardian}`, Date.now());
+	const hear = (runId, guardian, receipt, { read = false } = {}) => {
+		// A read of the dialog counts as heard whatever it found; a page's
+		// messages only when they said something, so the background read is
+		// still free to learn `delivered`.
+		if (read || receipt) lastHeard.set(`${runId}|${guardian}`, Date.now());
 		if (!receipt) return;
 		const byGuardian = heard.value.runId === runId ? heard.value.byGuardian : {};
 		const prev = byGuardian[guardian];
@@ -273,8 +276,9 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 				const read = await $dialogs.readPeerParts(guardian, ['recovery_holding'], {
 					deliveredOf: [sent[guardian].messageId],
 					newestMatch: isReportOn(sent[guardian]),
+					after: sent[guardian].messageId,
 				});
-				if (read && $userPQ.currentUserHash === owner) hear(current.runId, guardian, receiptOf(guardian, sent[guardian], read));
+				if (read && $userPQ.currentUserHash === owner) hear(current.runId, guardian, receiptOf(guardian, sent[guardian], read), { read: true });
 			};
 			// A few dialogs at a time: each read opens its own shape.
 			for (let i = 0; i < due.length; i += RECEIPT_READS_AT_ONCE) {

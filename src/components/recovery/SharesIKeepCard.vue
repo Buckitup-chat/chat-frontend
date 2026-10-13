@@ -33,6 +33,7 @@
 				<div class="cb-small">Each piece is listed under the contact who sent it: the network does not say whose backup it belongs to.</div>
 			</template>
 			<div v-if="actionError" class="cb-field-error" data-test="action-error">{{ actionError }}</div>
+			<div v-if="notice" class="cb-small" data-test="notice">{{ notice }}</div>
 		</div>
 	</div>
 </template>
@@ -47,7 +48,7 @@ import { userPQStore } from '@/store/userPQ.store';
 import { holdsBytes } from '@/lib/recovery/holdings';
 import errorMessage from '@/utils/errorMessage';
 import ContactAvatar from './backup/ContactAvatar.vue';
-import { confirmGiveBack, keptStateIsProblem, keptStateText } from './holdingWords';
+import { confirmGiveBack, givenBackOffline, keptStateIsProblem, keptStateText } from './holdingWords';
 
 const store = useRecoveryHoldingsStore();
 const $userPQ = userPQStore();
@@ -55,6 +56,7 @@ const $swal = inject('$swal');
 
 const loadError = ref(null);
 const actionError = ref(null);
+const notice = ref(null);
 const busy = ref(false);
 
 const load = async () => {
@@ -96,10 +98,12 @@ const rows = computed(() =>
 
 const giveBack = async (r) => {
 	actionError.value = null;
+	notice.value = null;
 	if (!(await confirmGiveBack($swal, r.name))) return;
 	busy.value = true;
 	try {
-		await store.giveBack(r.key);
+		const { queued } = await store.giveBack(r.key);
+		if (queued) notice.value = givenBackOffline(r.name);
 	} catch (e) {
 		actionError.value = errorMessage(e);
 	} finally {

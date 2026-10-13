@@ -62,3 +62,6 @@ export const confirmGiveBack = async (swal, ownerName) => {
 	});
 	return !!isConfirmed;
 };
+
+/** A piece given back while offline: done here, on its way to the owner. */
+export const givenBackOffline = (ownerName) => `Your copy is removed. ${ownerName} is told when you are online again.`;

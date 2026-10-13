@@ -13,7 +13,7 @@ const env = (over = {}) => ({ secretRef: REF, version: 1, threshold: 2, total: 5
 const sharePart = (over) => ({ kind: 'recovery_share', ...env(over) });
 const holdingPart = (state, over = {}) => ({ kind: 'recovery_holding', secretRef: REF, version: 1, splitId: 's1', shareIndex: 1, state, detail: '', ...over });
 
-const holdings = reactive({ holdings: {}, receive: vi.fn(async () => {}), giveBack: vi.fn(async () => {}) });
+const holdings = reactive({ holdings: {}, receive: vi.fn(async () => {}), giveBack: vi.fn(async () => ({ queued: false })) });
 const backup = reactive({
 	loaded: true,
 	run: { runId: 'r1', deployment: REF.split('/')[0], secretId: '0x' + 'ab'.repeat(32), version: 1, splitId: 's1', sent: { [PEER]: { messageId: 'dmsg_mine', shareIndex: 1 } }, guardians: [] },
@@ -117,6 +117,13 @@ describe('giving back', () => {
 
 		await giveBack('k1');
 		expect(holdings.giveBack).toHaveBeenCalledWith('k1');
+	});
+
+	it('says the owner hears it once online when it was given back offline', async () => {
+		holdings.giveBack.mockResolvedValueOnce({ queued: true });
+		const { giveBack } = use([]);
+		await giveBack('k1');
+		expect(swal.fire).toHaveBeenLastCalledWith(expect.objectContaining({ icon: 'info', title: 'Given back', text: expect.stringContaining('Daria is told when you are online again') }));
 	});
 
 	it('says so when it failed', async () => {

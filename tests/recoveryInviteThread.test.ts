@@ -116,7 +116,7 @@ describe('the owner’s view of an invitation', () => {
 
 describe('the guardian’s view of an invitation', () => {
 	it('can be accepted from a confirmed contact on a reachable deployment', () => {
-		expect(asGuardian([invite('m1', OWNER)]).m1).toEqual({ kind: 'received_invite', inviteId: INVITE, deployment: DEPLOYMENT, blocker: null, answer: null });
+		expect(asGuardian([invite('m1', OWNER)]).m1).toEqual({ kind: 'received_invite', inviteId: INVITE, messageId: 'm1', deployment: DEPLOYMENT, blocker: null, answer: null });
 	});
 
 	it('is not offered once the owner asked again, since its answers are ignored', () => {
@@ -203,7 +203,7 @@ describe('answering an invitation', () => {
 		expect(reply).toMatchObject({ kind: 'recovery_invite_reply', inviteId: INVITE, answer: 'accept', metaAddress: keys.metaAddress });
 		expect(checkInviteReply(reply, OWNER, GUARDIAN)).toEqual({ ok: true, answer: 'accept', metaAddress: keys.metaAddress });
 		expect(log).toEqual(['send', `patch:${GUARDIAN_SLOT}`]);
-		expect(slots[GUARDIAN_SLOT][0]).toEqual({ $keyed: ['answers'], answers: { [INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'accept', at: expect.any(Number) } } });
+		expect(slots[GUARDIAN_SLOT][0]).toEqual({ $keyed: ['answers'], $sticky: { answers: { answer: ['decline'] } }, answers: { [INVITE]: { owner: OWNER, deployment: DEPLOYMENT, answer: 'accept', at: expect.any(Number) } } });
 	});
 
 	it('answers every owner with the same meta-address', async () => {

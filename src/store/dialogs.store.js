@@ -1372,7 +1372,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * `delivered` — the ids among `deliveredOf` that the peer's verified
      * delivered receipt names. With `newestMatch`, only the newest message
      * with a part it accepts: rows are decrypted newest first and the read
-     * stops there. Read without joining the warm set, through the gate like
+     * stops there; with `after` too, the rows written before that message —
+     * the share a report can only follow — are not decrypted. Read without joining the warm set, through the gate like
      * the feed (a row that does not verify is not read), within a time
      * budget: null when the dialog could not be read in time, or another
      * account is signed in by then. For screens that need a few facts from
@@ -1380,7 +1381,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * word on their pieces (pq_recovery_shares § Holding).
      */
     const PEER_READ_BUDGET_MS = 15_000;
-    const readPeerParts = async (peerHash, kinds, { deliveredOf = [], newestMatch = null } = {}) => {
+    const readPeerParts = async (peerHash, kinds, { deliveredOf = [], newestMatch = null, after = null } = {}) => {
         const me = $userPQ.currentUserHash;
         const dialogHash = getDialogHash(peerHash);
         if (!dialogHash || !peerHash || peerHash === me) return null;
@@ -1389,7 +1390,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const read = withDialogCollections(dialogHash, async (colls) => {
             const gated = await admittedRowsOf(dialogHash, colls, stillMine);
             if (!gated) return null;
-            const peerRows = gated.admitted.filter((row) => row.sender_hash === peerHash && !row.deleted_flag);
+            const floor = after ? feedOrderKey(after, 0) : -Infinity;
+            const peerRows = gated.admitted.filter((row) => row.sender_hash === peerHash && !row.deleted_flag
+                && feedOrderKey(row.message_id, row.owner_timestamp) >= floor);
             const messages = [];
             for (const row of newestMatch ? [...peerRows].reverse() : peerRows) {
                 const parts = ((await decryptMessageRow(row, colls)).parts || []).filter(wanted);

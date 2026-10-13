@@ -30,7 +30,7 @@ beforeEach(() => {
 		list: [],
 		load: vi.fn(async () => {}),
 		sweep: vi.fn(async () => ({ read: false })),
-		giveBack: vi.fn(async () => {}),
+		giveBack: vi.fn(async () => ({ queued: false })),
 	});
 	swal = { fire: vi.fn(async () => ({ isConfirmed: true })) };
 });
@@ -96,5 +96,16 @@ describe('Shares I keep', () => {
 		await w.find('[data-test="give-back"]').trigger('click');
 		await flushPromises();
 		expect(w.find('[data-test="action-error"]').text()).toContain('offline');
+	});
+
+	it('says a piece given back offline reaches its owner once online', async () => {
+		H.store.list = [held('k1')];
+		H.store.giveBack = vi.fn(async () => ({ queued: true }));
+		const w = render();
+		await flushPromises();
+		await w.find('[data-test="give-back"]').trigger('click');
+		await flushPromises();
+		expect(w.find('[data-test="notice"]').text()).toBe('Your copy is removed. Daria is told when you are online again.');
+		expect(w.find('[data-test="action-error"]').exists()).toBe(false);
 	});
 });

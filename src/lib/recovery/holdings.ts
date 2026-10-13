@@ -113,6 +113,9 @@ export interface KeepingContext {
 	slotsAt: (id: string, version: number) => Promise<Uint8Array[]>;
 }
 
+/** Why a share kept without the guardian's live acceptance is reported. */
+export const UNREQUESTED = 'the guardian has not agreed to keep pieces on this network';
+
 /**
  * Where a share just received stands. It is kept whatever the answer — a
  * share is never dropped on arrival — and every state but `pending` is told
@@ -124,7 +127,16 @@ export const judgeShare = async (owner: string, share: ShareEnvelope, ctx: Keepi
 	const ref = parseSecretRef(share.secretRef);
 	if (!ref) return { state: 'unverified', detail: 'it names no secret the guardian\'s app can read' };
 	if (!ctx.reachable(ref.namespace)) return { state: 'unreachable', detail: 'it is for a network the guardian\'s app cannot reach' };
-	if (!ctx.consented(owner, ref.namespace)) return { state: 'unrequested', detail: 'the guardian has not agreed to keep pieces on this network' };
+	if (!ctx.consented(owner, ref.namespace)) return { state: 'unrequested', detail: UNREQUESTED };
+	// Bytes that do not decode are the piece's fault, whatever the chain says.
+	let piece: Uint8Array;
+	let proof: Uint8Array[];
+	try {
+		piece = fromBase64(share.shareB64);
+		proof = share.splitProof.map((leaf) => fromBase64(leaf));
+	} catch {
+		return { state: 'unverified', detail: 'the piece is not valid base64' };
+	}
 	const secret = await ctx.readSecret(ref.id);
 	// A version the chain does not show yet is read again later, not reported.
 	if (!secret || share.version > secret.version) return { state: 'pending', detail: '' };
@@ -140,8 +152,8 @@ export const judgeShare = async (owner: string, share: ShareEnvelope, ctx: Keepi
 				threshold: share.threshold,
 				total: share.total,
 				index: share.shareIndex,
-				share: fromBase64(share.shareB64),
-				proof: share.splitProof.map((leaf) => fromBase64(leaf)),
+				share: piece,
+				proof,
 				nodeSet: share.nodeSet,
 			},
 			root,
@@ -187,10 +199,14 @@ export const shouldDrop = async (h: Holding, all: readonly Holding[], ctx: Dying
 /**
  * The message telling the owner where `h` stands, or null when there is
  * nothing to tell yet (pending) or they already know. A refused share is told
- * as `unverified` with the reason: the owner's client sent two pieces that
- * cannot both be right.
+ * as `unverified` with the reason — the owner's client sent two pieces that
+ * cannot both be right — unless `holdings` keeps a holding under the same
+ * key: the owner's latest word on a piece is that holding's, so a refusal of
+ * other bytes for it stays with the guardian (the chat shows it), and only a
+ * refusal with no holding at its key, another split, is told.
  */
-export const reportFor = (h: Holding): RecoveryHoldingPart | null => {
+export const reportFor = (h: Holding, holdings: Holdings = {}): RecoveryHoldingPart | null => {
+	if (h.state === 'conflict' && holdings[holdingKey(h.owner, h.share)]) return null;
 	const state: ReportedState | null = h.state === 'conflict' ? 'unverified' : isReportedState(h.state) ? h.state : null;
 	if (!state || h.reported === state) return null;
 	const { secretRef, version, splitId, shareIndex } = h.share;

@@ -108,9 +108,9 @@ export function useGuardianInvites({ peerHash, dialogHash, messages, peerName, s
 		});
 	};
 
-	const answerInvite = ({ inviteId, deployment, accept }) =>
+	const answerInvite = ({ inviteId, messageId, deployment, accept }) =>
 		run('The answer was not sent', () =>
-			$invites.answer(peerHash.value, { inviteId, deployment }, accept, statusToast(accept ? 'Your acceptance' : 'Your answer')),
+			$invites.answer(peerHash.value, { inviteId, messageId, deployment }, accept, statusToast(accept ? 'Your acceptance' : 'Your answer')),
 		);
 
 	return { views, peerConfirmed, inviting, inviteGuardian, answerInvite };

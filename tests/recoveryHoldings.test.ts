@@ -38,6 +38,12 @@ describe('judging a share received', () => {
 		expect(await judgeShare(OWNER, share, ctx({ slotsAt: async () => slots.slice(1) }))).toMatchObject({ state: 'unverified' });
 	});
 
+	it('reports a piece that is not base64 as unverified, never as a chain that did not answer', async () => {
+		const down = ctx({ readSecret: async () => { throw new Error('the chain did not answer'); } });
+		expect(await judgeShare(OWNER, { ...share, shareB64: 'not base64!' }, down)).toEqual({ state: 'unverified', detail: 'the piece is not valid base64' });
+		expect(await judgeShare(OWNER, { ...share, splitProof: ['%%%', ...share.splitProof.slice(1)] }, ctx())).toEqual({ state: 'unverified', detail: 'the piece is not valid base64' });
+	});
+
 	it('waits for a version the chain does not show yet, and drops one that is revoked', async () => {
 		expect(await judgeShare(OWNER, share, ctx({ readSecret: async () => null }))).toMatchObject({ state: 'pending' });
 		expect(await judgeShare(OWNER, { ...share, version: 2 }, ctx())).toMatchObject({ state: 'pending' });

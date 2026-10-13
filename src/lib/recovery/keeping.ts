@@ -7,7 +7,7 @@
 // which come in as functions.
 import type { RecoveryHoldingPart } from '@/lib/pq/content';
 import {
-	classifyShare, conflictKey, holdingKey, holdsBytes, judgeShare, parseSecretRef, reportFor, shouldDrop, TOMBSTONES,
+	classifyShare, conflictKey, holdingKey, holdsBytes, judgeShare, parseSecretRef, reportFor, shouldDrop, TOMBSTONES, UNREQUESTED,
 	type DyingContext, type Holding, type Holdings, type HoldingState, type KeepingContext, type ReceivedShare, type SecretOnChain,
 } from './holdings';
 
@@ -22,6 +22,17 @@ export interface KeepingDeps {
 	dying: DyingContext;
 	now: () => number;
 }
+
+/**
+ * The patch writing `entries` into the guardian slot: by key, and a tombstone
+ * is final — a device that has not seen it never writes the share back over
+ * it (storageIntent `$sticky`).
+ */
+export const holdingsPatch = (entries: Holdings) => ({
+	$keyed: ['holdings'],
+	$sticky: { holdings: { state: [...TOMBSTONES] } },
+	holdings: entries,
+});
 
 /** `h` moved to `state`; a tombstone keeps the envelope and loses the share's bytes. */
 const settle = (h: Holding, state: HoldingState, detail: string, now: number): Holding => ({
@@ -58,7 +69,7 @@ const reportDue = async (deps: KeepingDeps, holdings: Holdings, keys: readonly s
 	const told: Holdings = {};
 	for (const key of keys) {
 		const h = holdings[key];
-		const part = h && reportFor(h);
+		const part = h && reportFor(h, holdings);
 		if (!part) continue;
 		try {
 			await deps.send(h.owner, [part]);
@@ -98,6 +109,10 @@ export const receiveShares = async (deps: KeepingDeps, owner: string, received: 
 	return reportDue(deps, holdings, Object.keys(holdings).filter((k) => holdings[k].owner === owner));
 };
 
+/** Whether the guardian's consent no longer matches what `h` says of it: kept as stored without it, or as unrequested with it. */
+const consentChanged = (h: Holding, consented: boolean): boolean =>
+	(h.state === 'stored' && !consented) || (h.state === 'unrequested' && consented);
+
 /** Kept shares § Dying applies to: a pending one is judged again instead, an unreachable one is left alone. */
 const DROPPABLE: ReadonlySet<HoldingState> = new Set(['stored', 'unverified', 'unrequested']);
 
@@ -117,19 +132,24 @@ export const secretsToCheck = (holdings: Holdings, reachable: (namespace: string
  * pending share, a state not told yet, or a kept share whose secret was
  * revoked or moved past its version.
  */
-export const sweepDue = (holdings: Holdings, secrets: ReadonlyMap<string, SecretOnChain | null>): boolean =>
+export const sweepDue = (
+	holdings: Holdings,
+	secrets: ReadonlyMap<string, SecretOnChain | null>,
+	consented: KeepingContext['consented'] = () => true,
+): boolean =>
 	Object.values(holdings).some((h) => {
-		if (h.state === 'pending' || reportFor(h)) return true;
+		if (h.state === 'pending' || reportFor(h, holdings)) return true;
 		if (!DROPPABLE.has(h.state)) return false;
 		const ref = parseSecretRef(h.share.secretRef);
+		if (ref && consentChanged(h, consented(h.owner, ref.namespace))) return true;
 		const secret = ref ? secrets.get(ref.id) : null;
 		return !!secret && (secret.revoked || secret.version > h.share.version);
 	});
 
 /**
  * The periodic pass: a pending share is judged again once the chain shows
- * its version; a kept share on a deployment this build reaches is dropped
- * when § Dying says so. The changes go in one write, then whatever the owner
+ * its version; a kept share on a deployment this build reaches follows the
+ * guardian's consent, and is dropped when § Dying says so. The changes go in one write, then whatever the owner
  * has not heard is told.
  */
 export const sweepHoldings = async (deps: KeepingDeps): Promise<Holdings> => {
@@ -144,6 +164,17 @@ export const sweepHoldings = async (deps: KeepingDeps): Promise<Holdings> => {
 		if (!DROPPABLE.has(h.state)) continue;
 		const ref = parseSecretRef(h.share.secretRef);
 		if (!ref || !deps.keeping.reachable(ref.namespace)) continue;
+		// The guardian's consent changed since: a withdrawn one makes a stored
+		// share unrequested (§ Holding says so to the owner), and a share kept
+		// without one is judged again once it is given.
+		if (consentChanged(h, deps.keeping.consented(h.owner, ref.namespace))) {
+			if (h.state === 'stored') changes[key] = settle(h, 'unrequested', UNREQUESTED, deps.now());
+			else {
+				const verdict = await orNull(() => judgeShare(h.owner, h.share, deps.keeping));
+				if (verdict) changes[key] = settle(h, verdict.state, verdict.detail, deps.now());
+			}
+			continue;
+		}
 		const reason = await orNull(() => shouldDrop(h, Object.values({ ...holdings, ...changes }), deps.dying));
 		if (reason) changes[key] = settle(h, 'dropped', reason, deps.now());
 	}

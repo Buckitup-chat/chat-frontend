@@ -9,10 +9,10 @@ import { defaultSettings } from '@/lib/recovery/backupPlan';
 import { prepareRun, shareInputsOf, sharePartOf } from '@/lib/recovery/backupRun';
 import { conflictKey, holdingKey, type Holdings, type ShareEnvelope } from '@/lib/recovery/holdings';
 import { guardianChainReads, type GuardianChain } from '@/lib/recovery/chain';
-import { consentedIn } from '@/lib/recovery/invitations';
+import { answersPatch, consentedIn } from '@/lib/recovery/invitations';
 import { mergeJsonPatch, stripPatchDirectives } from '@/lib/data/storageIntent';
 import {
-	anyUnhandled, giveBack, GiveBackError, receiveShares, secretsToCheck, sweepDue, sweepHoldings, type KeepingDeps,
+	anyUnhandled, giveBack, GiveBackError, holdingsPatch, receiveShares, secretsToCheck, sweepDue, sweepHoldings, type KeepingDeps,
 } from '@/lib/recovery/keeping';
 import type { RecoveryHoldingPart } from '@/lib/pq/content';
 import type { GuardianAnswer } from '@/lib/recovery/inviteThread';
@@ -82,7 +82,7 @@ const deps = (): KeepingDeps => {
 		// The slot's keyed merge, as the materializer applies it.
 		save: async (entries) => {
 			saves += 1;
-			slot = structuredClone(stripPatchDirectives(mergeJsonPatch(slot, { $keyed: ['holdings'], holdings: entries })));
+			slot = structuredClone(stripPatchDirectives(mergeJsonPatch(slot, holdingsPatch(entries))));
 			return structuredClone(holdings());
 		},
 		send: async (owner, parts) => {
@@ -153,7 +153,7 @@ describe('receiving a share', () => {
 });
 
 describe('a share that disagrees with one kept', () => {
-	it('is refused without its bytes, beside the one kept, and reported once as unverified', async () => {
+	it('is refused without its bytes, beside the one kept, and leaves the owner’s word on that piece the kept one’s', async () => {
 		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_1', share }]);
 		const other = { ...share, shareB64: envelopeOf(v1, 1).shareB64 };
 		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_2', share: other }]);
@@ -162,17 +162,23 @@ describe('a share that disagrees with one kept', () => {
 		expect(holdings()[KEY]).toMatchObject({ state: 'stored', messageId: 'dmsg_1' });
 		expect(holdings()[KEY].share.shareB64).toBe(share.shareB64);
 		const refused = holdings()[conflictKey(OWNER, { messageId: 'dmsg_2', share: other })];
-		expect(refused).toMatchObject({ state: 'conflict', detail: expect.stringMatching(/different contents/), reported: 'unverified' });
+		expect(refused).toMatchObject({ state: 'conflict', detail: expect.stringMatching(/different contents/) });
+		expect(refused.reported).toBeUndefined();
 		expect(refused.share.shareB64).toBe('');
-		expect(sent.map((s) => [s.parts[0].state, s.parts[0].detail])).toEqual([['stored', ''], ['unverified', 'this piece was already sent with different contents']]);
+		// The latest recovery_holding for this piece stays the stored one: the refusal is shown here only.
+		expect(sent.map((s) => [s.parts[0].state, s.parts[0].detail])).toEqual([['stored', '']]);
+		await sweepHoldings(deps());
+		expect(sent).toHaveLength(1);
 	});
 
-	it('refuses another split at a version already held', async () => {
+	it('refuses another split at a version already held, and tells the owner once: no holding speaks for that piece', async () => {
 		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_1', share }]);
 		const otherSplit = envelopeOf(runAt(1), 1);
 		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_2', share: otherSplit }]);
+		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_2', share: otherSplit }]);
 		expect(holdings()[holdingKey(OWNER, otherSplit)]).toBeUndefined();
-		expect(holdings()[conflictKey(OWNER, { messageId: 'dmsg_2', share: otherSplit })]).toMatchObject({ state: 'conflict', detail: expect.stringMatching(/another split/) });
+		expect(holdings()[conflictKey(OWNER, { messageId: 'dmsg_2', share: otherSplit })]).toMatchObject({ state: 'conflict', detail: expect.stringMatching(/another split/), reported: 'unverified' });
+		expect(sent.map((s) => [s.parts[0].state, s.parts[0].splitId])).toEqual([['stored', share.splitId], ['unverified', otherSplit.splitId]]);
 	});
 });
 
@@ -309,5 +315,61 @@ describe('consent', () => {
 		expect(consentedIn({ x: a('accept', 1, { owner: 'u_other' }) }, OWNER, NS)).toBe(false);
 		expect(consentedIn({ x: a('accept', 1, { deployment: 'eip155:10:0x1' }) }, OWNER, NS)).toBe(false);
 		expect(consentedIn(undefined, OWNER, NS)).toBe(false);
+	});
+
+	it('is the answer to the live invitation, the newest sent; an answer to one superseded changes nothing', () => {
+		const a = (answer: 'accept' | 'decline', inviteMessageId: string, at: number): GuardianAnswer => ({ owner: OWNER, deployment: NS, answer, inviteMessageId, at });
+		// The owner asked again (m2) and it was accepted; the old invitation was declined afterwards.
+		expect(consentedIn({ i1: a('decline', 'dmsg_0192aaa1', 50), i2: a('accept', 'dmsg_0192aaa2', 40) }, OWNER, NS)).toBe(true);
+		expect(consentedIn({ i1: a('accept', 'dmsg_0192aaa1', 50), i2: a('decline', 'dmsg_0192aaa2', 40) }, OWNER, NS)).toBe(false);
+		// An answer that names its invitation outranks one recorded before it did.
+		expect(consentedIn({ i1: { owner: OWNER, deployment: NS, answer: 'decline', at: 99 }, i2: a('accept', 'dmsg_0192aaa2', 1) }, OWNER, NS)).toBe(true);
+	});
+
+	it('does not depend on the order the slot lists answers in, those without a time included', () => {
+		const legacy = (answer: 'accept' | 'decline') => ({ owner: OWNER, deployment: NS, answer }) as GuardianAnswer;
+		const entries: [string, GuardianAnswer][] = [['aa', legacy('decline')], ['bb', legacy('accept')], ['cc', legacy('decline')]];
+		const results = [entries, [...entries].reverse(), [entries[1], entries[2], entries[0]]].map((e) => consentedIn(Object.fromEntries(e), OWNER, NS));
+		expect(new Set(results).size).toBe(1);
+		// The rule: the largest invitation id stands when nothing else orders them.
+		expect(results[0]).toBe(false);
+	});
+
+	it('keeps a decline recorded for an invitation against a stale acceptance of it', () => {
+		const stored = { answers: { i1: { owner: OWNER, deployment: NS, answer: 'decline', inviteMessageId: 'm1', at: 2 } } };
+		const landed = stripPatchDirectives(mergeJsonPatch(stored, answersPatch({ i1: { owner: OWNER, deployment: NS, answer: 'accept', inviteMessageId: 'm1', at: 1 } })));
+		expect(consentedIn(landed.answers as Record<string, GuardianAnswer>, OWNER, NS)).toBe(false);
+	});
+});
+
+describe('following the guardian’s consent', () => {
+	it('makes a stored share unrequested when consent is withdrawn, and stores it again once given', async () => {
+		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_1', share }]);
+		expect(sweepDue(holdings(), new Map(), (o, ns) => consentedIn(answers, o, ns))).toBe(false);
+		answers.i1 = { ...answers.i1, answer: 'decline' };
+		expect(sweepDue(holdings(), new Map(), (o, ns) => consentedIn(answers, o, ns))).toBe(true);
+		await sweepHoldings(deps());
+		expect(holdings()[KEY]).toMatchObject({ state: 'unrequested', reported: 'unrequested' });
+		expect(holdings()[KEY].share.shareB64).toBe(share.shareB64);
+
+		answers.i2 = { owner: OWNER, deployment: NS, answer: 'accept', inviteMessageId: 'dmsg_ffff', at: 99 };
+		await sweepHoldings(deps());
+		expect(holdings()[KEY]).toMatchObject({ state: 'stored', reported: 'stored' });
+		expect(states()).toEqual(['stored', 'unrequested', 'stored']);
+	});
+});
+
+describe('two devices', () => {
+	it('never write a share back over a tombstone: one gives it back while the other, behind, keeps it', async () => {
+		await receiveShares(deps(), OWNER, [{ messageId: 'dmsg_1', share }]);
+		// Device B read the slot before the share was kept anywhere, and acts on that read after A gave it back.
+		const stale = {};
+		await giveBack(deps(), KEY);
+		const reportsBefore = sent.length;
+		const b = { ...deps(), load: async () => structuredClone(stale) };
+		await receiveShares(b, OWNER, [{ messageId: 'dmsg_1', share }]);
+		expect(holdings()[KEY]).toMatchObject({ state: 'given_back' });
+		expect(holdings()[KEY].share.shareB64).toBe('');
+		expect(sent).toHaveLength(reportsBefore);
 	});
 });

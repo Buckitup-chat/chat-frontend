@@ -10,6 +10,7 @@ import { metaKeysOf } from '@/lib/recovery/guardianInvite';
 import { defaultSettings } from '@/lib/recovery/backupPlan';
 import { prepareRun, shareInputsOf, sharePartOf } from '@/lib/recovery/backupRun';
 import { holdingKey } from '@/lib/recovery/holdings';
+import { StorageNotOnServerError } from '@/lib/data/userStorage';
 
 const NS = 'eip155:11155111:0xd9ffd20f2db9c774b9f0237c4837f52dcbd937a7';
 const ID = '0x' + 'ab'.repeat(32);
@@ -21,13 +22,14 @@ const run = { ...prepareRun({ deployment: NS, owner: '0x' + '77'.repeat(20), gua
 const { kind: _kind, ...share } = sharePartOf(run, 0, `${NS}/${ID}`, 1);
 const KEY = holdingKey(OWNER, share);
 
-const H = vi.hoisted(() => ({ inputs: [], secret: null, chainReads: 0 }));
+const H = vi.hoisted(() => ({ inputs: [], secret: null, chainReads: 0, offline: false }));
 H.inputs = shareInputsOf(run);
 vi.mock('@/lib/recovery/chain', async (importOriginal) => ({
 	...(await importOriginal()),
 	RecoveryChain: class {
 		constructor() {
 			H.chainReads = 0;
+	H.offline = false;
 		}
 		async readSecret() {
 			H.chainReads += 1;
@@ -45,8 +47,14 @@ vi.mock('@/lib/recovery/chain', async (importOriginal) => ({
 const slots = {};
 const em = {
 	loadSlotJson: vi.fn(async (name) => structuredClone(slots[name] ?? null)),
-	// The slot's keyed merge, as the materializer applies it.
-	patchSlotJson: vi.fn(async (name, patch) => structuredClone((slots[name] = stripPatchDirectives(mergeJsonPatch(slots[name] ?? null, patch))))),
+	// The slot's keyed merge, as the materializer applies it. Offline, the
+	// write is durable on this device (read back from here on) and the
+	// server has not taken it yet.
+	patchSlotJson: vi.fn(async (name, patch) => {
+		slots[name] = stripPatchDirectives(mergeJsonPatch(slots[name] ?? null, patch));
+		if (H.offline) throw new StorageNotOnServerError('queued');
+		return structuredClone(slots[name]);
+	}),
 	guardianMetaSeed: vi.fn(async () => '01'.repeat(32)),
 };
 const user = { currentUserHash: ME };
@@ -183,5 +191,53 @@ describe('giving back', () => {
 		expect(slots.guardian.holdings[KEY].share.shareB64).toBe('');
 		expect(reports()).toEqual([[OWNER, 'stored'], [OWNER, 'given_back']]);
 		expect(store.holdings[KEY].state).toBe('given_back');
+	});
+});
+
+describe('offline', () => {
+	it('gives a piece back on this device and queues the report, saying it reaches the owner later', async () => {
+		const store = useRecoveryHoldingsStore();
+		await store.receive(OWNER, [{ messageId: 'dmsg_1', share }]);
+		H.offline = true;
+		expect(await store.giveBack(KEY)).toEqual({ queued: true });
+		expect(slots.guardian.holdings[KEY]).toMatchObject({ state: 'given_back', reported: 'given_back' });
+		expect(slots.guardian.holdings[KEY].share.shareB64).toBe('');
+		expect(reports()).toEqual([[OWNER, 'stored'], [OWNER, 'given_back']]);
+		expect(store.holdings[KEY].state).toBe('given_back');
+	});
+
+	it('keeps a share received offline and tells the owner as the network allows', async () => {
+		H.offline = true;
+		await useRecoveryHoldingsStore().receive(OWNER, [{ messageId: 'dmsg_1', share }]);
+		expect(slots.guardian.holdings[KEY]).toMatchObject({ state: 'stored', reported: 'stored' });
+		expect(reports()).toEqual([[OWNER, 'stored']]);
+	});
+
+	it('still fails on a write that did not land anywhere', async () => {
+		const store = useRecoveryHoldingsStore();
+		await store.receive(OWNER, [{ messageId: 'dmsg_1', share }]);
+		em.patchSlotJson.mockRejectedValueOnce(new Error('refused'));
+		await expect(store.giveBack(KEY)).rejects.toThrow('refused');
+	});
+});
+
+describe('two tabs', () => {
+	it('the tab that sweeps reads what another tab kept since, and judges its pending share', async () => {
+		const tabB = createPinia();
+		setActivePinia(tabB);
+		const b = useRecoveryHoldingsStore();
+		await b.load();
+		expect(b.list).toEqual([]);
+
+		setActivePinia(createPinia());
+		H.secret = null;
+		await useRecoveryHoldingsStore().receive(OWNER, [{ messageId: 'dmsg_1', share }]);
+		expect(slots.guardian.holdings[KEY]).toMatchObject({ state: 'pending' });
+
+		H.secret = { version: 1n, revoked: false };
+		setActivePinia(tabB);
+		await b.sweep();
+		expect(slots.guardian.holdings[KEY]).toMatchObject({ state: 'stored', reported: 'stored' });
+		expect(b.list.map((h) => h.state)).toEqual(['stored']);
 	});
 });

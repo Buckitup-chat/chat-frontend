@@ -7,6 +7,7 @@ import { ref, watch } from 'vue';
 import { v7 as uuidv7 } from 'uuid';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
+import { markGuardianSlotChanged, useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { deploymentNamespace, maybeRecoveryDeployment } from '@/lib/recovery/deployments';
 import { liveInviteId, rosterAnswersDue } from '@/lib/recovery/inviteThread';
@@ -86,7 +87,11 @@ export const useRecoveryInvitesStore = defineStore('recoveryInvites', () => {
 	};
 
 	const answer = async (peerHash, inv, accept, onStatus) => {
+		const owner = $userPQ.currentUserHash;
 		answers.value = { ...answers.value, ...(await answerInvite(deps(), peerHash, inv, accept, onStatus)) };
+		// Consent changed: the shares kept for this owner follow it (§ Holding).
+		markGuardianSlotChanged(owner);
+		useRecoveryHoldingsStore().sweep({ force: true }).catch((e) => console.warn('[recovery] the shares kept could not follow the answer:', e));
 	};
 
 	// A dialog re-judges on every new row: one write in flight, and an outcome

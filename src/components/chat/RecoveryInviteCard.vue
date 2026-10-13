@@ -63,7 +63,7 @@ const replyTitle = computed(() => {
   return mine ? `You ${verb} the invitation` : `They ${verb} the invitation`;
 });
 
-const answer = (accept) => emit('answer', { inviteId: props.view.inviteId, deployment: props.view.deployment, accept });
+const answer = (accept) => emit('answer', { inviteId: props.view.inviteId, messageId: props.view.messageId, deployment: props.view.deployment, accept });
 </script>
 
 <style scoped>
