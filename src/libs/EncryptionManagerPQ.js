@@ -24,6 +24,7 @@ import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
 import { publishVault } from '@/lib/recovery/vault';
+import { newMetaSeed } from '@/lib/recovery/guardianInvite';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
@@ -117,6 +118,9 @@ export class EncryptionManagerPQ extends EventTarget {
   #slotResolver = null;
   #contactSkey = null;
   #evmSkey = null;
+  // The guardian meta seed (pq_recovery_shares § Inviting, The keys), hex,
+  // once read or made: guardianMetaSeed.
+  #metaSeed = null;
 
   constructor() {
     super();
@@ -255,6 +259,9 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, bytesToHex(evmPrivKey));
     await userVault.set(`contact_skey`, bytesToHex(contactPrivKey));
+    // The guardian meta seed is an account key like the others: made here, it
+    // reaches every device the way they do (pq_recovery_shares § Inviting).
+    await userVault.set(`meta_seed`, bytesToHex(newMetaSeed()));
 
     const identity = {
       user_hash: userHash,
@@ -527,6 +534,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#cryptSkey = null;
     this.#evmSkey = null;
     this.#contactSkey = null;
+    this.#metaSeed = null;
     this.#currentVault = null;
     this.#bootstrapUserHash = null;
   }
@@ -635,6 +643,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#cryptSkey = null;
     }
     this.#evmSkey = null;
+    this.#metaSeed = null;
     this.#currentUserHash = null;
     this.#bootstrapUserHash = null;
     this.#currentVault = null;
@@ -793,6 +802,36 @@ export class EncryptionManagerPQ extends EventTarget {
     return this.#evmSkey;
   }
 
+  /**
+   * The guardian meta seed, hex, read from the vault. Made with the account
+   * (createUserVault), so every device of it holds the same one; with
+   * `create`, an account made before the seed existed makes it here, at its
+   * first acceptance.
+   */
+  async guardianMetaSeed({ create = false } = {}) {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+    if (this.#metaSeed) return this.#metaSeed;
+    const vault = this.#currentVault;
+    // One seed per account, ever: a second one would answer some owners with
+    // keys the first never derives. Another tab shares the vault, so the
+    // check is made again, under a lock, against the vault itself.
+    const make = async () => {
+      let seed = (await vault.get('meta_seed')) ?? null;
+      if (!seed && create) {
+        seed = bytesToHex(newMetaSeed());
+        await vault.set('meta_seed', seed);
+      }
+      return seed;
+    };
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    const seed = await (create && locks ? locks.request(`meta_seed:${vault.id}`, make) : make());
+    // A logout or switch while this ran leaves the seed in its own vault and
+    // nothing in this session.
+    if (this.#currentVault !== vault) throw new Error('The account changed while the guardian keys were being read');
+    this.#metaSeed = seed;
+    return seed;
+  }
+
   async exportVaultKeys() {
     if (!this.#currentVault) throw new Error('Vault not loaded');
 
@@ -838,6 +877,13 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, keys.evm_skey);
     await userVault.set(`contact_skey`, keys.contact_skey);
+    if (keys.meta_seed) {
+      // Owners may hold meta-addresses from the seed already here: replacing
+      // it would leave this device unable to approve for them.
+      const present = existing ? await userVault.get(`meta_seed`) : null;
+      if (!present) await userVault.set(`meta_seed`, keys.meta_seed);
+      else if (present !== keys.meta_seed) console.warn('[vault] the imported guardian seed differs from this device\'s; this device keeps its own');
+    }
 
     identity.vaultId = userVault.id;
     if (existing) {
