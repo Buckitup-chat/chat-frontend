@@ -55,7 +55,11 @@ const registry = [A, B].map((who, i) => ({
 vi.mock('@lo-fi/local-vault', () => ({
 	connect: async ({ vaultID }: { vaultID: string }) => vaults.get(vaultID),
 	rawStorage: () => ({
-		async get(k: string) { return k === 'pq-vaults-registry' ? registry : undefined; },
+		async get(k: string) {
+			if (k === 'pq-vaults-registry') return registry;
+			const vaultId = k.match(/^local-vault-(.+)$/)?.[1];
+			return vaultId && vaults.has(vaultId) ? { accountID: `account-${vaultId}`, data: 'sealed' } : undefined;
+		},
 		async set() {},
 		async remove() {},
 	}),

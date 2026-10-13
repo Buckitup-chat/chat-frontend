@@ -258,6 +258,7 @@ export const vaultModule = {
 			const id = `vault-${disk.vaults.size + 1}`;
 			const data = new Map();
 			disk.vaults.set(id, { id, async get(k) { return data.get(k); }, async set(k, v) { data.set(k, v); }, async clear() { data.clear(); } });
+			disk.raw.set(`local-vault-${id}`, { accountID: `account-${id}`, data: 'sealed' });
 			return disk.vaults.get(id);
 		}
 		return disk.vaults.get(vaultID);
