@@ -25,6 +25,8 @@ const { default: Screen_Guardians } = await import('@/components/recovery/backup
 const { default: Screen_Advanced } = await import('@/components/recovery/backup/Screen_Advanced.vue');
 const { default: Screen_Review } = await import('@/components/recovery/backup/Screen_Review.vue');
 const { default: Screen_Done } = await import('@/components/recovery/backup/Screen_Done.vue');
+const { default: Screen_Alerts } = await import('@/components/recovery/backup/Screen_Alerts.vue');
+const { default: Modal } = await import('@/components/modal/views/Modal_Community_Backup.vue');
 
 const DARIA = candidate('Daria', 'agreed', 'a');
 const MILO = candidate('Milo', 'agreed', 'b');
@@ -99,9 +101,9 @@ describe('the roster', () => {
 		H.store.receipts = { [DARIA.userHash]: 'stored', [MILO.userHash]: 'stored', [VITALII.userHash]: 'stored', [IVAN.userHash]: 'given_back' };
 		const w = render(Screen_Manage);
 		expect(at(w, 'reshare-prompt').text()).toContain('Ivan no longer keeps a piece that counts.');
-		expect(at(w, 'reshare-cta').text()).toBe('Reshare to replace');
-		await at(w, 'reshare-cta').trigger('click');
-		expect(draft.state.reshare).toMatchObject({ secretId: '0x1', version: 2 });
+		expect(at(w, 'reshare-prompt-cta').text()).toBe('Reshare to replace');
+		await at(w, 'reshare-prompt-cta').trigger('click');
+		expect(draft.state.reshare).toEqual({ guardians: [DARIA, MILO, VITALII, IVAN].map((c) => c.userHash) });
 		expect(nav.go).toHaveBeenCalledWith('guardians');
 	});
 
@@ -334,19 +336,20 @@ describe('alerts', () => {
 	beforeEach(() => setup());
 
 	it('lists the channels and removes one, recording what is left', async () => {
-		H.store.subscriptions = vi.fn(async () => [
+		H.store.subs = [
 			{ id: 's1', kind: 'telegram', createdAt: '2026-10-01T10:00:00Z' },
 			{ id: 's2', kind: 'webhook', createdAt: '2026-10-02T10:00:00Z' },
-		]);
+		];
 		const w = render(Screen_Manage);
 		await flushPromises();
+		expect(H.store.subscriptions).toHaveBeenCalledWith();
 		expect(all(w, 'subscription').map((r) => r.text())).toEqual([expect.stringContaining('Telegram'), expect.stringContaining('Webhook')]);
 
+		// The store removes it and records what is left; the screen shows its list.
 		await all(w, 'remove-subscription')[0].trigger('click');
 		await flushPromises();
 		expect(H.store.removeSubscription).toHaveBeenCalledWith('s1');
 		expect(all(w, 'subscription').map((r) => r.text())).toEqual([expect.stringContaining('Webhook')]);
-		expect(H.store.setAlerts).toHaveBeenCalledWith({ channels: ['app', 'webhook'], skipped: false });
 
 		await at(w, 'add-channel').trigger('click');
 		expect(nav.go).toHaveBeenCalledWith('alerts');
@@ -406,5 +409,99 @@ describe('the summary after a run', () => {
 		const w = render(Screen_Done);
 		await at(w, 'manage').trigger('click');
 		expect(nav.go).toHaveBeenCalledWith('manage');
+	});
+});
+
+describe('what the nodes hold now', () => {
+	beforeEach(() => setup());
+	afterEach(() => vi.useRealTimers());
+
+	it('is checked when the roster opens and every few minutes while it is open', async () => {
+		vi.useFakeTimers();
+		const w = render(Screen_Manage);
+		await flushPromises();
+		expect(H.store.checkHoldings).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(5 * 60_000);
+		expect(H.store.checkHoldings).toHaveBeenCalledTimes(2);
+		w.unmount();
+		await vi.advanceTimersByTimeAsync(10 * 60_000);
+		expect(H.store.checkHoldings).toHaveBeenCalledTimes(2);
+	});
+
+	it('shows a node that lost its part or does not answer, and asks for a reshare once a loss eats into the spare', () => {
+		const [a, b, c] = NODES.map((n) => n.descriptor.id);
+		H.store.holdings = { runId: H.store.run.runId, byNode: { [a]: 'holds', [b]: 'lost', [c]: 'unreachable' }, at: 1 };
+		const w = render(Screen_Manage);
+		expect(all(w, 'node-row').map((r) => r.text())).toEqual([
+			expect.stringMatching(/holds its part$/), expect.stringMatching(/lost its part$/), expect.stringMatching(/not answering$/),
+		]);
+		expect(at(w, 'node-prompt').text()).toContain('1 node lost its part: 1 of 3 hold it, 2 needed. The node half cannot be rebuilt now');
+		expect(at(w, 'node-prompt-cta').text()).toBe('Reshare to replace');
+
+		H.store.holdings = { runId: H.store.run.runId, byNode: { [a]: 'holds', [b]: 'holds', [c]: 'unreachable' }, at: 1 };
+		expect(at(render(Screen_Manage), 'node-prompt').exists()).toBe(false);
+		// A check made for another record says nothing about this one.
+		H.store.holdings = { runId: 'other', byNode: { [a]: 'lost' }, at: 1 };
+		expect(at(render(Screen_Manage), 'node-prompt').exists()).toBe(false);
+	});
+});
+
+describe('a revoked backup', () => {
+	beforeEach(() => setup());
+
+	it('offers a new backup in its place', async () => {
+		H.store.run.revokedAt = 1_700_000_500;
+		draft.beginReshare(H.store.run);
+		const w = render(Screen_Manage);
+		await at(w, 'create-new').trigger('click');
+		expect(draft.state.reshare).toBeNull();
+		expect(nav.reset).toHaveBeenCalledWith('guardians');
+	});
+});
+
+describe('the modal', () => {
+	beforeEach(() => setup());
+	const open = (start) => mount(Modal, { props: { inputData: { id: 'community_backup', start } }, global: { provide: { $mitt: { emit: vi.fn() } } } });
+
+	it('opened for a reshare starts on the guardians, filled in, over the roster', async () => {
+		const w = open('reshare');
+		await flushPromises();
+		expect(at(w, 'reshare-intro').exists()).toBe(true);
+		expect(w.findAll('[data-test="agreed-row"].picked')).toHaveLength(4);
+		await w.find('[aria-label="Back"]').trigger('click');
+		expect(w.text()).toContain('Guardians · version 2');
+	});
+
+	it('checks the nodes once while it is open, however often a reshare is entered', async () => {
+		const w = open('manage');
+		await flushPromises();
+		expect(H.store.staleSubscriptions).toHaveBeenCalledTimes(1);
+		expect(H.store.refreshNodes).not.toHaveBeenCalled();
+		await at(w, 'reshare').trigger('click');
+		await w.find('[aria-label="Back"]').trigger('click');
+		await at(w, 'reshare').trigger('click');
+		expect(H.store.refreshNodes).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('adding a channel to a finished backup', () => {
+	beforeEach(() => setup());
+
+	it('can add another webhook when one is on', async () => {
+		H.store.subs = [{ id: 'w1', kind: 'webhook', createdAt: 'x' }];
+		const w = render(Screen_Alerts);
+		await flushPromises();
+		expect(at(w, 'tile-webhook').text()).toContain('Add another');
+		await at(w, 'tile-webhook').trigger('click');
+		expect(w.find('[aria-label="Webhook address"]').exists()).toBe(true);
+	});
+
+	it('in the first setup, a connected webhook is the one', async () => {
+		H.store.run = null;
+		H.store.subs = [{ id: 'w1', kind: 'webhook', createdAt: 'x' }];
+		const w = render(Screen_Alerts);
+		await flushPromises();
+		await at(w, 'tile-webhook').trigger('click');
+		expect(w.find('[aria-label="Webhook address"]').exists()).toBe(false);
 	});
 });

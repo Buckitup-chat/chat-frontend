@@ -11,7 +11,7 @@
 		<div v-for="(a, i) in items" :key="i" class="cb-setting" data-test="history-row">
 			<span class="flex-grow-1 d-flex flex-column gap-1">
 				<span class="fw-medium">{{ TYPE_TEXT[a.type] ?? 'Alert' }}</span>
-				<span class="cb-small">{{ [KIND_NAMES[a.kind] ?? a.kind, a.createdAt ? whenText(a.createdAt) : null].filter(Boolean).join(' · ') }}</span>
+				<span class="cb-small">{{ [alertsText([a.kind], { title: true }), a.createdAt ? dateText(Date.parse(a.createdAt) / 1000, { time: true }) : null].filter(Boolean).join(' · ') }}</span>
 			</span>
 			<span :class="a.emitted ? 'cb-status-ok' : 'cb-status-warn'">{{ a.emitted ? 'sent' : 'not sent yet' }}</span>
 		</div>
@@ -23,19 +23,17 @@ import { onMounted, ref } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
+import { alertsText, dateText } from './backupFlow';
 
 // The alerts the notification server sent about the owner's backups (plan
 // § 7.4, Alerts outside the app), newest first. The server keeps what
 // happened, never where it was sent.
 const TYPE_TEXT = { RECOVERY_STARTED: 'A recovery was started', QUORUM_REACHED: 'Enough guardians approved a recovery' };
-const KIND_NAMES = { telegram: 'Telegram', webhook: 'Webhook' };
 
 const store = useRecoveryBackupStore();
 const items = ref([]);
 const loading = ref(false);
 const error = ref(null);
-
-const whenText = (t) => new Date(t).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
 const load = async () => {
 	loading.value = true;

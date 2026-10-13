@@ -86,7 +86,7 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { userPQStore } from '@/store/userPQ.store';
-import { canDiscard, canFinishWithoutPending, nodesDone, nodesPending, stepNumber } from '@/lib/recovery/backupRun';
+import { canDiscard, canFinishWithoutPending, nodeHolds, nodesDone, nodesPending, stepNumber } from '@/lib/recovery/backupRun';
 import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
 import Check from './Check.vue';
@@ -154,7 +154,7 @@ const nodeRows = computed(() =>
 		let text = store.running ? 'sending…' : 'waiting';
 		let cls = 'cb-status-off';
 		if (run.value.skippedNodes.includes(n.id)) text = 'left out';
-		else if (outcome?.state === 'held' || outcome?.state === 'staged') [text, cls] = ['✓', 'cb-status-ok'];
+		else if (nodeHolds(run.value, n.id)) [text, cls] = ['✓', 'cb-status-ok'];
 		else if (outcome?.state === 'failed') [text, cls] = [store.running ? 'offline · retrying' : 'did not take its part', 'cb-status-warn'];
 		return { id: n.id, name: nodeName(n), text, cls };
 	}),

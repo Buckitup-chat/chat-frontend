@@ -124,6 +124,17 @@ describe('one backup per account', () => {
 		expect(em.patchSlotJson).not.toHaveBeenCalled();
 	});
 
+	it('takes a new first backup in place of a revoked one', async () => {
+		const store = useRecoveryBackupStore();
+		slots.recovery_backup = { run: savedRun({ step: 'done', secretId: SECRET, version: 2, revokedAt: 5 }) };
+		await store.load();
+		await store.start(input());
+		expect(slots.recovery_backup.run).toMatchObject({ step: 'prepared', alerts: { channels: ['app', 'telegram'], skipped: false } });
+		expect(slots.recovery_backup.run.runId).not.toBe('r1');
+		expect(slots.recovery_backup.run).not.toHaveProperty('revokedAt');
+		await expect(store.start(input({ reshare: true }))).rejects.toThrow();
+	});
+
 	it('changes a finished backup only as a reshare of its secret, at its next version, kept beside the record', async () => {
 		const store = useRecoveryBackupStore();
 		await expect(store.start(input({ reshare: true }))).rejects.toThrow('There is no finished backup.');

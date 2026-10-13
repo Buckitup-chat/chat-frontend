@@ -140,7 +140,7 @@ const $userPQ = userPQStore();
 
 const open = ref(false);
 /** A reshare of the finished backup (draft.beginReshare), not a first setup. */
-const resharing = computed(() => !!draft.state.reshare);
+const resharing = computed(() => draft.resharing.value);
 /** The backup's guardians who can no longer be picked: they are dropped. */
 const gone = computed(() =>
 	resharing.value

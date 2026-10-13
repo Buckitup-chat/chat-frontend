@@ -79,6 +79,14 @@ export const settingsProblems = (s: BackupSettings, guardians: number, nodes: nu
 	return out;
 };
 
+/**
+ * What is wrong with a finished backup's waiting period and time to finish
+ * set to `delaySec` and `windowSec`: the rest of `settings` stays as it is,
+ * so only those two can be wrong.
+ */
+export const policyProblems = (settings: BackupSettings, delaySec: number, windowSec: number, guardians: number, nodes: number): SettingsProblem[] =>
+	settingsProblems({ ...settings, delaySec, windowSec }, guardians, nodes).filter((p) => p.field === 'delaySec' || p.field === 'windowSec');
+
 /** Whether the free service can register it: it takes at most RELAYER_MAX_GUARDIANS shares (the spares stay off chain). */
 export const relayerCanTake = (guardians: number): boolean => guardians <= RELAYER_MAX_GUARDIANS;
 

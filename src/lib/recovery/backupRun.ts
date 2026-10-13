@@ -265,12 +265,15 @@ export const sharePartOf = (run: BackupRun, i: number, secretRef: string, now: n
 	nodeSet: nodeSetOf(run.settings.nodeThreshold, run.nodes),
 });
 
+/** Whether node `id` took its share of `run`: it holds it, or holds it staged for the next version. */
+export const nodeHolds = (run: BackupRun, id: string): boolean => ['held', 'staged'].includes(run.nodeOutcomes[id]?.state ?? '');
+
 /** Nodes still owed their share: neither holding it, nor staged, nor skipped. */
 export const nodesPending = (run: BackupRun): NodeRef[] =>
-	run.nodes.filter((n) => !run.skippedNodes.includes(n.id) && !['held', 'staged'].includes(run.nodeOutcomes[n.id]?.state ?? ''));
+	run.nodes.filter((n) => !run.skippedNodes.includes(n.id) && !nodeHolds(run, n.id));
 
 /** Nodes that took their share. */
-export const nodesDone = (run: BackupRun): number => run.nodes.filter((n) => ['held', 'staged'].includes(run.nodeOutcomes[n.id]?.state ?? '')).length;
+export const nodesDone = (run: BackupRun): number => run.nodes.filter((n) => nodeHolds(run, n.id)).length;
 
 /** Whether the run may finish without the nodes still pending: the rest already reach the node threshold. */
 export const canFinishWithoutPending = (run: BackupRun): boolean => nodesDone(run) >= run.settings.nodeThreshold;

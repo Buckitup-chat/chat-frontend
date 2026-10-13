@@ -95,7 +95,14 @@ export const fakeBackupStore = (over = {}) =>
 		refreshNodes: vi.fn(async () => {}),
 		addNodeUrl: vi.fn(),
 		selfPayQuote: vi.fn(async () => ({ address: '0x7a3F' + '0'.repeat(32) + 'c91E', balance: '0.84', estimate: '0.02', enough: true })),
-		subscriptions: vi.fn(async () => []),
+		// As the store: the channels as last listed, read through subscriptions().
+		subs: [],
+		subscriptions: vi.fn(async function () {
+			return this.subs;
+		}),
+		staleSubscriptions: vi.fn(),
+		holdings: { runId: null, byNode: {}, at: 0 },
+		checkHoldings: vi.fn(async () => {}),
 		addWebhook: vi.fn(),
 		telegramLine: vi.fn(),
 		walletForBot: vi.fn(async () => '0x' + 'ab'.repeat(20)),
@@ -107,7 +114,10 @@ export const fakeBackupStore = (over = {}) =>
 		setPolicy: vi.fn(async () => {}),
 		revoke: vi.fn(async () => {}),
 		giveSpare: vi.fn(async () => {}),
-		removeSubscription: vi.fn(async () => {}),
+		removeSubscription: vi.fn(async function (id) {
+			this.subs = this.subs.filter((s) => s.id !== id);
+			return this.subs;
+		}),
 		history: vi.fn(async () => []),
 		receipts: {},
 		receiptDetails: {},

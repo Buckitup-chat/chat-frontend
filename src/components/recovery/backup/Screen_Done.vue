@@ -2,18 +2,18 @@
 	<ScreenHeader title="Community backup" />
 
 	<template v-if="run && run.step === 'done'">
-		<div v-if="draft.state.justFinished" class="cb-ok" data-test="created">{{ draft.state.reshare ? 'Backup changed.' : 'Backup created.' }} Every piece has been sent.</div>
+		<div v-if="draft.state.justFinished" class="cb-ok" data-test="created">{{ draft.resharing.value ? 'Backup changed.' : 'Backup created.' }} Every piece has been sent.</div>
 
-		<HealthLine :view="health" />
+		<HealthLine :view="roster.health" />
 
 		<div class="cb-list">
-			<div v-for="g in rows" :key="g.userHash" class="cb-row" data-test="roster-row">
+			<div v-for="g in roster.rows" :key="g.userHash" class="cb-row" data-test="roster-row">
 				<ContactAvatar :hash="g.userHash" />
 				<span class="cb-row-main">
 					<span class="cb-row-name">{{ g.name }}</span>
 					<span v-if="g.hint" class="cb-small" data-test="roster-hint">{{ g.hint }}</span>
 				</span>
-				<span :class="g.state === 'stored' ? 'cb-status-ok' : g.hint ? 'cb-status-warn' : 'cb-small'">{{ ROSTER_TEXT[g.state] }}</span>
+				<span :class="g.state === 'stored' ? 'cb-status-ok' : g.hint ? 'cb-status-warn' : 'cb-small'">{{ g.text }}</span>
 			</div>
 		</div>
 
@@ -47,36 +47,15 @@ import { userPQStore } from '@/store/userPQ.store';
 import ScreenHeader from './ScreenHeader.vue';
 import HealthLine from './HealthLine.vue';
 import ContactAvatar from './ContactAvatar.vue';
-import { DRAFT, NAV, alertsText, deliveryHint, guardianDelivery, guardianName, hasOutsideAlerts, healthView, sparesLeft } from './backupFlow';
+import { DRAFT, NAV, alertsText, guardianName, hasOutsideAlerts, rosterView, sparesLeft } from './backupFlow';
 
 // The top of the roster (design 9.1), where a finished run lands; Manage is the roster in full.
-const ROSTER_TEXT = {
-	stored: 'holds a piece',
-	delivered: 'delivered',
-	sent: 'sent',
-	waiting: 'waiting for keys',
-	problem: 'has a problem',
-	given_back: 'gave it back',
-	dropped: 'dropped it',
-};
-
 const draft = inject(DRAFT);
 const nav = inject(NAV);
 const store = useRecoveryBackupStore();
 const $userPQ = userPQStore();
 
 const run = computed(() => store.run);
-const health = computed(() => healthView(run.value, store.receipts));
+const roster = computed(() => rosterView(run.value, store.receipts, store.receiptDetails, (h) => guardianName(h, store.candidates, $userPQ)));
 const outsideAlerts = computed(() => hasOutsideAlerts(run.value?.alerts));
-const rows = computed(() =>
-	(run.value?.guardians ?? []).map((g) => {
-		const state = guardianDelivery(run.value, g.userHash, store.receipts);
-		return {
-			userHash: g.userHash,
-			name: guardianName(g.userHash, store.candidates, $userPQ),
-			state,
-			hint: deliveryHint(state, store.receiptDetails?.[g.userHash]?.detail),
-		};
-	}),
-);
 </script>

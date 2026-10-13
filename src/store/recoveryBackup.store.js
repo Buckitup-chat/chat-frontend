@@ -19,11 +19,11 @@ import { maybeRecoveryDeployment, deploymentNamespace, secretIdOf, secretRefOf }
 import { gatewayOf } from '@/lib/recovery/gateway';
 import { ownerKeyOf } from '@/lib/recovery/evmSign';
 import { signAddSecret, signBound } from '@/lib/recovery/typedData';
-import { depositShare } from '@/lib/recovery/nodeClient';
+import { depositShare, holdingOf } from '@/lib/recovery/nodeClient';
 import { liveInviteId } from '@/lib/recovery/inviteThread';
 import { knownNodes, checkNode, syncedServerNode } from '@/lib/recovery/nodeDirectory';
 import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedError, advance, prepareRun, skipPendingNodes, canDiscard, sharePartOf, activeRun, unfinished, promoteReshare } from '@/lib/recovery/backupRun';
-import { settingsProblems } from '@/lib/recovery/backupPlan';
+import { policyProblems, settingsProblems } from '@/lib/recovery/backupPlan';
 import { setProblems } from '@/lib/recovery/nodeChoice';
 import { listSubscriptions, subscribeWebhook, telegramReply, alertWallet, unsubscribe, alertHistory } from '@/lib/recovery/alerts';
 import { isReportOn, receiptOf, sentSharesOf } from '@/lib/recovery/receipts';
@@ -35,6 +35,8 @@ const DEVICE_KEY = 'buckitup:device-label';
 const FOLLOW_MS = 15_000;
 /** A guardian's word read this recently is not read again from their dialog. */
 const RECEIPT_FRESH_MS = 2 * 60_000;
+/** How long one check of the nodes' holdings may take, all nodes at once. */
+const HOLDINGS_BUDGET_MS = 20_000;
 /** Guardian dialogs read at once for their receipts. */
 const RECEIPT_READS_AT_ONCE = 3;
 /** A run another device has not moved for this long may be continued here: that device may be lost. */
@@ -88,6 +90,9 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		heldElsewhere.value = false;
 		heard.value = { runId: null, byGuardian: {} };
 		lastHeard.clear();
+		subs.value = [];
+		subsFresh = false;
+		holdings.value = { runId: null, byNode: {}, at: 0 };
 	});
 
 	const em = () => EncryptionManagerPQ.getInstance();
@@ -110,15 +115,20 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		reshare.value = slot.reshare;
 	};
 
-	const load = async () => {
-		const owner = $userPQ.currentUserHash;
-		const [backup, nodes] = await Promise.all([em().loadSlotJson(BACKUP_SLOT), em().loadSlotJson(NODES_SLOT), $invites.load({ refresh: true }), checkHeld(owner)]);
-		if ($userPQ.currentUserHash !== owner) return;
-		clock.value = nowSec();
-		if (!running.value) show({ run: backup?.run ?? null, reshare: backup?.reshare ?? null });
-		savedNodeUrls.value = nodes?.urls ?? [];
-		loaded.value = true;
-	};
+	/** Reads the backup's slot, its nodes and the invitations; calls made while a read runs share it. */
+	let loading = null;
+	const load = () =>
+		(loading ??= (async () => {
+			const owner = $userPQ.currentUserHash;
+			const [backup, nodes] = await Promise.all([em().loadSlotJson(BACKUP_SLOT), em().loadSlotJson(NODES_SLOT), $invites.load({ refresh: true }), checkHeld(owner)]);
+			if ($userPQ.currentUserHash !== owner) return;
+			clock.value = nowSec();
+			if (!running.value) show({ run: backup?.run ?? null, reshare: backup?.reshare ?? null });
+			savedNodeUrls.value = nodes?.urls ?? [];
+			loaded.value = true;
+		})().finally(() => {
+			loading = null;
+		}));
 
 	/** Only the run's slot, for following a run another device or tab drives. */
 	const refreshRun = async () => {
@@ -205,11 +215,49 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		const server = syncedServerNode(typeof ELECTRIC_API_URL !== 'undefined' ? ELECTRIC_API_URL : '/api', location.origin);
 		return [...(server ? [server] : []), ...savedNodeUrls.value];
 	};
-	const refreshNodes = async () => {
-		if (!deployment) return;
-		const out = await knownNodes(nodeUrls(), directoryDeps());
-		nodes.value = out.nodes;
-		refusedNodes.value = out.refused;
+	/** Checks the nodes this account knows; calls made while a check runs share it. */
+	let nodesReading = null;
+	const refreshNodes = () =>
+		(nodesReading ??= (async () => {
+			if (!deployment) return;
+			const out = await knownNodes(nodeUrls(), directoryDeps());
+			nodes.value = out.nodes;
+			refusedNodes.value = out.refused;
+		})().finally(() => {
+			nodesReading = null;
+		}));
+
+	/**
+	 * Whether each node of the backup still holds its part (pq_recovery_services
+	 * § Choosing nodes, "Holdings are watched"), by node id: 'holds' at the
+	 * backup's version, 'lost' when the node answers with none or another
+	 * version — a node up but wiped holds nothing — and 'unreachable' when
+	 * nothing answers in time, which is not the same as holding nothing. For
+	 * one record: another starts from nothing.
+	 */
+	const holdings = ref({ runId: null, byNode: {}, at: 0 });
+	let holdingsReading = null;
+	const checkHoldings = () => {
+		if (holdingsReading) return holdingsReading;
+		const r = run.value;
+		if (r?.step !== 'done' || r.revokedAt || !r.secretId) return Promise.resolve();
+		const owner = $userPQ.currentUserHash;
+		holdingsReading = (async () => {
+			const signal = AbortSignal.timeout(HOLDINGS_BUDGET_MS);
+			const one = async (n) => {
+				try {
+					const version = await holdingOf(n, r.secretId, { signal, timeoutMs: HOLDINGS_BUDGET_MS / 2 });
+					return [n.id, version === r.version ? 'holds' : 'lost'];
+				} catch {
+					return [n.id, 'unreachable'];
+				}
+			};
+			const byNode = Object.fromEntries(await Promise.all(r.nodes.filter((n) => !r.skippedNodes.includes(n.id)).map(one)));
+			if ($userPQ.currentUserHash === owner) holdings.value = { runId: r.runId, byNode, at: Date.now() };
+		})().finally(() => {
+			holdingsReading = null;
+		});
+		return holdingsReading;
 	};
 	/** Checks `url` and, if it verifies, keeps it among this account's nodes. */
 	const addNodeUrl = async (url) => {
@@ -238,8 +286,66 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 	// --- Alerts --------------------------------------------------------------
 
 	const alertsBase = () => deployment?.relayerUrl ?? null;
-	const subscriptions = async () => (alertsBase() ? listSubscriptions(alertsBase(), await ownerKey()) : []);
-	const addWebhook = async (url) => subscribeWebhook(alertsBase(), await ownerKey(), url);
+
+	/** The account's alert channels as last listed (kinds only), and whether that list still stands. */
+	const subs = ref([]);
+	let subsFresh = false;
+	let subsReading = null;
+	/** The channels a finished backup's record should name for `list`: the app, and each kind listed. */
+	const channelsOf = (list) => ['app', ...['telegram', 'webhook'].filter((k) => list.some((x) => x.kind === k))];
+	/**
+	 * Writes the channels `list` names onto the finished backup's record, as
+	 * the slot holds it under the lock, when they differ: the server's list is
+	 * the truth, and a write that failed before is made good here.
+	 */
+	const syncAlerts = async (list) => {
+		const r = run.value;
+		if (r?.step !== 'done' || r.revokedAt) return;
+		const channels = channelsOf(list);
+		const same = (rec) => channels.join() === (rec.alerts?.channels ?? ['app']).join();
+		// This tab's copy settles the common case; a write is decided on the slot, under the lock.
+		if (same(r)) return;
+		await onFinished(
+			async (record, { patch }) => {
+				if (same(record)) return;
+				await patch(() => ({ alerts: { channels, skipped: false } }));
+			},
+			{ duringReshare: true },
+		);
+	};
+	const readSubs = async () => {
+		const owner = $userPQ.currentUserHash;
+		const list = alertsBase() ? await listSubscriptions(alertsBase(), await ownerKey()) : [];
+		if ($userPQ.currentUserHash !== owner) return list;
+		subs.value = list;
+		subsFresh = true;
+		await syncAlerts(list).catch((e) => console.warn('[recovery] the alert channels could not be recorded:', e));
+		return list;
+	};
+	/**
+	 * The account's alert channels: the list in hand while it stands, else
+	 * read from the server. `refresh` reads it again — after the reads under
+	 * way, so it sees what changed since they started.
+	 */
+	const subscriptions = ({ refresh = false } = {}) => {
+		if (!refresh && subsFresh) return Promise.resolve(subs.value);
+		if (!refresh && subsReading) return subsReading;
+		const read = (subsReading ?? Promise.resolve()).catch(() => undefined).then(readSubs);
+		const pending = read.finally(() => {
+			if (subsReading === pending) subsReading = null;
+		});
+		subsReading = pending;
+		return read;
+	};
+	/** The next read of the channels goes to the server (a screen opened anew). */
+	const staleSubscriptions = () => {
+		subsFresh = false;
+	};
+	const addWebhook = async (url) => {
+		const out = await subscribeWebhook(alertsBase(), await ownerKey(), url);
+		await subscriptions({ refresh: true }).catch((e) => console.warn('[recovery] alert channels could not be read:', e));
+		return out;
+	};
 	const telegramLine = async (botText) => telegramReply(botText, await ownerKey());
 	const walletForBot = async () => alertWallet(await ownerKey());
 
@@ -457,9 +563,10 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		});
 	};
 
+	/** A first backup is refused while the account has one, unless it was revoked: a revoked backup protects nothing, and a new one takes its place. */
 	const refuseExisting = (r) => {
-		if (r?.step === 'done') throw new Error('This account already has a backup. Changing it is a reshare.');
-		if (r && r.step !== 'discarded') throw new Error('A backup is already being created.');
+		if (r?.step === 'done' && !r.revokedAt) throw new Error('This account already has a backup. Changing it is a reshare.');
+		if (r && r.step !== 'done' && r.step !== 'discarded') throw new Error('A backup is already being created.');
 	};
 
 	/** `r` if it is a finished backup that can still be changed; throws otherwise. */
@@ -631,7 +738,7 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 			'SetRecoveryPolicy',
 			'setRecoveryPolicy',
 			(r) => {
-				const bad = settingsProblems({ ...r.settings, delaySec, windowSec }, r.guardians.length, r.nodes.length).filter((p) => p.field === 'delaySec' || p.field === 'windowSec');
+				const bad = policyProblems(r.settings, delaySec, windowSec, r.guardians.length, r.nodes.length);
 				if (bad.length) throw new Error(`These times are out of bounds (${bad.map((p) => p.field).join(', ')}).`);
 				return { recoveryDelay: BigInt(delaySec), recoveryWindow: BigInt(windowSec) };
 			},
@@ -662,9 +769,16 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		});
 
 	const noAlertsServer = () => new Error('This network has no notification server.');
+	/**
+	 * Deletes alert channel `id`, then lists the channels again and records
+	 * what is left on the finished backup (syncAlerts), so its card warns once
+	 * none outside the app is. A record that could not be written then is
+	 * made good by the next list.
+	 */
 	const removeSubscription = async (id) => {
 		if (!alertsBase()) throw noAlertsServer();
-		return unsubscribe(alertsBase(), await ownerKey(), id);
+		await unsubscribe(alertsBase(), await ownerKey(), id);
+		return subscriptions({ refresh: true });
 	};
 	const history = async () => (alertsBase() ? alertHistory(alertsBase(), await ownerKey()) : []);
 
@@ -689,9 +803,13 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 		nodes,
 		refusedNodes,
 		refreshNodes,
+		holdings,
+		checkHoldings,
 		addNodeUrl,
 		selfPayQuote,
+		subs,
 		subscriptions,
+		staleSubscriptions,
 		addWebhook,
 		telegramLine,
 		walletForBot,

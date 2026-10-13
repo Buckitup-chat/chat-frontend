@@ -18,7 +18,7 @@ const em = {
 };
 const user = { currentUserHash: OWNER, contacts: [], contactsMap: {} };
 const sendMessage = vi.fn(async () => 'dmsg_spare');
-const H = vi.hoisted(() => ({ onSign: null, relayerUrl: 'https://relay.example' }));
+const H = vi.hoisted(() => ({ onSign: null, relayerUrl: 'https://relay.example', server: null, holdingOf: null, knownNodes: null }));
 
 vi.mock('@/lib/recovery/chain', () => ({ RecoveryChain: class {} }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({ EncryptionManagerPQ: { getInstance: () => em } }));
@@ -37,6 +37,21 @@ const gateway = (via) =>
 	new Proxy({}, { get: (_t, name) => async (body) => (calls.push({ via, call: name, body }), { status: 'PROCESSED' }) });
 // The choice of gateway is gatewayOf's (tested on its own): here, what the store hands it.
 vi.mock('@/lib/recovery/gateway', () => ({ gatewayOf: (_c, fee, _k, fallback) => gateway(fee?.kind === 'self' ? 'self' : `relayer:${fee?.url || fallback}`) }));
+
+// The notification server, as a list of subscriptions it keeps.
+vi.mock('@/lib/recovery/alerts', async (orig) => ({
+	...(await orig()),
+	listSubscriptions: async () => (H.server.lists++, H.server.subs.map((x) => ({ ...x }))),
+	unsubscribe: async (_b, _k, id) => {
+		H.server.subs = H.server.subs.filter((x) => x.id !== id);
+	},
+	subscribeWebhook: async () => {
+		H.server.subs.push({ id: 'w' + H.server.subs.length, kind: 'webhook', createdAt: 'x' });
+		return { id: 'w', secret: 'sec' };
+	},
+}));
+vi.mock('@/lib/recovery/nodeClient', async (orig) => ({ ...(await orig()), holdingOf: (...a) => H.holdingOf(...a) }));
+vi.mock('@/lib/recovery/nodeDirectory', async (orig) => ({ ...(await orig()), knownNodes: (...a) => H.knownNodes(...a) }));
 
 const { useRecoveryBackupStore } = await import('@/store/recoveryBackup.store');
 const { defaultSettings } = await import('@/lib/recovery/backupPlan');
@@ -58,6 +73,8 @@ beforeEach(async () => {
 	sendMessage.mockImplementation(async () => 'dmsg_spare');
 	user.currentUserHash = OWNER;
 	H.onSign = null;
+	H.server = { subs: [], lists: 0 };
+	em.patchSlotJson.mockImplementation(async (name, patch) => (slots[name] = { ...(slots[name] ?? {}), ...patch }));
 	H.relayerUrl = 'https://relay.example';
 	Object.defineProperty(navigator, 'locks', { value: makeFakeLockManager(), configurable: true });
 });
@@ -195,5 +212,98 @@ describe('alert subscriptions', () => {
 		const store = await loaded(done());
 		await expect(store.removeSubscription('s1')).rejects.toThrow('This network has no notification server.');
 		expect(await store.history()).toEqual([]);
+	});
+});
+
+describe('alert channels', () => {
+	it('are listed once, and again only when a screen asks anew or a channel is added', async () => {
+		H.server.subs = [{ id: 't1', kind: 'telegram', createdAt: 'x' }];
+		const store = await loaded(done({ alerts: { channels: ['app', 'telegram'], skipped: false } }));
+		const [a, b] = await Promise.all([store.subscriptions(), store.subscriptions()]);
+		expect(a).toEqual(b);
+		await store.subscriptions();
+		expect(H.server.lists).toBe(1);
+		expect(store.subs.map((x) => x.kind)).toEqual(['telegram']);
+
+		store.staleSubscriptions();
+		await store.subscriptions();
+		expect(H.server.lists).toBe(2);
+
+		await store.addWebhook('https://hook.example/x');
+		expect(H.server.lists).toBe(3);
+		expect(store.subs.map((x) => x.kind)).toEqual(['telegram', 'webhook']);
+		// The record follows what the server lists.
+		expect(slots.recovery_backup.run.alerts).toEqual({ channels: ['app', 'telegram', 'webhook'], skipped: false });
+	});
+
+	it('removing one lists them again and records what is left on the backup', async () => {
+		H.server.subs = [{ id: 't1', kind: 'telegram', createdAt: 'x' }, { id: 'w1', kind: 'webhook', createdAt: 'x' }];
+		const store = await loaded(done({ alerts: { channels: ['app', 'telegram', 'webhook'], skipped: false } }));
+		await store.subscriptions();
+		const left = await store.removeSubscription('t1');
+		expect(H.server.lists).toBe(2);
+		expect(left.map((x) => x.id)).toEqual(['w1']);
+		expect(store.subs.map((x) => x.id)).toEqual(['w1']);
+		expect(slots.recovery_backup.run.alerts).toEqual({ channels: ['app', 'webhook'], skipped: false });
+	});
+
+	it('a record that could not be written after a removal is made good by the next list', async () => {
+		H.server.subs = [{ id: 't1', kind: 'telegram', createdAt: 'x' }];
+		const store = await loaded(done({ alerts: { channels: ['app', 'telegram'], skipped: false } }));
+		em.patchSlotJson.mockImplementationOnce(async () => {
+			throw new Error('offline');
+		});
+		await store.removeSubscription('t1');
+		expect(H.server.subs).toEqual([]);
+		expect(slots.recovery_backup.run.alerts.channels).toEqual(['app', 'telegram']);
+
+		await store.subscriptions({ refresh: true });
+		expect(slots.recovery_backup.run.alerts).toEqual({ channels: ['app'], skipped: false });
+	});
+});
+
+describe('the nodes’ holdings', () => {
+	it('are each node’s answer: the backup’s version holds, none or another is lost, no answer is not answering', async () => {
+		const record = done({ skippedNodes: ['n_' + 'd'.repeat(32)] });
+		record.nodes.push({ id: 'n_' + 'd'.repeat(32), url: 'https://d.example/recovery/node' });
+		const store = await loaded(record);
+		const asked = [];
+		H.holdingOf = async (node, id) => {
+			asked.push([node.id, id]);
+			if (node.url.startsWith('https://a.')) return 2;
+			if (node.url.startsWith('https://b.')) return 1;
+			throw new Error('does not answer');
+		};
+		await store.checkHoldings();
+		expect(asked).toEqual(record.nodes.slice(0, 3).map((n) => [n.id, ID]));
+		expect(store.holdings).toMatchObject({ runId: 'r1', byNode: { [record.nodes[0].id]: 'holds', [record.nodes[1].id]: 'lost', [record.nodes[2].id]: 'unreachable' } });
+
+		H.holdingOf = async () => null;
+		await store.checkHoldings();
+		expect(Object.values(store.holdings.byNode)).toEqual(['lost', 'lost', 'lost']);
+	});
+
+	it('are not asked of a revoked backup', async () => {
+		const store = await loaded(done({ revokedAt: 5 }));
+		H.holdingOf = vi.fn();
+		await store.checkHoldings();
+		expect(H.holdingOf).not.toHaveBeenCalled();
+	});
+});
+
+describe('reads made at once', () => {
+	it('share one read of the backup, and one check of the nodes', async () => {
+		slots.recovery_backup = { run: done() };
+		const store = useRecoveryBackupStore();
+		em.loadSlotJson.mockClear();
+		await Promise.all([store.load(), store.load()]);
+		expect(em.loadSlotJson.mock.calls.filter(([name]) => name === 'recovery_backup')).toHaveLength(1);
+
+		let checks = 0;
+		H.knownNodes = async () => (checks++, { nodes: [], refused: {} });
+		await Promise.all([store.refreshNodes(), store.refreshNodes()]);
+		expect(checks).toBe(1);
+		await store.refreshNodes();
+		expect(checks).toBe(2);
 	});
 });

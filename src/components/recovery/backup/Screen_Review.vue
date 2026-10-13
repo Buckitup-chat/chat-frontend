@@ -46,15 +46,14 @@ import { CURRENCY, DRAFT, NAV, alertsText, amount, durationAdjective, feeText, g
 const draft = inject(DRAFT);
 const nav = inject(NAV);
 const store = useRecoveryBackupStore();
-
 const $userPQ = userPQStore();
 
 const s = computed(() => draft.settings.value);
-/** A reshare of the finished backup: it keeps the backup's alerts, and says who joins and who leaves. */
-const resharing = computed(() => !!draft.state.reshare);
+/** A reshare of the finished backup keeps the backup's alerts, and says who joins and who leaves. */
+const resharing = computed(() => draft.resharing.value);
 const nameOf = (h) => guardianName(h, store.candidates, $userPQ);
-const joining = computed(() => (resharing.value ? draft.guardianHashes.value.filter((h) => !draft.state.reshare.guardians.includes(h)).map(nameOf) : []));
-const leaving = computed(() => (resharing.value ? draft.state.reshare.guardians.filter((h) => !draft.guardianHashes.value.includes(h)).map(nameOf) : []));
+const joining = computed(() => draft.joining.value.map(nameOf));
+const leaving = computed(() => draft.leaving.value.map(nameOf));
 const needed = computed(() => neededGuardians(s.value));
 
 // Paying yourself: the balance is read again right before Create.
@@ -74,13 +73,6 @@ const blocked = computed(() => {
 	return null;
 });
 
-/** What store.start takes for a reshare: the backup's alerts stay as they are. */
-const reshareStart = () => {
-	const payload = draft.startPayload();
-	delete payload.alerts;
-	return { ...payload, reshare: true };
-};
-
 const creating = ref(false);
 const error = ref(null);
 // start resolves once the run is saved, before anything leaves this device;
@@ -89,7 +81,7 @@ const create = async () => {
 	creating.value = true;
 	error.value = null;
 	try {
-		await store.start(resharing.value ? reshareStart() : draft.startPayload());
+		await store.start(draft.startPayload());
 		nav.reset('progress');
 	} catch (e) {
 		error.value = errorMessage(e);
