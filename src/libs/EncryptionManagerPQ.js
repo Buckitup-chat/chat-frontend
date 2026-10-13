@@ -76,6 +76,13 @@ if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
 
 class VaultKeyError extends Error {}
 
+export class LocalVaultMissingError extends VaultKeyError {
+  constructor() {
+    super('This account is listed on this device, but its encrypted keys are missing. Restore it from a backup or another device.');
+    this.name = 'LocalVaultMissingError';
+  }
+}
+
 class CardNotDurableError extends Error {
   constructor(cause) {
     super(cause?.message ?? String(cause));
@@ -356,7 +363,7 @@ export class EncryptionManagerPQ extends EventTarget {
     }
     try {
       startLeaderElection(userHash, () => {});
-      const card = await this.#passBootstrapCard(userHash, { mode: 'sign-in', deferDelivery: true });
+      const card = await this.#passBootstrapCard(userHash, { mode: 'sign-in', card: identity, deferDelivery: true });
       if (card === 'deferred') throw new LoginDeferredError(userHash);
     } catch (e) {
       await this.#abortBootstrap();
@@ -468,6 +475,14 @@ export class EncryptionManagerPQ extends EventTarget {
     const identity = this.#localUserCards.find(i => i.user_hash === userHash);
 
     if (!identity) throw new Error(`User ${userHash} not found in local identities`);
+
+    // local-vault's adapter silently creates an empty row for an unknown ID.
+    // Detect that condition first, or the real loss is hidden behind a generic
+    // "Vault lock-key access failed" and WebAuthn is never even requested.
+    const vaultEntry = identity.vaultId
+      ? await this.#rawStore.get(`local-vault-${identity.vaultId}`)
+      : null;
+    if (!vaultEntry?.accountID || !vaultEntry?.data) throw new LocalVaultMissingError();
 
     const vault = await connect({
       vaultID: identity.vaultId,
@@ -880,7 +895,15 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await this.#loadLocalUserCards();
     const existing = this.#localUserCards.find(i => i.user_hash === identity.user_hash);
-    const userVault = existing
+    // A registry card can outlive its encrypted vault (for example after an
+    // older client cleared all local-vault entries). A backup supplies the
+    // missing private keys, so create a fresh passkey-protected vault instead
+    // of trying to connect to the empty row that local-vault auto-created.
+    const existingVault = existing?.vaultId
+      ? await this.#rawStore.get(`local-vault-${existing.vaultId}`)
+      : null;
+    const reuseExistingVault = !!existingVault?.accountID && !!existingVault?.data;
+    const userVault = reuseExistingVault
       ? await connect({ vaultID: existing.vaultId, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS })
       : await connect({
         storageType: 'idb',
@@ -895,7 +918,7 @@ export class EncryptionManagerPQ extends EventTarget {
     if (keys.meta_seed) {
       // Owners may hold meta-addresses from the seed already here: replacing
       // it would leave this device unable to approve for them.
-      const present = existing ? await userVault.get(`meta_seed`) : null;
+      const present = reuseExistingVault ? await userVault.get(`meta_seed`) : null;
       if (!present) await userVault.set(`meta_seed`, keys.meta_seed);
       else if (present !== keys.meta_seed) console.warn('[vault] the imported guardian seed differs from this device\'s; this device keeps its own');
     }

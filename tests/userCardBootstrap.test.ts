@@ -47,6 +47,7 @@ vi.mock('@lo-fi/local-vault', () => ({
 		if (addNewVault) {
 			const id = `vault-${vaults.size + 1}`;
 			vaults.set(id, makeVault(id));
+			await rawStore.set(`local-vault-${id}`, { accountID: `account-${id}`, data: 'sealed' });
 			return vaults.get(id);
 		}
 		return vaults.get(vaultID as string);
@@ -149,7 +150,7 @@ vi.mock('@/lib/data/intentRecovery', async () => {
 	};
 });
 
-const { EncryptionManagerPQ, AccountImportIncompleteError, LoginDeferredError } = await import('@/libs/EncryptionManagerPQ');
+const { EncryptionManagerPQ, AccountImportIncompleteError, LocalVaultMissingError, LoginDeferredError } = await import('@/libs/EncryptionManagerPQ');
 const { DecryptFailedError } = await import('@/lib/data/secureStore');
 const intents = await import('@/lib/data/intents');
 const outbox = await import('@/lib/data/outbox');
@@ -825,6 +826,35 @@ describe('import reports whether the card write is durable', () => {
 		return { keys, identity };
 	};
 
+	it('restores a listed account whose local vault is empty and republishes its card', async () => {
+		const { keys, identity } = await exported();
+		const oldVaultId = identity.vaultId;
+		await newDevice();
+		await rawStore.set('pq-vaults-registry', [identity]);
+		await rawStore.set(`local-vault-${identity.vaultId}`, { data: '' });
+		const target = freshManager();
+
+		const result = await target.importVaultKeys(keys, { ...identity });
+
+		expect(result).toEqual({ status: 'active', userHash: identity.user_hash });
+		const restored = (await target.getLocalUserCards()).find((card) => card.user_hash === identity.user_hash);
+		expect(restored?.vaultId).not.toBe(oldVaultId);
+		expect(httpSent.flat().some((m) => m.syncMetadata.relation === 'user_cards' && rowOf(m).user_hash === identity.user_hash)).toBe(true);
+	});
+
+	it('reports a missing local vault before attempting PassKey sign-in', async () => {
+		const source = freshManager();
+		await source.createUserVault({ name: 'Missing keys' });
+		const identity = (await source.getLocalUserCards())[0];
+		await source.logout();
+		const empty = { data: '' };
+		await rawStore.set(`local-vault-${identity.vaultId}`, empty);
+		const target = freshManager();
+
+		await expect(target.login(identity.user_hash)).rejects.toBeInstanceOf(LocalVaultMissingError);
+		expect(await rawStore.get(`local-vault-${identity.vaultId}`)).toBe(empty);
+	});
+
 	it('an intent store failure fails the import honestly: no HTTP, no card intent, no session, no promise of later recovery — and a retry reuses the restored account', async () => {
 		const { keys, identity } = await exported();
 		const intentsBefore = cardIntents().length;
@@ -1345,7 +1375,7 @@ describe('the card decision gates sign-in and import before anything irreversibl
 		};
 	};
 
-	it('sign-in with no card proven anywhere: no session, authChange, recovery, drain or HTTP', async () => {
+	it('sign-in republishes the local card when the live backend has none', async () => {
 		const em = freshManager();
 		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
 		await em.logout();
@@ -1357,15 +1387,11 @@ describe('the card decision gates sign-in and import before anything irreversibl
 		const again = watchAuth(freshManager());
 		events.length = 0;
 
-		const failure = await again.login(userHash).then(() => null, (e) => e);
+		await again.login(userHash);
 
-		expect(failure).toBeInstanceOf(CardAuthoringBlockedError);
-		expect(failure.reason).toBe('card_unproven');
-		expect(again.isAuth).toBe(false);
-		expect(again.localStorageOwnerHash).toBeNull();
-		expect(events).not.toContain('authChange:true');
-		expect(events).not.toContain('recoverIntents');
-		expect(httpSent).toHaveLength(httpBefore);
+		expect(again.isAuth).toBe(true);
+		expect(httpSent.flat().slice(httpBefore).filter((m) => m.syncMetadata.relation === 'user_cards').map((m) => m.type)).toEqual(['insert']);
+		expect(at('http:user_cards')).toBeLessThan(at('authChange:true'));
 	});
 
 	it('import where the shape is not live: nothing reserved, stored, signed or sent; once it is live, the retry publishes one bootstrap', async () => {
