@@ -109,7 +109,7 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 	const deps = (me) => ({
 		namespace,
 		peersWhoWrote: () => peersWhoWrote(me),
-		readPeer: async (peer) => (await $dialogs.readPeerParts(peer, ['text', 'recovery_share_return']))?.messages ?? null,
+		readPeer: async (peer, after) => (await $dialogs.readPeerParts(peer, ['text', 'recovery_share_return'], after ? { after } : {}))?.messages ?? null,
 		sendBinding: async (peer, parts) => {
 			// The binding names the temporary account and is signed as it: checked right before it is captured.
 			if ($userPQ.currentUserHash !== me) throw new Error('The account changed; no answer was sent');

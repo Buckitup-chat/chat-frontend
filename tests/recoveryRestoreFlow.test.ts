@@ -20,10 +20,12 @@ let w: World;
 let progress: RestoreProgress;
 let memo: RestoreMemo;
 let saves: RestoreProgress[];
+let reads: { peer: string; after: string | null }[];
 const deps = (): RestoreDeps => ({
 	namespace: NAMESPACE,
 	peersWhoWrote: async () => w.wrote(TEMP),
-	readPeer: async (peer) => w.inbox(TEMP, peer, ['text', 'recovery_share_return']),
+	// As the dialogs store reads: from `after` on, that message included.
+	readPeer: async (peer, after) => (reads.push({ peer, after }), w.inbox(TEMP, peer, ['text', 'recovery_share_return']).filter((m) => !after || m.messageId >= after)),
 	sendBinding: async (peer, parts) => void w.send(TEMP, peer, parts),
 	chain: w.chain,
 	release: (node, id, key) => requestRelease(node, id, key, { fetch: w.nodeFetch }),
@@ -48,6 +50,7 @@ beforeEach(() => {
 	progress = newProgress(TEMP, w.clock.now);
 	memo = newMemo();
 	saves = [];
+	reads = [];
 });
 
 describe('the temporary account', () => {
@@ -158,7 +161,7 @@ describe('the temporary account', () => {
 
 		// Another backup, on nodes with the same ids: the first one's releases are not its.
 		const before = w;
-		w = makeWorld();
+		w = makeWorld({ firstMessage: 1000 });
 		w.clock.now = before.clock.now;
 		for (const g of w.guardians) w.send(g.userHash, TEMP, [{ kind: 'text', text: helpRequestText(w.secretRef) }]);
 		await pass();
@@ -166,6 +169,35 @@ describe('the temporary account', () => {
 		expect(view.secretRef).toBe(w.secretRef);
 		expect(w.nodeCalls).toHaveLength(2);
 		expect(bytesToHex(wrapKeyFrom(view, memo))).toBe(w.run.wrapKey);
+	});
+
+	it('reads each dialog from where the last pass stopped, keeping what it gave', async () => {
+		const g = w.guardians[0].userHash;
+		w.send(g, TEMP, [{ kind: 'text', text: helpRequestText(w.secretRef) }]);
+		await pass();
+		const first = w.messages.find((m) => m.from === g)!.messageId;
+		reads.length = 0;
+		const view = await pass();
+		expect(reads).toEqual([{ peer: g, after: first }]);
+		expect(view.requests.map((r) => r.peer)).toEqual([g]);
+		expect(view.secretRef).toBe(w.secretRef);
+	});
+
+	it('answers several new guardians at once, and records each one answered whatever the others do', async () => {
+		const peers = [hashOf('6'), hashOf('7'), hashOf('8')];
+		for (const peer of peers) w.send(peer, TEMP, [{ kind: 'text', text: helpRequestText(w.secretRef) }]);
+		let inFlight = 0;
+		let most = 0;
+		const sendBinding: RestoreDeps['sendBinding'] = async (peer) => {
+			inFlight++;
+			most = Math.max(most, inFlight);
+			await new Promise((r) => setTimeout(r, 5));
+			inFlight--;
+			if (peer === peers[1]) throw new Error('offline');
+		};
+		await expect(restorePass(progress, { ...deps(), sendBinding }, memo)).rejects.toThrow('offline');
+		expect(most).toBe(3);
+		expect(Object.keys(saves.at(-1)!.answered).sort()).toEqual([peers[0], peers[2]].map((p) => `${p}|${w.secretRef}`).sort());
 	});
 
 	it('names the sender of a return that does not check, and does not count it', async () => {

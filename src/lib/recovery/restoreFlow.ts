@@ -80,7 +80,12 @@ export interface RestoreDeps {
 	/** Who opened a dialog with the temporary account: each once, not the account itself. */
 	peersWhoWrote: () => Promise<string[]>;
 	/** A peer's messages with text and returned shares, oldest first; null when the dialog could not be read now. */
-	readPeer: (peer: string) => Promise<{ messageId: string; parts: ContentPart[] }[] | null>;
+	/**
+	 * A peer's messages with text and returned shares, oldest first, from
+	 * `after` on (that message included) when given; null when the dialog
+	 * could not be read now.
+	 */
+	readPeer: (peer: string, after: string | null) => Promise<{ messageId: string; parts: ContentPart[] }[] | null>;
 	sendBinding: (peer: string, parts: ContentPart[]) => Promise<void>;
 	chain: RestoreChain;
 	/** A node's release for secret `id`, opened with the candidate key (nodeClient.requestRelease). */
@@ -101,13 +106,26 @@ export interface RestoreMemo {
 	roots: Map<string, Uint8Array | null>;
 	/** `<round>|<candidate>|<guardian>` of every approval seen. */
 	approved: Set<string>;
+	/** What each peer's dialog gave so far: the next read starts at its last message. */
+	peers: Map<string, PeerSeen>;
 	/** By `<secret id>|<candidate>|<node id>`. */
 	releases: Map<string, { version: number; share: string }>;
 	/** By `<secret id>|<candidate>|<node id>`: why it did not release, and when it was last asked. */
 	nodeFailures: Map<string, { reason: string; at: number }>;
 }
 
-export const newMemo = (): RestoreMemo => ({ guardians: new Map(), roots: new Map(), approved: new Set(), releases: new Map(), nodeFailures: new Map() });
+export interface PeerSeen {
+	/** The newest message read; UUIDv7, so it orders by time. */
+	last: string | null;
+	seen: Set<string>;
+	requests: HelpRequest[];
+	returns: ReceivedReturn[];
+}
+
+export const newMemo = (): RestoreMemo => ({ guardians: new Map(), roots: new Map(), approved: new Set(), peers: new Map(), releases: new Map(), nodeFailures: new Map() });
+
+/** Bindings sent at once, at most. */
+const SEND_AT_ONCE = 4;
 
 /** A node that did not release is asked again after this long. */
 export const NODE_RETRY_SEC = 60;
@@ -175,37 +193,51 @@ export const restorePass = async (progress: RestoreProgress, deps: RestoreDeps, 
 	// Requests and returns, from every dialog a guardian opened.
 	const received: ReceivedReturn[] = p.typedReturns.map((r) => ({ sender: r.sender, via: 'text' as const, part: r.part }));
 	const requests: HelpRequest[] = [];
+	// Each dialog from where the last pass stopped: what it gave before is kept.
 	await Promise.all(
 		(await deps.peersWhoWrote()).map(async (peer) => {
-			const messages = await deps.readPeer(peer);
+			let seen = memo.peers.get(peer);
+			if (!seen) memo.peers.set(peer, (seen = { last: null, seen: new Set(), requests: [], returns: [] }));
+			const messages = await deps.readPeer(peer, seen.last);
 			for (const m of messages ?? []) {
+				if (seen.seen.has(m.messageId)) continue;
+				seen.seen.add(m.messageId);
+				if (!seen.last || m.messageId > seen.last) seen.last = m.messageId;
 				for (const part of m.parts) {
 					if (part.kind === 'text') {
 						const ref = findSecretRef(part.text);
-						if (ref) requests.push({ peer, secretRef: ref, messageId: m.messageId });
-					} else if (isReturn(part)) received.push({ sender: peer, via: 'dialog', part });
+						if (ref) seen.requests.push({ peer, secretRef: ref, messageId: m.messageId });
+					} else if (isReturn(part)) seen.returns.push({ sender: peer, via: 'dialog', part });
 				}
 			}
+			requests.push(...seen.requests);
+			received.push(...seen.returns);
 		}),
 	);
 	const typed = p.typedRequests.map((t, i) => ({ peer: `typed:${i}`, secretRef: t.secretRef, messageId: `typed:${t.at}` }));
 	view.requests = [...requests.sort((a, b) => (a.messageId < b.messageId ? -1 : 1)), ...typed.map((t) => ({ ...t, peer: null }))];
 
 	// Every guardian is answered for the backup they asked about, once per candidate.
+	// Several at a time; each one sent is recorded, whatever happens to the others.
 	const answered = { ...p.answered };
-	let changed = false;
-	const newest = new Map<string, HelpRequest>();
-	for (const r of requests) newest.set(`${r.peer}|${r.secretRef}`, r);
-	for (const [key, r] of newest) {
-		if (answered[key] === candidate) continue;
-		await deps.sendBinding(r.peer, [bindingFor(p.candidateKey, r.secretRef, me)]);
-		answered[key] = candidate;
-		changed = true;
+	const due = new Map<string, HelpRequest>();
+	for (const r of requests) if (answered[`${r.peer}|${r.secretRef}`] !== candidate) due.set(`${r.peer}|${r.secretRef}`, r);
+	const pending = [...due];
+	let failure: unknown = null;
+	for (let i = 0; i < pending.length; i += SEND_AT_ONCE) {
+		const batch = pending.slice(i, i + SEND_AT_ONCE);
+		const sent = await Promise.allSettled(batch.map(([, r]) => deps.sendBinding(r.peer, [bindingFor(p.candidateKey, r.secretRef, me)])));
+		sent.forEach((s, j) => {
+			if (s.status === 'fulfilled') answered[batch[j][0]] = candidate;
+			else failure ??= s.reason;
+		});
+		if (failure) break;
 	}
-	if (changed) {
+	if (Object.keys(answered).some((k) => p.answered[k] !== answered[k])) {
 		p = { ...p, answered };
 		await deps.save(p);
 	}
+	if (failure) throw failure;
 
 	const secretRef = chosenSecret([...requests, ...typed]);
 	view.secretRef = secretRef;

@@ -56,7 +56,8 @@ const eciesTo = async (recipientPublicKey: Uint8Array, plaintext: string): Promi
 	return bytesToHex(concatBytes(iv, secp.getPublicKey(eph, true), mac, ct));
 };
 
-export const makeWorld = () => {
+/** `firstMessage`: where this world's message ids start, so two worlds' messages never share an id. */
+export const makeWorld = ({ firstMessage = 0 } = {}) => {
 	const clock = { now: 1_800_000_000 };
 	const owner = new Wallet('0x' + '77'.repeat(32));
 	const nodes = ['a', 'b', 'c'].map((c) => ({ id: 'n_' + c.repeat(32), url: `https://${c}.nodes.example/recovery/node` }));
@@ -216,7 +217,7 @@ export const makeWorld = () => {
 	}) as typeof fetch;
 
 	// ------------------------------ the dialogs ------------------------------
-	let seq = 0;
+	let seq = firstMessage;
 	const messages: { from: string; to: string; messageId: string; parts: ContentPart[] }[] = [];
 	const send = (from: string, to: string, parts: ContentPart[]) => {
 		seq += 1;
