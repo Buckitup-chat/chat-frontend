@@ -18,6 +18,9 @@
 			<div class="text-secondary small" v-if="outcome?.kind === 'expired'">
 				Session expired. Start again to make new codes.
 			</div>
+			<div class="text-danger small" v-if="outcome?.kind === 'failed'">
+				This phone could not sign its code. Sign in again, then start again.
+			</div>
 		</div>
 		<div class="text-danger small text-center" v-if="cameraError">{{ cameraError }}</div>
 	</div>
@@ -194,7 +197,7 @@ const finished = (id, result) => {
 	stopCamera();
 	setScanning(false);
 	outcome.value = result;
-	if (result.kind === 'expired') {
+	if (result.kind === 'expired' || result.kind === 'failed') {
 		clearCode();
 		stage.value = 'idle';
 		return;
@@ -213,6 +216,8 @@ const finished = (id, result) => {
 	});
 };
 
+// The camera starts first: the 90 s session, its nonce and its connection
+// begin once it runs, so a permission prompt takes nothing out of them.
 const startSession = async () => {
 	const id = ++session;
 	engine?.stop();
@@ -228,6 +233,25 @@ const startSession = async () => {
 		me = identity();
 	} catch (e) {
 		cameraError.value = e.message;
+		return;
+	}
+	setScanning(true);
+	await nextTick();
+	if (id !== session) return;
+	try {
+		await qrScanner?.start();
+	} catch (e) {
+		if (id !== session) return;
+		log(`camera did not start: ${e?.message ?? e}`);
+		cameraError.value = 'The camera did not start. Allow it, or check that no other app uses it.';
+		setScanning(false);
+		return;
+	}
+	if (id !== session) {
+		// Stopped while the camera was starting: nothing scans now, so the camera
+		// this start turned on goes off. Replaced by a newer session instead: the
+		// camera is that session's, and stays.
+		if (!scanning.value) stopCamera();
 		return;
 	}
 	const current = new HandshakeEngine({
@@ -251,22 +275,7 @@ const startSession = async () => {
 		onDone: (result) => finished(id, result),
 	});
 	engine = current;
-	setScanning(true);
 	current.start();
-
-	await nextTick();
-	if (id !== session) return;
-	try {
-		await qrScanner?.start();
-	} catch (e) {
-		if (id !== session) return;
-		log(`camera did not start: ${e?.message ?? e}`);
-		cameraError.value = 'The camera did not start. Allow it, or check that no other app uses it.';
-		current.stop();
-		engine = null;
-		setScanning(false);
-		return;
-	}
 };
 
 /** Ends the session: its codes verify against nothing from now on. */

@@ -212,6 +212,72 @@ describe('the scanner, two phones face to face', () => {
 		expect(a.stage()).toBe('A');
 	});
 
+	/** The camera waits on a permission prompt until `allow()`. */
+	const promptedCamera = (p) => {
+		let allow;
+		p.scanner.start = () => new Promise((resolve) => { allow = () => { p.scanner.running = true; resolve(); }; });
+		return () => allow();
+	};
+
+	it('starts the 90 s session once the camera runs: the permission prompt takes nothing out of it', async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
+		const a = await phone(alice);
+		const allow = promptedCamera(a);
+		void a.wrapper.vm.toggleScanner(); // started, waiting on the prompt
+		await flushPromises();
+		expect(a.code()).toBeUndefined(); // no session, no code, yet
+		await vi.advanceTimersByTimeAsync(60_000); // the person reads the prompt for a minute
+		allow();
+		await flushPromises();
+		expect(a.code()).toMatch(/^PQ2:A:/);
+		await vi.advanceTimersByTimeAsync(80_000);
+		expect(a.wrapper.text()).not.toMatch(/Session expired/); // 140 s since the tap, 80 s of session
+		await vi.advanceTimersByTimeAsync(10_100);
+		expect(a.wrapper.text()).toMatch(/Session expired/);
+	});
+
+	it('stops the camera that comes up after the session was stopped during the prompt', async () => {
+		const a = await phone(alice);
+		const allow = promptedCamera(a);
+		void a.wrapper.vm.toggleScanner();
+		await flushPromises();
+		a.wrapper.vm.stopScan();
+		allow();
+		await flushPromises();
+		expect(a.scanner.running).toBe(false);
+		expect(a.code()).toBeUndefined();
+	});
+
+	it('leaves the camera to a newer session that replaced the one waiting on the prompt', async () => {
+		const a = await phone(alice);
+		const allow = promptedCamera(a);
+		const first = a.wrapper.vm.toggleScanner();
+		await flushPromises();
+		a.wrapper.vm.stopScan();
+		a.scanner.start = async () => { a.scanner.running = true; };
+		await a.wrapper.vm.toggleScanner(); // the newer session's camera is up at once
+		allow();
+		await first;
+		await flushPromises();
+		expect(a.scanner.running).toBe(true);
+		expect(a.code()).toMatch(/^PQ2:A:/);
+	});
+
+	it('ends with its own cause when this phone cannot sign its code, and reports no contact', async () => {
+		const a = await phone(alice, { signContactChallenge: async () => { throw new Error('vault locked'); } });
+		const b = await phone(bob);
+		await a.wrapper.vm.toggleScanner();
+		await b.wrapper.vm.toggleScanner();
+		for (let i = 0; i < 3; i++) {
+			await a.read(b.code());
+			await new Promise((r) => setTimeout(r, 450)); // the same code again within 400 ms is the camera repeating itself
+		}
+		expect(a.outcome()).toBe('failed');
+		expect(a.wrapper.text()).toMatch(/could not sign its code/);
+		expect(a.wrapper.emitted('completed')).toBeUndefined();
+		expect(a.scanner.running).toBe(false);
+	});
+
 	it('says so when the camera does not start', async () => {
 		const a = await phone(alice);
 		a.scanner.start = async () => { throw new Error('NotAllowedError'); };

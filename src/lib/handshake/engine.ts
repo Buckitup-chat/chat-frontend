@@ -10,8 +10,8 @@
 import { bytesToHex } from '@noble/hashes/utils';
 import { equalBytes } from '@noble/post-quantum/utils.js';
 import {
-	checkConfirm, confirmMessage, encode, fingerprintOf, newNonce, parse, pqMessage, sasOf, sessionTag, transcript,
-	verifyOptical, type Fingerprints, type Message, type Party,
+	checkConfirm, confirmMessage, encode, fingerprintOf, newNonce, parse, pqMessage, refusalMessage, sasOf, sessionTag,
+	transcript, verifyOptical, type Fingerprints, type Message, type Party, type RefusalCause,
 } from '@/lib/pq/handshake';
 import type { UserCardRow } from '@/lib/data/types';
 
@@ -54,10 +54,19 @@ export type Outcome =
 	 * logs and tests; what the person reads is worded from `cause` by the UI.
 	 */
 	| { kind: 'verified'; peerHash: string; peerContactPkey: Uint8Array; sas: string | null; reason: string; cause: VerifiedCause }
-	| { kind: 'expired' };
+	| { kind: 'expired' }
+	/** This phone could not sign its code, after retries: nothing was proved. */
+	| { kind: 'failed'; cause: 'no-signature' };
 
-/** Why a session ended verified only: what the person can do about it differs. */
-export type VerifiedCause = 'no-address' | 'no-channel' | 'no-card' | 'no-confirmation' | 'refused';
+/**
+ * Why a session ended verified only: what the person can do about it differs.
+ * This side's own: no-address, no-card (never published), no-signature (could
+ * not sign M). The channel's: no-channel, no-confirmation. The peer's:
+ * refused (its card or signature does not hold), deleted (its account is),
+ * peer-unable (it sent a refusal: no card, or it could not sign).
+ */
+export type VerifiedCause =
+	| 'no-address' | 'no-card' | 'no-signature' | 'no-channel' | 'no-confirmation' | 'refused' | 'deleted' | 'peer-unable';
 
 export interface EngineOptions {
 	identity: HandshakeIdentity;
@@ -81,6 +90,8 @@ export interface EngineOptions {
 const SESSION_MS = 90_000;
 const CHANNEL_MS = 15_000;
 const CONFIRM_MS = 10_000;
+/** Reads of a code whose optical signature failed before the session gives up. */
+const SIGN_ATTEMPTS = 3;
 /** Our confirmation may still be on its way when the peer's arrives: the connection closes this much later. */
 const CLOSE_AFTER_CHANNEL_MS = 3_000;
 
@@ -95,6 +106,9 @@ export class HandshakeEngine {
 	private peer: Party | null = null;
 	private T: Uint8Array | null = null;
 	private mySig: Promise<Uint8Array> | null = null;
+	private signFailures = 0;
+	/** Why this side cannot confirm itself to the peer; it sends a refusal instead. */
+	private ownFailure: RefusalCause | null = null;
 	private ownCard: Promise<UserCardRow | null> | null = null;
 	private conn: ChannelAdapter | null = null;
 	private myPayload: Uint8Array | null = null;
@@ -156,6 +170,7 @@ export class HandshakeEngine {
 			await this.handle(m);
 		} catch (e) {
 			this.log(`error handling ${m.kind}: ${(e as Error)?.message ?? e}`);
+			if (this.signFailures >= SIGN_ATTEMPTS) this.finish({ kind: 'failed', cause: 'no-signature' });
 		} finally {
 			this.busy = false;
 		}
@@ -224,9 +239,16 @@ export class HandshakeEngine {
 		this.log(`bound to ${short(peer.userHash)}`);
 	}
 
-	/** Our optical signature over T, signed once. */
+	/** Our optical signature over T, signed once; a failure is not kept, so the next read of the code signs again. */
 	private signature(): Promise<Uint8Array> {
-		this.mySig ??= this.o.identity.signOptical(this.T!);
+		if (!this.mySig) {
+			const signing = this.o.identity.signOptical(this.T!);
+			this.mySig = signing;
+			signing.then(() => { this.signFailures = 0; }, () => {
+				if (this.mySig === signing) this.mySig = null;
+				this.signFailures++;
+			});
+		}
 		return this.mySig;
 	}
 
@@ -272,15 +294,36 @@ export class HandshakeEngine {
 		const fp = (hash: string) => `${bytesToHex(fps[hash]).slice(0, 8)}…`;
 		this.log(`both bootstrap payloads known (fingerprints ${fp(this.me.userHash)} / ${fp(peer.userHash)}) — waiting for the channel`);
 		// The channel window starts now, unless the channel is already open.
-		if (!this.link) this.setDeadline(this.o.channelMs, () => this.verified('no channel', 'no-channel'));
-		const [card, sigPq] = await Promise.all([this.ownCard!, this.o.identity.signPq(pqMessage(this.T!, fps))]);
-		if (this.ended) return;
-		if (!card) {
-			this.finishVerified('no own card', 'no-card');
-			return;
+		// With no channel, this side's own failure, if any, is what to fix first.
+		if (!this.link) {
+			this.setDeadline(this.o.channelMs, () => (this.ownFailure ? this.ownFailed() : this.verified('no channel', 'no-channel')));
 		}
-		this.message = confirmMessage(card, sigPq);
+		this.message = await this.ownConfirmation(fps);
+		if (this.ended) return;
 		if (this.link) this.exchange();
+	}
+
+	/**
+	 * What this side sends: its card and signature over M, or — with no card
+	 * published, or a signature that failed — a refusal naming why, so that the
+	 * peer reports the real cause. This side still checks what the peer sends.
+	 */
+	private async ownConfirmation(fps: Fingerprints): Promise<string> {
+		const [card, sigPq] = await Promise.all([
+			this.ownCard!,
+			this.o.identity.signPq(pqMessage(this.T!, fps)).catch((e: unknown) => {
+				this.log(`could not sign the confirmation: ${(e as Error)?.message ?? e}`);
+				return null;
+			}),
+		]);
+		if (card && sigPq) return confirmMessage(card, sigPq);
+		this.ownFailure = !card ? 'no-card' : 'no-signature';
+		this.log(`sending a refusal: ${this.ownFailure}`);
+		return refusalMessage(this.ownFailure);
+	}
+
+	private ownFailed(): Outcome {
+		return this.verified(this.ownFailure === 'no-card' ? 'no own card' : 'no signature', this.ownFailure!);
 	}
 
 	private channelOpen(link: ChannelLink): void {
@@ -309,7 +352,7 @@ export class HandshakeEngine {
 				this.finish({ kind: 'confirmed', peerHash: peer.userHash, peerContactPkey: peer.contactPkey, sas, card: verdict.card });
 			} else {
 				this.log(`not confirmed: ${verdict.reason}`);
-				this.finishVerified(verdict.reason, 'refused');
+				this.finishVerified(verdict.reason, verdict.refusal);
 			}
 		});
 		this.link!.send(this.message!);

@@ -11,7 +11,7 @@ import { bytesToHex, concatBytes } from '@noble/hashes/utils';
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import {
-	checkConfirm, confirmMessage, encode, parse, pqMessage, sasOf, sessionTag, signOptical, transcript, verifyOptical, type Message,
+	checkConfirm, confirmMessage, encode, parse, pqMessage, refusalMessage, sasOf, sessionTag, signOptical, transcript, verifyOptical, type Message,
 	type Party,
 } from '@/lib/pq/handshake';
 import { fromBase64 } from '@/lib/pq/signature';
@@ -187,7 +187,18 @@ describe('the confirmation over the channel', () => {
 	it('refuses a valid card shown under someone else\'s key (Mallory showing Alice\'s user_hash)', () => {
 		const impostor = { userHash: alice.userHash, contactPkey: fromBase64(mallory.card.contact_pkey as string) };
 		expect(checkConfirm(confirmMessage(card, signed(mallory)), impostor, T, fps))
-			.toEqual({ ok: false, reason: 'the card does not certify the contact key the codes showed' });
+			.toEqual({ ok: false, reason: 'the card does not certify the contact key the codes showed', refusal: 'refused' });
+	});
+
+	it('refuses a deleted account\'s card, though it verifies and certifies the key: a deleted account is never confirmed', () => {
+		const deleted = resignedCard(alice, { deleted_flag: true }) as UserCardRow;
+		expect(checkConfirm(confirmMessage(deleted, signed(alice)), bound, T, fps))
+			.toEqual({ ok: false, reason: 'the card is a deleted account\'s', refusal: 'deleted' });
+	});
+
+	it('reads the peer\'s refusal — no card, or no signature — as the peer\'s, not as a bad card', () => {
+		expect(checkConfirm(refusalMessage('no-card'), bound, T, fps)).toMatchObject({ ok: false, refusal: 'peer-unable', reason: expect.stringMatching(/no card/) });
+		expect(checkConfirm(refusalMessage('no-signature'), bound, T, fps)).toMatchObject({ ok: false, refusal: 'peer-unable', reason: expect.stringMatching(/no signature/) });
 	});
 
 	it('refuses a card of another identity, a card that does not verify, a signature by another key, and one over another channel', () => {

@@ -10,7 +10,7 @@ import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { base64urlDecode, decode as decodeQwbp } from 'qwbp';
 import { hkdfDerive, sixDigits } from './hkdf';
-import { cardVouchesForContactKey, verifyUserCard } from './verifyCard';
+import { contactKeyVouch, type ContactKeyVouch } from './verifyCard';
 import { toBase64, toBase64Url, toBytes } from './signature';
 import type { UserCardRow } from '@/lib/data/types';
 
@@ -19,6 +19,7 @@ export const TRANSCRIPT_TAG = 'buckitup/handshake/v2\n';
 export const PQ_TAG = 'buckitup/handshake/v2/pq\n';
 export const SAS_SALT = 'buckitup/handshake/v2';
 export const CONFIRM_TYPE = 'PQ2_CONFIRM';
+export const REFUSAL_TYPE = 'PQ2_REFUSE';
 
 export const USER_HASH_CHARS = 130;
 export const CONTACT_PKEY_BYTES = 33; // compressed secp256k1
@@ -196,15 +197,44 @@ export interface ConfirmMessage {
 export const confirmMessage = (card: UserCardRow, sigPq: Uint8Array): string =>
 	JSON.stringify({ type: CONFIRM_TYPE, card, sig: toBase64(sigPq) } satisfies ConfirmMessage);
 
-export type ConfirmVerdict =
-	| { ok: true; card: UserCardRow }
-	| { ok: false; reason: string };
+/**
+ * What a side sends instead of its confirmation when it cannot make one — it
+ * has no published card, or could not sign — so that the other phone names the
+ * real cause rather than a missing channel.
+ */
+export interface RefusalMessage {
+	type: typeof REFUSAL_TYPE;
+	cause: RefusalCause;
+}
+
+export type RefusalCause = 'no-card' | 'no-signature';
+
+export const refusalMessage = (cause: RefusalCause): string =>
+	JSON.stringify({ type: REFUSAL_TYPE, cause } satisfies RefusalMessage);
 
 /**
- * The peer is confirmed when its card is the identity the codes showed, is
- * valid and certifies the contact key the optical proof used, and its
- * identity key signed M. A confirmation verifies the card once; only a
- * refusal verifies it again, to name the reason.
+ * Why the peer is not confirmed: `refused`, its card or signature does not
+ * hold; `deleted`, its card is a deleted account's; `peer-unable`, it sent a
+ * refusal (no card, or it could not sign).
+ */
+export type ConfirmRefusal = 'refused' | 'deleted' | 'peer-unable';
+
+export type ConfirmVerdict =
+	| { ok: true; card: UserCardRow }
+	| { ok: false; reason: string; refusal: ConfirmRefusal };
+
+const CARD_REFUSAL: Record<Exclude<ContactKeyVouch, { ok: true }>['why'], string> = {
+	'no-card': 'no card',
+	'another-identity': 'the card is another identity than the codes showed',
+	deleted: 'the card is a deleted account\'s',
+	'another-key': 'the card does not certify the contact key the codes showed',
+	invalid: 'the card does not verify',
+};
+
+/**
+ * The peer is confirmed when its card is the live identity the codes showed,
+ * verifies, and certifies the contact key the optical proof used, and its
+ * identity key signed M. The card is verified once (contactKeyVouch).
  */
 export const checkConfirm = (
 	raw: string,
@@ -212,40 +242,33 @@ export const checkConfirm = (
 	T: Uint8Array,
 	fps: Fingerprints,
 ): ConfirmVerdict => {
-	let msg: ConfirmMessage;
+	const refused = (reason: string, refusal: ConfirmRefusal = 'refused'): ConfirmVerdict => ({ ok: false, reason, refusal });
+	let msg: ConfirmMessage | RefusalMessage;
 	try {
 		msg = JSON.parse(raw);
 	} catch {
-		return { ok: false, reason: 'the message is not JSON' };
+		return refused('the message is not JSON');
+	}
+	if (msg?.type === REFUSAL_TYPE) {
+		const cause = (msg as RefusalMessage).cause;
+		return refused(`the other phone could not confirm itself (${cause === 'no-card' ? 'no card' : 'no signature'})`, 'peer-unable');
 	}
 	if (msg?.type !== CONFIRM_TYPE || !msg.card || typeof msg.card !== 'object' || typeof msg.sig !== 'string') {
-		return { ok: false, reason: 'not a confirmation message' };
+		return refused('not a confirmation message');
 	}
 	const card = msg.card;
-	if (card.user_hash !== bound.userHash) return { ok: false, reason: 'the card is another identity than the codes showed' };
-	if (!cardVouchesForContactKey(card, bound.userHash, toBase64(bound.contactPkey))) {
-		// Not this identity's card was refused above: here it does not verify, or certifies another key.
-		const verdict = verifyUserCard(card);
-		return {
-			ok: false,
-			reason: verdict.status === 'verified'
-				? 'the card does not certify the contact key the codes showed'
-				: `the card does not verify (${verdict.reason})`,
-		};
-	}
-	let sig: Uint8Array;
-	try {
-		sig = toBytes(msg.sig);
-	} catch {
-		return { ok: false, reason: 'the signature is not base64' };
+	const vouch = contactKeyVouch(card, bound.userHash, toBase64(bound.contactPkey));
+	if (!vouch.ok) {
+		const reason = vouch.why === 'invalid' ? `${CARD_REFUSAL.invalid} (${vouch.reason})` : CARD_REFUSAL[vouch.why];
+		return refused(reason, vouch.why === 'deleted' ? 'deleted' : 'refused');
 	}
 	let valid = false;
 	try {
 		// A verified card has its sign_pkey.
-		valid = ml_dsa87.verify(sig, pqMessage(T, fps), toBytes(card.sign_pkey!));
+		valid = ml_dsa87.verify(toBytes(msg.sig), pqMessage(T, fps), toBytes(card.sign_pkey!));
 	} catch {
 		valid = false;
 	}
-	if (!valid) return { ok: false, reason: 'the post-quantum signature does not verify' };
+	if (!valid) return refused('the post-quantum signature does not verify');
 	return { ok: true, card };
 };

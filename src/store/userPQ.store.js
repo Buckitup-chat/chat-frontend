@@ -6,7 +6,7 @@ import { getUserCardsCollection } from '@/lib/data/collections';
 import { preloadWithRetry } from '@/lib/data/attach';
 import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verifiedCards } from '@/lib/data/userCardsLink';
 import { mergeContactEdit } from '@/lib/data/storageIntent';
-import { cardVouchesForContactKey } from '@/lib/pq/verifyCard';
+import { contactKeyVouch } from '@/lib/pq/verifyCard';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
@@ -400,6 +400,7 @@ export const userPQStore = defineStore('userPQ', () => {
    * caller, and checks that `card`:
    * - is `userHash`'s card: user_hash is SHA3-512 of its sign_pkey;
    * - is signed by that key, and certifies its contact_pkey with it;
+   * - is not a deleted account's;
    * - certifies `contactPkey`, the key the handshake proved in person.
    * Anything else is refused, and nothing is written. The stored key is
    * `contactPkey`; `confirmedAt` is set here.
@@ -413,8 +414,11 @@ export const userPQStore = defineStore('userPQ', () => {
    */
   const confirmContact = async (userHash, card, contactPkey, fields = {}) => {
     if (!em.value || !currentUserHash.value) return false;
-    if (typeof contactPkey !== 'string' || !cardVouchesForContactKey(card, userHash, contactPkey)) {
-      throw new Error('This contact cannot be confirmed: their card does not certify the key they showed in person');
+    const vouch = typeof contactPkey === 'string' ? contactKeyVouch(card, userHash, contactPkey) : { ok: false, why: 'another-key' };
+    if (!vouch.ok) {
+      throw new Error(vouch.why === 'deleted'
+        ? 'This contact cannot be confirmed: their account is deleted'
+        : 'This contact cannot be confirmed: their card does not certify the key they showed in person');
     }
     const account = currentUserHash.value;
     const { contact_pkey: _ignored, ...kept } = storedFields(fields);

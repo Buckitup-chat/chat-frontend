@@ -91,25 +91,44 @@ export const verifyUserCard = (row: UserCardRow): CardVerdict => {
 	};
 };
 
+/** Why a card does not vouch for a contact key, or that it does. */
+export type ContactKeyVouch =
+	| { ok: true }
+	| { ok: false; why: 'no-card' | 'another-identity' | 'deleted' | 'another-key' }
+	| { ok: false; why: 'invalid'; reason: Extract<CardVerdict, { status: 'invalid' }>['reason'] };
+
 /**
- * Whether `row` is the verified card of `userHash` whose certified contact key
- * is `contactPkeyB64` — the identity a QR handshake's codes named and the key
- * it proved its peer holds. The handshake alone proves only that the person in
- * front of you holds some key; the card is what binds that key to the
- * user_hash they showed. Anything less — no card, a card that does not verify,
- * another identity's card, another key — is not a confirmation.
+ * Whether `row` is the live, verified card of `userHash` whose certified
+ * contact key is `contactPkeyB64` — the identity a QR handshake's codes named
+ * and the key it proved its peer holds — and if not, why. The handshake alone
+ * proves only that the person in front of you holds some key; the card is
+ * what binds that key to the user_hash they showed. Anything less — no card,
+ * another identity's card, a card that does not verify, a deleted account,
+ * another key — is not a confirmation. The card is verified once.
  */
+export const contactKeyVouch = (
+	row: UserCardRow | null | undefined,
+	userHash: string,
+	contactPkeyB64: string,
+): ContactKeyVouch => {
+	if (!row) return { ok: false, why: 'no-card' };
+	if (row.user_hash !== userHash) return { ok: false, why: 'another-identity' };
+	const verdict = verifyUserCard(row);
+	if (verdict.status !== 'verified') return { ok: false, why: 'invalid', reason: verdict.reason };
+	if (verdict.card.deletedFlag) return { ok: false, why: 'deleted' };
+	try {
+		const onCard = toBytes(row.contact_pkey!);
+		const proved = toBytes(contactPkeyB64);
+		const same = onCard.length === proved.length && onCard.every((b, i) => b === proved[i]);
+		return same ? { ok: true } : { ok: false, why: 'another-key' };
+	} catch {
+		return { ok: false, why: 'another-key' };
+	}
+};
+
+/** contactKeyVouch, as a yes or no. */
 export const cardVouchesForContactKey = (
 	row: UserCardRow | null | undefined,
 	userHash: string,
 	contactPkeyB64: string,
-): boolean => {
-	if (!row || row.user_hash !== userHash || verifyUserCard(row).status !== 'verified' || !row.contact_pkey) return false;
-	try {
-		const onCard = toBytes(row.contact_pkey);
-		const proved = toBytes(contactPkeyB64);
-		return onCard.length === proved.length && onCard.every((b, i) => b === proved[i]);
-	} catch {
-		return false;
-	}
-};
+): boolean => contactKeyVouch(row, userHash, contactPkeyB64).ok;

@@ -174,6 +174,20 @@ describe('what the modal does with the handshake\'s result', () => {
 		}));
 	});
 
+	it('names each cause the engine gives, a deleted account among them', async () => {
+		for (const [cause, text] of [
+			['deleted', 'This account is deleted: a deleted account cannot be confirmed.'],
+			['peer-unable', 'The other phone could not confirm its account'],
+			['no-signature', 'This phone could not sign the confirmation'],
+			['no-confirmation', 'the other one sent no confirmation'],
+		]) {
+			const wrapper = await mountModal();
+			await completeWith(wrapper, verifiedResult(cause));
+			expect(wrapper.text(), cause).toContain(text);
+			wrapper.unmount();
+		}
+	});
+
 	it('refuses a handshake with the signed-in account itself before anything is saved', async () => {
 		store.currentUserHash = A;
 		const wrapper = await mountModal();

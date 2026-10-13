@@ -17,7 +17,7 @@ import { encode, parse, transcript } from '@/lib/pq/handshake';
 import { fromBase64 } from '@/lib/pq/signature';
 import { _setRelaySourceForTests } from '@/lib/data/turnCredentials';
 import { FakeNetwork, handshakeIdentity, impostorIdentity } from './helpers/fakeHandshakeNetwork';
-import { makeTestIdentity } from './helpers/signedFixtures';
+import { makeTestIdentity, resignedCard } from './helpers/signedFixtures';
 
 // ---------- the scanner component's surroundings (used by the last part) ----------
 
@@ -210,12 +210,61 @@ describe('two phones, face to face', () => {
 		expect(net.channels[0].closed).toBe(true);
 	});
 
-	it('an account whose card was never published ends verified in person: the peer could not confirm it', async () => {
+	it('an account whose card was never published sends a refusal: the peer names that cause, and the account still confirms the peer', async () => {
 		const net = new FakeNetwork();
 		const a = side(handshakeIdentity(alice, { signedCard: async () => null }), net);
 		const b = side(handshakeIdentity(bob), net);
-		await run(a, b, () => !!a.outcome);
-		expect(a.outcome).toMatchObject({ kind: 'verified', cause: 'no-card' });
+		await run(a, b);
+		expect(b.outcome).toMatchObject({ kind: 'verified', cause: 'peer-unable', reason: expect.stringMatching(/no card/) });
+		expect(a.outcome).toMatchObject({ kind: 'confirmed', card: { name: 'Bob' } });
+	});
+
+	it('a confirmation that cannot be signed is named as such, here and on the peer — not as a missing channel', async () => {
+		const net = new FakeNetwork();
+		const a = side(handshakeIdentity(alice, { signPq: async () => { throw new Error('vault locked'); } }), net);
+		const b = side(handshakeIdentity(bob), net);
+		await run(a, b);
+		expect(b.outcome).toMatchObject({ kind: 'verified', cause: 'peer-unable', reason: expect.stringMatching(/no signature/) });
+		expect(a.outcome).toMatchObject({ kind: 'confirmed' });
+
+		const net2 = new FakeNetwork();
+		net2.reachable = false;
+		const c = side(handshakeIdentity(alice, { signPq: async () => { throw new Error('vault locked'); } }), net2);
+		const d = side(handshakeIdentity(bob), net2);
+		await run(c, d);
+		expect(c.outcome).toMatchObject({ kind: 'verified', cause: 'no-signature' });
+		expect(d.outcome).toMatchObject({ kind: 'verified', cause: 'no-channel' });
+	});
+
+	it('a deleted account is never confirmed, and the cause says so', async () => {
+		const net = new FakeNetwork();
+		const a = side(handshakeIdentity(alice), net);
+		const b = side(handshakeIdentity(bob, { signedCard: async () => resignedCard(bob, { deleted_flag: true }) }), net);
+		await run(a, b);
+		expect(a.outcome).toMatchObject({ kind: 'verified', cause: 'deleted' });
+	});
+
+	it('an optical signature that fails once is signed again on the next read, and the session goes on', async () => {
+		const net = new FakeNetwork();
+		let failures = 1;
+		const real = handshakeIdentity(alice).signOptical;
+		const a = side(handshakeIdentity(alice, { signOptical: async (T) => { if (failures-- > 0) throw new Error('busy'); return real(T); } }), net);
+		const b = side(handshakeIdentity(bob), net);
+		await a.engine.read(b.code);
+		expect(a.stage).toBe('A');
+		await a.engine.read(b.code);
+		expect(a.stage).toBe('B');
+		await run(a, b);
+		expect(a.outcome).toMatchObject({ kind: 'confirmed' });
+	});
+
+	it('an optical signature that keeps failing ends the session with its own cause', async () => {
+		const net = new FakeNetwork();
+		const a = side(handshakeIdentity(alice, { signOptical: async () => { throw new Error('no key'); } }), net);
+		const b = side(handshakeIdentity(bob), net);
+		for (let i = 0; i < 3; i++) await a.engine.read(b.code);
+		expect(a.outcome).toEqual({ kind: 'failed', cause: 'no-signature' });
+		expect(net.channels[0].closed).toBe(true);
 	});
 
 	it('stop reading once both payloads are known', async () => {

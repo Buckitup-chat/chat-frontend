@@ -143,6 +143,8 @@ describe('the contacts slot', () => {
 		// Ann's own, valid card, but the key shown in person is someone else's: Mallory showing Ann's user_hash.
 		await expect(store.confirmContact(A, annCard, bob.card.contact_pkey, { name: 'Ann' })).rejects.toThrow(/cannot be confirmed/);
 		await expect(store.confirmContact(A, annCard, undefined, { name: 'Ann' })).rejects.toThrow(/cannot be confirmed/);
+		// Ann's account deleted: its last card verifies and certifies the key, and still confirms nothing.
+		await expect(store.confirmContact(A, resignedCard(ann, { deleted_flag: true }), pkA, { name: 'Ann' })).rejects.toThrow(/account is deleted/);
 		expect(fake.stored).toBeNull();
 		expect(store.contactsMap[A]).toBeUndefined();
 	});

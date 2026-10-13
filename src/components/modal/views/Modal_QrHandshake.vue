@@ -209,8 +209,11 @@ const NOT_CONFIRMED = {
 	'no-channel': 'Check that both phones are online, or scan again on a shared Wi-Fi.',
 	'no-address': 'This phone has no network to reach the other one. Check that both phones are online, or scan again on a shared Wi-Fi.',
 	'no-card': 'Your profile card is not published yet, so the other phone cannot confirm you. Try again once you are online.',
+	'no-signature': 'This phone could not sign the confirmation. Sign in again, then scan again.',
 	'no-confirmation': 'The phones connected, but the other one sent no confirmation. Scan again.',
 	refused: 'Their profile card does not certify the key their phone showed: this is not confirmed as their account.',
+	deleted: 'This account is deleted: a deleted account cannot be confirmed.',
+	'peer-unable': 'The other phone could not confirm its account: its profile card may not be published yet. Try again once it is online.',
 };
 const notConfirmedReason = (c) => NOT_CONFIRMED[c.cause] ?? NOT_CONFIRMED['no-channel'];
 
