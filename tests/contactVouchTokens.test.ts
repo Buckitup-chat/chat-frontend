@@ -24,7 +24,7 @@ vi.mock('vue-router', async () => {
 });
 vi.mock('@/components/Account_Item.vue', () => ({ default: { render: () => null } }));
 const ScannerEngine = defineComponent({
-	emits: ['completed', 'scanning', 'countdown'],
+	emits: ['completed', 'scanning'],
 	setup(_, { expose }) {
 		expose({ toggleScanner: async () => {}, stopScan: () => {} });
 		return () => h('div');

@@ -17,7 +17,7 @@ vi.mock('@/lib/data/turnCredentials', () => ({ prefetchRelay: () => prefetchRela
 vi.mock('@/components/Account_Item.vue', () => ({ default: { render: () => null } }));
 // The scanner engine stands in for the handshake: `completed` is what it emits.
 const ScannerEngine = defineComponent({
-	emits: ['completed', 'scanning', 'countdown'],
+	emits: ['completed', 'scanning'],
 	setup(_, { expose }) {
 		expose({ toggleScanner: async () => {}, stopScan: () => {} });
 		return () => h('div', { class: 'scanner-stub' });

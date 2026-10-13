@@ -15,7 +15,7 @@
 	</template>
 
 	<div class="_main">
-		<template v-if="!scanning && !contact && !manual && !countdown">
+		<template v-if="!scanning && !contact && !manual">
 			<!--div class="_divider my-3">Your account</div-->
 
 			<div class="px-3 d-flex justify-content-center">
@@ -23,7 +23,7 @@
 			</div>
 		</template>
 
-		<template v-if="!scanning && !contact && !manual && !countdown">
+		<template v-if="!scanning && !contact && !manual">
 			<div class="_divider my-3">Scan QR code of trusted contact</div>
 
 			<div class="d-flex _input_block py-4 mb-3">
@@ -36,21 +36,14 @@
 			</div>
 		</template>
 
-		<!-- Display QR Code for Current State -->
-		<div class="text-center text-secondary fw-bold mb-1 fs-4" v-if="countdown">Turn phones to each other</div>
-		<div class="text-center fw-bold fs-1" v-if="countdown">
-			{{ countdown }}
-		</div>
-
 		<QRScannerEngine
 			ref="scannerEngineRef"
 			v-if="hasCamera"
 			@scanning="onScanning"
-			@countdown="onCountdown"
 			@completed="onHandshakeCompleted"
 		/>
 
-		<div class="row justify-content-center gx-2 mt-3 mb-2" v-if="!contact && !countdown && hasCamera">
+		<div class="row justify-content-center gx-2 mt-3 mb-2" v-if="!contact && hasCamera">
 			<div class="col-30">
 				<button type="button" class="btn btn-dark btn-lg w-100" @click="toggleScanner()">
 					<span v-if="!scanning">Start handshake scanning</span>
@@ -73,7 +66,7 @@
 			</div>
 		</div>
 
-		<div class="row justify-content-center gx-2 mt-3 mb-2" v-if="!scanning && !manual && !countdown">
+		<div class="row justify-content-center gx-2 mt-3 mb-2" v-if="!scanning && !manual">
 			<div class="col-30">
 				<button type="button" class="btn btn-outline-dark w-100" @click="setManually()">Add manually</button>
 			</div>
@@ -136,9 +129,6 @@
 <script setup>
 import { userPQStore } from '@/store/userPQ.store';
 
-import { useLoader } from '@/composables/useLoader';
-
-
 import { useMenu } from '@/composables/useMenu';
 
 import { ref, inject, onMounted, computed } from 'vue';
@@ -151,7 +141,6 @@ const $userPQ = userPQStore();
 const $mitt = inject('$mitt');
 const $router = inject('$router');
 const $swal = inject('$swal');
-const $loader = useLoader();
 const { close: closeMenu } = useMenu();
 
 const scannerEngineRef = ref(null);
@@ -160,7 +149,6 @@ const hasCamera = ref();
 const contact = ref(null);
 const manual = ref();
 const scanning = ref(false);
-const countdown = ref();
 const userIdInput = ref();
 
 const { inputData } = defineProps({ inputData: { type: Object } });
@@ -184,15 +172,6 @@ onMounted(async () => {
 
 const onScanning = (isScanning) => {
 	scanning.value = isScanning;
-};
-
-const onCountdown = (count) => {
-	countdown.value = count;
-	if (count > 0) {
-		$loader.show();
-	} else {
-		$loader.hide();
-	}
 };
 
 // The engine decides: `confirmed` comes with the card the handshake verified
