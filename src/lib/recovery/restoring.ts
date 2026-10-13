@@ -147,15 +147,36 @@ export interface ReturnsJudged {
 /**
  * Every return checked against the version's root on chain, for this
  * recovery's secret, version, round and candidate (§ Returning, step 6). A
- * return for another backup is not this recovery's and is not listed; one
- * that fails any other check is set aside with its sender named; one without
- * a root to check against is set aside too.
+ * return for another backup, round or candidate is not this one's and is not
+ * listed — a share sent to a device of an earlier round, before a restart,
+ * says nothing against its guardian; one that fails any other check is set
+ * aside with its sender named; one without a root to check against is set
+ * aside too.
  */
+/** Whether a return answers this round and names this device. */
+const forThisRound = (part: RecoveryShareReturnPart, expected: ExpectedReturn): boolean => {
+	if (part.round !== expected.round || typeof part.candidate !== 'string') return false;
+	try {
+		return canonicalCandidate(part.candidate) === canonicalCandidate(expected.candidate);
+	} catch {
+		return false;
+	}
+};
+
+/**
+ * The guardians whose piece for this round did not check and who returned
+ * none that did: what the finale leaves out of the reshare it suggests.
+ */
+export const setAsideGuardians = (judged: Pick<ReturnsJudged, 'verified' | 'setAside'>): string[] => {
+	const good = new Set(judged.verified.map((v) => v.sender));
+	return [...new Set(judged.setAside.map((r) => r.sender))].filter((s) => !good.has(s));
+};
+
 export const judgeReturns = (received: readonly ReceivedReturn[], expected: ExpectedReturn, root: Uint8Array | null): ReturnsJudged => {
 	const verified: VerifiedReturn[] = [];
 	const setAside: SetAsideReturn[] = [];
 	for (const r of received) {
-		if (r.part.secretRef !== expected.secretRef) continue;
+		if (r.part.secretRef !== expected.secretRef || !forThisRound(r.part, expected)) continue;
 		if (!root) {
 			setAside.push({ sender: r.sender, via: r.via, reason: 'the network holds no checksum for this backup' });
 			continue;

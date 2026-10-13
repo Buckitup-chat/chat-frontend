@@ -179,10 +179,11 @@ describe('the temporary account', () => {
 		const edited = returnOf(w.shareOf(2), Number(w.state.round), candidate, w.clock.now);
 		edited.shareB64 = edited.shareB64.replace(/^./, (c) => (c === 'A' ? 'B' : 'A'));
 		w.send(w.guardians[2].userHash, TEMP, [edited]);
+		// One for another round says nothing against its guardian.
 		giveBack(1, candidate, { round: 99 });
 		const view = await pass();
 		expect(view.returns!.distinct).toBe(1);
-		expect(view.returns!.setAside.map((r) => r.sender).sort()).toEqual([w.guardians[1].userHash, w.guardians[2].userHash].sort());
+		expect(view.returns!.setAside.map((r) => r.sender)).toEqual([w.guardians[2].userHash]);
 		expect(view.ready).toBe(false);
 	});
 
@@ -227,7 +228,8 @@ describe('the temporary account', () => {
 		expect(bindingsTo(g).map((b) => b.candidate)).toEqual([first, second]);
 		expect(view.words).toEqual(recoveryWords(w.secretRef, second, TEMP));
 		expect(view.returns!.distinct).toBe(0);
-		expect(view.returns!.setAside).toEqual([expect.objectContaining({ sender: g })]);
+		// The piece sent to the first device was not wrong: it is not this round's.
+		expect(view.returns!.setAside).toEqual([]);
 	});
 
 	it('follows the backup most guardians asked about, and says when it is on a network this app does not reach', async () => {

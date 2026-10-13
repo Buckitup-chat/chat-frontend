@@ -20,6 +20,7 @@ import {
 	newCandidateKey,
 	nodesOf,
 	roundViewOf,
+	setAsideGuardians,
 } from '@/lib/recovery/restoring';
 import type { SecretState } from '@/lib/recovery/chain';
 
@@ -141,25 +142,36 @@ describe('returned shares', () => {
 		expect(judged.setAside).toEqual([]);
 	});
 
-	it('are set aside with their sender named when they do not check, and ignored when for another backup', () => {
+	it('are set aside with their sender named when they do not check, and ignored when for another backup, round or device', () => {
 		const edited = ret(2);
 		edited.shareB64 = edited.shareB64.replace(/^./, (c) => (c === 'A' ? 'B' : 'A'));
 		const judged = judgeReturns(
 			[
 				{ sender: G(1), via: 'dialog', part: ret(0, { round: 2 }) },
+				{ sender: G(1), via: 'dialog', part: ret(0, { candidate: '0x' + '11'.repeat(20) }) },
 				{ sender: G(3), via: 'dialog', part: edited },
 				{ sender: G(2), via: 'dialog', part: ret(1, { secretRef: REF.replace('ab', 'cd') }) },
+				{ sender: G(2), via: 'dialog', part: ret(1, { version: 1 }) },
 			],
 			expected,
 			root,
 		);
 		expect(judged.verified).toEqual([]);
 		expect(judged.setAside).toEqual([
-			{ sender: G(1), via: 'dialog', reason: expect.stringMatching(/another recovery round/) },
 			{ sender: G(3), via: 'dialog', reason: expect.any(String) },
+			{ sender: G(2), via: 'dialog', reason: expect.stringMatching(/another backup or version/) },
 		]);
+		expect(setAsideGuardians(judged)).toEqual([G(3), G(2)]);
 		expect(judged.distinct).toBe(0);
 		expect(judged.nodeSet).toBeNull();
+	});
+
+	it('name no guardian who also returned a piece that checks', () => {
+		const edited = ret(0);
+		edited.shareB64 = edited.shareB64.replace(/^./, (c) => (c === 'A' ? 'B' : 'A'));
+		const judged = judgeReturns([{ sender: G(1), via: 'dialog', part: edited }, { sender: G(1), via: 'text', part: ret(0) }], expected, root);
+		expect(judged.setAside).toHaveLength(1);
+		expect(setAsideGuardians(judged)).toEqual([]);
 	});
 
 	it('are set aside when the version holds no root to check them against', () => {

@@ -19,7 +19,7 @@ import { deploymentNamespace, maybeRecoveryDeployment } from '@/lib/recovery/dep
 import { parseSecretRef } from '@/lib/recovery/holdings';
 import { requestRelease } from '@/lib/recovery/nodeClient';
 import { fetchVault } from '@/lib/recovery/vault';
-import { bindingFor, canRestart, findSecretRef } from '@/lib/recovery/restoring';
+import { bindingFor, canRestart, findSecretRef, setAsideGuardians } from '@/lib/recovery/restoring';
 import { newMemo, newProgress, restarted, restorePass, wrapKeyFrom } from '@/lib/recovery/restoreFlow';
 import { bindingText, blockSignedBy, parseReturnBlock, readReturnBlock } from '@/lib/recovery/manualReturn';
 import { nameOf as accountName } from '@/components/recovery/backup/backupFlow';
@@ -246,7 +246,7 @@ export const useRecoveryRestoreStore = defineStore('recoveryRestore', () => {
 				version: v.version,
 				round: v.round.round,
 				candidate: v.candidate,
-				setAside: [...new Set(v.returns.setAside.map((r) => r.sender))],
+				setAside: setAsideGuardians(v.returns),
 			});
 			setMarker(null);
 		} catch (e) {

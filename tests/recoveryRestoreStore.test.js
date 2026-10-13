@@ -157,8 +157,10 @@ describe('a recovery through the dialogs', () => {
 		expect(checkBinding(binding, { secretRef: w.secretRef, dialogPeerUserHash: TEMP })).toBe(candidate());
 		quorumAndWindow();
 		for (const i of [0, 2]) w.send(w.guardians[i].userHash, TEMP, [returnOf(w.shareOf(i), Number(w.state.round), candidate(), w.clock.now)]);
-		// A guardian whose piece does not check is named, and left out of the reshare.
-		w.send(w.guardians[1].userHash, TEMP, [{ ...returnOf(w.shareOf(1), Number(w.state.round), candidate(), w.clock.now), round: 99 }]);
+		// A guardian whose piece for this round does not check is named, and left out of the reshare;
+		// one who also sent a piece for another round is not.
+		w.send(w.guardians[1].userHash, TEMP, [{ ...returnOf(w.shareOf(1), Number(w.state.round), candidate(), w.clock.now), shareB64: 'AAAA' }]);
+		w.send(w.guardians[0].userHash, TEMP, [{ ...returnOf(w.shareOf(0), Number(w.state.round), candidate(), w.clock.now), round: 99 }]);
 		await store.check();
 		expect(store.view.ready).toBe(true);
 		const elected = candidate();
