@@ -1,5 +1,5 @@
 import { getUserCardsCollection } from './collections';
-import { readAcceptedBase } from './acceptedSnapshot';
+import { readAcceptedBase, freshestOf } from './acceptedSnapshot';
 import { enqueueIntent, intentsOf } from './intents';
 import { signAndDispatchIntent } from './intentRecovery';
 import { DurabilityError, type DeliveryHandle } from './ingest';
@@ -225,6 +225,25 @@ async function shapeCardOf(row: UserCardRow | undefined): Promise<ShapeCard> {
 	if (!row) return { kind: 'none' };
 	const verification = await verifyReplicatedRow('user_cards', row as unknown as Record<string, unknown>, async () => null);
 	return verification.status === 'verified' ? { kind: 'card', row } : { kind: 'unverified' };
+}
+
+/**
+ * The freshest self-signed card of this account the device knows, or null: the
+ * card the server last accepted from this device, or the verified card the
+ * user_cards shape holds — the two sources an update's timestamp is decided
+ * from (decideCardConstruction). A deleted card is no card.
+ */
+export async function freshestOwnCard(userHash: string): Promise<UserCardRow | null> {
+	let accepted: UserCardRow | null = null;
+	try {
+		const read = await readAcceptedBase('user_cards', userHash, userHash);
+		if (read.kind === 'present') accepted = read.row;
+	} catch (e) {
+		console.warn('[userCardIntent] the accepted card cannot be read:', e);
+	}
+	const shapeCard = await shapeCardOf(getUserCardsCollection().get(userHash) as UserCardRow | undefined);
+	const freshest = freshestOf(accepted, shapeCard.kind === 'card' ? shapeCard.row : null);
+	return freshest && !freshest.deleted_flag && freshest.sign_b64 ? freshest : null;
 }
 
 export async function acceptedCardTimestamp(userHash: string): Promise<number | null> {

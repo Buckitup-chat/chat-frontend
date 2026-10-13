@@ -189,7 +189,7 @@ const onCountdown = (count) => {
 // carry, does not.
 const onHandshakeCompleted = (peerData) => {
 	const card = $userPQ.allNetworkUsers.find((u) => u.user_hash === peerData.user_hash);
-	contact.value = { ...peerData, viaHandshake: true, confirmed: cardVouchesForContactKey(card, peerData.contact_pkey) };
+	contact.value = { ...peerData, viaHandshake: true, card, confirmed: cardVouchesForContactKey(card, peerData.user_hash, peerData.contact_pkey) };
 };
 
 const onDeviceOnly = (saved) => !!saved?.status && saved.status !== 'synced';
@@ -240,7 +240,7 @@ const addContact = async () => {
 			// Scanned in person now, after being added by id before: that is what
 			// confirms it, with the key the handshake proved.
 			const confirmsIt = contact.value.confirmed && !existingContact.confirmed;
-			const saved = confirmsIt ? await $userPQ.confirmContact(contact.value.user_hash, contact.value.contact_pkey) : null;
+			const saved = confirmsIt ? await $userPQ.confirmContact(contact.value.user_hash, contact.value.card) : null;
 			$swal.fire({
 				icon: 'success',
 				title: onDeviceOnly(saved) ? 'Contact confirmed on this device' : confirmsIt ? 'Contact confirmed' : 'Contact already in your list',
@@ -259,7 +259,7 @@ const addContact = async () => {
 
 		const fields = { name: contact.value.name, notes: '', hidden: false };
 		const saved = contact.value.confirmed
-			? await $userPQ.confirmContact(contact.value.user_hash, contact.value.contact_pkey, fields)
+			? await $userPQ.confirmContact(contact.value.user_hash, contact.value.card, fields)
 			: await $userPQ.saveContact(contact.value.user_hash, { ...fields, contact_pkey: contact.value.contact_pkey });
 
 		$swal.fire({

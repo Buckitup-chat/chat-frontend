@@ -20,7 +20,7 @@ vi.mock('@/lib/data/collections', () => ({
 
 const { createShapeLink, registerShapeLink, whenLive } = await import('@/lib/data/shapeLink');
 const {
-	decideCardConstruction, storeCardIntentUnderLock, withCardLock, BOOTSTRAP_CARD_PURPOSE,
+	decideCardConstruction, storeCardIntentUnderLock, withCardLock, BOOTSTRAP_CARD_PURPOSE, freshestOwnCard,
 } = await import('@/lib/data/userCardIntent');
 const { enqueueIntent, resolveIntent, _setIntentStorageForTests } = await import('@/lib/data/intents');
 const { _setStorageForTests, enqueue, markServerAccepted, recordFailure } = await import('@/lib/data/outbox');
@@ -347,5 +347,25 @@ describe('the shape proves only within its current live generation', () => {
 		expect(await decideCardConstruction(USER, 'import')).toMatchObject({ kind: 'author-bootstrap' });
 		shape.rows.set(USER, cardRow(100));
 		expect(await decideCardConstruction(USER, 'sign-in')).toEqual({ kind: 'proven' });
+	});
+});
+
+describe('the signed card the optical handshake sends (freshestOwnCard)', () => {
+	it('is the fresher of the accepted card and the verified shape card, with its signature', async () => {
+		expect(await freshestOwnCard(USER)).toBeNull();
+		storeAccepted(cardRow(100));
+		expect(await freshestOwnCard(USER)).toMatchObject({ owner_timestamp: 100, sign_b64: expect.any(String) });
+		shape.rows.set(USER, cardRow(200, { name: 'Me, renamed' }));
+		expect(await freshestOwnCard(USER)).toMatchObject({ owner_timestamp: 200, name: 'Me, renamed' });
+		shape.rows.set(USER, cardRow(300));
+		storeAccepted(cardRow(400));
+		expect(await freshestOwnCard(USER)).toMatchObject({ owner_timestamp: 400 });
+	});
+
+	it('is never a shape card that does not verify, nor a deleted card', async () => {
+		shape.rows.set(USER, { ...cardRow(200), name: 'not re-signed' });
+		expect(await freshestOwnCard(USER)).toBeNull();
+		storeAccepted(cardRow(100, { deleted_flag: true }));
+		expect(await freshestOwnCard(USER)).toBeNull();
 	});
 });

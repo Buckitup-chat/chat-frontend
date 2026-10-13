@@ -33,20 +33,26 @@ const identity = (seed: number) => {
 describe('confirming a contact from a handshake', () => {
 	it('holds when the key the handshake proved is the one the verified card certifies', () => {
 		const alice = identity(3);
-		expect(cardVouchesForContactKey(alice.card as never, alice.contactPkeyB64)).toBe(true);
+		expect(cardVouchesForContactKey(alice.card as never, alice.card.user_hash as string, alice.contactPkeyB64)).toBe(true);
 	});
 
 	it('fails for someone showing Alice\'s user_hash with their own key', () => {
 		const alice = identity(3);
 		const mallory = identity(4);
-		expect(cardVouchesForContactKey(alice.card as never, mallory.contactPkeyB64)).toBe(false);
+		expect(cardVouchesForContactKey(alice.card as never, alice.card.user_hash as string, mallory.contactPkeyB64)).toBe(false);
 	});
 
 	it('fails without a card, and with a card whose contact key is not certified by its owner', () => {
 		const alice = identity(3);
 		const mallory = identity(4);
-		expect(cardVouchesForContactKey(undefined, alice.contactPkeyB64)).toBe(false);
+		expect(cardVouchesForContactKey(undefined, alice.card.user_hash as string, alice.contactPkeyB64)).toBe(false);
 		const swapped = { ...alice.card, contact_pkey: mallory.contactPkeyB64 };
-		expect(cardVouchesForContactKey(swapped as never, mallory.contactPkeyB64)).toBe(false);
+		expect(cardVouchesForContactKey(swapped as never, alice.card.user_hash as string, mallory.contactPkeyB64)).toBe(false);
+	});
+
+	it('fails for a valid card of another identity than the one the codes named', () => {
+		const alice = identity(3);
+		const bob = identity(5);
+		expect(cardVouchesForContactKey(bob.card as never, alice.card.user_hash as string, bob.contactPkeyB64)).toBe(false);
 	});
 });

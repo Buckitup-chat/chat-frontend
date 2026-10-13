@@ -82,7 +82,7 @@ describe('adding a contact the server does not take', () => {
 		await buttonNamed(wrapper, 'Open contact').trigger('click');
 		await flushPromises();
 
-		expect(store.confirmContact).toHaveBeenCalledWith(A, 'pkA');
+		expect(store.confirmContact).toHaveBeenCalledWith(A, store.allNetworkUsers[0]);
 		expectErrorShownAndModalKept('Saved on this device, but the server did not take it');
 		expect(wrapper.text()).toContain('Existing contact'); // still on the contact, ready to try again
 	});

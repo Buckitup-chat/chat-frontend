@@ -92,14 +92,19 @@ export const verifyUserCard = (row: UserCardRow): CardVerdict => {
 };
 
 /**
- * Whether `row` is a verified card whose certified contact key is
- * `contactPkeyB64` — the key a QR handshake proved its peer holds. The
- * handshake alone proves only that the person in front of you holds some key;
- * the card is what binds that key to the user_hash they showed. Anything less
- * — no card, a card that does not verify, another key — is not a confirmation.
+ * Whether `row` is the verified card of `userHash` whose certified contact key
+ * is `contactPkeyB64` — the identity a QR handshake's codes named and the key
+ * it proved its peer holds. The handshake alone proves only that the person in
+ * front of you holds some key; the card is what binds that key to the
+ * user_hash they showed. Anything less — no card, a card that does not verify,
+ * another identity's card, another key — is not a confirmation.
  */
-export const cardVouchesForContactKey = (row: UserCardRow | undefined, contactPkeyB64: string): boolean => {
-	if (!row || verifyUserCard(row).status !== 'verified' || !row.contact_pkey) return false;
+export const cardVouchesForContactKey = (
+	row: UserCardRow | null | undefined,
+	userHash: string,
+	contactPkeyB64: string,
+): boolean => {
+	if (!row || row.user_hash !== userHash || verifyUserCard(row).status !== 'verified' || !row.contact_pkey) return false;
 	try {
 		const onCard = toBytes(row.contact_pkey);
 		const proved = toBytes(contactPkeyB64);
