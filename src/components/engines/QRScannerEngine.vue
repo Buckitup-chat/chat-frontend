@@ -91,25 +91,33 @@ onMounted(() => {
 	// qr-scanner prefers the browser's BarcodeDetector whenever the browser
 	// lists QR among its formats, and falls back only when it throws. A browser
 	// can list QR and still find nothing in a dense code on a screen; the
-	// decoder qr-scanner ships reads the same in every browser.
+	// decoder qr-scanner ships reads the same in every browser. The switch is
+	// global and read when a scanner picks its decoder, at construction: it is
+	// set for this one and put back, so other scanners (device link) keep the
+	// browser's.
+	const previous = QrScanner._disableBarcodeDetector;
 	QrScanner._disableBarcodeDetector = true;
-	qrScanner = new QrScanner(qrScannerRef.value, (result) => onScan(result.data), {
-		returnDetailedScanResult: true,
-		preferredCamera: 'user',
-		maxScansPerSecond: 12,
-		calculateScanRegion: (video) => {
-			const size = Math.round(Math.min(video.videoWidth, video.videoHeight) * 0.95);
-			const scaled = Math.min(size, 1080);
-			return {
-				x: Math.round((video.videoWidth - size) / 2),
-				y: Math.round((video.videoHeight - size) / 2),
-				width: size,
-				height: size,
-				downScaledWidth: scaled,
-				downScaledHeight: scaled,
-			};
-		},
-	});
+	try {
+		qrScanner = new QrScanner(qrScannerRef.value, (result) => onScan(result.data), {
+			returnDetailedScanResult: true,
+			preferredCamera: 'user',
+			maxScansPerSecond: 12,
+			calculateScanRegion: (video) => {
+				const size = Math.round(Math.min(video.videoWidth, video.videoHeight) * 0.95);
+				const scaled = Math.min(size, 1080);
+				return {
+					x: Math.round((video.videoWidth - size) / 2),
+					y: Math.round((video.videoHeight - size) / 2),
+					width: size,
+					height: size,
+					downScaledWidth: scaled,
+					downScaledHeight: scaled,
+				};
+			},
+		});
+	} finally {
+		QrScanner._disableBarcodeDetector = previous;
+	}
 });
 
 onBeforeUnmount(() => {

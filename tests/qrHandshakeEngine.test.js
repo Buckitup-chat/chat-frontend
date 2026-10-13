@@ -483,6 +483,9 @@ describe('the scanner: what reaches WebRTC', () => {
 	it('decodes with qr-scanner\'s own decoder, not BarcodeDetector', async () => {
 		const wrapper = await mountScanner();
 		expect(scanners[0].decoderAtCreation).toBe('qr-scanner');
+		// The switch is global: it is put back, so another scanner (device link) keeps the browser's decoder.
+		const QrScanner = (await import('qr-scanner')).default;
+		expect(QrScanner._disableBarcodeDetector).toBe(false);
 		wrapper.unmount();
 	});
 
