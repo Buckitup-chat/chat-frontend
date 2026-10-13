@@ -151,3 +151,37 @@ describe('with a finished backup', () => {
 		expect(w.text()).toContain('Set up alerts');
 	});
 });
+
+describe('with a change of the finished backup being made', () => {
+	const base = () => {
+		const run = makeRun({ step: 'done', secretId: '0x1', version: 1, alerts: { channels: ['app', 'telegram'], skipped: false } });
+		run.sent = Object.fromEntries(run.guardians.map((g, i) => [g.userHash, { messageId: `m${i}`, shareIndex: i + 1 }]));
+		return run;
+	};
+
+	it('shows the change in progress, with Discard while allowed and Continue, over the backup’s health', async () => {
+		H.store.run = base();
+		H.store.reshare = makeRun({ runId: 'r2', step: 'published', reshareOf: { secretId: '0x1', version: 1 } });
+		const w = render();
+		await flushPromises();
+		expect(text(w, 'unfinished').text()).toContain('The change to your backup was not finished');
+		expect(text(w, 'unfinished').text()).toContain('Stopped at step 2 of 6');
+		expect(w.find('.health-count').text()).toBe('0 of 3');
+		expect(w.text()).not.toContain('Manage');
+		await text(w, 'discard').trigger('click');
+		expect(H.store.discard).toHaveBeenCalled();
+		await text(w, 'continue').trigger('click');
+		expect(H.store.resume).toHaveBeenCalled();
+		expect(opened).toEqual([{ id: 'community_backup', start: 'progress' }]);
+	});
+
+	it('once on the network, offers no Discard; on another device, shows where it runs', () => {
+		H.store.run = base();
+		H.store.reshare = makeRun({ runId: 'r2', step: 'registered', secretId: '0x1', version: 2, reshareOf: { secretId: '0x1', version: 1 }, device: 'phone-9' });
+		H.store.runsHere = false;
+		const w = render();
+		expect(text(w, 'unfinished').text()).toContain('Your backup is being changed on your phone-9');
+		expect(text(w, 'discard').exists()).toBe(false);
+		expect(text(w, 'continue').text()).toBe('Show progress');
+	});
+});
