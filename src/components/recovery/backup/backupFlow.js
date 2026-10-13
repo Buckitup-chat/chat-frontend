@@ -57,6 +57,12 @@ export const nodeOwnerName = (descriptor, $userPQ) => {
 	return $userPQ?.contactsMap?.[operator]?.name || hostOf(descriptor.url);
 };
 
+/** A node of a backup's record ({ id, url }), named by its operator when this device knows it, else by its address. */
+export const nodeRefName = (ref, known, $userPQ) => {
+	const node = known?.find((n) => n.descriptor.id === ref.id);
+	return node ? nodeOwnerName(node.descriptor, $userPQ) : hostOf(ref.url);
+};
+
 /** A guardian's name: as a candidate, else as a contact. */
 export const guardianName = (userHash, candidates, $userPQ) =>
 	candidates?.find((c) => c.userHash === userHash)?.name || $userPQ?.contactsMap?.[userHash]?.name || 'Guardian';
@@ -134,6 +140,15 @@ export const deliveryHint = (state, detail = '') => {
 	return null;
 };
 
+/** A piece in these states no longer counts: each is a prompt to reshare. */
+export const LOST_STATES = ['problem', 'given_back', 'dropped'];
+
+/** Spare pieces still in the record: the shares past the guardians' that were not handed out. */
+export const sparesLeft = (run) => (run?.shares ?? []).slice(run?.guardians?.length ?? 0).filter(Boolean).length;
+
+/** How many spare pieces guardian `userHash` was handed (run.sparesGiven). */
+export const sparesHeldBy = (run, userHash) => Object.values(run?.sparesGiven ?? {}).filter((g) => g.guardian === userHash).length;
+
 /**
  * The health line of a finished backup: holders are the guardians whose piece
  * is 'stored'. Pieces sent or delivered but not yet stored are "on the way":
@@ -204,6 +219,12 @@ export const createBackupDraft = (store) => {
 		nodesLoading: false,
 		/** The run finished while this flow was open: the summary says so. */
 		justFinished: false,
+		/**
+		 * Set while the setup is a reshare of the finished backup (plan § 7.4):
+		 * the version it replaces and the guardians it has now. The screens
+		 * then skip Alerts, and Review starts a reshare.
+		 */
+		reshare: null,
 	});
 
 	const guardians = computed(() => store.pickable.filter((c) => state.selected.includes(c.userHash)));
@@ -279,6 +300,34 @@ export const createBackupDraft = (store) => {
 		return `${plural(s.spares, 'spare piece')} · ${s.nodeThreshold} of ${nodes.value.length} nodes · ${durationAdjective(s.delaySec)} wait · ${feeText(feeChoice.value)}`;
 	});
 
+	/**
+	 * Turns the draft into a reshare of `record`, the finished backup, filled
+	 * in from it: its guardians, pieces, approvals and spares, its nodes and
+	 * how it pays. The waiting period and the time to finish are the
+	 * record's — a reshare keeps them (store.start; setPolicy changes them).
+	 * A guardian who no longer agrees cannot be picked, and with fewer
+	 * guardians than the record's the counts start from their defaults.
+	 */
+	const beginReshare = (record) => {
+		const hashes = record.guardians.map((g) => g.userHash);
+		const pickable = store.pickable.map((c) => c.userHash);
+		const s = record.settings;
+		const sameGuardians = hashes.every((h) => pickable.includes(h));
+		Object.assign(state, {
+			reshare: { secretId: record.secretId, version: record.version, guardians: hashes },
+			selected: hashes.filter((h) => pickable.includes(h)),
+			touched: true,
+			twoAck: hashes.length === 2,
+			custom: { spares: s.spares, delaySec: s.delaySec, windowSec: s.windowSec, ...(sameGuardians ? { threshold: s.threshold, approvals: s.approvals } : {}) },
+			work: null,
+			nodeIds: record.nodes.map((n) => n.id),
+			nodeThreshold: s.nodeThreshold,
+			fee: record.fee?.kind === 'self' ? { choice: 'self', url: '' } : record.fee?.url ? { choice: 'other', url: record.fee.url } : { choice: 'buckitup', url: '' },
+			quote: null,
+			justFinished: false,
+		});
+	};
+
 	/** What store.start takes. */
 	const startPayload = () => {
 		const choice = feeChoice.value;
@@ -309,5 +358,6 @@ export const createBackupDraft = (store) => {
 		blockReason,
 		summaryLine,
 		startPayload,
+		beginReshare,
 	};
 };

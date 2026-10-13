@@ -29,8 +29,12 @@
 		</div>
 	</div>
 
-	<div class="cb-section">Time</div>
-	<div class="cb-group">
+	<!-- A reshare keeps the waiting period: it is changed from Manage, on its own -->
+	<div v-if="resharing" class="cb-small" data-test="reshare-time">
+		The waiting period ({{ durationText(w.delaySec) }}) and the time to finish ({{ durationText(w.windowSec) }}) stay as they are. Change them from Manage.
+	</div>
+	<div v-if="!resharing" class="cb-section">Time</div>
+	<div v-if="!resharing" class="cb-group">
 		<div class="cb-setting flex-wrap">
 			<div class="flex-grow-1 d-flex flex-column gap-1">
 				<span class="fw-medium">Waiting period</span>
@@ -46,7 +50,7 @@
 			<DurationInput v-model="w.windowSec" label="Time to finish" :invalid="bad('windowSec')" />
 		</div>
 	</div>
-	<div class="cb-small">If someone else starts a recovery, you have {{ delayWords }} to stop it from any of your devices.</div>
+	<div v-if="!resharing" class="cb-small">If someone else starts a recovery, you have {{ delayWords }} to stop it from any of your devices.</div>
 
 	<div class="cb-section">Nodes and fee</div>
 	<div class="cb-group">
@@ -89,6 +93,7 @@ if (!draft.state.work) draft.state.work = pick(draft.settings.value);
 const w = draft.state.work;
 
 const guardianCount = computed(() => draft.guardians.value.length);
+const resharing = computed(() => !!draft.state.reshare);
 const maxThreshold = computed(() => Math.max(guardianCount.value, 2));
 
 const problems = computed(() =>
@@ -107,7 +112,11 @@ const delayWords = computed(() =>
 );
 const boundsText = (b) => `${durationText(b.min)} … ${durationText(b.max)}`;
 
-const reset = () => Object.assign(w, pick(defaultSettings(guardianCount.value, draft.nodes.value.length)));
+// A reshare's reset leaves the waiting period and the time to finish as the backup has them.
+const reset = () => {
+	const keep = resharing.value ? { delaySec: w.delaySec, windowSec: w.windowSec } : {};
+	Object.assign(w, pick(defaultSettings(guardianCount.value, draft.nodes.value.length)), keep);
+};
 const save = () => {
 	draft.state.custom = { ...w };
 	draft.state.work = null;

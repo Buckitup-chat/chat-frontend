@@ -90,7 +90,7 @@ import { canDiscard, canFinishWithoutPending, nodesDone, nodesPending, stepNumbe
 import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
 import Check from './Check.vue';
-import { DELIVERY_WORDS, DRAFT, NAV, STEP_LABELS, agoText, guardianDelivery, guardianName, hostOf, nodeOwnerName } from './backupFlow';
+import { DELIVERY_WORDS, DRAFT, NAV, STEP_LABELS, agoText, guardianDelivery, guardianName, nodeRefName } from './backupFlow';
 // sent → delivered → stored; a piece that no longer counts shows how far it got before.
 const TICKS = { waiting: 0, sent: 1, delivered: 2, stored: 3, problem: 2, given_back: 2, dropped: 2 };
 
@@ -115,7 +115,12 @@ const otherError = computed(() => (!store.running && store.stopped && !['nodes_f
 const interrupted = computed(() => !!run.value && !isDone.value && !store.running && store.runsHere && !nodesFailed.value && !regPending.value && !otherError.value);
 const discardable = computed(() => !!run.value && canDiscard(run.value));
 
-const title = computed(() => (interrupted.value ? 'Your backup was not finished' : isDone.value ? 'Backup created' : 'Creating your backup'));
+const changing = computed(() => !!run.value?.reshareOf);
+const title = computed(() => {
+	if (interrupted.value) return changing.value ? 'The change to your backup was not finished' : 'Your backup was not finished';
+	if (isDone.value) return 'Backup created';
+	return changing.value ? 'Changing your backup' : 'Creating your backup';
+});
 const existsText = computed(() =>
 	current.value >= 3 ? 'The backup already exists on the network, so nothing has to start over.' : 'Nothing is on the network yet: you can continue, or cancel it.',
 );
@@ -142,11 +147,7 @@ const shownSteps = computed(() =>
 	}).filter((s) => !collapsed.value || s.n >= 4),
 );
 
-const nodeName = (ref) => {
-	const known = store.nodes.find((n) => n.descriptor.id === ref.id);
-	if (!known) return hostOf(ref.url);
-	return nodeOwnerName(known.descriptor, $userPQ);
-};
+const nodeName = (ref) => nodeRefName(ref, store.nodes, $userPQ);
 const nodeRows = computed(() =>
 	(run.value?.nodes ?? []).map((n) => {
 		const outcome = run.value.nodeOutcomes[n.id];

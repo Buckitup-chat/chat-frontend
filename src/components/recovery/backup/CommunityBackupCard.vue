@@ -40,13 +40,21 @@
 					<div v-if="actionError" class="cb-field-error">{{ actionError }}</div>
 				</template>
 
+				<!-- Revoked for good: nothing protects the account any more -->
+				<template v-if="state === 'done' && run.revokedAt">
+					<div class="cb-muted" data-test="revoked">This backup was revoked for good. No recovery can use it.</div>
+					<div class="d-flex gap-2">
+						<button class="btn btn-outline-dark flex-fill" @click="open('manage')">Manage</button>
+					</div>
+				</template>
+
 				<!-- 1.0 / 1.3: the backup exists -->
-				<template v-if="state === 'done'">
+				<template v-else-if="state === 'done'">
 					<HealthLine :view="health" :extra="healthExtra" />
 					<div v-if="!outsideAlerts" class="cb-warn" data-test="no-alerts">No alerts. You may not learn about an attempt in time to stop it.</div>
 					<div v-if="!active" class="d-flex gap-2">
 						<button v-if="!outsideAlerts" class="btn btn-outline-dark flex-fill" @click="open('alerts')">Set up alerts</button>
-						<button class="btn btn-dark flex-fill" @click="open('done')">Manage</button>
+						<button class="btn btn-dark flex-fill" data-test="manage" @click="open('manage')">Manage</button>
 					</div>
 				</template>
 			</template>
@@ -79,7 +87,7 @@ import HealthLine from './HealthLine.vue';
 import ContactAvatar from './ContactAvatar.vue';
 import errorMessage from '@/utils/errorMessage';
 import { plural } from '@/lib/recovery/backupPlan';
-import { STEP_LABELS, agoText, alertsText, hasOutsideAlerts, healthView } from './backupFlow';
+import { STEP_LABELS, agoText, alertsText, hasOutsideAlerts, healthView, sparesLeft } from './backupFlow';
 
 const ABOUT = 'Your keys are split between contacts you trust and a few independent nodes. Nobody can open your account alone.';
 
@@ -182,7 +190,7 @@ const discard = async () => {
 const health = computed(() => healthView(run.value, store.receipts));
 const outsideAlerts = computed(() => hasOutsideAlerts(run.value?.alerts));
 const healthExtra = computed(() => {
-	const spares = plural(run.value?.settings?.spares ?? 0, 'spare piece');
+	const spares = plural(sparesLeft(run.value), 'spare piece');
 	return outsideAlerts.value ? `${spares} · alerts: ${alertsText(run.value.alerts.channels)}` : spares;
 });
 

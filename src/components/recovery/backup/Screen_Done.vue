@@ -2,7 +2,7 @@
 	<ScreenHeader title="Community backup" />
 
 	<template v-if="run && run.step === 'done'">
-		<div v-if="draft.state.justFinished" class="cb-ok" data-test="created">Backup created. Every piece has been sent.</div>
+		<div v-if="draft.state.justFinished" class="cb-ok" data-test="created">{{ draft.state.reshare ? 'Backup changed.' : 'Backup created.' }} Every piece has been sent.</div>
 
 		<HealthLine :view="health" />
 
@@ -20,7 +20,7 @@
 		<div class="cb-group">
 			<div class="cb-setting">
 				<span class="flex-grow-1">Spare pieces left</span>
-				<span class="fw-semibold">{{ run.settings.spares }}</span>
+				<span class="fw-semibold">{{ sparesLeft(run) }}</span>
 			</div>
 			<div class="cb-setting">
 				<span class="flex-grow-1">Alerts</span>
@@ -33,6 +33,7 @@
 
 		<div class="cb-actions">
 			<button v-if="!outsideAlerts" class="btn btn-outline-dark w-100" @click="nav.go('alerts')">Set up alerts</button>
+			<button class="btn btn-outline-dark w-100" data-test="manage" @click="nav.go('manage')">Manage</button>
 			<button class="btn btn-dark w-100" @click="nav.close()">Close</button>
 		</div>
 	</template>
@@ -46,9 +47,9 @@ import { userPQStore } from '@/store/userPQ.store';
 import ScreenHeader from './ScreenHeader.vue';
 import HealthLine from './HealthLine.vue';
 import ContactAvatar from './ContactAvatar.vue';
-import { DRAFT, NAV, alertsText, deliveryHint, guardianDelivery, guardianName, hasOutsideAlerts, healthView } from './backupFlow';
+import { DRAFT, NAV, alertsText, deliveryHint, guardianDelivery, guardianName, hasOutsideAlerts, healthView, sparesLeft } from './backupFlow';
 
-// The top of the roster (design 9.1); phase 7.4 builds the roster in full.
+// The top of the roster (design 9.1), where a finished run lands; Manage is the roster in full.
 const ROSTER_TEXT = {
 	stored: 'holds a piece',
 	delivered: 'delivered',

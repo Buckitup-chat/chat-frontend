@@ -1,5 +1,14 @@
 <template>
-	<ScreenHeader title="Community backup" :step="1" step-label="Guardians" />
+	<ScreenHeader v-if="resharing" title="Change your backup" back />
+	<ScreenHeader v-else title="Community backup" :step="1" step-label="Guardians" />
+
+	<!-- A reshare: the picker starts from the backup's guardians -->
+	<div v-if="resharing" class="cb-muted" data-test="reshare-intro">
+		Pick who holds a piece of the new version. Everyone picked gets a new piece; anyone left out is dropped, and the old pieces stop working.
+	</div>
+	<div v-if="resharing && gone.length" class="cb-warn" data-test="reshare-gone">
+		{{ gone.join(', ') }} no longer {{ gone.length === 1 ? 'agrees' : 'agree' }} to be a guardian, so {{ gone.length === 1 ? 'is' : 'are' }} not in the new version.
+	</div>
 
 	<!-- 2.1: nobody has agreed yet -->
 	<template v-if="!store.pickable.length">
@@ -100,7 +109,7 @@
 		</div>
 
 		<div class="cb-actions">
-			<button class="btn btn-dark w-100" :disabled="!!draft.blockReason.value" data-test="next" @click="nav.go('alerts')">Next: alerts</button>
+			<button class="btn btn-dark w-100" :disabled="!!draft.blockReason.value" data-test="next" @click="nav.go(resharing ? 'review' : 'alerts')">{{ resharing ? 'Next: review' : 'Next: alerts' }}</button>
 			<div v-if="draft.blockReason.value" class="cb-small text-center" data-test="block-reason">{{ draft.blockReason.value }}</div>
 		</div>
 	</template>
@@ -111,12 +120,13 @@ import { computed, inject, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { useRecoveryInvitesStore } from '@/store/recoveryInvites.store';
+import { userPQStore } from '@/store/userPQ.store';
 import { durationText, neededGuardians, plural } from '@/lib/recovery/backupPlan';
 import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
 import ContactAvatar from './ContactAvatar.vue';
 import Check from './Check.vue';
-import { DRAFT, NAV, feeText } from './backupFlow';
+import { DRAFT, NAV, feeText, guardianName } from './backupFlow';
 
 const STATUS_TEXT = { waiting: 'waiting for answer', declined: 'declined', not_asked: 'not asked' };
 
@@ -126,7 +136,17 @@ const store = useRecoveryBackupStore();
 const invites = useRecoveryInvitesStore();
 const router = useRouter();
 
+const $userPQ = userPQStore();
+
 const open = ref(false);
+/** A reshare of the finished backup (draft.beginReshare), not a first setup. */
+const resharing = computed(() => !!draft.state.reshare);
+/** The backup's guardians who can no longer be picked: they are dropped. */
+const gone = computed(() =>
+	resharing.value
+		? draft.state.reshare.guardians.filter((h) => !store.pickable.some((c) => c.userHash === h)).map((h) => guardianName(h, store.candidates, $userPQ))
+		: [],
+);
 const others = computed(() => store.candidates.filter((c) => !store.pickable.includes(c)));
 const count = computed(() => draft.guardians.value.length);
 const settings = computed(() => draft.settings.value);

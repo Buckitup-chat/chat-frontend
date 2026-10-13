@@ -40,7 +40,7 @@
 			</div>
 		</div>
 
-		<div class="cb-tile pickable" :class="{ picked: a.webhook || webhookOpen }" data-test="tile-webhook" @click="!a.webhook && (webhookOpen = !webhookOpen)">
+		<div class="cb-tile pickable" :class="{ picked: a.webhook || webhookOpen }" data-test="tile-webhook" @click="(!a.webhook || !setup) && (webhookOpen = !webhookOpen)">
 			<div class="cb-tile-head">
 				<span class="cb-check" :class="{ on: a.webhook }">
 					<Check v-if="a.webhook" />
@@ -50,12 +50,13 @@
 					<span class="cb-muted">for email or SMS gateways</span>
 				</div>
 				<span v-if="a.webhook" class="cb-status-ok">connected</span>
+				<span v-if="a.webhook && !setup && !webhookSecret" class="cb-small">Add another</span>
 			</div>
 			<div v-if="webhookSecret" class="cb-tile-body" @click.stop>
 				<span class="cb-small">The receiving end checks each alert with this secret. It is shown only once: keep it now.</span>
 				<CopyField :value="webhookSecret" wrap />
 			</div>
-			<div v-else-if="webhookOpen && !a.webhook" class="cb-tile-body" @click.stop>
+			<div v-else-if="webhookOpen && (!a.webhook || !setup)" class="cb-tile-body" @click.stop>
 				<div class="d-flex gap-2">
 					<input v-model="webhookUrl" type="url" class="form-control" placeholder="https://" aria-label="Webhook address" :disabled="connecting" />
 					<button class="btn btn-outline-dark" :disabled="!webhookOk || connecting" @click="connectWebhook">
@@ -90,7 +91,7 @@ const draft = inject(DRAFT);
 const nav = inject(NAV);
 const store = useRecoveryBackupStore();
 
-/** Part of the setup, or adding alerts to a finished backup that has none. */
+/** Part of the setup, or adding a channel to a finished backup (from its card or Manage): several webhooks may be added then. */
 const setup = store.run?.step !== 'done';
 const a = draft.state.alerts;
 const delaySec = computed(() => (setup ? draft.settings.value.delaySec : store.run?.settings?.delaySec));
@@ -145,7 +146,7 @@ const saveAlerts = async () => {
 	saveError.value = null;
 	try {
 		await store.setAlerts({ channels: [...draft.alertChannels.value], skipped: false });
-		nav.close();
+		nav.back();
 	} catch (e) {
 		saveError.value = errorMessage(e);
 	} finally {
