@@ -83,6 +83,13 @@ export class LocalVaultMissingError extends VaultKeyError {
   }
 }
 
+export class AccountPasskeyMismatchError extends VaultKeyError {
+  constructor() {
+    super('The selected passkey belongs to a different account. Choose the passkey for this account.');
+    this.name = 'AccountPasskeyMismatchError';
+  }
+}
+
 class CardNotDurableError extends Error {
   constructor(cause) {
     super(cause?.message ?? String(cause));
@@ -476,26 +483,49 @@ export class EncryptionManagerPQ extends EventTarget {
 
     if (!identity) throw new Error(`User ${userHash} not found in local identities`);
 
-    // local-vault's adapter silently creates an empty row for an unknown ID.
-    // Detect that condition first, or the real loss is hidden behind a generic
-    // "Vault lock-key access failed" and WebAuthn is never even requested.
+    // A card may retain an old vault ID while its passkey still opens a vault
+    // on this device. Check before connecting: the adapter creates an empty
+    // row for an unknown ID, which would hide the surviving vault.
     const vaultEntry = identity.vaultId
       ? await this.#rawStore.get(`local-vault-${identity.vaultId}`)
       : null;
-    if (!vaultEntry?.accountID || !vaultEntry?.data) throw new LocalVaultMissingError();
-
-    const vault = await connect({
-      vaultID: identity.vaultId,
-      storageType: 'idb',
-      keyOptions: VAULT_KEY_OPTIONS
-    });
+    const discoverVault = !vaultEntry?.accountID || !vaultEntry?.data;
+    let vault;
+    if (discoverVault) {
+      try {
+        vault = await connect({ storageType: 'idb', discoverVault: true, keyOptions: VAULT_KEY_OPTIONS });
+      } catch (e) {
+        if (e?.message?.startsWith('No matching vault found in storage')) throw new LocalVaultMissingError();
+        throw e;
+      }
+    } else {
+      vault = await connect({ vaultID: identity.vaultId, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS });
+    }
 
     const signSkey = this.#normalizeKey(await vault.get('sign_skey'));
     const cryptSkey = this.#normalizeKey(await vault.get('crypt_skey'));
     const evmSkey = await vault.get('evm_skey');
     const contactSkey = await vault.get('contact_skey');
 
+    if (discoverVault) {
+      const discoveredEntry = await this.#rawStore.get(`local-vault-${vault.id}`);
+      if (!discoveredEntry?.accountID || !discoveredEntry?.data) throw new LocalVaultMissingError();
+    }
     if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
+
+    if (discoverVault) {
+      let matches = false;
+      try {
+        const challenge = new TextEncoder().encode('buckitup/local-vault/account-binding/v1');
+        matches = ml_dsa87.verify(ml_dsa87.sign(challenge, signSkey), challenge, decodeHexOrBase64(identity.sign_pkey));
+      } catch { /* A malformed card or key cannot establish the binding. */ }
+      if (!matches) {
+        try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
+        throw new AccountPasskeyMismatchError();
+      }
+      identity.vaultId = vault.id;
+      await this.#saveLocalUserCards();
+    }
 
     this.#currentVault = vault;
     this.#signSkey = signSkey;
