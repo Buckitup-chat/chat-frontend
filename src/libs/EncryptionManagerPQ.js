@@ -494,13 +494,22 @@ export class EncryptionManagerPQ extends EventTarget {
     let vault;
     if (discoverVault) {
       const vaultKeys = await this.#rawStore.keys();
+      const [legacyCards, legacyCurrentVaultId] = await Promise.all([
+        this.#rawStore.get('vaults-registry'),
+        this.#rawStore.get('vault-id'),
+      ]);
+      const legacyVaultIds = new Set(Array.isArray(legacyCards)
+        ? legacyCards.map(card => card.vaultId)
+        : []);
+      if (legacyCurrentVaultId) legacyVaultIds.add(legacyCurrentVaultId);
       const otherCardVaultIds = new Set(this.#localUserCards
         .filter(card => card.user_hash !== userHash)
         .map(card => card.vaultId));
       const candidateKeys = vaultKeys
         .filter(key => key.startsWith('local-vault-') &&
           key !== `local-vault-${identity.vaultId}` &&
-          !otherCardVaultIds.has(key.slice('local-vault-'.length)));
+          !otherCardVaultIds.has(key.slice('local-vault-'.length)) &&
+          !legacyVaultIds.has(key.slice('local-vault-'.length)));
       const candidates = (await Promise.all(candidateKeys.map(async key => ({
         key,
         entry: await this.#rawStore.get(key),

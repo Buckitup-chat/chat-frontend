@@ -56,6 +56,7 @@ vi.mock('@lo-fi/local-vault', () => ({
 			await rawStore.set(`local-vault-${id}`, { accountID: `account-${id}`, data: 'sealed' });
 			return vaults.get(id);
 		}
+		events.push(`connect:${vaultID}`);
 		return vaults.get(vaultID as string);
 	},
 	rawStorage: () => rawStore,
@@ -892,6 +893,26 @@ describe('import reports whether the card write is durable', () => {
 
 		await expect(target.login(identity.user_hash)).rejects.toBeInstanceOf(LocalVaultMissingError);
 		expect(events).not.toContain('discoverVault');
+	});
+
+	it('does not offer the same legacy passkey for four missing PQ account vaults', async () => {
+		const source = freshManager();
+		for (const name of ['First', 'Second', 'Third', 'Test-4']) {
+			await source.createUserVault({ name });
+		}
+		const cards = await source.getLocalUserCards();
+		await source.logout();
+		for (const card of cards) await rawStore.remove(`local-vault-${card.vaultId}`);
+		vaults.set('legacy-vault', makeVault('legacy-vault'));
+		await rawStore.set('local-vault-legacy-vault', { accountID: 'biometric-user', data: 'sealed' });
+		await rawStore.set('vault-id', 'legacy-vault');
+		await rawStore.set('vaults-registry', [{ vaultId: 'legacy-vault', name: 'biometric-user' }]);
+
+		for (const card of cards) {
+			const target = freshManager();
+			await expect(target.login(card.user_hash)).rejects.toBeInstanceOf(LocalVaultMissingError);
+		}
+		expect(events).not.toContain('connect:legacy-vault');
 	});
 
 	it('finds an existing vault through its passkey when the account card has a stale vault ID', async () => {
