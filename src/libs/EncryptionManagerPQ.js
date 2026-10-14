@@ -86,6 +86,13 @@ export class LocalVaultMissingError extends VaultKeyError {
   }
 }
 
+export class AccountPasskeyMismatchError extends VaultKeyError {
+  constructor() {
+    super('The selected passkey belongs to a different account. Choose the passkey for this account.');
+    this.name = 'AccountPasskeyMismatchError';
+  }
+}
+
 class CardNotDurableError extends Error {
   constructor(cause) {
     super(cause?.message ?? String(cause));
@@ -294,6 +301,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards.push(identity);
 
     await this.#saveLocalUserCards();
+    await this.#rawStore.set(`pq-vault-owner-${userVault.id}`, userHash);
 
     // Bootstrap: the keys open locally (the card intent and snapshot are
     // sealed with them), the card is published and accepted, and only then is
@@ -479,26 +487,76 @@ export class EncryptionManagerPQ extends EventTarget {
 
     if (!identity) throw new Error(`User ${userHash} not found in local identities`);
 
-    // local-vault's adapter silently creates an empty row for an unknown ID.
-    // Detect that condition first, or the real loss is hidden behind a generic
-    // "Vault lock-key access failed" and WebAuthn is never even requested.
+    // A card may retain an old vault ID while its passkey still opens a vault
+    // on this device. Check before connecting: the adapter creates an empty
+    // row for an unknown ID, which would hide the surviving vault.
     const vaultEntry = identity.vaultId
       ? await this.#rawStore.get(`local-vault-${identity.vaultId}`)
       : null;
-    if (!vaultEntry?.accountID || !vaultEntry?.data) throw new LocalVaultMissingError();
-
-    const vault = await connect({
-      vaultID: identity.vaultId,
-      storageType: 'idb',
-      keyOptions: VAULT_KEY_OPTIONS
-    });
+    const discoverVault = !vaultEntry?.accountID || !vaultEntry?.data;
+    let vault;
+    if (discoverVault) {
+      const vaultKeys = await this.#rawStore.keys();
+      const [legacyCards, legacyCurrentVaultId] = await Promise.all([
+        this.#rawStore.get('vaults-registry'),
+        this.#rawStore.get('vault-id'),
+      ]);
+      const legacyVaultIds = new Set(Array.isArray(legacyCards)
+        ? legacyCards.map(card => card.vaultId)
+        : []);
+      if (legacyCurrentVaultId) legacyVaultIds.add(legacyCurrentVaultId);
+      const otherCardVaultIds = new Set(this.#localUserCards
+        .filter(card => card.user_hash !== userHash)
+        .map(card => card.vaultId));
+      const candidateKeys = vaultKeys
+        .filter(key => key.startsWith('local-vault-') &&
+          key !== `local-vault-${identity.vaultId}` &&
+          !otherCardVaultIds.has(key.slice('local-vault-'.length)) &&
+          !legacyVaultIds.has(key.slice('local-vault-'.length)));
+      const candidates = (await Promise.all(candidateKeys.map(async key => ({
+        key,
+        entry: await this.#rawStore.get(key),
+        owner: await this.#rawStore.get(`pq-vault-owner-${key.slice('local-vault-'.length)}`),
+      })))).filter(({ entry, owner }) => entry?.accountID && entry?.data && (owner === userHash || owner == null));
+      if (!candidates.length) throw new LocalVaultMissingError();
+      try {
+        vault = candidates.length === 1
+          ? await connect({ vaultID: candidates[0].key.slice('local-vault-'.length), storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS })
+          : await connect({ storageType: 'idb', discoverVault: true, keyOptions: VAULT_KEY_OPTIONS });
+      } catch (e) {
+        if (e?.message?.startsWith('No matching vault found in storage')) throw new LocalVaultMissingError();
+        throw e;
+      }
+    } else {
+      vault = await connect({ vaultID: identity.vaultId, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS });
+    }
 
     const signSkey = this.#normalizeKey(await vault.get('sign_skey'));
     const cryptSkey = this.#normalizeKey(await vault.get('crypt_skey'));
     const evmSkey = await vault.get('evm_skey');
     const contactSkey = await vault.get('contact_skey');
 
-    if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
+    if (discoverVault) {
+      const discoveredEntry = await this.#rawStore.get(`local-vault-${vault.id}`);
+      if (!discoveredEntry?.accountID || !discoveredEntry?.data) throw new LocalVaultMissingError();
+    }
+    if (!(signSkey instanceof Uint8Array)) {
+      if (discoverVault) throw new LocalVaultMissingError();
+      throw new VaultKeyError('Failed to load secret key from vault');
+    }
+
+    if (discoverVault) {
+      const matches = this.#signKeyMatchesIdentity(signSkey, identity);
+      if (!matches) {
+        try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
+        throw new AccountPasskeyMismatchError();
+      }
+      identity.vaultId = vault.id;
+      await this.#saveLocalUserCards();
+      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
+    } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`)) && this.#signKeyMatchesIdentity(signSkey, identity)) {
+      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
+    }
 
     this.#currentVault = vault;
     this.#signSkey = signSkey;
@@ -715,6 +773,7 @@ export class EncryptionManagerPQ extends EventTarget {
         removeLocalAccount(vaultData.accountID);
       }
       await this.#rawStore.remove(`local-vault-${vaultId}`);
+      await this.#rawStore.remove(`pq-vault-owner-${vaultId}`);
     } catch (e) {
       console.warn('Could not delete from local-vault', e);
     }
@@ -767,6 +826,13 @@ export class EncryptionManagerPQ extends EventTarget {
       return new Uint8Array(Object.values(key).map(v => Number(v)));
     }
     return null;
+  }
+
+  #signKeyMatchesIdentity(signSkey, identity) {
+    try {
+      const challenge = new TextEncoder().encode('buckitup/local-vault/account-binding/v1');
+      return ml_dsa87.verify(ml_dsa87.sign(challenge, signSkey), challenge, decodeHexOrBase64(identity.sign_pkey));
+    } catch { return false; }
   }
 
   #dispatchAuthChange() {
@@ -992,6 +1058,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#localUserCards.push(identity);
     }
     await this.#saveLocalUserCards();
+    await this.#rawStore.set(`pq-vault-owner-${userVault.id}`, identity.user_hash);
 
     // Same card boundary as registration: the card may not exist on this Pi
     // yet, and the session activates only once it is accepted.
