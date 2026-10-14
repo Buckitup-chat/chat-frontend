@@ -586,12 +586,18 @@ export class EncryptionManagerPQ extends EventTarget {
     // Writes queued before a reload/crash can replay now that the signing key
     // is available again. Background: a slow drain must not delay login.
     this.#startOutboxDrain();
+    this.#claimDevice(userHash);
+  }
 
-    // The first person to sign in on a device owns it: one whose card reached it
-    // by sync claims it here. Background, like the drain.
+  // The first person to sign in on a device owns it: one whose card reached it
+  // by sync claims it here (deviceOwner.ts). Background, like the drain; a
+  // claim the device could not answer is tried again when it comes back.
+  #claimDevice(userHash) {
+    if (this.#deviceClaimSettled === userHash) return;
     const signingKey = this.#signingKeyOf(userHash);
-    void claimDeviceIfUnowned(userHash, async (challenge) => ml_dsa87.sign(challenge, await signingKey())).then((claim) => {
-      if (claim === 'refused') console.warn('[EncryptionManagerPQ] the server refused this account\'s claim to the device');
+    void claimDeviceIfUnowned(userHash, async (challenge) => ml_dsa87.sign(challenge, await signingKey())).then(({ claim }) => {
+      if (claim === 'refused') console.warn('[EncryptionManagerPQ] the device refused this account\'s owner claim');
+      if (claim !== 'unavailable' && this.#currentUserHash === userHash) this.#deviceClaimSettled = userHash;
     });
   }
 
@@ -634,6 +640,7 @@ export class EncryptionManagerPQ extends EventTarget {
   // another user must not be replayed with this session's auth.
   #outboxOnlineListener = null;
   #outboxVisibleListener = null;
+  #deviceClaimSettled = null;
   #outboxWakeUnsubscribe = null;
   #outboxChangeUnsubscribe = null;
 
@@ -676,11 +683,13 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#outboxOnlineListener = () => {
       resumePendingWrites(userHash, signSkey);
       this.#recoverIntents(userHash);
+      this.#claimDevice(userHash);
     };
     this.#outboxVisibleListener = () => {
       if (document.visibilityState !== 'visible') return;
       resumePendingWrites(userHash, signSkey);
       this.#recoverIntents(userHash);
+      this.#claimDevice(userHash);
     };
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.#outboxOnlineListener);

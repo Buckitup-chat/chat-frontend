@@ -181,9 +181,24 @@ const stranger = (seed: number): Account => {
 	return { user_hash: id.userHash, sign_pkey: id.signPkeyB64 };
 };
 
+const CLAIM_CHALLENGE = 'ab'.repeat(32);
+// The owner claim as the backend makes it: a signature over the challenge by the card's key, first claim wins.
+const ownerClaim = (init?: RequestInit) => {
+	const { user_hash: userHash, signature } = JSON.parse(String(init?.body)) as { user_hash: string; signature: string };
+	const card = cardOf(userHash);
+	const valid = !!card && ml_dsa87.verify(fromBase64(signature), new TextEncoder().encode(CLAIM_CHALLENGE), fromBase64(card.sign_pkey as string));
+	if (!valid) return Response.json({ error: 'invalid_signature' }, { status: 401 });
+	claimedBy ??= { user_hash: userHash, sign_pkey: card.sign_pkey as string };
+	deviceIdentity = identityFor(claimedBy);
+	return Response.json({ admin: claimedBy.user_hash });
+};
+let claimedBy: Account | null = null;
+
 const backend = (url: string, init?: RequestInit) => {
 	const u = new URL(url, 'http://localhost');
 	if (u.pathname.endsWith('/device_identity')) { deviceIdentityRequests++; return deviceIdentity(); }
+	if (u.pathname.endsWith('/challenge')) return Response.json({ challenge_id: 'claim', challenge: CLAIM_CHALLENGE });
+	if (u.pathname.endsWith('/owner_claim')) return ownerClaim(init);
 	if (u.pathname.endsWith('/shapes') && u.searchParams.get('table') === 'vouch_tokens') return vouchShape(u);
 	if (u.pathname.endsWith('/ingest_each')) return ingest(init);
 	return undefined;
@@ -275,6 +290,7 @@ beforeEach(() => {
 	maxDepth = 7;
 	net.mode = 'online';
 	deviceIdentityRequests = 0;
+	claimedBy = null;
 	Owner = newClient('Owner');
 	Bob = newClient('Bob');
 	Object.defineProperty(navigator, 'mediaDevices', {
@@ -464,7 +480,6 @@ describe('FRON-23: what the server already holds', () => {
 describe('FRON-23: no owner vouch without a proven owner and device', () => {
 	const cases: [name: string, answer: () => Response][] = [
 		['admin is another account', () => identityFor(stranger(9), accountOf(Owner))()],
-		['admin is null', () => identityFor(null, accountOf(Owner))()],
 		['the endpoint is unavailable', () => new Response('unavailable', { status: 503 })],
 		['device_id is missing', () => Response.json({ admin: accountOf(Owner) })],
 		['device_id is empty', () => Response.json({ device_id: '', admin: accountOf(Owner) })],
@@ -482,6 +497,22 @@ describe('FRON-23: no owner vouch without a proven owner and device', () => {
 		await vi.waitFor(() => expect(deviceIdentityRequests).toBeGreaterThan(0), { timeout: 10_000 });
 		await settle();
 		expect(vouches.posts).toEqual([]);
+	}, 120_000);
+});
+
+describe('FRON-23: an ownerless device', () => {
+	it('is claimed by the account confirming a contact, which then vouches as its owner', async () => {
+		await register(Bob);
+		await register(Owner);
+		claimedBy = null;
+		deviceIdentity = identityFor(null, accountOf(Owner));
+		const { store } = Owner.app;
+
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+
+		await vi.waitFor(() => expect(vouches.rows.size).toBe(2), { timeout: 10_000 });
+		expect(claimedBy).toEqual(accountOf(Owner));
+		expect([...vouches.rows.values()].every((r) => r.issuer_hash === Owner.hash && r.subject_hash === Bob.hash)).toBe(true);
 	}, 120_000);
 });
 

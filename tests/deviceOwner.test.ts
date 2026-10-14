@@ -29,7 +29,7 @@ describe('claimDeviceIfUnowned', () => {
 		api.getDeviceIdentity.mockResolvedValue({ device_id: 'BK-001', admin: null });
 		api.claimOwner.mockResolvedValue(response(200, { admin: ME }));
 
-		expect(await claimDeviceIfUnowned(ME, sign)).toBe('owner');
+		expect((await claimDeviceIfUnowned(ME, sign)).claim).toBe('owner');
 
 		const [userHash, challengeId, signature] = api.claimOwner.mock.calls[0];
 		expect([userHash, challengeId]).toEqual([ME, 'c1']);
@@ -40,9 +40,9 @@ describe('claimDeviceIfUnowned', () => {
 	it('leaves a device that already has an owner alone', async () => {
 		api.getDeviceIdentity.mockResolvedValue({ device_id: 'BK-001', admin: { user_hash: OTHER } });
 
-		expect(await claimDeviceIfUnowned(ME, sign)).toBe('other');
+		expect((await claimDeviceIfUnowned(ME, sign)).claim).toBe('other');
 		api.getDeviceIdentity.mockResolvedValue({ device_id: 'BK-001', admin: { user_hash: ME } });
-		expect(await claimDeviceIfUnowned(ME, sign)).toBe('owner');
+		expect((await claimDeviceIfUnowned(ME, sign)).claim).toBe('owner');
 
 		expect(api.claimOwner).not.toHaveBeenCalled();
 		expect(sign).not.toHaveBeenCalled();
@@ -52,26 +52,49 @@ describe('claimDeviceIfUnowned', () => {
 		api.getDeviceIdentity.mockResolvedValue({ device_id: 'BK-001', admin: null });
 		api.claimOwner.mockResolvedValue(response(200, { admin: OTHER }));
 
-		expect(await claimDeviceIfUnowned(ME, sign)).toBe('other');
+		expect((await claimDeviceIfUnowned(ME, sign)).claim).toBe('other');
+	});
+
+	it('returns the device identity with the owner the claim produced', async () => {
+		api.getDeviceIdentity.mockResolvedValue({ device_id: 'BK-001', admin: null });
+		api.claimOwner.mockResolvedValue(response(200, { admin: ME }));
+
+		expect((await claimDeviceIfUnowned(ME, sign)).identity).toEqual({ deviceId: 'BK-001', adminHash: ME });
+	});
+
+	it('signs nothing but a well-formed challenge', async () => {
+		api.getDeviceIdentity.mockResolvedValue({ device_id: 'BK-001', admin: null });
+		api.getChallenge.mockResolvedValue({ error: 'unavailable' });
+
+		expect((await claimDeviceIfUnowned(ME, sign)).claim).toBe('unavailable');
+		expect(sign).not.toHaveBeenCalled();
+		expect(api.claimOwner).not.toHaveBeenCalled();
+	});
+
+	it('treats a server error as unavailable, not as a refusal', async () => {
+		api.getDeviceIdentity.mockResolvedValue({ device_id: 'BK-001', admin: null });
+		api.claimOwner.mockResolvedValue(response(503, { error: 'not_ready' }));
+
+		expect((await claimDeviceIfUnowned(ME, sign)).claim).toBe('unavailable');
 	});
 
 	it('reports a refused claim', async () => {
 		api.getDeviceIdentity.mockResolvedValue({ device_id: 'BK-001', admin: null });
 		api.claimOwner.mockResolvedValue(response(401, { error: 'unknown_user' }));
 
-		expect(await claimDeviceIfUnowned(ME, sign)).toBe('refused');
+		expect((await claimDeviceIfUnowned(ME, sign)).claim).toBe('refused');
 	});
 
 	it('does not claim when the device identity cannot be read, or the key is not open', async () => {
 		api.getDeviceIdentity.mockRejectedValue(new Error('offline'));
-		expect(await claimDeviceIfUnowned(ME, sign)).toBe('unavailable');
+		expect((await claimDeviceIfUnowned(ME, sign)).claim).toBe('unavailable');
 		expect(api.claimOwner).not.toHaveBeenCalled();
 
 		api.getDeviceIdentity.mockResolvedValue({ device_id: 'BK-001', admin: null });
 		const locked = vi.fn(async () => {
 			throw new Error('vault locked');
 		});
-		expect(await claimDeviceIfUnowned(ME, locked)).toBe('unavailable');
+		expect((await claimDeviceIfUnowned(ME, locked)).claim).toBe('unavailable');
 		expect(api.claimOwner).not.toHaveBeenCalled();
 	});
 });
