@@ -81,7 +81,7 @@ beforeEach(() => {
 });
 
 describe('the login page', () => {
-	const render = () => mount(Page_Login, { global: { provide: { $mitt: mitt, $encryptionManager: { getVaults: async () => [] } } } });
+	const render = () => mount(Page_Login, { global: { provide: { $mitt: mitt, $swal: swal, $encryptionManager: { getVaults: async () => [] } } } });
 
 	it('offers Recover with friends after Sync with other device', async () => {
 		H.restore.temporary = null;
@@ -103,6 +103,18 @@ describe('the login page', () => {
 		expect(w.find('[data-test="recover-with-friends"]').exists()).toBe(false);
 		await w.find('[data-test="continue-recovering"]').trigger('click');
 		expect(H.user.login).toHaveBeenCalledWith(TEMP);
+	});
+
+	it('says why the recovery could not be opened on this device', async () => {
+		H.user.myLocalUsers = [{ user_hash: TEMP }];
+		H.user.login = vi.fn(async () => {
+			throw Object.assign(new Error('missing'), { name: 'LocalVaultMissingError' });
+		});
+		const w = render();
+		await flushPromises();
+		await w.find('[data-test="continue-recovering"]').trigger('click');
+		await flushPromises();
+		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ icon: 'error', title: "This recovery's keys are missing on this device" }));
 	});
 });
 

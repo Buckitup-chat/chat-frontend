@@ -239,7 +239,7 @@ import * as $enigma from '@/libs/enigma';
 const $mitt = inject('$mitt');
 const $user = userStore();
 const $userPQ = userPQStore();
-// const $swal = inject('$swal');
+const $swal = inject('$swal');
 // const $loader = useLoader();
 // const $isProd = inject('$isProd');
 // const $router = inject('$router');
@@ -287,11 +287,19 @@ function setMode(m) {
 // A recovery started on this device goes on in its temporary account, while that account is still here.
 const $restore = useRecoveryRestoreStore();
 const recovering = computed(() => !!$restore.temporary && !!$userPQ.myLocalUsers?.some((u) => u.user_hash === $restore.temporary));
+// When its keys are gone or the passkey picked is another account's, the
+// person has to see why nothing happened.
+const RESUME_ERRORS = {
+	LocalVaultMissingError: ['This recovery\'s keys are missing on this device', 'Start the recovery again: your guardians will need to approve a new device.'],
+	AccountPasskeyMismatchError: ['That passkey belongs to another account', 'Try again and choose the passkey this recovery created.'],
+};
 const continueRecovering = async () => {
 	try {
 		await $userPQ.login($restore.temporary);
 	} catch (e) {
 		console.error('[recovery] could not sign in to the temporary account:', e);
+		const [title, text] = RESUME_ERRORS[e?.name] ?? ['The recovery could not be opened', e?.message ?? String(e)];
+		$swal.fire({ icon: 'error', title, text });
 	}
 };
 
