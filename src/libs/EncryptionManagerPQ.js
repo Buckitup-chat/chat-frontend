@@ -298,6 +298,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards.push(identity);
 
     await this.#saveLocalUserCards();
+    await this.#rawStore.set(`pq-vault-owner-${userVault.id}`, userHash);
 
     // Bootstrap: the keys open locally (the card intent and snapshot are
     // sealed with them), the card is published and accepted, and only then is
@@ -503,7 +504,8 @@ export class EncryptionManagerPQ extends EventTarget {
       const candidates = (await Promise.all(candidateKeys.map(async key => ({
         key,
         entry: await this.#rawStore.get(key),
-      })))).filter(({ entry }) => entry?.accountID && entry?.data);
+        owner: await this.#rawStore.get(`pq-vault-owner-${key.slice('local-vault-'.length)}`),
+      })))).filter(({ entry, owner }) => entry?.accountID && entry?.data && owner === userHash);
       if (!candidates.length) throw new LocalVaultMissingError();
       try {
         vault = candidates.length === 1
@@ -529,17 +531,15 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
 
     if (discoverVault) {
-      let matches = false;
-      try {
-        const challenge = new TextEncoder().encode('buckitup/local-vault/account-binding/v1');
-        matches = ml_dsa87.verify(ml_dsa87.sign(challenge, signSkey), challenge, decodeHexOrBase64(identity.sign_pkey));
-      } catch { /* A malformed card or key cannot establish the binding. */ }
+      const matches = this.#signKeyMatchesIdentity(signSkey, identity);
       if (!matches) {
         try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
         throw new AccountPasskeyMismatchError();
       }
       identity.vaultId = vault.id;
       await this.#saveLocalUserCards();
+    } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`)) && this.#signKeyMatchesIdentity(signSkey, identity)) {
+      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
     }
 
     this.#currentVault = vault;
@@ -757,6 +757,7 @@ export class EncryptionManagerPQ extends EventTarget {
         removeLocalAccount(vaultData.accountID);
       }
       await this.#rawStore.remove(`local-vault-${vaultId}`);
+      await this.#rawStore.remove(`pq-vault-owner-${vaultId}`);
     } catch (e) {
       console.warn('Could not delete from local-vault', e);
     }
@@ -774,6 +775,13 @@ export class EncryptionManagerPQ extends EventTarget {
       return new Uint8Array(Object.values(key).map(v => Number(v)));
     }
     return null;
+  }
+
+  #signKeyMatchesIdentity(signSkey, identity) {
+    try {
+      const challenge = new TextEncoder().encode('buckitup/local-vault/account-binding/v1');
+      return ml_dsa87.verify(ml_dsa87.sign(challenge, signSkey), challenge, decodeHexOrBase64(identity.sign_pkey));
+    } catch { return false; }
   }
 
   #dispatchAuthChange() {
@@ -975,6 +983,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#localUserCards.push(identity);
     }
     await this.#saveLocalUserCards();
+    await this.#rawStore.set(`pq-vault-owner-${userVault.id}`, identity.user_hash);
 
     // Same card boundary as registration: the card may not exist on this Pi
     // yet, and the session activates only once it is accepted.

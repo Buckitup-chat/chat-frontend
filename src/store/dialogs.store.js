@@ -58,6 +58,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // Optimistic (in-flight) items shown in UI before DB round-trip
     const optimisticItems = ref(new Map()); // id -> { type, dialogHash, status, ... }
     let optimisticCounter = 0;
+    let lastProjectionCreatedAt = 0;
 
     // --- dialog writes ---
     // Every write is a durable intent, signed once into an immutable snapshot
@@ -659,6 +660,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
      const captureMessageIntent = async (peerHash, content, messageId = null, ownerTimestamp = null, kind = 'message') => {
+        const projectionCreatedAt = kind === 'message'
+            ? (lastProjectionCreatedAt = Math.max(Date.now(), lastProjectionCreatedAt + 1))
+            : null;
         const parts = typeof content === 'string' ? [{ kind: 'text', text: content }] : content;
         if (!messageId) {
             const { v7 } = await import('uuid');
@@ -681,7 +685,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             try {
                 await saveProjection({
                     messageId, owner: ownerHash, relation: 'dialog_messages', dialogHash, peerHash,
-                    ownerTimestamp: nowSec, createdAt: Date.now(), text: contentToText(parts), signHash: null,
+                    ownerTimestamp: nowSec, createdAt: projectionCreatedAt, text: contentToText(parts), signHash: null,
                 });
             } catch (e) {
                 console.error('[dialogs] message projection not durable — the send is refused:', e);
