@@ -505,7 +505,7 @@ export class EncryptionManagerPQ extends EventTarget {
         key,
         entry: await this.#rawStore.get(key),
         owner: await this.#rawStore.get(`pq-vault-owner-${key.slice('local-vault-'.length)}`),
-      })))).filter(({ entry, owner }) => entry?.accountID && entry?.data && owner === userHash);
+      })))).filter(({ entry, owner }) => entry?.accountID && entry?.data && (owner === userHash || owner == null));
       if (!candidates.length) throw new LocalVaultMissingError();
       try {
         vault = candidates.length === 1
@@ -528,7 +528,10 @@ export class EncryptionManagerPQ extends EventTarget {
       const discoveredEntry = await this.#rawStore.get(`local-vault-${vault.id}`);
       if (!discoveredEntry?.accountID || !discoveredEntry?.data) throw new LocalVaultMissingError();
     }
-    if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
+    if (!(signSkey instanceof Uint8Array)) {
+      if (discoverVault) throw new LocalVaultMissingError();
+      throw new VaultKeyError('Failed to load secret key from vault');
+    }
 
     if (discoverVault) {
       const matches = this.#signKeyMatchesIdentity(signSkey, identity);
@@ -538,6 +541,7 @@ export class EncryptionManagerPQ extends EventTarget {
       }
       identity.vaultId = vault.id;
       await this.#saveLocalUserCards();
+      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
     } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`)) && this.#signKeyMatchesIdentity(signSkey, identity)) {
       await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
     }
