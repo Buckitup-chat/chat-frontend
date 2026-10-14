@@ -512,17 +512,17 @@ export class EncryptionManagerPQ extends EventTarget {
       if (!discoveredEntry?.accountID || !discoveredEntry?.data) throw new LocalVaultMissingError();
     }
     if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
-    
-    let matches = false;
-    try {
-      const challenge = new TextEncoder().encode('buckitup/local-vault/account-binding/v1');
-      matches = ml_dsa87.verify(ml_dsa87.sign(challenge, signSkey), challenge, decodeHexOrBase64(identity.sign_pkey));
-    } catch {}
-    if (!matches) {
-      try { await vault.lock?.(); } catch {}
-      throw new AccountPasskeyMismatchError();
-    }
+
     if (discoverVault) {
+      let matches = false;
+      try {
+        const challenge = new TextEncoder().encode('buckitup/local-vault/account-binding/v1');
+        matches = ml_dsa87.verify(ml_dsa87.sign(challenge, signSkey), challenge, decodeHexOrBase64(identity.sign_pkey));
+      } catch { /* A malformed card or key cannot establish the binding. */ }
+      if (!matches) {
+        try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
+        throw new AccountPasskeyMismatchError();
+      }
       identity.vaultId = vault.id;
       await this.#saveLocalUserCards();
     }
