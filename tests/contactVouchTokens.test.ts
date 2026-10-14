@@ -1081,6 +1081,11 @@ describe('contact changes from an account whose own writes still wait for approv
 
 		device.grantWrite();
 		await switchTo(Ann);
+		if ((await heldStorageWrites()).length) {
+			const { blockedWriteShapes } = await import('@/lib/data/accessGate');
+			await vi.waitFor(() => expect(blockedWriteShapes()).toContain('user_storage'), { timeout: 10_000 });
+			window.dispatchEvent(new Event('online'));
+		}
 		await vi.waitFor(async () => expect(await heldStorageWrites()).toEqual([]), { timeout: 45_000 });
 		expect(device.storageWrites().some((p) => p.result.status === 'ok')).toBe(true);
 		await switchTo(Ann);
