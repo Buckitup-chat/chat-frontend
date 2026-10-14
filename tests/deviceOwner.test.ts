@@ -2,6 +2,7 @@
 // left alone, and the claim is a signature over the server's challenge.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
+import { fromBase64 } from '@/lib/pq/signature';
 
 const api = vi.hoisted(() => ({
 	getDeviceIdentity: vi.fn(),
@@ -33,8 +34,7 @@ describe('claimDeviceIfUnowned', () => {
 		const [userHash, challengeId, signature] = api.claimOwner.mock.calls[0];
 		expect([userHash, challengeId]).toEqual([ME, 'c1']);
 		expect(signature).not.toMatch(/=$/);
-		const sigBytes = Uint8Array.from(atob(signature + '='.repeat((4 - (signature.length % 4)) % 4)), (c) => c.charCodeAt(0));
-		expect(ml_dsa87.verify(sigBytes, new TextEncoder().encode('ab'.repeat(32)), keys.publicKey)).toBe(true);
+		expect(ml_dsa87.verify(fromBase64(signature), new TextEncoder().encode('ab'.repeat(32)), keys.publicKey)).toBe(true);
 	});
 
 	it('leaves a device that already has an owner alone', async () => {

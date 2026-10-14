@@ -5,7 +5,7 @@
 // ingest, so signing in claims an ownerless device explicitly: a signature over
 // a fresh challenge for the card already stored there.
 import { api } from '@/api/client';
-import { toBase64 } from '@/lib/pq/signature';
+import { toBase64Unpadded } from '@/lib/pq/signature';
 import { readDeviceIdentity } from './contactVouches';
 
 /** owner: this account owns the device; other: someone else does; refused: the server did not accept the claim. */
@@ -18,7 +18,7 @@ export async function claimDeviceIfUnowned(userHash: string, sign: (challenge: U
 	if (identity.adminHash !== null) return identity.adminHash === userHash ? 'owner' : 'other';
 	try {
 		const { challenge_id: challengeId, challenge } = await api.getChallenge();
-		const signature = toBase64(await sign(new TextEncoder().encode(challenge))).replace(/=+$/, '');
+		const signature = toBase64Unpadded(await sign(new TextEncoder().encode(challenge)));
 		const resp = await api.claimOwner(userHash, challengeId, signature);
 		if (!resp.ok) return 'refused';
 		const body = (await resp.json().catch(() => null)) as { admin?: unknown } | null;

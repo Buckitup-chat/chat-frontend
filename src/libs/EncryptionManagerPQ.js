@@ -590,8 +590,9 @@ export class EncryptionManagerPQ extends EventTarget {
     // The first person to sign in on a device owns it: one whose card reached it
     // by sync claims it here. Background, like the drain.
     const signingKey = this.#signingKeyOf(userHash);
-    claimDeviceIfUnowned(userHash, async (challenge) => ml_dsa87.sign(challenge, await signingKey()))
-      .catch((e) => console.warn('[EncryptionManagerPQ] device claim failed:', e?.message ?? e));
+    void claimDeviceIfUnowned(userHash, async (challenge) => ml_dsa87.sign(challenge, await signingKey())).then((claim) => {
+      if (claim === 'refused') console.warn('[EncryptionManagerPQ] the server refused this account\'s claim to the device');
+    });
   }
 
   // Registration and import: open the account locally without activating it.
