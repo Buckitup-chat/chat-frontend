@@ -490,15 +490,19 @@ describe('FRON-23: the account that starts a grant is the one that signs it', ()
 		await register(Bob);
 		await register(Owner);
 		const owner = accountOf(Owner);
-		let answer!: () => void;
-		deviceIdentity = () => new Promise<Response>((resolve) => { answer = () => resolve(identityFor(owner)()); });
+		// Signing in also asks for the device identity, to claim an ownerless device:
+		// let those requests finish, count from here, and answer every request held.
+		await settle();
+		const held: (() => void)[] = [];
+		deviceIdentity = () => new Promise<Response>((resolve) => { held.push(() => resolve(identityFor(owner)())); });
+		const before = deviceIdentityRequests;
 		const { store } = Owner.app;
 
 		const confirming = store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
-		await vi.waitFor(() => expect(deviceIdentityRequests).toBe(1), { timeout: 10_000 });
+		await vi.waitFor(() => expect(deviceIdentityRequests).toBe(before + 1), { timeout: 10_000 });
 		await store.logout();
 		await store.registerNewUser({ name: 'Second' } as never);
-		answer();
+		for (const answer of held) answer();
 		await confirming;
 
 		await settle();

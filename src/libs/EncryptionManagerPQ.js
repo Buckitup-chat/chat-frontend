@@ -21,6 +21,7 @@ import {
 } from '@/lib/data/outbox';
 import { recoverIntents, signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import { requestContactAccess, applyContactAccessIntent } from '@/lib/data/contactVouches';
+import { claimDeviceIfUnowned } from '@/lib/data/deviceOwner';
 import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch } from '@/lib/data/userStorage';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
@@ -585,6 +586,12 @@ export class EncryptionManagerPQ extends EventTarget {
     // Writes queued before a reload/crash can replay now that the signing key
     // is available again. Background: a slow drain must not delay login.
     this.#startOutboxDrain();
+
+    // The first person to sign in on a device owns it: one whose card reached it
+    // by sync claims it here. Background, like the drain.
+    const signingKey = this.#signingKeyOf(userHash);
+    claimDeviceIfUnowned(userHash, async (challenge) => ml_dsa87.sign(challenge, await signingKey()))
+      .catch((e) => console.warn('[EncryptionManagerPQ] device claim failed:', e?.message ?? e));
   }
 
   // Registration and import: open the account locally without activating it.
