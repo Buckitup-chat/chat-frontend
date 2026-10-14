@@ -29,7 +29,7 @@ const makeVault = (id: string) => {
 let events: string[];
 let vaults: Map<string, ReturnType<typeof makeVault>>;
 let discoveredVaultId: string | null;
-let rawStore: { get: (k: string) => Promise<unknown>; set: (k: string, v: unknown) => Promise<void>; remove: (k: string) => Promise<void> };
+let rawStore: { get: (k: string) => Promise<unknown>; set: (k: string, v: unknown) => Promise<void>; remove: (k: string) => Promise<void>; keys: () => Promise<string[]> };
 let cardRows: Map<string, Row>;
 let intentStore: ReturnType<typeof makeStore>;
 let outboxStore: ReturnType<typeof makeStore>;
@@ -46,6 +46,7 @@ let onHttp: ((mutations: Mutation[]) => void) | null;
 vi.mock('@lo-fi/local-vault', () => ({
 	connect: async ({ vaultID, addNewVault, discoverVault }: { vaultID?: string; addNewVault?: boolean; discoverVault?: boolean }) => {
 		if (discoverVault) {
+			events.push('discoverVault');
 			if (!discoveredVaultId) throw new Error("No matching vault found in storage ('idb') for presented passkey");
 			return vaults.get(discoveredVaultId);
 		}
@@ -229,6 +230,7 @@ beforeEach(() => {
 		async get(k) { return raw.get(k); },
 		async set(k, v) { raw.set(k, v); },
 		async remove(k) { raw.delete(k); },
+		async keys() { return [...raw.keys()]; },
 	};
 	intentStore = makeStore('intent', events);
 	outboxStore = makeStore('outbox', events);
@@ -858,7 +860,21 @@ describe('import reports whether the card write is durable', () => {
 		const target = freshManager();
 
 		await expect(target.login(identity.user_hash)).rejects.toBeInstanceOf(LocalVaultMissingError);
+		expect(events).not.toContain('discoverVault');
 		expect(await rawStore.get(`local-vault-${identity.vaultId}`)).toBe(empty);
+	});
+
+	it('does not offer another listed account passkey when this account vault is missing', async () => {
+		const source = freshManager();
+		await source.createUserVault({ name: 'Missing keys' });
+		const first = (await source.getLocalUserCards())[0];
+		await source.createUserVault({ name: 'Other account' });
+		await source.logout();
+		await rawStore.remove(`local-vault-${first.vaultId}`);
+		const target = freshManager();
+
+		await expect(target.login(first.user_hash)).rejects.toBeInstanceOf(LocalVaultMissingError);
+		expect(events).not.toContain('discoverVault');
 	});
 
 	it('finds an existing vault through its passkey when the account card has a stale vault ID', async () => {
@@ -873,6 +889,7 @@ describe('import reports whether the card write is durable', () => {
 		const target = freshManager();
 		await expect(target.login(identity.user_hash)).resolves.toBeTruthy();
 		expect(target.isAuth).toBe(true);
+		expect(events).not.toContain('discoverVault');
 		expect((await target.getLocalUserCards())[0].vaultId).toBe(actualVaultId);
 	});
 
@@ -884,7 +901,7 @@ describe('import reports whether the card write is durable', () => {
 		const second = (await source.getLocalUserCards()).find((card) => card.user_hash !== first.user_hash)!;
 		await source.logout();
 		discoveredVaultId = second.vaultId as string;
-		await rawStore.set('pq-vaults-registry', [{ ...first, vaultId: 'old-vault-id' }, second]);
+		await rawStore.set('pq-vaults-registry', [{ ...first, vaultId: 'old-vault-id' }]);
 
 		const target = freshManager();
 		await expect(target.login(first.user_hash)).rejects.toThrow('different account');
