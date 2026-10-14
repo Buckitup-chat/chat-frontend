@@ -850,18 +850,21 @@ describe('import reports whether the card write is durable', () => {
 		expect(httpSent.flat().some((m) => m.syncMetadata.relation === 'user_cards' && rowOf(m).user_hash === identity.user_hash)).toBe(true);
 	});
 
-	it('reports a missing local vault when passkey discovery finds no encrypted vault', async () => {
+	it('reports a missing local vault before passkey use even when a local passkey identity remains', async () => {
 		const source = freshManager();
 		await source.createUserVault({ name: 'Missing keys' });
 		const identity = (await source.getLocalUserCards())[0];
 		await source.logout();
 		const empty = { data: '' };
+		const passkeyIdentity = { account: 'existing', passkeys: [{ credentialID: 'bitwarden-credential' }] };
+		await rawStore.set('local-identities', { 'account-vault-1': passkeyIdentity });
 		await rawStore.set(`local-vault-${identity.vaultId}`, empty);
 		const target = freshManager();
 
 		await expect(target.login(identity.user_hash)).rejects.toBeInstanceOf(LocalVaultMissingError);
 		expect(events).not.toContain('discoverVault');
 		expect(await rawStore.get(`local-vault-${identity.vaultId}`)).toBe(empty);
+		expect(await rawStore.get('local-identities')).toEqual({ 'account-vault-1': passkeyIdentity });
 	});
 
 	it('does not offer another listed account passkey when this account vault is missing', async () => {
@@ -905,6 +908,38 @@ describe('import reports whether the card write is durable', () => {
 		expect(target.isAuth).toBe(true);
 		expect(events).not.toContain('discoverVault');
 		expect((await target.getLocalUserCards())[0].vaultId).toBe(actualVaultId);
+	});
+
+	it('recovers an ownerless legacy vault only when its signing key matches the selected card', async () => {
+		const source = freshManager();
+		await source.createUserVault({ name: 'Legacy vault' });
+		const identity = (await source.getLocalUserCards())[0];
+		const actualVaultId = identity.vaultId;
+		await source.logout();
+		await rawStore.remove(`pq-vault-owner-${actualVaultId}`);
+		await rawStore.set('pq-vaults-registry', [{ ...identity, vaultId: 'old-vault-id' }]);
+		const target = freshManager();
+
+		await expect(target.login(identity.user_hash)).resolves.toBeTruthy();
+		expect((await target.getLocalUserCards())[0].vaultId).toBe(actualVaultId);
+		expect(await rawStore.get(`pq-vault-owner-${actualVaultId}`)).toBe(identity.user_hash);
+	});
+
+	it('leaves an ownerless vault untouched when its signing key belongs to another account', async () => {
+		const source = freshManager();
+		await source.createUserVault({ name: 'Selected' });
+		const selected = { ...(await source.getLocalUserCards())[0] };
+		await source.createUserVault({ name: 'Other' });
+		const other = (await source.getLocalUserCards()).find(card => card.user_hash !== selected.user_hash)!;
+		await source.logout();
+		await rawStore.remove(`local-vault-${selected.vaultId}`);
+		await rawStore.remove(`pq-vault-owner-${other.vaultId}`);
+		await rawStore.set('pq-vaults-registry', [{ ...selected, vaultId: 'old-vault-id' }]);
+		const target = freshManager();
+
+		await expect(target.login(selected.user_hash)).rejects.toThrow('different account');
+		expect((await target.getLocalUserCards())[0].vaultId).toBe('old-vault-id');
+		expect(await rawStore.get(`pq-vault-owner-${other.vaultId}`)).toBeUndefined();
 	});
 
 	it('does not bind an account card to a different account selected in the passkey prompt', async () => {
