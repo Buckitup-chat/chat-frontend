@@ -243,10 +243,12 @@ describe('destroying an account on this device', () => {
 	it('clears its vault — keys and the recovery\'s candidate key — then drops its card, and leaves the signed-in account its own vault', async () => {
 		const { em, temp, seed } = await twoAccounts();
 		const vault = vaults.get(temp.vaultId);
+		expect(await rawStore.get(`pq-vault-owner-${temp.vaultId}`)).toBe(temp.user_hash);
 		await em.destroyUserVault({ userHash: temp.user_hash });
 		for (const k of ['crypt_skey', 'sign_skey', 'evm_skey', 'recovery_progress']) expect(await vault.get(k)).toBeUndefined();
 		expect(await rawStore.get(`local-vault-${temp.vaultId}`)).toBeUndefined();
 		expect((await em.getLocalUserCards()).map((c) => c.user_hash)).not.toContain(temp.user_hash);
+		expect(await rawStore.get(`pq-vault-owner-${temp.vaultId}`)).toBeUndefined();
 		expect(await em.guardianMetaSeed()).toBe(seed);
 	});
 

@@ -811,6 +811,7 @@ export class EncryptionManagerPQ extends EventTarget {
         await this.#rawStore.remove(`local-vault-${id}`);
         if (this.#currentVault?.id === id) this.#currentVault = null;
       }
+      await this.#rawStore.remove(`pq-vault-owner-${id}`);
     }
     if (card) {
       this.#localUserCards = this.#localUserCards.filter((i) => i.user_hash !== userHash);
