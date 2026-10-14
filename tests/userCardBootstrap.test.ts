@@ -877,6 +877,20 @@ describe('import reports whether the card write is durable', () => {
 		expect(events).not.toContain('discoverVault');
 	});
 
+	it('does not treat an unrelated legacy vault without account keys as a recovery candidate', async () => {
+		const source = freshManager();
+		await source.createUserVault({ name: 'Missing keys' });
+		const identity = (await source.getLocalUserCards())[0];
+		await source.logout();
+		await rawStore.remove(`local-vault-${identity.vaultId}`);
+		vaults.set('legacy-vault', makeVault('legacy-vault'));
+		await rawStore.set('local-vault-legacy-vault', { accountID: 'legacy-account', data: 'sealed' });
+		const target = freshManager();
+
+		await expect(target.login(identity.user_hash)).rejects.toBeInstanceOf(LocalVaultMissingError);
+		expect(events).not.toContain('discoverVault');
+	});
+
 	it('finds an existing vault through its passkey when the account card has a stale vault ID', async () => {
 		const source = freshManager();
 		await source.createUserVault({ name: 'Stale vault ID' });
@@ -900,7 +914,8 @@ describe('import reports whether the card write is durable', () => {
 		await source.createUserVault({ name: 'Second' });
 		const second = (await source.getLocalUserCards()).find((card) => card.user_hash !== first.user_hash)!;
 		await source.logout();
-		discoveredVaultId = second.vaultId as string;
+		await rawStore.remove(`local-vault-${first.vaultId}`);
+		await rawStore.set(`pq-vault-owner-${second.vaultId}`, first.user_hash);
 		await rawStore.set('pq-vaults-registry', [{ ...first, vaultId: 'old-vault-id' }]);
 
 		const target = freshManager();
