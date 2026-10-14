@@ -492,8 +492,23 @@ export class EncryptionManagerPQ extends EventTarget {
     const discoverVault = !vaultEntry?.accountID || !vaultEntry?.data;
     let vault;
     if (discoverVault) {
+      const vaultKeys = await this.#rawStore.keys();
+      const otherCardVaultIds = new Set(this.#localUserCards
+        .filter(card => card.user_hash !== userHash)
+        .map(card => card.vaultId));
+      const candidateKeys = vaultKeys
+        .filter(key => key.startsWith('local-vault-') &&
+          key !== `local-vault-${identity.vaultId}` &&
+          !otherCardVaultIds.has(key.slice('local-vault-'.length)));
+      const candidates = (await Promise.all(candidateKeys.map(async key => ({
+        key,
+        entry: await this.#rawStore.get(key),
+      })))).filter(({ entry }) => entry?.accountID && entry?.data);
+      if (!candidates.length) throw new LocalVaultMissingError();
       try {
-        vault = await connect({ storageType: 'idb', discoverVault: true, keyOptions: VAULT_KEY_OPTIONS });
+        vault = candidates.length === 1
+          ? await connect({ vaultID: candidates[0].key.slice('local-vault-'.length), storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS })
+          : await connect({ storageType: 'idb', discoverVault: true, keyOptions: VAULT_KEY_OPTIONS });
       } catch (e) {
         if (e?.message?.startsWith('No matching vault found in storage')) throw new LocalVaultMissingError();
         throw e;
