@@ -12,15 +12,30 @@ let onRowWritten;     // hook run after each write; a test switches accounts fro
 let cards = new Map();
 
 let clearMode = 'clears'; // 'clears' | 'throws' | 'keeps': a vault whose clear fails, or claims to and does not
+// As @lo-fi/local-vault: clear() removes the vault's row, and reading a vault
+// whose row is gone writes an empty row back and asks for a passkey, which
+// fails for a vault with no account. peek() is the test's own look inside.
 const makeVault = (id) => {
 	const data = new Map();
+	let cleared = false;
+	const removeRow = (k) => (rawStore.remove ? rawStore.remove(k) : rawStore.delete(k));
 	return {
 		id,
 		async set(k, v) { data.set(k, v); },
-		async get(k) { return data.get(k); },
+		async get(k) {
+			if (cleared) {
+				await rawStore.set(`local-vault-${id}`, { data: '' });
+				throw new Error('Vault lock-key access failed');
+			}
+			return data.get(k);
+		},
+		peek: (k) => data.get(k),
 		async clear() {
 			if (clearMode === 'throws') throw new Error('locked');
-			if (clearMode === 'clears') data.clear();
+			if (clearMode !== 'clears') return;
+			data.clear();
+			cleared = true;
+			await removeRow(`local-vault-${id}`);
 		},
 	};
 };
@@ -245,7 +260,7 @@ describe('destroying an account on this device', () => {
 		const vault = vaults.get(temp.vaultId);
 		expect(await rawStore.get(`pq-vault-owner-${temp.vaultId}`)).toBe(temp.user_hash);
 		await em.destroyUserVault({ userHash: temp.user_hash });
-		for (const k of ['crypt_skey', 'sign_skey', 'evm_skey', 'recovery_progress']) expect(await vault.get(k)).toBeUndefined();
+		for (const k of ['crypt_skey', 'sign_skey', 'evm_skey', 'recovery_progress']) expect(vault.peek(k)).toBeUndefined();
 		expect(await rawStore.get(`local-vault-${temp.vaultId}`)).toBeUndefined();
 		expect((await em.getLocalUserCards()).map((c) => c.user_hash)).not.toContain(temp.user_hash);
 		expect(await rawStore.get(`pq-vault-owner-${temp.vaultId}`)).toBeUndefined();
@@ -263,7 +278,7 @@ describe('destroying an account on this device', () => {
 
 		clearMode = 'clears';
 		await em.destroyUserVault({ userHash: 'u_' + 'f'.repeat(128), vaultId: temp.vaultId });
-		expect(await vaults.get(temp.vaultId).get('crypt_skey')).toBeUndefined();
+		expect(vaults.get(temp.vaultId).peek('crypt_skey')).toBeUndefined();
 		expect(await rawStore.get(`local-vault-${temp.vaultId}`)).toBeUndefined();
 	});
 });

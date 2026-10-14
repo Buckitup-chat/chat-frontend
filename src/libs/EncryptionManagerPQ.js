@@ -77,8 +77,6 @@ if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
 class VaultKeyError extends Error {}
 
 /** What an account's vault holds that must be gone once it is destroyed (destroyUserVault). */
-const DESTROYED_VAULT_KEYS = ['sign_skey', 'crypt_skey', 'evm_skey', 'contact_skey', 'meta_seed', 'recovery_progress'];
-
 export class LocalVaultMissingError extends VaultKeyError {
   constructor() {
     super('This account is listed on this device, but its encrypted keys are missing. Restore it from a backup or another device.');
@@ -786,8 +784,8 @@ export class EncryptionManagerPQ extends EventTarget {
   /**
    * Destroys an account on this device for good, or throws: its vault — the
    * keys, crypt_skey among them, and anything else kept beside them, such as a
-   * recovery's candidate key — is cleared and checked to be empty before the
-   * vault's entry and the account's card go. A vault that does not clear
+   * recovery's candidate key — is cleared, and its row checked to be gone,
+   * before the account's card goes. A vault that does not clear
    * leaves both in place, so the caller can try again; with `vaultId` it is
    * found even once the card is gone. The account signed in now, if another,
    * keeps its own vault open.
@@ -804,11 +802,12 @@ export class EncryptionManagerPQ extends EventTarget {
           ? this.#currentVault
           : await connect({ vaultID: id, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS });
         await vault.clear();
-        for (const key of DESTROYED_VAULT_KEYS) {
-          if ((await vault.get(key)) != null) throw new Error('The account\'s vault on this device did not clear.');
+        // A cleared vault has no row left; reading one would write an empty row
+        // back and ask for a passkey, so the row is what is checked.
+        if ((await this.#rawStore.get(`local-vault-${id}`)) != null) {
+          throw new Error('The account\'s vault on this device did not clear.');
         }
         if (stored.accountID) removeLocalAccount(stored.accountID);
-        await this.#rawStore.remove(`local-vault-${id}`);
         if (this.#currentVault?.id === id) this.#currentVault = null;
       }
       await this.#rawStore.remove(`pq-vault-owner-${id}`);
