@@ -894,10 +894,6 @@ export class EncryptionManagerPQ extends EventTarget {
     return bytesToHex(signature.toCompactRawBytes());
   }
 
-  async getEvmSkey() {
-    return this.#evmSkey;
-  }
-
   /**
    * The guardian meta seed, hex, read from the vault. Made with the account
    * (createUserVault), so every device of it holds the same one; with

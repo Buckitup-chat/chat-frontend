@@ -103,9 +103,6 @@ export default defineConfig(({ command }) => {
 			),
 			API_URL: JSON.stringify(apiBase),
 			IS_PRODUCTION: isProduction,
-			IS_PRODUCTION_API: isProduction,
-			API_SURL: JSON.stringify(isLocalhost ? `http://${DOMAIN}` : apiBase),
-			API_SPATH: JSON.stringify('/api'),
 			TM_BOT: JSON.stringify(isLocalhost ? 'BuckitUpLocalBot' : 'BuckitUpDemoBot'),
 		},
 		resolve: {
