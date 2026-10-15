@@ -20,6 +20,9 @@ class FakeEM extends EventTarget {
 		this.stored = stripPatchDirectives(mergeJsonPatch(this.stored, { contacts: edits }));
 		return this.list;
 	}
+	async saveContacts(edits) {
+		return { contacts: await this.patchContacts(edits), status: 'synced' };
+	}
 	fakeLogin(hash) {
 		this.#userHash = hash;
 		this.dispatchEvent(new CustomEvent('authChange', { detail: { isAuthenticated: true, userHash: hash } }));

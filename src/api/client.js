@@ -43,6 +43,14 @@ export const api = {
     });
   },
 
+  getDeviceIdentity: async () => {
+    const resp = await timedFetch(`${ELECTRIC_API_URL}/device_identity`, {
+      headers: { accept: "application/json" },
+    });
+    if (!resp.ok) throw new Error(`device_identity: HTTP ${resp.status}`);
+    return resp.json();
+  },
+
   getChallenge: async () => {
     const resp = await timedFetch(`${ELECTRIC_API_URL}/challenge`, {
       headers: { accept: "application/json" },

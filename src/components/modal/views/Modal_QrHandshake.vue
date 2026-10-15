@@ -192,6 +192,14 @@ const onHandshakeCompleted = (peerData) => {
 	contact.value = { ...peerData, viaHandshake: true, confirmed: cardVouchesForContactKey(card, peerData.contact_pkey) };
 };
 
+const onDeviceOnly = (saved) => !!saved?.status && saved.status !== 'synced';
+const notSyncedFooter = (saved) => {
+	if (!onDeviceOnly(saved)) return null;
+	return saved.status === 'awaiting-approval'
+		? 'It reaches the server once the device owner approves your account'
+		: 'It reaches the server when this device can send it';
+};
+
 const notConfirmedFooter = () =>
 	contact.value.viaHandshake && !contact.value.confirmed
 		? 'Not confirmed: the key they showed is not the one on their card'
@@ -232,11 +240,11 @@ const addContact = async () => {
 			// Scanned in person now, after being added by id before: that is what
 			// confirms it, with the key the handshake proved.
 			const confirmsIt = contact.value.confirmed && !existingContact.confirmed;
-			if (confirmsIt) await $userPQ.confirmContact(contact.value.user_hash, contact.value.contact_pkey);
+			const saved = confirmsIt ? await $userPQ.confirmContact(contact.value.user_hash, contact.value.contact_pkey) : null;
 			$swal.fire({
 				icon: 'success',
-				title: confirmsIt ? 'Contact confirmed' : 'Contact already in your list',
-				footer: notConfirmedFooter(),
+				title: onDeviceOnly(saved) ? 'Contact confirmed on this device' : confirmsIt ? 'Contact confirmed' : 'Contact already in your list',
+				footer: notSyncedFooter(saved) ?? notConfirmedFooter(),
 				timer: 15000,
 			});
 			manual.value = false;
@@ -250,16 +258,16 @@ const addContact = async () => {
 		}
 
 		const fields = { name: contact.value.name, notes: '', hidden: false };
-		if (contact.value.confirmed) {
-			await $userPQ.confirmContact(contact.value.user_hash, contact.value.contact_pkey, fields);
-		} else {
-			await $userPQ.saveContact(contact.value.user_hash, { ...fields, contact_pkey: contact.value.contact_pkey });
-		}
+		const saved = contact.value.confirmed
+			? await $userPQ.confirmContact(contact.value.user_hash, contact.value.contact_pkey, fields)
+			: await $userPQ.saveContact(contact.value.user_hash, { ...fields, contact_pkey: contact.value.contact_pkey });
 
 		$swal.fire({
 			icon: 'success',
-			title: contact.value.confirmed ? 'Contact added and confirmed' : 'Contact added',
-			footer: notConfirmedFooter() ?? 'Now you can name it and make notes',
+			title: onDeviceOnly(saved)
+				? (contact.value.confirmed ? 'Contact confirmed on this device' : 'Contact added on this device')
+				: (contact.value.confirmed ? 'Contact added and confirmed' : 'Contact added'),
+			footer: notSyncedFooter(saved) ?? notConfirmedFooter() ?? 'Now you can name it and make notes',
 			timer: 15000,
 		});
 		

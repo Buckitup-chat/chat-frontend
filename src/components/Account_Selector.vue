@@ -324,6 +324,19 @@ const signinPQ = async () => {
 		$mitt.emit('modal::close');
 	} catch (error) {
 		console.error('signin', error);
+		if (error?.name === 'LocalVaultMissingError') {
+			$swal.fire({
+				icon: 'error',
+				title: 'Account keys missing on this device',
+				text: 'Restore this account from a backup or another device.',
+			});
+		} else if (error?.name === 'AccountPasskeyMismatchError') {
+			$swal.fire({
+				icon: 'error',
+				title: 'Passkey belongs to another account',
+				text: 'Choose the Bitwarden passkey for the selected account and try again.',
+			});
+		}
 	}
 
 	console.log('is loader next')

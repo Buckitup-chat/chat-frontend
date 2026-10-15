@@ -39,6 +39,9 @@ export const toBase64 = (bytes: Uint8Array): string => {
 	return btoa(binary);
 };
 
+/** Standard alphabet without '=' padding, as binary columns travel in shapes and messages. */
+export const toBase64Unpadded = (bytes: Uint8Array): string => toBase64(bytes).replace(/=+$/, '');
+
 /**
  * Restores stripped '=' padding.
  *
@@ -120,8 +123,10 @@ export const encodeField = (key: string, value: SignableValue): string => {
 
 	if (Array.isArray(value)) {
 		// Binary arrays (files.chunk_sign_hashes) concatenate their elements'
-		// base64 with no separator.
-		return value.map((el) => (typeof el === 'string' ? el : toBase64(el))).join('');
+		// padded base64 with no separator. Each element is normalized as a
+		// `_b64` value is: the shape serves them unpadded, and a SHA3-512 hash
+		// is 64 bytes, never a multiple of 3.
+		return value.map((el) => encodeBase64Value(el)).join('');
 	}
 
 	if (value === true) return 'true';

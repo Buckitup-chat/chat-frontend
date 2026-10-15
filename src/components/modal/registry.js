@@ -122,6 +122,15 @@ export const modalRegistry = {
 		modalClass: 'modal-md',
 	},
 
+	// Setting up a community backup and following its progress: one modal with
+	// its own screens and header (Modal_Community_Backup).
+	community_backup: {
+		header: false,
+		modalStatic: true,
+		component: 'Modal_Community_Backup',
+		modalClass: 'modal-md',
+	},
+
 	...(SANDBOX_SURFACES ? SANDBOX_MODALS : {}),
 };
 

@@ -1,4 +1,5 @@
-// Decrypted media cache, keyed by fileId.
+// Decrypted media cache, keyed by fileKey (fileKey.ts): the same file_id from
+// another sender is another file, and must not be shown from here.
 //
 // Chunks are immutable and content-addressed, so a decrypted attachment never
 // goes stale — re-downloading one because the user switched dialogs and came
@@ -20,27 +21,27 @@ interface Entry {
 const entries = new Map<string, Entry>(); // insertion order = LRU order
 let totalBytes = 0;
 
-export const getCachedMedia = (fileId: string): string | null => {
-	const hit = entries.get(fileId);
+export const getCachedMedia = (key: string): string | null => {
+	const hit = entries.get(key);
 	if (!hit) return null;
 	// re-insert to refresh the LRU position
-	entries.delete(fileId);
-	entries.set(fileId, hit);
+	entries.delete(key);
+	entries.set(key, hit);
 	return hit.url;
 };
 
-export const putCachedMedia = (fileId: string, bytes: Uint8Array, mimeType: string): string => {
-	const existing = entries.get(fileId);
+export const putCachedMedia = (key: string, bytes: Uint8Array, mimeType: string): string => {
+	const existing = entries.get(key);
 	if (existing) return existing.url;
 
 	const url = URL.createObjectURL(new Blob([bytes as unknown as globalThis.BlobPart], { type: mimeType }));
-	entries.set(fileId, { url, size: bytes.length });
+	entries.set(key, { url, size: bytes.length });
 	totalBytes += bytes.length;
 
-	for (const [key, entry] of entries) {
-		if (totalBytes <= MAX_BYTES || key === fileId) break;
+	for (const [old, entry] of entries) {
+		if (totalBytes <= MAX_BYTES || old === key) break;
 		URL.revokeObjectURL(entry.url);
-		entries.delete(key);
+		entries.delete(old);
 		totalBytes -= entry.size;
 	}
 	return url;

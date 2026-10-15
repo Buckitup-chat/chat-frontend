@@ -85,4 +85,19 @@ export const SIGNABLE: Record<string, SignableSchema> = {
 		owner_timestamp: 'int',
 		deleted_flag: 'bool',
 	},
+	file_chunks: {
+		file_id: 'text',
+		chunk_index: 'int',
+		data_hash: 'text',
+		size: 'int',
+		uploader_hash: 'text',
+		owner_timestamp: 'int',
+	},
+	vouch_tokens: {
+		kind: 'text',
+		issuer_hash: 'text',
+		subject_hash: 'text',
+		owner_timestamp: 'int',
+		deleted_flag: 'bool',
+	},
 };

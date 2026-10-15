@@ -1,7 +1,7 @@
 # Task: access gating and vouch tokens (client side)
 
 **Sources:** `chat` `main` at `ce00e687` (2026-10-03):
-`docs/pq/reqs/pq_access_gating.in_progress.md` (§ Client Behaviour is the
+`docs/pq/reqs/pq_access_gating.done.md` (§ Client Behaviour is the
 contract for this task) and `docs/pq/reqs/pq_vouch_tokens.in_progress.md`.
 **Frontend base:** `chat-frontend` `main` at `caa3a4b`.
 
