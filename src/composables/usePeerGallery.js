@@ -2,8 +2,7 @@ import { ref, computed, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useAvatarsStore } from '@/store/avatars.store';
 import { galleryOf } from '@/lib/avatars/gallery';
-import { cachedPhotoOf } from '@/lib/avatars/display';
-import { isAvatarPart, photoToWire } from '@/lib/pq/content';
+import { isAvatarPart } from '@/lib/pq/content';
 import { useGalleryViewer } from '@/composables/useGalleryViewer';
 
 /**
@@ -57,19 +56,12 @@ export function usePeerGallery({ peerHash, messages, rows, live }) {
 	const read = computed(() => isDialogRead(live.value === true, rows.value || [], messages.value || []));
 
 	// The contact's cached photo follows the dialog's current one, from a
-	// dialog read whole only: a disk copy or a half-read dialog may show an
-	// older photo, or none, and must not overwrite what the contact has.
-	// Keyed on the ids, so a message tick that changes neither writes
-	// nothing; a write shows in contactsMap at once (userPQ writeContacts), so
-	// the next tick finds it done.
-	watch([peerHash, currentId, read], ([peer, id, whole]) => {
-		const contact = $userPQ.contactsMap?.[peer];
-		if (!peer || !contact || !whole) return;
-		const cachedId = cachedPhotoOf(contact.avatar)?.avatarId ?? null;
-		if (id === cachedId || (!id && !contact.avatar)) return;
-		const value = id ? { id, photo: photoToWire(peerGallery.value[0].photo) } : null;
-		if (!id) $avatars.forgetContactThumb(peer);
-		$userPQ.cacheContactAvatar(peer, value).catch((e) => console.warn('[chat] avatar cache not updated:', e?.message ?? e));
+	// dialog read whole only (avatars.store followContactAvatar). Keyed on
+	// the ids, so a message tick that changes neither writes nothing.
+	watch([peerHash, currentId, read], ([peer, , whole]) => {
+		if (!whole) return;
+		$avatars.followContactAvatar(peer, peerGallery.value[0] ?? null)
+			.catch((e) => console.warn('[chat] avatar cache not updated:', e?.message ?? e));
 	}, { immediate: true });
 
 	// The viewer: the gallery of whoever's picture or photo line was tapped.

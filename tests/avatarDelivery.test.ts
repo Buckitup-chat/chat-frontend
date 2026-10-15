@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { loadOwed, updateOwed } from '@/lib/avatars/localStore';
 import { useMemoryAvatarStore } from './helpers/avatarLocalStore';
-import { createAvatarDelivery, changeMessage, NO_KEY_TTL_MS, PROBE_CONCURRENCY, type DeliveryDeps } from '@/lib/avatars/delivery';
+import { createAvatarDelivery, changeMessage, PROBE_CONCURRENCY, type DeliveryDeps } from '@/lib/avatars/delivery';
 import { galleryOf, type GalleryEntry, type GalleryMessage } from '@/lib/avatars/gallery';
 import type { AvatarPhoto, ContentPart } from '@/lib/pq/content';
 
@@ -28,7 +28,6 @@ const world = (opts: { gallery?: GalleryEntry[]; contacts?: string[]; sentTo?: s
 		slot: null as GalleryEntry[] | null, freshReads: 0, unreadable: new Set(opts.unreadable ?? []),
 	};
 	let seq = 1;
-	const contacts = opts.contacts ?? [];
 	const deps: DeliveryDeps = {
 		gallery: async ({ fresh = false } = {}) => {
 			if (fresh) {
@@ -37,8 +36,8 @@ const world = (opts: { gallery?: GalleryEntry[]; contacts?: string[]; sentTo?: s
 			}
 			return state.gallery;
 		},
-		contacts: () => contacts,
-		isTarget: (p) => contacts.includes(p),
+		peers: async () => [...dialogs.keys()],
+		isTarget: (p) => p !== ME,
 		probe: async (p, { requireOwnKey }) => {
 			state.probes.push(p);
 			state.inProbe++;
@@ -67,6 +66,12 @@ const kinds = (parts: ContentPart[]) => parts.map((p) => `${p.kind}:${(p as { av
 const sendAvatar = (w: ReturnType<typeof world>, peer: string, c: string) => w.deps.send(peer, [{ kind: 'avatar', avatarId: id(c), photo: photo(1) }]);
 
 describe('rule 1: a change goes to every dialog the account has', () => {
+	it('sends a later change to someone the account wrote to without adding as a contact', async () => {
+		const w = world({ gallery: [entry('b'), entry('a')], sentTo: ['P1'] });
+		const result = await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('b'), photo: photo(2) });
+		expect(result.sent).toEqual(['P1']);
+		expect(w.readerGallery('P1')).toEqual(['b']);
+	});
 	it('sends the change alone where the dialog already carries the gallery', async () => {
 		const w = world({ gallery: [entry('b'), entry('a')], contacts: ['P1', 'P2'], sentTo: ['P1', 'P2'] });
 		await sendAvatar(w, 'P1', 'a');
@@ -77,24 +82,20 @@ describe('rule 1: a change goes to every dialog the account has', () => {
 		expect(w.sends.map((s) => kinds(s.parts))).toEqual([['avatar:b'], ['avatar:b']]);
 	});
 
-	it('sends the whole gallery where the dialog has none of it yet, not a gallery of one', async () => {
+	it('sends only the current photo where the dialog has none yet', async () => {
 		const w = world({ gallery: [entry('c'), entry('b'), entry('a')], contacts: ['P1'], sentTo: ['P1'] });
 		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('c'), photo: photo(1) });
-		expect(kinds(w.sends[0].parts)).toEqual(['avatar:a', 'avatar:b', 'avatar:c']);
-		expect(w.readerGallery('P1')).toEqual(['c', 'b', 'a']);
+		expect(kinds(w.sends[0].parts)).toEqual(['avatar:c']);
+		expect(w.readerGallery('P1')).toEqual(['c']);
 	});
 
-	it('skips contacts never written to, and does not read their dialogs again for the next change', async () => {
+	it('sends to every written dialog, including one outside contacts', async () => {
 		const w = world({ gallery: [entry('a')], contacts: ['P1', 'P2'], sentTo: ['P1', 'STRANGER'] });
 		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
-		expect(w.sends.map((s) => s.peer)).toEqual(['P1']);
+		expect(w.sends.map((s) => s.peer)).toEqual(['P1', 'STRANGER']);
 		w.state.probes.length = 0;
 		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
-		expect(w.state.probes).toEqual(['P1']);
-		w.state.clock += NO_KEY_TTL_MS + 1;
-		w.state.probes.length = 0;
-		await w.delivery.deliverChange({ kind: 'avatar', avatarId: id('a'), photo: photo(1) });
-		expect(w.state.probes.sort()).toEqual(['P1', 'P2']);
+		expect(w.state.probes).toEqual(['P1', 'STRANGER']);
 	});
 
 	it('a contact the account then writes to is probed again at once', async () => {
@@ -115,13 +116,13 @@ describe('rule 1: a change goes to every dialog the account has', () => {
 		expect(w.state.maxInProbe).toBeLessThanOrEqual(PROBE_CONCURRENCY);
 	});
 
-	it('a removal reaches a dialog carrying the gallery as the removal alone', async () => {
+	it('a removal also gives the dialog its new current photo', async () => {
 		const w = world({ gallery: [entry('a')], contacts: ['P1'], sentTo: ['P1'] });
 		await sendAvatar(w, 'P1', 'a');
 		await sendAvatar(w, 'P1', 'b');
 		w.sends.length = 0;
 		await w.delivery.deliverChange({ kind: 'avatar_removed', avatarId: id('b') });
-		expect(kinds(w.sends[0].parts)).toEqual(['avatar_removed:b']);
+		expect(kinds(w.sends[0].parts)).toEqual(['avatar:a', 'avatar_removed:b']);
 		expect(w.readerGallery('P1')).toEqual(['a']);
 	});
 
@@ -142,16 +143,16 @@ describe('rule 1: a change goes to every dialog the account has', () => {
 	});
 });
 
-describe('rule 2: the first message in a dialog brings the gallery', () => {
+describe('rule 2: the first message in a dialog brings the current photo', () => {
 	const text: ContentPart[] = [{ kind: 'text', text: 'hello' }];
 
-	it('sends the gallery, oldest first, once', async () => {
+	it('sends only the current photo, once', async () => {
 		const w = world({ gallery: [entry('b'), entry('a')], contacts: ['P1'] });
 		expect(await w.delivery.onOwnSend('P1', text)).toBe('sent');
-		expect(kinds(w.sends[0].parts)).toEqual(['avatar:a', 'avatar:b']);
+		expect(kinds(w.sends[0].parts)).toEqual(['avatar:b']);
 		expect(await w.delivery.onOwnSend('P1', text)).toBe('present');
 		expect(w.sends).toHaveLength(1);
-		expect(w.readerGallery('P1')).toEqual(['b', 'a']);
+		expect(w.readerGallery('P1')).toEqual(['b']);
 	});
 
 	it('two messages sent at once still bring one snapshot: the second probe sees the first send', async () => {
@@ -183,10 +184,10 @@ describe('rule 2: the first message in a dialog brings the gallery', () => {
 		expect(w.sends).toHaveLength(0);
 	});
 
-	it('sends nothing to someone who is not a contact', async () => {
+	it('sends the gallery with the first message to someone outside contacts', async () => {
 		const w = world({ gallery: [entry('a')], contacts: [] });
-		expect(await w.delivery.onOwnSend('STRANGER', text)).toBe('skipped');
-		expect(w.state.probes).toEqual([]);
+		expect(await w.delivery.onOwnSend('STRANGER', text)).toBe('sent');
+		expect(w.readerGallery('STRANGER')).toEqual(['a']);
 	});
 
 	it('a dialog it could not read is tried again at the next message, not guessed', async () => {
@@ -197,14 +198,15 @@ describe('rule 2: the first message in a dialog brings the gallery', () => {
 
 	// Whichever runs first sends the gallery; the other then finds the dialog
 	// carrying it and adds at most the change itself.
-	it('a change and a first message racing in one dialog send one gallery between them', async () => {
+	it('a change and a first message racing send only the current photo', async () => {
 		const w = world({ gallery: [entry('b'), entry('a')], contacts: ['P1'], sentTo: ['P1'] });
 		await Promise.all([
 			w.delivery.deliverChange({ kind: 'avatar', avatarId: id('b'), photo: photo(1) }),
 			w.delivery.onOwnSend('P1', text),
 		]);
-		expect(w.sends.filter((s) => s.parts.length > 1)).toHaveLength(1);
-		expect(w.readerGallery('P1')).toEqual(['b', 'a']);
+		expect(w.sends.length).toBeGreaterThanOrEqual(1);
+		expect(w.sends.every((s) => kinds(s.parts).join(',') === 'avatar:b')).toBe(true);
+		expect(w.readerGallery('P1')).toEqual(['b']);
 	});
 });
 
@@ -262,7 +264,7 @@ describe('nothing owed is dropped', () => {
 
 		w.deps.send = send;
 		expect(await delivery.onOwnSend('P1', text)).toBe('caught-up');
-		expect(w.readerGallery('P1')).toEqual(['b', 'a']);
+		expect(w.readerGallery('P1')).toEqual(['b']);
 		expect(await loadOwed(ME)).toEqual({});
 	});
 
@@ -277,12 +279,12 @@ describe('nothing owed is dropped', () => {
 		expect(await loadOwed(ME)).toEqual({});
 	});
 
-	it('what is owed to someone not (yet) a contact is kept, not sent and not dropped', async () => {
+	it('what is owed to someone outside contacts is sent', async () => {
 		const w = world({ gallery: [entry('a')], contacts: [] });
 		await updateOwed(ME, (o) => { o.P9 = { first: true }; });
 		const result = await w.delivery.retryOwed();
-		expect(result).toEqual({ sent: [], failed: [], pending: [] });
-		expect(Object.keys(await loadOwed(ME))).toEqual(['P9']);
+		expect(result).toEqual({ sent: ['P9'], failed: [], pending: [] });
+		expect(await loadOwed(ME)).toEqual({});
 	});
 
 	it('a dialog the account has not sent in is owed nothing', async () => {

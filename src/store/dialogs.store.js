@@ -1481,21 +1481,26 @@ export const useDialogsStore = defineStore('dialogs', () => {
      * word on their pieces (pq_recovery_shares § Holding).
      */
     const PEER_READ_BUDGET_MS = 15_000;
-    const readPeerParts = async (peerHash, kinds, { deliveredOf = [], newestMatch = null, after = null } = {}) => {
+    const readPeerParts = async (peerHash, kinds, { deliveredOf = [], newestMatch = null, after = null, requireComplete = false } = {}) => {
         const me = $userPQ.currentUserHash;
         const dialogHash = getDialogHash(peerHash);
         if (!dialogHash || !peerHash || peerHash === me) return null;
         const wanted = (p) => kinds.includes(p.kind) && (!newestMatch || newestMatch(p));
         const stillMine = () => $userPQ.currentUserHash === me;
         const read = withDialogCollections(dialogHash, async (colls) => {
+            if (requireComplete && !(await liveWithinBudget(colls.messages))) return null;
             const gated = await admittedRowsOf(dialogHash, colls, stillMine);
             if (!gated) return null;
+            if (requireComplete && gated.rows.some((row) => row.sender_hash === peerHash
+                && !isRowAdmitted(dialogHash, row) && !isRevisionTerminal(dialogHash, row.message_id, row.sign_hash))) return null;
             const floor = after ? feedOrderKey(after, 0) : -Infinity;
             const peerRows = gated.admitted.filter((row) => row.sender_hash === peerHash && !row.deleted_flag
                 && feedOrderKey(row.message_id, row.owner_timestamp) >= floor);
             const messages = [];
             for (const row of newestMatch ? [...peerRows].reverse() : peerRows) {
-                const parts = ((await decryptMessageRow(row, colls)).parts || []).filter(wanted);
+                const decrypted = await decryptMessageRow(row, colls);
+                if (requireComplete && decrypted.awaitingKey) return null;
+                const parts = (decrypted.parts || []).filter(wanted);
                 if (!parts.length) continue;
                 messages.push({ messageId: row.message_id, senderHash: row.sender_hash, parts });
                 if (newestMatch) break;

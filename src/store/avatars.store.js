@@ -5,7 +5,8 @@
 // The gallery lives in the `avatars` user_storage slot, shared by the
 // owner's devices; every change to it goes out as dialog messages
 // (lib/avatars/delivery). A reader's view of someone's gallery is not kept
-// here: it is computed from the dialog (composables/usePeerGallery).
+// here: it is computed from the dialog (composables/usePeerGallery). What a
+// reader keeps is a peer's current photo, also cached next to saved contacts.
 
 import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
@@ -13,10 +14,12 @@ import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import {
-	AVATARS_SLOT, ownGalleryOf, nextAt, addPatch, setMainPatch, removePatch, newAvatarId,
+	AVATARS_SLOT, ownGalleryOf, nextAt, addPatch, setMainPatch, removePatch, newAvatarId, galleryOf,
 } from '@/lib/avatars/gallery';
 import { createAvatarDelivery } from '@/lib/avatars/delivery';
-import { cachedPhotoOf, imageMime, inlineDataUrl } from '@/lib/avatars/display';
+import { peersWeWrote } from '@/lib/data/outboundDialogs';
+import { peersWhoWrote } from '@/lib/data/inboundDialogs';
+import { cachedPhotoOf, contactAvatarChange, imageMime, inlineDataUrl } from '@/lib/avatars/display';
 import { thumbDataUrl } from '@/lib/data/imageMeta';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
 import { fileKey } from '@/lib/data/fileKey';
@@ -28,10 +31,11 @@ import { resizeImageUrl } from '@/utils/imageResize';
 export const PHOTO_RETRY_AFTER_MS = 60_000;
 /** The account's own picture, kept on the device for the menu and the account list. */
 const OWN_PICTURE_SIDE = 128;
-/** A contact's picture in the lists. */
+/** A peer's picture in the lists. */
 const CONTACT_THUMB_SIDE = 96;
 /** A gallery read this recently answers "is there any photo" without reading the slot again. */
 const OWN_GALLERY_MAX_AGE_MS = 60_000;
+export const CONTACT_PHOTO_REREAD_MS = 60_000;
 
 export const useAvatarsStore = defineStore('avatars', () => {
 	const $userPQ = userPQStore();
@@ -127,6 +131,73 @@ export const useAvatarsStore = defineStore('avatars', () => {
 		if (owner) forgetThumb(owner, userHash).catch((e) => console.warn('[avatars] thumbnail not removed:', e?.message ?? e));
 	};
 
+	const peerAvatars = ref({});
+	const peerAvatarSrc = (peerHash) => {
+		const owner = $userPQ.currentUserHash;
+		return owner && peerHash ? contactAvatarSrc(peerAvatars.value[`${owner}|${peerHash}`], peerHash) : '';
+	};
+
+	const followContactAvatar = async (peerHash, current) => {
+		const owner = $userPQ.currentUserHash;
+		if (!owner || !peerHash || peerHash === owner) return;
+		const key = `${owner}|${peerHash}`;
+		const peerValue = contactAvatarChange(peerAvatars.value[key], current);
+		if (peerValue !== undefined) peerAvatars.value = { ...peerAvatars.value, [key]: peerValue };
+		const contact = $userPQ.contactsMap?.[peerHash];
+		if (!contact) return;
+		const value = contactAvatarChange(contact.avatar, current);
+		if (value === undefined) return;
+		if (!value) forgetContactThumb(peerHash);
+		await $userPQ.cacheContactAvatar(peerHash, value);
+	};
+
+	const contactReadAt = new Map();
+	let contactSweep = null;
+	const pendingPeers = new Set();
+
+	const refreshContactAvatars = (peers = null) => {
+		const owner = $userPQ.currentUserHash;
+		if (!owner) return Promise.resolve();
+		for (const peer of peers ?? Object.keys($userPQ.contactsMap ?? {})) {
+			if (peer !== owner) pendingPeers.add(`${owner}|${peer}`);
+		}
+		if (contactSweep) return contactSweep;
+		const sweep = (async () => {
+			while (pendingPeers.size) {
+				const next = pendingPeers.values().next().value;
+				pendingPeers.delete(next);
+				const [targetOwner, peerHash] = next.split('|');
+				if (targetOwner !== owner) continue;
+				if ($userPQ.currentUserHash !== owner) return;
+				const key = `${owner}|${peerHash}`;
+				if (Date.now() - (contactReadAt.get(key) ?? -Infinity) < CONTACT_PHOTO_REREAD_MS) continue;
+				contactReadAt.set(key, Date.now());
+				try {
+					const read = await $dialogs.readPeerParts(peerHash, ['avatar', 'avatar_removed'], { requireComplete: true });
+					if (!read || $userPQ.currentUserHash !== owner) continue;
+					await followContactAvatar(peerHash, galleryOf(read.messages, peerHash)[0] ?? null);
+				} catch (e) {
+					console.warn('[avatars] peer photo not updated:', e?.message ?? e);
+				}
+			}
+		})().finally(() => { if (contactSweep === sweep) contactSweep = null; });
+		contactSweep = sweep;
+		return sweep;
+	};
+
+	const refreshPeerAvatars = async (visiblePeers) => {
+		const owner = $userPQ.currentUserHash;
+		if (!owner) return;
+		try {
+			const [outbound, inbound] = await Promise.all([peersWeWrote(owner), peersWhoWrote(owner)]);
+			if ($userPQ.currentUserHash !== owner) return;
+			const participants = new Set([...outbound, ...inbound]);
+			return refreshContactAvatars(visiblePeers.filter((peer) => participants.has(peer)));
+		} catch (e) {
+			console.warn('[avatars] peer dialogs not read:', e?.message ?? e);
+		}
+	};
+
 	// ---------- the owner's gallery ----------
 
 	const own = ref({ owner: null, record: null, at: 0 });
@@ -202,8 +273,8 @@ export const useAvatarsStore = defineStore('avatars', () => {
 				sameAccount();
 				return loadOwn(fresh ? { fresh } : { maxAgeMs: OWN_GALLERY_MAX_AGE_MS });
 			},
-			contacts: () => Object.keys($userPQ.contactsMap).filter((p) => p !== owner),
-			isTarget: (peerHash) => peerHash !== owner && !!$userPQ.contactsMap[peerHash],
+			peers: () => peersWeWrote(owner),
+			isTarget: (peerHash) => peerHash !== owner,
 			probe: async (peerHash, opts) => {
 				sameAccount();
 				const read = await $dialogs.ownDialogCarriesAvatar(peerHash, opts).catch((e) => {
@@ -305,10 +376,12 @@ export const useAvatarsStore = defineStore('avatars', () => {
 			.catch((e) => console.warn('[avatars] gallery not loaded:', e));
 	}, { immediate: true });
 
-	// What was owed when the app last ran goes out once the contacts it is
-	// owed to are known — they load after sign-in.
+	// What was owed when the app last ran goes out after sign-in, independent
+	// of the contact list. Cached contact photos are read once contacts load.
 	watch(() => [$userPQ.currentUserHash, Object.keys($userPQ.contactsMap ?? {}).length > 0], ([owner, haveContacts], before) => {
-		if (owner && haveContacts && (before?.[0] !== owner || !before?.[1])) void retryOwed();
+		if (!owner) return;
+		if (before?.[0] !== owner) void retryOwed();
+		if (haveContacts && (before?.[0] !== owner || !before?.[1])) void refreshContactAvatars();
 	}, { immediate: true });
 
 	return {
@@ -320,7 +393,11 @@ export const useAvatarsStore = defineStore('avatars', () => {
 		photoUrl,
 		loadPhoto,
 		contactAvatarSrc,
+		peerAvatarSrc,
 		forgetContactThumb,
+		followContactAvatar,
+		refreshContactAvatars,
+		refreshPeerAvatars,
 		retryOwed,
 	};
 });

@@ -1,7 +1,7 @@
 // The avatars store wires the gallery to its slot and its dialogs
 // (pq_avatars): a change is recorded in the slot, then sent to the
-// contacts this account has written to; the first message into a contact's
-// dialog brings the whole gallery. Fakes keep the contracts: the slot merges
+// dialogs this account has written to; the first message into any peer's
+// dialog brings the current photo. Fakes keep the contracts: the slot merges
 // patches like storageIntent, a sent message is readable in its dialog.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
@@ -21,6 +21,7 @@ let slotUnreadable;
 
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 vi.mock('@/store/dialogs.store', () => ({ useDialogsStore: () => dialogs }));
+vi.mock('@/lib/data/outboundDialogs', () => ({ peersWeWrote: async () => [...dialogs.messages.keys()] }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
 		getInstance: () => ({
@@ -41,7 +42,7 @@ vi.mock('@/utils/imageResize', () => ({
 	resizeImageUrl: async (src, side) => ({ dataUrl: `resized(${side}):${src}`, blobFile: null }),
 }));
 
-const { useAvatarsStore, PHOTO_RETRY_AFTER_MS } = await import('@/store/avatars.store');
+const { useAvatarsStore, PHOTO_RETRY_AFTER_MS, CONTACT_PHOTO_REREAD_MS } = await import('@/store/avatars.store');
 const { useMemoryAvatarStore } = await import('./helpers/avatarLocalStore');
 const { getThumb, loadOwed, updateOwed } = await import('@/lib/avatars/localStore');
 
@@ -79,6 +80,14 @@ const fakeDialogs = () => {
 			const own = (messages.get(peer) ?? []).filter((m) => m.senderHash === user.currentUserHash);
 			return { ownKey, carries: own.some((m) => m.parts.some((x) => x.kind === 'avatar')) };
 		},
+		peerReads: new Map(),
+		readCounts: new Map(),
+		async readPeerParts(peer, kinds, opts) {
+			if (kinds.join(',') !== 'avatar,avatar_removed' || opts?.requireComplete !== true) throw new Error('Unexpected peer photo read');
+			this.readCounts.set(peer, (this.readCounts.get(peer) ?? 0) + 1);
+			const messages = this.peerReads.has(peer) ? this.peerReads.get(peer) : [];
+			return messages === null ? null : { messages };
+		},
 		fetches: [],
 		fetchResult: async () => new Uint8Array([1, 2, 3]),
 		async fetchFile(part) {
@@ -115,7 +124,7 @@ beforeEach(() => {
 });
 
 describe('avatars store', () => {
-	it('adds a photo: one upload, recorded in the slot, the own picture follows, sent to the contacts written to', async () => {
+	it('adds a photo: one upload, recorded in the slot, the own picture follows, sent to written dialogs', async () => {
 		const store = useAvatarsStore();
 		const result = await store.addPhoto(photoBlob());
 		expect(dialogs.uploads).toBe(1);
@@ -124,9 +133,9 @@ describe('avatars store', () => {
 		// the own picture is the uploaded bytes, downscaled — nothing downloaded back
 		expect(user.currentUser.avatar).toMatch(/^resized\(128\):blob:/);
 		expect(dialogs.fetches).toEqual([]);
-		expect(result.sent).toEqual([WRITTEN]);
+		expect(result.sent).toEqual([WRITTEN, STRANGER]);
 		expect(kindsSentTo(SILENT)).toEqual([]);
-		expect(kindsSentTo(STRANGER)).toEqual([]);
+		expect(kindsSentTo(STRANGER)).toEqual(['avatar']);
 	});
 
 	it('a second photo goes out as the change alone; every dialog references the same file', async () => {
@@ -147,24 +156,24 @@ describe('avatars store', () => {
 		expect(user.currentUser.avatarId).toBe(oldest);
 		await store.removePhoto(newest);
 		expect(store.ownGallery.map((e) => e.avatarId)).toEqual([oldest]);
-		expect(dialogs.sent.slice(-2).map((s) => s.parts)).toEqual([
+		expect(dialogs.sent.filter((s) => s.peer === WRITTEN).slice(-2).map((s) => s.parts)).toEqual([
 			[{ kind: 'avatar', avatarId: oldest, photo: expect.objectContaining({ kind: 'image' }) }],
-			[{ kind: 'avatar_removed', avatarId: newest }],
+			[{ kind: 'avatar', avatarId: oldest, photo: expect.objectContaining({ kind: 'image' }) }, { kind: 'avatar_removed', avatarId: newest }],
 		]);
 	});
 
-	it('the first message into a contact\'s dialog brings the gallery, once; not into a stranger\'s', async () => {
+	it('the first message brings only the current photo, including outside contacts', async () => {
+		dialogs.messages.delete(STRANGER);
 		const store = useAvatarsStore();
 		await store.addPhoto(photoBlob());
 		await store.addPhoto(photoBlob());
 		await dialogs.sendMessage(SILENT, [{ kind: 'text', text: 'hello' }]);
-		await settle();
+		await vi.waitFor(() => expect(kindsSentTo(SILENT)).toContain('avatar'));
 		await dialogs.sendMessage(SILENT, [{ kind: 'text', text: 'again' }]);
 		await settle();
-		expect(kindsSentTo(SILENT)).toEqual(['text', 'avatar+avatar', 'text']);
+		expect(kindsSentTo(SILENT).filter((kind) => kind === 'avatar')).toEqual(['avatar']);
 		await dialogs.sendMessage(STRANGER, [{ kind: 'text', text: 'hello' }]);
-		await settle();
-		expect(kindsSentTo(STRANGER)).toEqual(['text']);
+		await vi.waitFor(() => expect(kindsSentTo(STRANGER)).toEqual(['text', 'avatar']));
 	});
 
 	it('a delivery still running when the account changes sends nothing from the next one', async () => {
@@ -203,17 +212,68 @@ describe('avatars store', () => {
 		expect(dialogs.sent).toEqual([]);
 	});
 
-	it('what was owed goes out once the contacts it is owed to have loaded', async () => {
+	it('what was owed goes out after sign-in without waiting for contacts', async () => {
 		await updateOwed(ME, (o) => { o[SILENT] = { first: true }; });
 		slot = { avatars: { ['a'.repeat(32)]: { photo: { image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_1', 'k'] }, at: 1 } } };
 		const contacts = user.contactsMap;
 		user.contactsMap = {};
 		useAvatarsStore();
 		await settle();
-		expect(dialogs.sent).toEqual([]);
-		user.contactsMap = contacts;
 		await vi.waitFor(() => expect(kindsSentTo(SILENT)).toEqual(['avatar']));
+		user.contactsMap = contacts;
 		await vi.waitFor(async () => expect(await loadOwed(ME)).toEqual({}));
+	});
+});
+
+describe("contacts' photos, read in the background", () => {
+	const photoOf = (n) => ({ kind: 'image', widthAspect: 1, heightAspect: 1, thumbHashB64: '', name: `p${n}.jpg`, size: 3, mimeType: 'image/jpeg', createdAt: 0, fileId: `f_${n}`, encSecretB64: 'k' });
+	const avatarMsg = (n, c) => ({ messageId: `dmsg_${n}`, senderHash: WRITTEN, parts: [{ kind: 'avatar', avatarId: c.repeat(32), photo: photoOf(n) }] });
+	const cached = (peer) => user.contactsMap[peer]?.avatar?.id;
+	beforeEach(() => {
+		user.cacheContactAvatar = async (hash, avatar) => {
+			user.contactsMap[hash] = { ...user.contactsMap[hash], avatar };
+			return true;
+		};
+	});
+
+	it('after sign-in, each contact gets the current photo of their dialog, without the chat being opened', async () => {
+		dialogs.peerReads.set(WRITTEN, [avatarMsg(1, 'a'), avatarMsg(2, 'b')]);
+		useAvatarsStore();
+		await vi.waitFor(() => expect(cached(WRITTEN)).toBe('b'.repeat(32)));
+		expect(user.contactsMap[WRITTEN].avatar.photo).toEqual({ image: [1, 1, '', 'p2.jpg', 3, 'image/jpeg', 0, 'f_2', 'k'] });
+		expect(cached(SILENT)).toBeUndefined();
+	});
+
+	it('a dialog not read whole changes nothing: neither a clear nor an older photo', async () => {
+		user.contactsMap[WRITTEN].avatar = { id: 'b'.repeat(32), photo: { image: [1, 1, '', 'p2.jpg', 3, 'image/jpeg', 0, 'f_2', 'k'] } };
+		dialogs.peerReads.set(WRITTEN, null);
+		useAvatarsStore();
+		await vi.waitFor(() => expect(dialogs.readCounts.get(WRITTEN)).toBe(1));
+		await settle();
+		expect(cached(WRITTEN)).toBe('b'.repeat(32));
+	});
+
+	it('a dialog read whole with no photo clears the cached one', async () => {
+		user.contactsMap[WRITTEN].avatar = { id: 'b'.repeat(32), photo: { image: [1, 1, '', 'p2.jpg', 3, 'image/jpeg', 0, 'f_2', 'k'] } };
+		useAvatarsStore();
+		await vi.waitFor(() => expect(user.contactsMap[WRITTEN].avatar).toBeNull());
+	});
+
+	it('a dialog is not read again before its re-read time, and is after it', async () => {
+		const store = useAvatarsStore();
+		await vi.waitFor(() => expect(dialogs.readCounts.get(WRITTEN)).toBe(1));
+		await store.refreshContactAvatars();
+		expect(dialogs.readCounts.get(WRITTEN)).toBe(1);
+		const now = Date.now();
+		vi.spyOn(Date, 'now').mockReturnValue(now + CONTACT_PHOTO_REREAD_MS + 1);
+		try {
+			dialogs.peerReads.set(WRITTEN, [avatarMsg(3, 'c')]);
+			await store.refreshContactAvatars([WRITTEN]);
+		} finally {
+			vi.restoreAllMocks();
+		}
+		expect(dialogs.readCounts.get(WRITTEN)).toBe(2);
+		expect(cached(WRITTEN)).toBe('c'.repeat(32));
 	});
 });
 

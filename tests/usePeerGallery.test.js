@@ -13,9 +13,21 @@ const writes = [];
 
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 const forgotten = [];
-vi.mock('@/store/avatars.store', () => ({
-	useAvatarsStore: () => ({ photoUrl: () => '', contactAvatarSrc: () => '', forgetContactThumb: (h) => forgotten.push(h) }),
-}));
+vi.mock('@/store/avatars.store', async () => {
+	const { contactAvatarChange } = await import('@/lib/avatars/display');
+	return {
+		useAvatarsStore: () => ({
+			photoUrl: () => '',
+			contactAvatarSrc: () => '',
+			async followContactAvatar(peer, current) {
+				const value = contactAvatarChange(user.contactsMap[peer]?.avatar, current);
+				if (!user.contactsMap[peer] || value === undefined) return;
+				if (!value) forgotten.push(peer);
+				await user.cacheContactAvatar(peer, value);
+			},
+		}),
+	};
+});
 
 const { usePeerGallery, isDialogRead } = await import('@/composables/usePeerGallery');
 

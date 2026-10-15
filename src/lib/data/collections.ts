@@ -239,6 +239,37 @@ export function getInboundDialogKeysCollection(userHash: string) {
 	return coll;
 }
 
+const outboundKeys = new Map<string, ReturnType<typeof buildOutboundKeys>>();
+
+const buildOutboundKeys = (userHash: string) => {
+	const link = createShapeLink();
+	const coll = createCollection(
+		electricCollectionOptions<DialogKeyRow>({
+			id: `dk-out-${userHash.slice(0, 24)}`,
+			shapeOptions: {
+				url: electricUrl('/shapes'),
+				params: { table: 'dialog_keys', where: `sender_hash = '${assertUserHash(userHash)}'` },
+				...shapeDefaults,
+				headers: { Authorization: () => bearerFor('dialog_keys') },
+				...gatedStream(link, 'dialog_keys'),
+			},
+			getKey: (r) => `${r.dialog_hash}|${r.sender_hash}`,
+			gcTime: DIALOG_GC_MS,
+		}),
+	);
+	registerShapeLink(coll, link);
+	return coll;
+};
+
+export function getOutboundDialogKeysCollection(userHash: string) {
+	let coll = outboundKeys.get(userHash);
+	if (!coll) {
+		coll = buildOutboundKeys(userHash);
+		outboundKeys.set(userHash, coll);
+	}
+	return coll;
+}
+
 // ---------- per-dialog collections ----------
 
 export interface DialogCollections {

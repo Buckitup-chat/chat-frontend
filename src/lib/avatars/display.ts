@@ -1,7 +1,7 @@
 // Drawing profile photos.
 
 import { isImageMime, thumbDataUrl } from '@/lib/data/imageMeta';
-import { photoFromWire, type AvatarPhoto } from '@/lib/pq/content';
+import { photoFromWire, photoToWire, type AvatarPhoto } from '@/lib/pq/content';
 
 /** The MIME type a photo is drawn as: the sender's word only when it names a picture format. */
 export const imageMime = (mimeType: string): string => (isImageMime(mimeType) ? mimeType : 'image/jpeg');
@@ -20,6 +20,15 @@ export const cachedPhotoOf = (avatar: unknown): { avatarId: string; photo: Avata
 	const a = avatar as { id?: unknown; photo?: unknown } | null;
 	const photo = a && typeof a.id === 'string' ? photoFromWire(a.photo) : null;
 	return photo ? { avatarId: a!.id as string, photo } : null;
+};
+
+export const contactAvatarChange = (
+	cached: unknown,
+	current: { avatarId: string; photo: AvatarPhoto } | null,
+): { id: string; photo: unknown } | null | undefined => {
+	const id = current?.avatarId ?? null;
+	if (id === (cachedPhotoOf(cached)?.avatarId ?? null) || (!id && !cached)) return undefined;
+	return current ? { id: current.avatarId, photo: photoToWire(current.photo) } : null;
 };
 
 /** A gallery as the viewer's frames, newest first. */
