@@ -1,35 +1,30 @@
 // Delivery of the owner's gallery into dialogs (pq_avatars § Delivery).
 //
 // 1. On a change — a photo added, removed or set as main — one message with
-//    the one part, into every dialog the account has.
+//    the current photo and any removal, into every dialog the account has.
 // 2. On a new dialog — the first time this account sends in a dialog that
-//    has no `avatar` part from it — one message with the whole gallery,
-//    oldest first.
+//    has no `avatar` part from it — one message with the current photo.
 //
-// "Every dialog the account has" is the account's contacts it has sent to
-// (its own dialog key exists there): a contact it never wrote to is reached
-// by rule 2 at the first message, and people who are not contacts get no
-// photo at all. A dialog that carries no avatar part from this account yet
-// gets the whole gallery even on a change, since one part alone would leave
-// it with a gallery of one.
+// "Every dialog the account has" means its own dialog key exists there,
+// whether or not the peer is saved as a contact. A dialog without an avatar
+// part from this account yet gets the current photo on a change.
 //
 // Whether a dialog carries an avatar part is read from it every time, its
 // messages still on their way included (dialogs.store ownDialogCarriesAvatar);
 // deliveries into one dialog run one at a time, so a second one sees what the
-// first stored. A snapshot sent twice anyway is harmless — applying it
-// reproduces the same order.
+// first stored. Sending the current photo twice is harmless.
 //
 // Nothing owed is dropped. A change records every dialog it goes to before
 // sending, and each leaves the record once its message is stored or it turns
 // out to need none; a dialog that could not be read, or whose send failed,
 // stays owed, as does one whose first message could not be checked. What is
 // owed is sent when the app starts, when the connection returns, and at the
-// next message into that dialog — as the whole gallery after the removals
-// it missed, which leaves it right whatever it already had.
+// next message into that dialog — with the current photo and any removals
+// it missed.
 
 import { isAvatarPart, type AvatarPart, type AvatarRemovedPart, type ContentPart } from '@/lib/pq/content';
 import { serialized } from '@/lib/data/serialized';
-import { snapshotParts, type GalleryEntry } from './gallery';
+import type { GalleryEntry } from './gallery';
 import type { Owed, OwedMap } from './localStore';
 
 export type AvatarChange = AvatarPart | AvatarRemovedPart;
@@ -45,9 +40,9 @@ export interface DialogProbe {
 export interface DeliveryDeps {
 	/** The owner's gallery, newest first; `fresh` reads it from the slot again, as another device may have changed it. */
 	gallery(opts?: { fresh?: boolean }): Promise<GalleryEntry[]>;
-	/** The peers a change may go to: the account's contacts. */
-	contacts(): string[];
-	/** Whether a send to this peer may carry the gallery at all (a contact). */
+	/** The peers this account has published a dialog key for. */
+	peers(): Promise<string[]>;
+	/** Whether this is another account rather than self. */
 	isTarget(peerHash: string): boolean;
 	/** One read of the dialog with a peer. */
 	probe(peerHash: string, opts: { requireOwnKey: boolean }): Promise<DialogProbe>;
@@ -69,22 +64,27 @@ export const NO_KEY_TTL_MS = 60_000;
 
 /**
  * The message a change becomes in one dialog. Where the dialog already
- * carries this account's gallery it is the change alone; elsewhere it is the
- * gallery after the change. A dialog that could not be read also gets a
- * removal after the gallery, for a reader who had the photo from a message
+ * carries this account's photo it is the change alone; elsewhere it is the
+ * current photo after the change. A removal also includes the new current
+ * photo, if any. A dialog that could not be read also gets a
+ * removal after the current photo, for a reader who had it from a message
  * this device could not see.
  */
 export const changeMessage = (change: AvatarChange, gallery: GalleryEntry[], carries: boolean | null): ContentPart[] => {
-	if (carries === true) return [change];
-	const snapshot: ContentPart[] = snapshotParts(gallery);
+	if (carries === true && change.kind === 'avatar') return [change];
+	const snapshot: ContentPart[] = currentPhotoPart(gallery);
+	if (carries === true && change.kind === 'avatar_removed') return [...snapshot, change];
 	return carries === null && change.kind === 'avatar_removed' ? [...snapshot, change] : snapshot;
 };
 
-/** What makes good what a dialog missed: the gallery as it is, then the removals of photos no longer in it. */
+const currentPhotoPart = (gallery: GalleryEntry[]): AvatarPart[] =>
+	gallery[0] ? [{ kind: 'avatar', avatarId: gallery[0].avatarId, photo: gallery[0].photo }] : [];
+
+/** What makes good what a dialog missed: the current photo, then the removals of photos no longer in it. */
 export const catchUpMessage = (gallery: GalleryEntry[], removed: string[] = []): ContentPart[] => {
 	const kept = new Set(gallery.map((e) => e.avatarId));
 	return [
-		...snapshotParts(gallery),
+		...currentPhotoPart(gallery),
 		...[...new Set(removed)].filter((id) => !kept.has(id)).map((avatarId): ContentPart => ({ kind: 'avatar_removed', avatarId })),
 	];
 };
@@ -122,7 +122,7 @@ export const createAvatarDelivery = (deps: DeliveryDeps) => {
 	const now = deps.now ?? Date.now;
 	const queues = new Map<string, Promise<unknown>>();
 	const perPeer = <T>(peerHash: string, fn: () => Promise<T>) => serialized(queues, peerHash, fn);
-	// Contacts found without this account's key: each change would read their
+	// Peers found without this account's key: each change would read their
 	// dialogs again for the same answer, until the account writes there.
 	const noKeyUntil = new Map<string, number>();
 	const settle = (peerHash: string) => deps.owed.update((owed) => { delete owed[peerHash]; });
@@ -131,7 +131,7 @@ export const createAvatarDelivery = (deps: DeliveryDeps) => {
 	const deliverChange = async (change: AvatarChange): Promise<DeliveryResult> => {
 		const result: DeliveryResult = { sent: [], failed: [], pending: [] };
 		const gallery = await deps.gallery();
-		const peers = deps.contacts().filter((p) => !((noKeyUntil.get(p) ?? 0) > now()));
+		const peers = (await deps.peers()).filter((p) => deps.isTarget(p) && !((noKeyUntil.get(p) ?? 0) > now()));
 		// Owed before anything is sent: an interrupted delivery leaves the rest owed.
 		let earlier: OwedMap = {};
 		await deps.owed.update((owed) => {
@@ -182,16 +182,16 @@ export const createAvatarDelivery = (deps: DeliveryDeps) => {
 		const { carries } = await deps.probe(peerHash, { requireOwnKey: false });
 		if (carries === null) return 'pending';
 		const gallery = carries ? [] : await deps.gallery({ fresh: true });
-		if (gallery.length) await deps.send(peerHash, snapshotParts(gallery));
+		if (gallery.length) await deps.send(peerHash, currentPhotoPart(gallery));
 		await settle(peerHash);
 		return gallery.length ? 'sent' : 'settled';
 	};
 
-	/** Sends what is owed: to every owed contact, or to `only`. */
+	/** Sends what is owed: to every owed dialog, or to `only`. */
 	const retryOwed = async (only: string[] | null = null): Promise<DeliveryResult> => {
 		const result: DeliveryResult = { sent: [], failed: [], pending: [] };
 		const owed = await deps.owed.load();
-		// Not a contact now (or not yet: contacts load after sign-in): kept for later.
+		// A peer outside this account is kept for later.
 		const peers = Object.keys(owed).filter((p) => (only ? only.includes(p) : true) && deps.isTarget(p));
 		await eachLimit(peers, PROBE_CONCURRENCY, (peerHash) => perPeer(peerHash, async () => {
 			const outcome = await payOwed(peerHash, owed[peerHash]);
@@ -203,7 +203,7 @@ export const createAvatarDelivery = (deps: DeliveryDeps) => {
 
 	/**
 	 * Rule 2, called after this account stored a message for a dialog: the
-	 * gallery follows it when the dialog carries no avatar part from it yet,
+	 * current photo follows it when the dialog carries no avatar part from it yet,
 	 * or what the dialog is owed when it is owed something. Its own avatar
 	 * messages never trigger it, which keeps it from looping.
 	 */
@@ -224,11 +224,11 @@ export const createAvatarDelivery = (deps: DeliveryDeps) => {
 				await deps.owed.update((owed) => owe(owed, peerHash, { first: true }));
 				return 'unknown';
 			}
-			// The gallery as it is now: a photo removed on another device must not go out.
+			// The current photo as it is now: a removed photo must not go out.
 			const gallery = await deps.gallery({ fresh: true });
 			if (!gallery.length) return 'empty';
 			try {
-				await deps.send(peerHash, snapshotParts(gallery));
+				await deps.send(peerHash, currentPhotoPart(gallery));
 			} catch (e) {
 				await deps.owed.update((owed) => owe(owed, peerHash, { first: true }));
 				throw e;

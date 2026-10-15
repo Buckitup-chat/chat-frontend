@@ -133,6 +133,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({ alertingPeers: new Set(), checkpointAlerts: new Map(), scanCheckpointAlerts: () => {} }),
 }));
+vi.mock('@/store/avatars.store', () => ({ useAvatarsStore: () => ({ contactAvatarSrc: () => '', peerAvatarSrc: () => '', refreshPeerAvatars: async () => {} }) }));
 vi.mock('@/store/transfers.store', () => ({
 	useTransfersStore: () => ({ transferPeers: new Set() }),
 }));

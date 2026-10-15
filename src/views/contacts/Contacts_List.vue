@@ -61,12 +61,14 @@
 <script setup>
 import highlightText from '@/utils/highlightText';
 import { userPQStore } from '@/store/userPQ.store';
+import { useAvatarsStore } from '@/store/avatars.store';
 
 
 import { ref, onMounted, inject, computed, onUnmounted } from 'vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 
 const $userPQ = userPQStore();
+const $avatars = useAvatarsStore();
 const $mitt = inject('$mitt');
 const search = ref();
 
@@ -113,6 +115,7 @@ const filteredList = computed(() => {
 
 onMounted(async () => {
 	filteredList.value;
+	void $avatars.refreshContactAvatars();
 });
 
 onUnmounted(async () => {});

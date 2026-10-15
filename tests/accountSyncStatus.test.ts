@@ -30,7 +30,7 @@ vi.mock('@/store/dialogs.store', () => ({
 }));
 // Contacts' photos are not what this file tests; their store pulls in the
 // vault library, which only loads in a browser.
-vi.mock('@/store/avatars.store', () => ({ useAvatarsStore: () => ({ contactAvatarSrc: () => '' }) }));
+vi.mock('@/store/avatars.store', () => ({ useAvatarsStore: () => ({ contactAvatarSrc: () => '', peerAvatarSrc: () => '', refreshPeerAvatars: async () => {} }) }));
 vi.mock('@/store/transfers.store', () => ({
 	useTransfersStore: () => ({ transferPeers: new Set() }),
 }));

@@ -12,6 +12,7 @@ const dialogs = {
 	onOwnSend: () => {},
 	ownDialogCarriesAvatar: async () => ({ ownKey: true, carries: false }),
 	sendMessage: async (peer, parts) => { sent.push({ peer, parts }); },
+	readPeerParts: async () => null,
 };
 const slot = { avatars: { ['a'.repeat(32)]: { photo: { image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_1', 'k'] }, at: 1 } } };
 
@@ -33,10 +34,8 @@ describe('owed photos on reconnect', () => {
 		await updateOwed(ME, (o) => { o[PEER] = { first: true }; });
 		useAvatarsStore();
 		await new Promise((r) => setTimeout(r, 0));
-		expect(sent).toEqual([]); // no contacts loaded yet
-		user.contactsMap = { [PEER]: { user_hash: PEER } };
-		sent.length = 0;
 		await vi.waitFor(() => expect(sent.length).toBe(1));
+		user.contactsMap = { [PEER]: { user_hash: PEER } };
 		// owed again, then the connection returns
 		await updateOwed(ME, (o) => { o[PEER] = { first: true }; });
 		window.dispatchEvent(new Event('online'));

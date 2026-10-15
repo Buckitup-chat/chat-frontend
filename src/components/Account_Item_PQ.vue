@@ -112,7 +112,8 @@ const avatarSrc = computed(() => {
   if (typeof acc.value?.avatar === 'string') return acc.value.avatar;
   if (self) return '';
   const hash = acc.value?.user_hash;
-  return $avatars.contactAvatarSrc(acc.value?.avatar ?? $userPQ.contactsMap?.[hash]?.avatar, hash);
+  return $avatars.contactAvatarSrc(acc.value?.avatar ?? $userPQ.contactsMap?.[hash]?.avatar, hash)
+    || $avatars.peerAvatarSrc(hash);
 });
 
 const shortCode = computed(() => {

@@ -104,7 +104,7 @@ const run = async (change, title) => {
 };
 
 const removeFrame = (avatarId) => {
-	if (!window.confirm('Remove this photo? Contacts who already have it keep their copy.')) return;
+	if (!window.confirm('Remove this photo? People who already received it keep their copy.')) return;
 	run(() => $avatars.removePhoto(avatarId), 'Remove photo');
 };
 

@@ -124,6 +124,15 @@ describe('readPeerParts', () => {
 		expect(registered).toBe(0);
 	});
 
+	it('requires a complete verified dialog before using its photo as the current one', async () => {
+		const photo = { kind: 'avatar_removed', avatarId: 'a'.repeat(32) };
+		seed(await message(peer, peerKey, 1, [photo]));
+		expect((await store.readPeerParts(peer.userHash, ['avatar', 'avatar_removed'], { requireComplete: true })).messages[0].parts).toEqual([photo]);
+		const forged = await message(peer, peerKey, 2, [photo]);
+		seed({ ...forged, sign_b64: forged.sign_b64.replace(/^./, (c) => (c === 'A' ? 'B' : 'A')) });
+		expect(await store.readPeerParts(peer.userHash, ['avatar', 'avatar_removed'], { requireComplete: true })).toBeNull();
+	});
+
 	it('with newestMatch, returns only the newest message with a part it accepts', async () => {
 		seed(
 			await message(peer, peerKey, 1, [holding('stored')]),

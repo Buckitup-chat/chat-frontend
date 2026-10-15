@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
-// pq_avatars in the feed: a profile-photo message is a compact service line,
-// not a text bubble, and the peer's picture opens their gallery.
+// Photo-only messages update the header without announcing the change in chat.
 import { describe, it, expect, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
@@ -25,64 +24,36 @@ const render = (messages, props = {}) => mount(ChatWindow, {
 	global: { stubs: { Avatar: true } },
 });
 
-describe('profile-photo messages render as a service line', () => {
-	it('names who changed their photo, not a bubble', () => {
-		const w = render([message([avatar('a')])]);
-		expect(w.find('.msg-avatar-line').text()).toBe('Ирина updated their photo');
-		expect(w.find('.message-bubble').exists()).toBe(false);
+describe('photo-only messages stay out of the chat feed', () => {
+	it('hides an update, a removal, and an old multi-photo message', () => {
+		for (const parts of [[avatar('a')], [{ kind: 'avatar_removed', avatarId: id('a') }], [avatar('a'), avatar('b')]]) {
+			const w = render([message(parts)]);
+			expect(w.find('.message-bubble').exists()).toBe(false);
+			expect(w.text()).not.toContain('updated their photo');
+		}
 	});
 
-	it('words the own change, a removal, and a whole gallery', () => {
-		expect(render([message([avatar('a')], { isMine: true })]).find('.msg-avatar-line').text()).toBe('You updated your photo');
-		expect(render([message([{ kind: 'avatar_removed', avatarId: id('a') }])]).find('.msg-avatar-line').text()).toBe('Ирина removed a photo');
-		expect(render([message([avatar('a'), avatar('b'), avatar('c')])]).find('.msg-avatar-line').text()).toBe('Ирина shared 3 profile photos');
+	it('hides an outgoing photo while syncing, but shows a failed one', () => {
+		expect(render([message([avatar('a')], { isMine: true, _verify: 'waiting', _syncStatus: 'syncing' })]).find('.message-bubble').exists()).toBe(false);
+		expect(render([message([avatar('a')], { isMine: true, _verify: 'waiting', _syncStatus: 'error' })]).find('.message-bubble').exists()).toBe(true);
 	});
 
-	it('shows the decrypted photo when the page has it, the newest one of the message, as its sender\'s', () => {
-		const asked = [];
-		const avatarSrc = (photo, sender) => { asked.push(sender); return `blob:${photo.name}`; };
-		const w = render([message([avatar('a'), { ...avatar('b'), photo: { ...photo, name: 'b.jpg' } }])], { avatarSrc });
-		expect(w.find('.msg-avatar-thumb').attributes('src')).toBe('blob:b.jpg');
-		expect(new Set(asked)).toEqual(new Set([PEER]));
-	});
-
-	it('draws nothing where neither the photo nor a blur is there yet', () => {
-		const w = render([message([avatar('a')])]);
-		expect(w.find('.msg-avatar-thumb').exists()).toBe(false);
-	});
-
-	it('only a verified message is a photo line: any other keeps its bubble and fetches nothing', () => {
+	it('hides a waiting photo, but shows blocked or invalid data', () => {
 		const asked = [];
 		const avatarSrc = (p) => { asked.push(p); return 'blob:x'; };
-		for (const state of ['waiting', 'blocked', 'invalid']) {
+		expect(render([message([avatar('a')], { _verify: 'waiting' })]).find('.message-bubble').exists()).toBe(false);
+		for (const state of ['blocked', 'invalid']) {
 			const w = render([message([avatar('a')], { _verify: state })], { avatarSrc });
-			expect(w.find('.msg-avatar-line').exists()).toBe(false);
 			expect(w.find('.message-bubble').text()).toContain('🖼 profile photo');
 		}
 		expect(asked).toEqual([]);
 	});
 
-	it('a tap opens the sender\'s gallery at that photo', async () => {
-		const w = render([message([avatar('a')])]);
-		await w.find('.msg-avatar-chip').trigger('click');
-		expect(w.emitted('showAvatar')[0][0]).toEqual({ senderHash: PEER, avatarId: id('a') });
-	});
-
 	it('anything else in the message keeps the bubble, and a deleted one reads as deleted', () => {
 		const mixed = render([message([avatar('a'), { kind: 'text', text: 'new me' }], { text: '🖼 profile photo\nnew me' })]);
-		expect(mixed.find('.msg-avatar-line').exists()).toBe(false);
 		expect(mixed.find('.message-bubble').exists()).toBe(true);
 		const deleted = render([message([], { _deleted: true, text: '' })]);
-		expect(deleted.find('.msg-avatar-line').exists()).toBe(false);
 		expect(deleted.text()).toContain('Message deleted');
-	});
-
-	it('cannot be edited into text: the context menu offers no Edit', async () => {
-		const w = render([message([avatar('a')], { isMine: true, _raw: { message_id: 'dmsg_1', sign_hash: 'dms_1', sender_hash: MY } })]);
-		await w.find('.msg-avatar-line').trigger('contextmenu');
-		expect(w.find('.context-menu').exists()).toBe(true);
-		expect(w.find('.context-menu').text()).not.toContain('Edit');
-		expect(w.find('.context-menu').text()).toContain('Delete');
 	});
 });
 

@@ -5,6 +5,7 @@ import SyncStatus from './SyncStatus.vue'
 import { ref, computed, onMounted, onBeforeUnmount, watch, inject } from 'vue'
 import { userPQStore } from '@/store/userPQ.store'
 import { useDialogsStore } from '@/store/dialogs.store'
+import { useAvatarsStore } from '@/store/avatars.store'
 import { useAccountSyncStatus } from '@/composables/useAccountSyncStatus'
 import type { UserCardRow } from '@/lib/data/types'
 
@@ -51,6 +52,7 @@ const filtered = computed(() => {
 })
 const $transfers = useTransfersStore();
 const $dialogs = useDialogsStore();
+const $avatars = useAvatarsStore();
 
 // Checkpoint alerts (see dialogs.store): the list scans the dialogs this
 // account has confirmed a state in and marks the ones that moved since.
@@ -58,10 +60,13 @@ const $dialogs = useDialogsStore();
 // The list holds no dialog subscription of its own, so there is nothing to
 // react to — the scan is re-run at the moments the answer can have changed:
 // coming back from a dialog, returning to the tab, and while the list is on
-// screen. The store collapses overlapping runs into one.
+// screen. The store collapses overlapping runs into one. Peer photos the list
+// draws are brought up to date at the same moments.
 const scanAlerts = () => {
   const peers = filtered.value.map((u) => u.user_hash).filter(Boolean)
-  if (peers.length) $dialogs.scanCheckpointAlerts(peers)
+  if (!peers.length) return
+  $dialogs.scanCheckpointAlerts(peers)
+  void $avatars.refreshPeerAvatars(peers)
 }
 
 const $route = inject<{ params?: { address?: string } } | null>('$route', null)

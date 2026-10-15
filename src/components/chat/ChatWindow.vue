@@ -36,19 +36,8 @@
 
     <!-- Messages Area -->
     <div class="chat-body flex-grow-1 p-3 overflow-y-auto" ref="messagesContainer">
-      <template v-for="msg in messages" :key="msg.id">
-        <!-- A profile-photo message is a service line, not a bubble: who
-             changed their photo, with the photo; a tap opens the gallery. -->
-        <div v-if="avatarLine(msg)" class="msg-avatar-line d-flex justify-content-center mb-3" :data-msg-id="msg.id"
-          @contextmenu.prevent="openContextMenu($event, msg)"
-          @touchstart="startLongPress($event, msg)" @touchend="cancelLongPress"
-          @touchmove="cancelLongPress" @touchcancel="cancelLongPress">
-          <button type="button" class="msg-avatar-chip" @click="openAvatarLine(msg)">
-            <img v-if="avatarLine(msg).src" class="msg-avatar-thumb" :src="avatarLine(msg).src" alt="" />
-            <span class="msg-avatar-text">{{ avatarLine(msg).text }}</span>
-          </button>
-        </div>
-        <div v-else class="message-wrapper d-flex mb-3"
+      <template v-for="msg in visibleMessages" :key="msg.id">
+        <div class="message-wrapper d-flex mb-3"
         :class="msg.isMine ? 'justify-content-end' : 'justify-content-start'">
         <div class="message-bubble p-2 rounded-3 shadow-sm"
           :data-msg-id="msg.id"
@@ -405,7 +394,7 @@
         type="button" class="context-menu-action" @click="startReply(contextMenuMsg)">
         <i class="bi bi-reply me-2"></i>Reply
       </button>
-      <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !avatarLine(contextMenuMsg)" type="button" class="context-menu-action"
+      <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !isPhotoOnly(contextMenuMsg)" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
         <i class="bi bi-pencil me-2"></i>Edit
       </button>
@@ -859,39 +848,14 @@ const lightboxFrames = computed(() =>
 
 // ---------- profile-photo messages (pq_avatars) ----------
 
-/**
- * The service line of each profile-photo message, by message id; other
- * messages have none. Only a verified message is a photo change — the same
- * ones the gallery counts; any other keeps its bubble and fetches nothing.
- */
-const avatarLines = computed(() => {
-  const lines = new Map();
-  for (const msg of props.messages) {
-    const parts = msg.parts || [];
-    if (msg._verify !== 'verified' || msg._deleted || !parts.length || !parts.every(isAvatarPart)) continue;
-    const photos = parts.filter((p) => p.kind === 'avatar');
-    const who = msg.isMine ? 'You' : props.title;
-    const shown = photos.at(-1);
-    const senderHash = msg._raw?.sender_hash || (msg.isMine ? props.myHash : props.peerHash);
-    let text;
-    if (photos.length > 1) text = `${who} shared ${photos.length} profile photos`;
-    else if (photos.length) text = msg.isMine ? 'You updated your photo' : `${who} updated their photo`;
-    else text = `${who} removed a photo`;
-    lines.set(msg.id, {
-      text,
-      senderHash,
-      avatarId: shown?.avatarId ?? null,
-      src: shown ? props.avatarSrc(shown.photo, senderHash) || thumbDataUrl(shown.photo) : '',
-    });
-  }
-  return lines;
-});
-const avatarLine = (msg) => avatarLines.value.get(msg.id) ?? null;
-
-const openAvatarLine = (msg) => {
-  const line = avatarLine(msg);
-  if (line) emit('showAvatar', { senderHash: line.senderHash, avatarId: line.avatarId });
+// A verified photo-only message updates the header but has no visible chat row.
+const isPhotoOnly = (msg) => {
+  const parts = msg.parts || [];
+  return !msg._deleted && msg._syncStatus !== 'error'
+    && (msg._verify === 'verified' || msg._verify === 'waiting' || msg.isMine)
+    && parts.length > 0 && parts.every(isAvatarPart);
 };
+const visibleMessages = computed(() => props.messages.filter((msg) => !isPhotoOnly(msg)));
 
 
 const fmtSize = (n) => {
@@ -1519,23 +1483,6 @@ watch(() => props.messages, () => {
 }
 
 .context-menu-danger { color: #dc3545; }
-
-/* ---------- profile-photo service line ---------- */
-.msg-avatar-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 85%;
-  border: none;
-  border-radius: 999px;
-  background: rgba(36, 24, 36, .06);
-  color: #5c5f62;
-  font-size: 12px;
-  padding: 3px 12px 3px 3px;
-}
-.msg-avatar-thumb { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
-.msg-avatar-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
 
 /* ---------- §1.5 / §2.1 files ---------- */
 .msg-file { display: flex; align-items: center; gap: 8px; background: rgba(36, 24, 36, .06); border-radius: 9px; padding: 6px 8px; margin-bottom: 6px; }
