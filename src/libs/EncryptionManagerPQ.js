@@ -29,6 +29,7 @@ import { newMetaSeed } from '@/lib/recovery/guardianInvite';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
+import { forgetAccountAvatars } from '@/lib/avatars/localStore';
 import { clearSessions } from '@/lib/data/readSession';
 import { resetGate } from '@/lib/data/accessGate';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
@@ -249,7 +250,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
   // Vaults Management
 
-  async createUserVault({ name, notes, avatar, avatarDataUrl }) {
+  async createUserVault({ name, notes }) {
     const userVault = await connect({
       storageType: 'idb',
       addNewVault: true,
@@ -314,14 +315,7 @@ export class EncryptionManagerPQ extends EventTarget {
     }
     this.#activateSession(userHash, identity);
 
-    let avatarUuid = null;
-    if (avatar instanceof Blob || avatar instanceof File) {
-      avatarUuid = await this.encryptAndStoreAvatar(avatar);
-    } else if (typeof avatar === 'string') {
-      avatarUuid = avatar;
-    }
-
-    await this.updateUserStorage({ name, notes, avatarUuid, avatarDataUrl });
+    await this.updateUserStorage({ name, notes });
 
     return this.#localUserCards.find(i => i.user_hash === userHash);
   }
@@ -562,7 +556,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#evmSkey = evmSkey;
     this.#contactSkey = contactSkey;
     if (!(this.#cryptSkey instanceof Uint8Array)) {
-      console.warn('Crypt key not found in vault, avatar encryption will not work');
+      console.warn('Crypt key not found in vault, storage slots will not open');
     }
     this.#bootstrapUserHash = userHash;
     return identity;
@@ -775,6 +769,8 @@ export class EncryptionManagerPQ extends EventTarget {
     } catch (e) {
       console.warn('Could not delete from local-vault', e);
     }
+    // Contacts' thumbnails and the dialogs owed a photo leave with the account.
+    await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
 
     this.#localUserCards.splice(identityIndex, 1);
     await this.#saveLocalUserCards();
@@ -930,10 +926,6 @@ export class EncryptionManagerPQ extends EventTarget {
     const hash = sha256(msg);
     const signature = await secp.signAsync(hash, this.#contactSkey);
     return bytesToHex(signature.toCompactRawBytes());
-  }
-
-  async getEvmSkey() {
-    return this.#evmSkey;
   }
 
   /**
@@ -1150,16 +1142,6 @@ export class EncryptionManagerPQ extends EventTarget {
     });
   }
 
-  async #writeSlotRow(uuid, valueB64, hashB64) {
-    await putStorageRow({
-      userHash: this.#currentUserHash,
-      uuid,
-      valueB64,
-      hashB64,
-      signSkey: this.#signSkey,
-    });
-  }
-
   /** Signed tombstone; deletion is a revision like any other and fails like one. */
   async #tombstoneRow(uuid) {
     await putStorageRow({
@@ -1311,7 +1293,7 @@ export class EncryptionManagerPQ extends EventTarget {
    * `cardPublished` when the public card went out with it. Throws only when
    * the change can never reach the server.
    */
-  async updateUserStorage({ name, notes, avatarUuid, avatarDataUrl }) {
+  async updateUserStorage({ name, notes }) {
     if (!this.#currentUserHash) {
       throw new Error('No user is currently logged in');
     }
@@ -1320,8 +1302,8 @@ export class EncryptionManagerPQ extends EventTarget {
     }
 
     // 1. Encrypt profile and save to DB.
-    // A field left undefined here (e.g. avatarUuid on a plain name/notes
-    // save) must be omitted from the patch, not written as undefined — a
+    // A field left undefined here (e.g. notes on a plain rename) must be
+    // omitted from the patch, not written as undefined — a
     // full-record spread would have serialized it away and silently erased
     // the existing value. Merging (storageIntent.ts's mergeJsonPatch) also
     // means the slot map, the vault's address and any other field written by
@@ -1330,7 +1312,6 @@ export class EncryptionManagerPQ extends EventTarget {
     const patch = {};
     if (name !== undefined) patch.name = name;
     if (notes !== undefined) patch.notes = notes;
-    if (avatarUuid !== undefined) patch.avatarUuid = avatarUuid;
     const rootStatus = await saveStorageJsonPatch({
       userHash: this.#currentUserHash,
       uuid: this.#rootSlotUuid(),
@@ -1349,11 +1330,9 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards[idx] = {
       ...current,
       name: name !== undefined ? name : current.name,
-      avatar: avatarDataUrl !== undefined ? avatarDataUrl : current.avatar,
       userStorage: {
         ...current.userStorage,
         notes: notes !== undefined ? notes : current.userStorage?.notes,
-        avatarUuid: avatarUuid !== undefined ? avatarUuid : current.userStorage?.avatarUuid
       }
     };
 
@@ -1393,7 +1372,7 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!root) return null;
     // A root record holding only the slot map is not a profile: the account
     // created a slot before ever saving one.
-    if (root.name === undefined && root.notes === undefined && root.avatarUuid === undefined) {
+    if (root.name === undefined && root.notes === undefined) {
       return null;
     }
     return root;
@@ -1465,14 +1444,18 @@ export class EncryptionManagerPQ extends EventTarget {
 
   /**
    * A named slot's JSON value, or null when the slot was never written or
-   * does not decrypt. For readers only: a writer goes through patchSlotJson,
-   * which refuses rather than build on a value it could not read.
+   * does not decrypt — `strict` tells the two apart by throwing for the
+   * second. For readers only: a writer goes through patchSlotJson, which
+   * refuses rather than build on a value it could not read.
    */
-  async loadSlotJson(name) {
+  async loadSlotJson(name, { strict = false } = {}) {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
-    if (!this.#cryptSkey) return null;
+    if (!this.#cryptSkey) {
+      if (strict) throw new Error('Crypt key not loaded');
+      return null;
+    }
     const uuid = await this.#slotUuid(name);
-    return uuid ? this.#readJsonAt(uuid, `the ${name} slot`) : null;
+    return uuid ? this.#readJsonAt(uuid, `The ${name} slot`, { strict }) : null;
   }
 
   /**
@@ -1527,72 +1510,21 @@ export class EncryptionManagerPQ extends EventTarget {
     return this.#decryptJson(accepted.value_b64);
   }
 
-  // Avatar Encryption
-
-  async encryptAndStoreAvatar(imageBlob) {
-    console.log('encryptAndStoreAvatar:', { userHash: this.#currentUserHash, hasCryptSkey: !!this.#cryptSkey });
-
-    if (!this.#currentUserHash) {
-      throw new Error('No user is currently logged in');
-    }
-
-    if (!this.#cryptSkey) {
-      console.error('Crypt key not loaded!');
-      throw new Error('Crypt key not loaded');
-    }
-
-    const uuid = crypto.randomUUID();
-    const arrayBuffer = await imageBlob.arrayBuffer();
-    const imageData = new Uint8Array(arrayBuffer);
-
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-
-    const encryptedData = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      await this.#deriveKeyFromCryptSkey(),
-      imageData
-    );
-
-    const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
-    const combined = arrayToBase64(ivData);
-
-    // The caller publishes this uuid inside the profile revision, so the
-    // avatar must be accepted by the server FIRST — otherwise a profile can
-    // sync successfully while pointing at an avatar row that never landed,
-    // and another device renders a broken reference.
-    await this.#writeSlotRow(uuid, combined, bytesToHex(sha256(new Uint8Array(encryptedData))));
-
-    return uuid;
+  /**
+   * The current profile photo as this device shows it in the account list
+   * and menu: kept in the local registry next to the card, never published.
+   * The photos themselves live in the avatars slot (lib/avatars/gallery).
+   */
+  async setLocalAvatar({ avatarId, dataUrl }) {
+    const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
+    if (idx === -1) throw new Error('No user is currently logged in');
+    this.#localUserCards[idx] = { ...this.#localUserCards[idx], avatar: dataUrl, avatarId };
+    await this.#saveLocalUserCards();
+    return this.#localUserCards[idx];
   }
 
-  async loadAvatar(uuid) {
-    if (!this.#currentUserHash) {
-      throw new Error('No user is currently logged in');
-    }
-
-    if (!this.#cryptSkey) {
-      throw new Error('Crypt key not loaded');
-    }
-
-    const storage = await getStorageRow(this.#currentUserHash, uuid);
-    if (!storage || !storage.value_b64) {
-      return null;
-    }
-
-    const combined = decodeHexOrBase64(storage.value_b64);
-
-    const iv = combined.slice(0, 12);
-    const encryptedData = combined.slice(12);
-
-    const decryptedData = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
-      await this.#deriveKeyFromCryptSkey(),
-      encryptedData
-    );
-
-    return new Blob([decryptedData], { type: 'image/webp' });
-  }
-
+  // The key every storage slot's JSON is sealed with. The salt names the
+  // first thing it sealed; it stays, or every stored slot stops opening.
   async #deriveKeyFromCryptSkey() {
     const keyMaterial = await crypto.subtle.importKey(
       'raw',

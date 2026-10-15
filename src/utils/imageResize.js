@@ -1,4 +1,4 @@
-export default function(image, maxSize = 500, quality = 0.8) {
+export default function resize(image, maxSize = 500, quality = 0.8) {
     const canvas = document.createElement('canvas')        
     let width = image.width
     let height = image.height
@@ -51,3 +51,10 @@ var dataUrlToBlob = function(dataURL) {
 
     return new Blob([uInt8Array], {type: contentType});
 }
+/** Loads a picture from a URL and resizes it as above. */
+export const resizeImageUrl = (src, maxSize, quality = 0.8) => new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(resize(image, maxSize, quality));
+    image.onerror = () => reject(new Error('The picture could not be read'));
+    image.src = src;
+});

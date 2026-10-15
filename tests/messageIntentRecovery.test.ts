@@ -347,4 +347,18 @@ describe('materializeMessageIntent: builds the row from the captured payload alo
 
 		await expect(materializeMessageIntent(payload, currentSessionToken()!)).rejects.toThrow(SessionFencedError);
 	});
+	// A profile photo's file sits inside its avatar part; the message must
+	// still wait for that file's manifest like any attachment's.
+	it('names the file of a profile photo as a dependency of the message', async () => {
+		const photo = {
+			kind: 'image' as const, widthAspect: 1, heightAspect: 1, thumbHashB64: '', name: 'avatar.jpg', size: 1,
+			mimeType: 'image/jpeg', createdAt: 0, fileId: 'f_' + '5'.repeat(32), encSecretB64: 'k',
+		};
+		const payload = messagePayload({
+			messageId: 'dmsg_avatar',
+			parts: [{ kind: 'avatar' as const, avatarId: 'a'.repeat(32), photo }, { kind: 'avatar_removed' as const, avatarId: 'b'.repeat(32) }],
+		});
+		const readyRow = await materializeMessageIntent(payload as never, currentSessionToken()!);
+		expect(readyRow!.fileIds).toEqual([photo.fileId]);
+	});
 });

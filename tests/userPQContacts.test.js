@@ -324,3 +324,41 @@ describe('the contacts slot', () => {
 		});
 	});
 });
+
+// pq_avatars § What a reader keeps: a contact's current photo, cached next to
+// the contact so the list can draw it without reading every dialog.
+describe('the cached avatar of a contact', () => {
+	let store;
+	const cached = { id: 'c'.repeat(32), photo: { image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_1', 'k'] } };
+
+	beforeEach(async () => {
+		setActivePinia(createPinia());
+		fake = new FakeEM();
+		store = userPQStore();
+		await store.initialize();
+		fake.fakeLogin('u_' + '1'.repeat(128));
+	});
+
+	it('is kept next to the contact, and a save of the contact leaves it', async () => {
+		await store.confirmContact(A, 'pkA', { name: 'Ann' });
+		expect(await store.cacheContactAvatar(A, cached)).toBe(true);
+		expect(fake.stored.contacts[A]).toMatchObject({ confirmed: true, avatar: cached });
+		// A view object carries the cache back in; a save writes only what a contact is.
+		await store.saveContact(A, { ...store.contactsMap[A], name: 'Anna', avatar: 'data:forged' });
+		expect(fake.stored.contacts[A]).toMatchObject({ name: 'Anna', avatar: cached });
+	});
+
+	it('is replaced whole by the next one, and cleared with null', async () => {
+		await store.saveContact(A, { name: 'Ann' });
+		await store.cacheContactAvatar(A, cached);
+		await store.cacheContactAvatar(A, { id: 'd'.repeat(32), photo: { inline_image: [1, 1, '', 'b.jpg', 1, 'image/jpeg', 0, 'AA'] } });
+		expect(fake.stored.contacts[A].avatar.photo).toEqual({ inline_image: [1, 1, '', 'b.jpg', 1, 'image/jpeg', 0, 'AA'] });
+		await store.cacheContactAvatar(A, null);
+		expect(fake.stored.contacts[A].avatar).toBeNull();
+	});
+
+	it('does not make someone a contact', async () => {
+		expect(await store.cacheContactAvatar(B, cached)).toBe(false);
+		expect(fake.stored).toBeNull();
+	});
+});

@@ -154,9 +154,9 @@
 import { userPQStore } from '@/store/userPQ.store';
 import { useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
 import { useRecoveryHelpStore } from '@/store/recoveryHelp.store';
+import { useAvatarsStore } from '@/store/avatars.store';
 import { initPersistence } from '@/lib/data/persistence';
 
-import { userStore } from '@/store/user.store';
 
 import { useBreakpoint } from '@/composables/useBreakpoint';
 
@@ -177,13 +177,14 @@ import Swal from '@/components/swal/Swal_.vue';
 import { ref, provide, watch, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
-const $user = userStore();
 const $userPQ = userPQStore();
 const $restore = useRecoveryRestoreStore();
+// Created with the app, not with the first screen that shows a photo: it
+// sends the gallery into a dialog the first time this account writes there.
+useAvatarsStore();
 const $breakpoint = useBreakpoint();
 
 
-// const $web3 = web3Store();
 // const $swal = inject('$swal');
 // const $loader = useLoader();
 // const $isProd = inject('$isProd');
@@ -205,9 +206,6 @@ provide('$modal', $modal);
 const $swalModal = ref();
 provide('$swalModal', $swalModal);
 
-const timestamp = ref();
-provide('$timestamp', timestamp);
-
 watch(
 	() => $breakpoint.current,
 	() => {
@@ -216,13 +214,6 @@ watch(
 );
 
 	onMounted(async () => {
-		window.addEventListener('online', () => ($user.isOnline = navigator.onLine));
-		window.addEventListener('offline', () => ($user.isOnline = navigator.onLine));
-		setTimeout(function tick() {
-			timestamp.value = Math.floor(Date.now().valueOf() / 1000);
-			setTimeout(tick, 1000);
-		}, 1000);
-
 		// Must resolve before the first collection is built: collections
 		// created earlier would silently run in-memory. Resolves false (and
 		// the app runs exactly as before) when OPFS is unavailable.

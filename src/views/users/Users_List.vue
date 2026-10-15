@@ -53,6 +53,7 @@
 </style>
 
 <script setup>
+import highlightText from '@/utils/highlightText';
 import { ref, computed } from 'vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 import { userPQStore } from '@/store/userPQ.store';
@@ -104,9 +105,4 @@ const filteredList = computed(() => {
 	return l;
 });
 
-function highlightText(text, searchTerm) {
-	if (!searchTerm || !text) return text;
-	const regex = new RegExp(`(${searchTerm})`, 'gi');
-	return text.replace(regex, `<span class="_highlight_search_text">$1</span>`);
-}
 </script>

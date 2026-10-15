@@ -1,0 +1,41 @@
+// The big round profile picture with its edit button (Account_Info,
+// OwnAvatarGallery). Needs variables.scss and breakpoints.scss imported first.
+@mixin profile-avatar {
+	._avatar {
+		display: flex;
+		justify-content: center;
+		width: 100%;
+
+		._wrap {
+			position: relative;
+
+			._img_wrap {
+				width: 10rem;
+				height: 10rem;
+
+				@include media-breakpoint-up(sm) {
+					width: 14rem;
+					height: 14rem;
+				}
+
+				border-radius: 50%;
+				border: 5px solid $white;
+				overflow: hidden;
+
+				img,
+				svg {
+					height: 100%;
+					width: 100%;
+					object-fit: cover;
+				}
+			}
+
+			a {
+				position: absolute;
+				bottom: 1rem;
+				right: 5rem;
+				transform: translateX(4rem);
+			}
+		}
+	}
+}

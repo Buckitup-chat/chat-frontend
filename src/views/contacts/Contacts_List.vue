@@ -11,11 +11,8 @@
 		<div class="_list">
 			<div class="_contact" @click="select(contact.address)" v-for="contact in filteredList" :class="{ _selected: isSelected(contact.address) }">
 				<Account_Item_PQ :account="contact" class="w-100" />
-				<div v-if="metaRequired && contact.metaPublicKey">
-					<div class="_icon_activated bg-success me-2"></div>
-				</div>
 			</div>
-			<div class="px-2 mt-2" v-if="!metaRequired">
+			<div class="px-2 mt-2">
 				<button class="btn btn-dark rounded-pill d-flex align-items-center justify-content-center p-2 w-100" @click="$mitt.emit('modal::open', { id: 'add_contact_handshake' })">
 					<i class="_icon_plus bg-white"></i>
 					<span class="ms-2">Add new contact</span>
@@ -62,8 +59,7 @@
 </style>
 
 <script setup>
-import { web3Store } from '@/store/web3.store';
-
+import highlightText from '@/utils/highlightText';
 import { userPQStore } from '@/store/userPQ.store';
 
 
@@ -71,14 +67,11 @@ import { ref, onMounted, inject, computed, onUnmounted } from 'vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 
 const $userPQ = userPQStore();
-const $web3 = web3Store();
 const $mitt = inject('$mitt');
 const search = ref();
 
-const { selected, excluded, metaRequired } = defineProps({
+const { selected } = defineProps({
 	selected: { type: Array, default: () => [] },
-	excluded: { type: Array, default: () => [] },
-	metaRequired: { type: Boolean },
 });
 
 const emit = defineEmits(['select']);
@@ -104,11 +97,6 @@ const filteredList = computed(() => {
 		list = $userPQ.contacts.filter((c) => [c.name, c.notes].some((value) => value && value.toLowerCase().includes(searchTerm)));
 	}
 
-	// Exclude contacts in the `excluded` list
-	if (excluded?.length) {
-		list = list.filter((item) => !excluded.includes(item.user_hash)); // exclude from excluded)
-	}
-
 	//  Exclude hidden contacts
 	list = list.filter((contact) => !contact.hidden);
 
@@ -122,11 +110,6 @@ const filteredList = computed(() => {
 	return l;
 });
 
-function highlightText(text, searchTerm) {
-	if (!searchTerm || !text) return text;
-	const regex = new RegExp(`(${searchTerm})`, 'gi');
-	return text.replace(regex, `<span class="_highlight_search_text">$1</span>`); // Wrap matched text with <mark>
-}
 
 onMounted(async () => {
 	filteredList.value;

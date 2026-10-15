@@ -71,15 +71,6 @@ export const modalRegistry = {
 		modalClass: 'modal-md',
 	},
 
-	account_activate: {
-		header: false,
-		component: 'Modal_Account_Activate',
-		modalClass: 'modal-sm',
-		title: 'Account Activation',
-		icon: '_icon_profile',
-		bodyClass: 'p-0',
-	},
-
 	account_backup_local: {
 		header: true,
 		component: 'Modal_Account_Backup_Local',
@@ -124,13 +115,5 @@ export const modalRegistry = {
 		modalStatic: true,
 		component: 'Modal_Community_Backup',
 		modalClass: 'modal-md',
-	},
-
-	contacts: {
-		header: true,
-		component: 'Modal_Contacts',
-		modalClass: 'modal-md',
-		title: 'Verified contacts',
-		icon: '_icon_contacts',
 	},
 };

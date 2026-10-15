@@ -602,7 +602,7 @@ describe('FRON-23: the confirmed contact\'s own client', () => {
 		await signIn(Bob);
 		const bobWrites = () => server.posts.filter((p) => p.relation === 'user_storage' && (p.row as { user_hash?: string }).user_hash === Bob.hash);
 		const sinceGate = bobWrites().length;
-		const saved = await Bob.app.store.updateCurrentUserProfile({ name: 'Bob, renamed', notes: undefined, avatarUuid: undefined, avatarDataUrl: undefined });
+		const saved = await Bob.app.store.updateCurrentUserProfile({ name: 'Bob, renamed', notes: undefined });
 		expect(saved).toMatchObject({ awaitingApproval: true });
 		expect(bobWrites().slice(sinceGate).map((p) => p.result.error)).toContain('not_in_trust_chain');
 		expect(bobWrites().slice(sinceGate).some((p) => p.result.status === 'ok')).toBe(false);
