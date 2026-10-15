@@ -8,9 +8,12 @@
     <div class="chat-header d-flex align-items-center justify-content-between px-3 py-2 border-bottom">
       <div class="d-flex align-items-center text-dark">
         <!-- Avatar -->
+        <!-- Tapping the peer's picture opens their photo gallery. -->
         <div
           class="avatar bg-secondary rounded-circle me-2 d-flex align-items-center justify-content-center overflow-hidden"
-          style="width: 40px; height: 40px; flex-shrink: 0;">
+          :class="{ _pointer: peerHash }" :role="peerHash ? 'button' : undefined"
+          style="width: 40px; height: 40px; flex-shrink: 0;"
+          @click="peerHash && emit('showAvatar', { senderHash: peerHash })">
           <img loading="lazy" v-if="avatarUrl" :src="avatarUrl" @error="(event) => (event.target.src = defaultAvatar)"
             style="width: 100%; height: 100%; object-fit: cover;" />
           <Avatar v-else-if="avatarHash" :name="avatarHash" variant="bauhaus" style="width: 100%; height: 100%;" />
@@ -33,7 +36,19 @@
 
     <!-- Messages Area -->
     <div class="chat-body flex-grow-1 p-3 overflow-y-auto" ref="messagesContainer">
-        <div v-for="msg in messages" :key="msg.id" class="message-wrapper d-flex mb-3"
+      <template v-for="msg in messages" :key="msg.id">
+        <!-- A profile-photo message is a service line, not a bubble: who
+             changed their photo, with the photo; a tap opens the gallery. -->
+        <div v-if="avatarLine(msg)" class="msg-avatar-line d-flex justify-content-center mb-3" :data-msg-id="msg.id"
+          @contextmenu.prevent="openContextMenu($event, msg)"
+          @touchstart="startLongPress($event, msg)" @touchend="cancelLongPress"
+          @touchmove="cancelLongPress" @touchcancel="cancelLongPress">
+          <button type="button" class="msg-avatar-chip" @click="openAvatarLine(msg)">
+            <img v-if="avatarLine(msg).src" class="msg-avatar-thumb" :src="avatarLine(msg).src" alt="" />
+            <span class="msg-avatar-text">{{ avatarLine(msg).text }}</span>
+          </button>
+        </div>
+        <div v-else class="message-wrapper d-flex mb-3"
         :class="msg.isMine ? 'justify-content-end' : 'justify-content-start'">
         <div class="message-bubble p-2 rounded-3 shadow-sm"
           :data-msg-id="msg.id"
@@ -99,7 +114,7 @@
               <div class="msg-video-frame" :style="{ aspectRatio: v.widthAspect + ' / ' + v.heightAspect }"
                 :role="videos[fileKey(v)]?.url ? undefined : 'button'"
                 @click="!refusedFile(v) && !videos[fileKey(v)]?.url && videos[fileKey(v)]?.status !== 'opening' && emit('playVideo', v)">
-                <img v-if="thumbUrl(v)" class="msg-image-blur" :src="thumbUrl(v)" alt="" />
+                <img v-if="thumbDataUrl(v)" class="msg-image-blur" :src="thumbDataUrl(v)" alt="" />
                 <video v-if="videos[fileKey(v)]?.url" class="msg-video-el"
                   :src="videos[fileKey(v)].url" controls playsinline
                   @loadedmetadata="restoreVideoPosition(v.fileId, $event)"
@@ -137,7 +152,7 @@
             <div v-if="imagesOf(msg).length === 1" class="msg-image"
               :style="{ aspectRatio: imagesOf(msg)[0].widthAspect + ' / ' + imagesOf(msg)[0].heightAspect }"
               @click="openLightbox(msg, 0)">
-              <img v-if="thumbUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbUrl(imagesOf(msg)[0])" alt="" />
+              <img v-if="thumbDataUrl(imagesOf(msg)[0])" class="msg-image-blur" :src="thumbDataUrl(imagesOf(msg)[0])" alt="" />
               <img v-if="images[fileKey(imagesOf(msg)[0])]?.url" class="msg-image-full"
                 :src="images[fileKey(imagesOf(msg)[0])].url" :alt="imagesOf(msg)[0].name" />
               <div v-if="refusedFile(imagesOf(msg)[0])" class="msg-image-progress _err">This image could not be verified</div>
@@ -156,7 +171,7 @@
               :class="'_n' + Math.min(imagesOf(msg).length, 4)">
               <div v-for="(im, i) in visibleImages(msg)" :key="im.fileId" class="msg-gallery-cell"
                 @click="openLightbox(msg, i)">
-                <img v-if="thumbUrl(im)" class="msg-image-blur" :src="thumbUrl(im)" alt="" />
+                <img v-if="thumbDataUrl(im)" class="msg-image-blur" :src="thumbDataUrl(im)" alt="" />
                 <img v-if="images[fileKey(im)]?.url" class="msg-image-full" :src="images[fileKey(im)].url" :alt="im.name" />
                 <div v-if="refusedFile(im)" class="msg-image-progress _err">could not be verified</div>
                 <div v-if="overflowCount(msg) && i === visibleImages(msg).length - 1" class="msg-gallery-more">
@@ -333,6 +348,7 @@
           </div>
         </div>
       </div>
+      </template>
     </div>
 
     <!-- Footer / Input -->
@@ -368,35 +384,11 @@
       </form>
     </div>
 
-    <!-- Carousel (board screen 03): counter in the header, caption under the
-         frame, a strip of every picture in the dialog in feed order — frames
-         still on their way read as dimmed. Arrows walk past message
-         boundaries; the strip doubles as "which of these are here". -->
-    <div v-if="lightbox && currentFrame" class="lightbox" @click.self="closeLightbox">
-      <div class="lightbox-bar">
-        <span class="lightbox-count">{{ lightbox.index + 1 }} / {{ allDialogImages.length }}</span>
-        <button type="button" class="lightbox-close" @click="closeLightbox" title="Close">✕</button>
-      </div>
-      <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _prev" @click.stop="stepLightbox(-1)">‹</button>
-      <div class="lightbox-frame">
-        <img v-if="images[fileKey(currentFrame.part)]?.url"
-          :src="images[fileKey(currentFrame.part)].url" :alt="currentFrame.part.name" />
-        <img v-else-if="thumbUrl(currentFrame.part)" class="_blur" :src="thumbUrl(currentFrame.part)" alt="" />
-        <div v-if="refusedFile(currentFrame.part)" class="msg-image-progress _err">This image could not be verified</div>
-        <div v-else-if="images[fileKey(currentFrame.part)]?.status === 'downloading'" class="msg-image-progress">
-          {{ images[fileKey(currentFrame.part)].done }} / {{ images[fileKey(currentFrame.part)].total }} chunks
-        </div>
-      </div>
-      <button v-if="allDialogImages.length > 1" type="button" class="lightbox-nav _next" @click.stop="stepLightbox(1)">›</button>
-      <div v-if="currentFrame.caption" class="lightbox-caption">{{ currentFrame.caption }}</div>
-      <div v-if="allDialogImages.length > 1" class="lightbox-strip">
-        <button v-for="(it, i) in allDialogImages" :key="it.part.fileId" type="button"
-          class="lightbox-thumb" :class="{ _active: i === lightbox.index, _pending: !images[fileKey(it.part)]?.url }"
-          @click.stop="jumpLightbox(i)">
-          <img v-if="images[fileKey(it.part)]?.url || thumbUrl(it.part)" :src="images[fileKey(it.part)]?.url || thumbUrl(it.part)" alt="" />
-        </button>
-      </div>
-    </div>
+    <!-- Carousel (board screen 03): every picture in the dialog in feed
+         order; arrows walk past message boundaries, the strip doubles as
+         "which of these are here". -->
+    <GalleryViewer v-if="lightbox && currentFrame" :frames="lightboxFrames" :index="lightbox.index"
+      @update:index="jumpLightbox" @close="closeLightbox" />
 
     <!-- Context Menu -->
     <div v-if="contextMenu" ref="contextMenuRef" class="context-menu"
@@ -410,7 +402,7 @@
         type="button" class="context-menu-action" @click="startReply(contextMenuMsg)">
         <i class="bi bi-reply me-2"></i>Reply
       </button>
-      <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced'" type="button" class="context-menu-action"
+      <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !avatarLine(contextMenuMsg)" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
         <i class="bi bi-pencil me-2"></i>Edit
       </button>
@@ -438,14 +430,15 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { fileKey } from '@/lib/data/fileKey';
 import { contentToText, quoteSnapshot } from '@/lib/pq/content';
-import { thumbHashToDataURL } from 'thumbhash';
-import { fromBase64 } from '@/lib/pq/signature';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import RecoveryInviteCard from './RecoveryInviteCard.vue';
 import { useMenu } from '@/composables/useMenu';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
 import { playableAudioType } from '@/composables/useAudioPlayback';
 import Avatar from 'vue-boring-avatars';
+import GalleryViewer from '@/components/GalleryViewer.vue';
+import { thumbDataUrl } from '@/lib/data/imageMeta';
+import { isAvatarPart } from '@/lib/pq/content';
 
 const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
 const $breakpoint = useBreakpoint();
@@ -532,10 +525,15 @@ const props = defineProps({
   reactions: {
     type: Object,
     default: () => ({})
+  },
+  /** (photo, senderHash) → the decrypted profile photo's URL, empty while it is on its way. */
+  avatarSrc: {
+    type: Function,
+    default: () => ''
   }
 });
 
-const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo', 'inviteGuardian', 'answerInvite']);
+const emit = defineEmits(['sendMessage', 'toggleReaction', 'editMessage', 'acknowledgeMessage', 'showHistory', 'deleteMessage', 'sendFile', 'downloadFile', 'showImage', 'playVideo', 'playAudio', 'showFileState', 'discardMessage', 'createCheckpoint', 'checkpointInfo', 'showAvatar', 'inviteGuardian', 'answerInvite']);
 
 const newMessage = ref('');
 const messagesContainer = ref(null);
@@ -795,8 +793,6 @@ const onVideoTime = (fileId, event) => {
 
 
 
-// ThumbHash decodes to a tiny data URL; cached because it is pure and the
-// list re-renders on every sync tick.
 // Past four previews the rest live behind the +N counter (§1.6).
 const MAX_TILES = 4;
 const visibleImages = (msg) => imagesOf(msg).slice(0, MAX_TILES);
@@ -827,31 +823,62 @@ const openLightbox = (msg, localIndex) => {
   emit('showImage', target);
 };
 const closeLightbox = () => { lightbox.value = null; };
-const stepLightbox = (delta) => {
-  if (!lightbox.value) return;
-  const total = allDialogImages.value.length;
-  if (!total) return closeLightbox();
-  lightbox.value.index = (lightbox.value.index + delta + total) % total;
-  emit('showImage', allDialogImages.value[lightbox.value.index].part);
-};
 const jumpLightbox = (index) => {
   if (!lightbox.value) return;
   lightbox.value.index = index;
   emit('showImage', allDialogImages.value[index].part);
 };
 
-const thumbCache = new Map();
-const thumbUrl = (im) => {
-  if (!im.thumbHashB64) return '';
-  // By the hash itself: each message carries its own, unverified, blur.
-  if (thumbCache.has(im.thumbHashB64)) return thumbCache.get(im.thumbHashB64);
-  let url = '';
-  try {
-    url = thumbHashToDataURL(fromBase64(im.thumbHashB64));
-  } catch { /* a malformed hash just means no blur */ }
-  thumbCache.set(im.thumbHashB64, url);
-  return url;
+const lightboxFrames = computed(() =>
+  allDialogImages.value.map(({ part, caption }) => {
+    const state = props.images[fileKey(part)];
+    return {
+      key: fileKey(part),
+      src: state?.url || '',
+      placeholder: thumbDataUrl(part),
+      alt: part.name,
+      caption,
+      error: refusedFile(part) ? 'This image could not be verified' : '',
+      progress: state?.status === 'downloading' ? `${state.done} / ${state.total} chunks` : '',
+    };
+  }));
+
+// ---------- profile-photo messages (pq_avatars) ----------
+
+/**
+ * The service line of each profile-photo message, by message id; other
+ * messages have none. Only a verified message is a photo change — the same
+ * ones the gallery counts; any other keeps its bubble and fetches nothing.
+ */
+const avatarLines = computed(() => {
+  const lines = new Map();
+  for (const msg of props.messages) {
+    const parts = msg.parts || [];
+    if (msg._verify !== 'verified' || msg._deleted || !parts.length || !parts.every(isAvatarPart)) continue;
+    const photos = parts.filter((p) => p.kind === 'avatar');
+    const who = msg.isMine ? 'You' : props.title;
+    const shown = photos.at(-1);
+    const senderHash = msg._raw?.sender_hash || (msg.isMine ? props.myHash : props.peerHash);
+    let text;
+    if (photos.length > 1) text = `${who} shared ${photos.length} profile photos`;
+    else if (photos.length) text = msg.isMine ? 'You updated your photo' : `${who} updated their photo`;
+    else text = `${who} removed a photo`;
+    lines.set(msg.id, {
+      text,
+      senderHash,
+      avatarId: shown?.avatarId ?? null,
+      src: shown ? props.avatarSrc(shown.photo, senderHash) || thumbDataUrl(shown.photo) : '',
+    });
+  }
+  return lines;
+});
+const avatarLine = (msg) => avatarLines.value.get(msg.id) ?? null;
+
+const openAvatarLine = (msg) => {
+  const line = avatarLine(msg);
+  if (line) emit('showAvatar', { senderHash: line.senderHash, avatarId: line.avatarId });
 };
+
 
 const fmtSize = (n) => {
   if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
@@ -1479,6 +1506,22 @@ watch(() => props.messages, () => {
 
 .context-menu-danger { color: #dc3545; }
 
+/* ---------- profile-photo service line ---------- */
+.msg-avatar-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 85%;
+  border: none;
+  border-radius: 999px;
+  background: rgba(36, 24, 36, .06);
+  color: #5c5f62;
+  font-size: 12px;
+  padding: 3px 12px 3px 3px;
+}
+.msg-avatar-thumb { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+.msg-avatar-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 
 /* ---------- §1.5 / §2.1 files ---------- */
 .msg-file { display: flex; align-items: center; gap: 8px; background: rgba(36, 24, 36, .06); border-radius: 9px; padding: 6px 8px; margin-bottom: 6px; }
@@ -1578,78 +1621,6 @@ watch(() => props.messages, () => {
   font-weight: 600;
   color: #fff;
 }
-
-/* ---------- carousel ---------- */
-.lightbox {
-  position: fixed;
-  inset: 0;
-  z-index: 1080;
-  background: rgba(23, 22, 26, .92);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 16px;
-}
-.lightbox-bar {
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  color: #fff;
-}
-.lightbox-count { font-size: 13px; font-weight: 500; }
-.lightbox-close { background: none; border: none; color: #fff; font-size: 20px; line-height: 1; }
-.lightbox-frame {
-  position: relative;
-  max-width: min(92vw, 1100px);
-  max-height: 74vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.lightbox-frame img { max-width: 100%; max-height: 74vh; object-fit: contain; display: block; }
-.lightbox-frame img._blur { filter: blur(8px); }
-.lightbox-nav {
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  background: rgba(255, 255, 255, .12);
-  border: none;
-  color: #fff;
-  font-size: 28px;
-  line-height: 1;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-}
-.lightbox-nav._prev { left: 12px; }
-.lightbox-nav._next { right: 12px; }
-.lightbox-caption { color: #fff; font-size: 13px; max-width: min(92vw, 1100px); text-align: center; }
-.lightbox-strip {
-  display: flex;
-  gap: 6px;
-  max-width: min(92vw, 1100px);
-  overflow-x: auto;
-  padding: 2px;
-}
-.lightbox-thumb { flex-shrink: 0; }
-.lightbox-thumb {
-  width: 46px; height: 46px;
-  padding: 0;
-  border: 1.5px solid transparent;
-  border-radius: 8px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, .12);
-}
-.lightbox-thumb._active { border-color: #8e2b77; }
-/* a frame still on its way reads as dimmed, so the strip doubles as a
-   "which of these are here" indicator */
-.lightbox-thumb._pending { opacity: .5; }
-.lightbox-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 /* ---------- §2.4 availability ---------- */
 .msg-availability { margin: -2px 0 6px; display: flex; flex-direction: column; gap: 6px; }

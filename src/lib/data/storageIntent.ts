@@ -36,24 +36,29 @@ export function mergeJsonPatch(
 	if (base?.staleVaults || base?.retiredVaults || 'vaultUuid' in patch || patch.retiredVaults) {
 		mergeVaultList(merged, base, patch);
 	}
-	if (base?.contacts || patch.contacts) merged.contacts = mergeContacts(base?.contacts, patch.contacts);
+	for (const key of KEYED_FIELDS) {
+		if (base?.[key] || patch[key]) merged[key] = mergeKeyed(base?.[key], patch[key]);
+	}
 	return merged;
 }
 
-type ContactEdits = Record<string, Record<string, unknown> | null>;
+type KeyedEdits = Record<string, Record<string, unknown> | null>;
 
-// The contacts slot holds { contacts: { [user_hash]: contact } }. A patch edits
-// contacts by user_hash: its fields merge into the stored contact, and null
-// deletes it. A contact deleted and added again in patches not sent yet must
-// not inherit the deleted one's fields — `confirmed` above all, which only the
-// QR handshake sets — so that addition is marked to replace, not merge.
-// `base` is the stored record or an earlier pending patch, as for the vault
-// list; the materializer strips the deletions and the marker.
+// Fields edited entry by entry rather than replaced whole: the contacts slot
+// holds { contacts: { [user_hash]: contact } }, the avatars slot { avatars:
+// { [avatar_id]: { photo, at } } }. A patch edits entries by key: its fields
+// merge into the stored entry, and null deletes it. An entry deleted and added
+// again in patches not sent yet must not inherit the deleted one's fields — a
+// contact's `confirmed` above all, which only the QR handshake sets — so that
+// addition is marked to replace, not merge. `base` is the stored record or an
+// earlier pending patch, as for the vault list; the materializer strips the
+// deletions and the marker.
+const KEYED_FIELDS = ['contacts', 'avatars'] as const;
 const REPLACES = '$replaces';
 
-function mergeContacts(base: unknown, patch: unknown): ContactEdits {
-	const merged: ContactEdits = { ...((base ?? {}) as ContactEdits) };
-	for (const [hash, edit] of Object.entries((patch ?? {}) as ContactEdits)) {
+function mergeKeyed(base: unknown, patch: unknown): KeyedEdits {
+	const merged: KeyedEdits = { ...((base ?? {}) as KeyedEdits) };
+	for (const [hash, edit] of Object.entries((patch ?? {}) as KeyedEdits)) {
 		const prev = merged[hash];
 		if (edit === null) merged[hash] = null;
 		else if (prev === null || edit[REPLACES]) merged[hash] = { ...edit, [REPLACES]: true };
@@ -89,11 +94,12 @@ function mergeVaultList(merged: Record<string, unknown>, base: Record<string, un
 /** Keys of a patch that steer the merge and are not part of the stored record. */
 export function stripPatchDirectives(record: Record<string, unknown>): Record<string, unknown> {
 	const { retiredVaults: _retired, ...stored } = record;
-	if (stored.contacts) {
-		stored.contacts = Object.fromEntries(
-			Object.entries(stored.contacts as ContactEdits)
+	for (const key of KEYED_FIELDS) {
+		if (!stored[key]) continue;
+		stored[key] = Object.fromEntries(
+			Object.entries(stored[key] as KeyedEdits)
 				.filter((entry): entry is [string, Record<string, unknown>] => entry[1] !== null)
-				.map(([hash, { [REPLACES]: _marker, ...contact }]) => [hash, contact])
+				.map(([hash, { [REPLACES]: _marker, ...entry }]) => [hash, entry])
 		);
 	}
 	return stored;

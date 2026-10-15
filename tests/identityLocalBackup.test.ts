@@ -7,6 +7,11 @@ import { modalRegistry } from '@/components/modal/registry';
 
 let activeStore: Record<string, unknown> = {};
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => activeStore }));
+// The profile's photo gallery is not what this file tests; its store pulls in
+// the vault library, which only loads in a browser.
+vi.mock('@/store/avatars.store', () => ({
+	useAvatarsStore: () => ({ ownGallery: [], loadOwn: async () => [], photoUrl: () => '', loadPhoto: async () => '' }),
+}));
 
 const { default: Page_Account_Info } = await import('@/views/account/Page_Account_Info.vue');
 const { default: Modal_Account_Restore_Local } = await import('@/components/modal/views/Modal_Account_Restore_Local.vue');

@@ -16,7 +16,7 @@ import type { UserCardRow } from './types';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
-import { encodeContent } from '@/lib/pq/content';
+import { encodeContent, fileRefsOf, type ContentPart } from '@/lib/pq/content';
 
 function decode(str: string, fieldName: string): Uint8Array {
 	const result = decodeHexOrBase64(str);
@@ -191,11 +191,8 @@ export async function trustedRowBase(
 	return freshestOf(verified, own);
 }
 
-const fileIdsOf = (parts: unknown[] | undefined): string[] =>
-	(parts ?? []).flatMap((part) => {
-		const fileId = (part as { fileId?: unknown } | null)?.fileId;
-		return typeof fileId === 'string' && fileId ? [fileId] : [];
-	});
+const fileIdsOf = (parts: ContentPart[] | undefined): string[] =>
+	(parts ?? []).flatMap(fileRefsOf).map((ref) => ref.fileId).filter(Boolean);
 
 export async function materializeMessageIntent(
 	payload: DialogIntentPayload,

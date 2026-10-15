@@ -9,8 +9,8 @@ document — [reviews-frontend-context.md](reviews-frontend-context.md).
 
 **What the client has today:** text messages, editing your own message, emoji
 reactions, read confirmation on a button, the contact and dialog lists, a
-profile with an avatar, account creation and recovery. Everything below is
-missing.
+profile with a photo gallery its contacts see, account creation and recovery.
+Everything below is missing.
 
 **Three degrees of readiness** are marked on every item:
 
@@ -249,15 +249,6 @@ it offers. An "N messages unsent" indicator in the header.
 ---
 
 # 5. Dialogs and contacts
-
-## 5.1 Contacts' avatars [needs backend]
-
-Your own avatar exists, other people's do not: theirs is encrypted with the
-owner's personal key and there is nothing to decrypt it with. It needs a product
-decision and server work.
-
-**For the designer.** For now — what the placeholder instead of an avatar looks
-like (generated today). Worth designing for both outcomes.
 
 ## 5.2 Group chats [needs backend]
 

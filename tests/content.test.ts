@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError } from '@/lib/pq/content';
+import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError, fileRefsOf } from '@/lib/pq/content';
 
 // Wire-format contract with every other client (07_content_polymorphism.md).
 // The acceptance names follow the review's T-CONTENT set.
@@ -343,4 +343,133 @@ describe('T-CONTENT-RECOVERY: the other recovery envelopes', () => {
 			expect(contentToText([parts[type]])).toMatch(/^(🔐|🛡) /);
 		});
 	}
+});
+
+// pq_avatars: a profile photo rides as a nested image element; anything else
+// in the photo position makes the part unreadable, and it is ignored.
+describe('T-CONTENT-AVATAR: profile photo envelopes', () => {
+	const id = '5c0f'.repeat(8);
+	const ref = 'f_' + '4'.repeat(32);
+	const imageWire = [1, 1, 'YTg4', 'avatar.jpg', 48213, 'image/jpeg', 1791200000, ref, 'c2VjcmV0'];
+	const inlineWire = [1, 1, 'YTg4', 'avatar.jpg', 3, 'image/jpeg', 1791200000, 'AAEC'];
+	const image = {
+		kind: 'image' as const, widthAspect: 1, heightAspect: 1, thumbHashB64: 'YTg4', name: 'avatar.jpg',
+		size: 48213, mimeType: 'image/jpeg', createdAt: 1791200000, fileId: ref, encSecretB64: 'c2VjcmV0',
+	};
+	const inline = {
+		kind: 'inline_image' as const, widthAspect: 1, heightAspect: 1, thumbHashB64: 'YTg4', name: 'avatar.jpg',
+		size: 3, mimeType: 'image/jpeg', createdAt: 1791200000, dataB64: 'AAEC',
+	};
+
+	it('encodes avatar with a nested image at the registry positions', () => {
+		expect(encodeContent([{ kind: 'avatar', avatarId: id, photo: image }]))
+			.toBe(JSON.stringify({ avatar: [id, { image: imageWire }] }));
+	});
+
+	it('decodes avatar with a nested image or inline_image', () => {
+		expect(decodeContent(JSON.stringify({ avatar: [id, { image: imageWire }] }))).toEqual([{ kind: 'avatar', avatarId: id, photo: image }]);
+		expect(decodeContent(JSON.stringify({ avatar: [id, { inline_image: inlineWire }] }))).toEqual([{ kind: 'avatar', avatarId: id, photo: inline }]);
+	});
+
+	it('round-trips a whole-gallery message, oldest first, part order kept', () => {
+		const other = '0a1b'.repeat(8);
+		const wire = JSON.stringify([{ avatar: [other, { inline_image: inlineWire }] }, { avatar: [id, { image: imageWire }] }]);
+		const parts = decodeContent(wire);
+		expect(parts.map((p) => (p as { avatarId: string }).avatarId)).toEqual([other, id]);
+		expect(encodeContent(parts)).toBe(wire);
+	});
+
+	it('encodes and decodes avatar_removed', () => {
+		const wire = JSON.stringify({ avatar_removed: [id] });
+		expect(encodeContent([{ kind: 'avatar_removed', avatarId: id }])).toBe(wire);
+		expect(decodeContent(wire)).toEqual([{ kind: 'avatar_removed', avatarId: id }]);
+	});
+
+	it('keeps a newer tail on both, and on the nested photo', () => {
+		for (const value of [
+			{ avatar: [id, { image: [...imageWire, 'a future field'] }, 'another'] },
+			{ avatar_removed: [id, 'a future field'] },
+		]) {
+			const wire = JSON.stringify(value);
+			expect(encodeContent(decodeContent(wire))).toBe(wire);
+		}
+	});
+
+	// "Any other element makes the part unreadable, and it is ignored": the
+	// message still decodes, the part is kept verbatim and changes no gallery.
+	it('ignores an avatar whose photo is any other element, or whose id is not one', () => {
+		const unreadable = [
+			[id, { video: [1, 1, 'YTg4', 'a.mp4', 1, 'video/mp4', 0, 3, ref, 'c2VjcmV0'] }],
+			[id, { file: ['a.jpg', 1, 'image/jpeg', 0, ref, 'c2VjcmV0'] }],
+			[id, 'a bare string'],
+			[id, [{ image: imageWire }]],
+			[id, { image: [1, 1] }],
+			[id],
+			['5C0F'.repeat(8), { image: imageWire }],
+			['5c0f', { image: imageWire }],
+			'not an array',
+		];
+		for (const value of unreadable) {
+			const wire = JSON.stringify(['hi', { avatar: value }]);
+			const parts = decodeContent(wire);
+			expect(parts[0]).toEqual({ kind: 'text', text: 'hi' });
+			expect(parts[1]).toEqual({ kind: 'unknown', type: 'avatar', value });
+			expect(encodeContent(parts)).toBe(wire);
+		}
+		expect(decodeContent(JSON.stringify({ avatar_removed: ['nope'] }))[0]).toMatchObject({ kind: 'unknown', type: 'avatar_removed' });
+	});
+
+	it('reads as a label in text and previews, and is named in a quote, never copied', () => {
+		const parts = decodeContent(JSON.stringify({ avatar: [id, { inline_image: inlineWire }] }));
+		expect(contentToText(parts)).toBe('🖼 profile photo');
+		expect(previewText([{ kind: 'avatar_removed', avatarId: id }])).toBe('🖼 profile photo removed');
+		const reply = encodeContent([{ kind: 'quote', authorHash: 'u_a', messageId: 'm', signHash: 's', snapshot: parts }]);
+		expect(reply).not.toContain('AAEC');
+		expect(reply).not.toContain('"avatar"');
+		expect(reply).toContain('🖼 profile photo');
+	});
+});
+
+describe('T-CONTENT-INLINE-IMAGE: inline_image envelope', () => {
+	const wire = [16, 9, 'YTg4', 'small.png', 3, 'image/png', 1715000000, 'AAEC'];
+
+	it('round-trips at the registry positions, and keeps a newer tail', () => {
+		const parts = decodeContent(JSON.stringify({ inline_image: wire }));
+		expect(parts).toEqual([{
+			kind: 'inline_image', widthAspect: 16, heightAspect: 9, thumbHashB64: 'YTg4', name: 'small.png',
+			size: 3, mimeType: 'image/png', createdAt: 1715000000, dataB64: 'AAEC',
+		}]);
+		expect(encodeContent(parts)).toBe(JSON.stringify({ inline_image: wire }));
+		const longer = JSON.stringify({ inline_image: [...wire, 'a future field'] });
+		expect(encodeContent(decodeContent(longer))).toBe(longer);
+	});
+
+	it('rejects an envelope without its bytes', () => {
+		expect(() => decodeContent(JSON.stringify({ inline_image: wire.slice(0, 7) }))).toThrow(ContentDecodeError);
+		expect(() => decodeContent(JSON.stringify({ inline_image: [...wire.slice(0, 7), 42] }))).toThrow(ContentDecodeError);
+	});
+
+	it('is named, not copied, in a quote: its bytes stay in the original', () => {
+		const reply = encodeContent([{ kind: 'quote', authorHash: 'u_a', messageId: 'm', signHash: 's', snapshot: decodeContent(JSON.stringify({ inline_image: wire })) }]);
+		expect(reply).not.toContain('AAEC');
+		expect(reply).toContain('🖼 small.png');
+	});
+});
+
+describe('fileRefsOf: the files a part references', () => {
+	const image = decodeContent(JSON.stringify({ image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_a', 'k'] }))[0];
+	it('names an attachment itself and a profile photo nested in its avatar part', () => {
+		expect(fileRefsOf(image)).toEqual([image]);
+		const avatar = decodeContent(JSON.stringify({ avatar: ['a'.repeat(32), { image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'f_b', 'k'] }] }))[0];
+		expect(fileRefsOf(avatar).map((r) => r.fileId)).toEqual(['f_b']);
+		// the same object, so a reader's stamp lands on the part it renders
+		expect(fileRefsOf(avatar)[0]).toBe((avatar as { photo: unknown }).photo);
+	});
+	it('names nothing for text, an inline photo or a removal', () => {
+		const inline = decodeContent(JSON.stringify({ avatar: ['a'.repeat(32), { inline_image: [1, 1, '', 'a.jpg', 1, 'image/jpeg', 0, 'AA'] }] }))[0];
+		expect([{ kind: 'text', text: 'x' } as const, inline, { kind: 'avatar_removed', avatarId: 'a'.repeat(32) } as const].flatMap(fileRefsOf)).toEqual([]);
+	});
+	it('a reader\'s uploaderHash never reaches the wire', () => {
+		expect(encodeContent([{ ...(image as object), uploaderHash: 'u_x' } as never])).not.toContain('u_x');
+	});
 });

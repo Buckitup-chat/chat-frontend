@@ -13,8 +13,7 @@
 // identity in this protocol, so the address cannot drift.
 //
 // Every other slot gets a random uuid at creation and is reachable only
-// through the map inside the root record — the same shape avatars already use
-// (EncryptionManagerPQ stores avatarUuid inside the profile).
+// through the map inside the root record.
 
 import { hkdfDerive } from './hkdf';
 

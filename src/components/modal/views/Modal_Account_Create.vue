@@ -17,13 +17,16 @@
 
 <script setup>
 import { userPQStore } from '@/store/userPQ.store';
+import { useAvatarsStore } from '@/store/avatars.store';
 
 
 import { ref, inject } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
 
 const $userPQ = userPQStore();
+const $avatars = useAvatarsStore();
 const $mitt = inject('$mitt');
+const $swal = inject('$swal');
 const $router = inject('$router');
 
 const creating = ref(false);
@@ -73,9 +76,20 @@ const create = async () => {
 		await $userPQ.registerNewUser({
 			name: account.value.name || 'Anonymous',
 			notes: account.value.notes,
-			avatar: account.value.draftAvatar,
-			avatarDataUrl: account.value.avatar
 		});
+
+		// The photo chosen here is the gallery's first. The account stands
+		// without it: a failed upload is said, not a failed creation.
+		if (account.value.draftAvatar) {
+			await $avatars.addPhoto(account.value.draftAvatar).catch((e) => {
+				console.error('avatar upload failed', e);
+				$swal.fire({
+					icon: 'warning',
+					title: 'Account created without its photo',
+					text: `The photo could not be uploaded: ${e?.message ?? e}. Add it again from your profile.`,
+				});
+			});
+		}
 
 		$mitt.emit('account::created');
 		$mitt.emit('modal::close');

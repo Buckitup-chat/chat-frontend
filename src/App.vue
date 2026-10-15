@@ -138,6 +138,7 @@
 <script setup>
 
 import { userPQStore } from '@/store/userPQ.store';
+import { useAvatarsStore } from '@/store/avatars.store';
 import { initPersistence } from '@/lib/data/persistence';
 
 
@@ -157,6 +158,9 @@ import { ref, provide, watch, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 const $userPQ = userPQStore();
+// Created with the app, not with the first screen that shows a photo: it
+// sends the gallery into a dialog the first time this account writes there.
+useAvatarsStore();
 const $breakpoint = useBreakpoint();
 
 

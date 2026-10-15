@@ -1,12 +1,13 @@
-// Preview metadata for outgoing images (design board §1.3).
+// Preview metadata for images (design board §1.3): computed for outgoing
+// ones, drawn for every one.
 //
 // The bubble must reserve the picture's space before any byte of it arrives,
 // so the message carries the aspect ratio and a ThumbHash — a ~25-byte blur
 // preview. Both are computed here, in the browser, from the plaintext image:
 // the device never sees it, so nobody else can produce them.
 
-import { rgbaToThumbHash } from 'thumbhash';
-import { toBase64 } from '@/lib/pq/signature';
+import { rgbaToThumbHash, thumbHashToDataURL } from 'thumbhash';
+import { fromBase64, toBase64 } from '@/lib/pq/signature';
 
 export interface ImagePreview {
 	widthAspect: number;
@@ -21,6 +22,28 @@ export interface VideoPreview extends ImagePreview {
 
 export const isImageMime = (mime: string): boolean =>
 	/^image\/(png|jpe?g|gif|webp|avif|bmp)$/i.test(mime || '');
+
+const thumbs = new Map<string, string>();
+
+/**
+ * The ThumbHash blur a picture is drawn as before its bytes arrive; empty
+ * when there is none or it does not decode. Cached by the hash itself: each
+ * message carries its own, unverified, blur.
+ */
+export const thumbDataUrl = (part: { thumbHashB64?: string } | null | undefined): string => {
+	const hash = part?.thumbHashB64;
+	if (!hash) return '';
+	let url = thumbs.get(hash);
+	if (url === undefined) {
+		try {
+			url = thumbHashToDataURL(fromBase64(hash));
+		} catch {
+			url = '';
+		}
+		thumbs.set(hash, url);
+	}
+	return url;
+};
 
 export const isVideoMime = (mime: string): boolean => /^video\//i.test(mime || '');
 

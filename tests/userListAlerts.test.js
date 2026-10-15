@@ -25,6 +25,9 @@ vi.mock('@/store/userPQ.store', () => ({
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({ alertingPeers: alerting, checkpointAlerts: alertEntries, scanCheckpointAlerts }),
 }));
+// Contacts' photos are not what this file tests; their store pulls in the
+// vault library, which only loads in a browser.
+vi.mock('@/store/avatars.store', () => ({ useAvatarsStore: () => ({ contactAvatarSrc: () => '' }) }));
 vi.mock('@/store/transfers.store', () => ({
 	useTransfersStore: () => ({ transferPeers }),
 }));

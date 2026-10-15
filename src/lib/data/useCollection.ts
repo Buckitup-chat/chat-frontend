@@ -32,6 +32,9 @@ export function useCollectionRows<T extends Record<string, unknown>>(
 ) {
 	const rows = ref<T[]>([]) as Ref<T[]>;
 	const ready = ref(false);
+	// The live set is confirmed: `rows` is what the server has, not the disk
+	// copy `ready` may already be showing.
+	const live = ref(false);
 	let sub: Subscription | null = null;
 	let token = 0;
 
@@ -52,6 +55,7 @@ export function useCollectionRows<T extends Record<string, unknown>>(
 		const my = token;
 		rows.value = [];
 		ready.value = false;
+		live.value = false;
 		if (!coll) return;
 
 		const readCache = opts.readCache;
@@ -94,11 +98,12 @@ export function useCollectionRows<T extends Record<string, unknown>>(
 		cached = [];
 		show();
 		ready.value = true;
+		live.value = true;
 		if (!sub) sub = coll.subscribeChanges(show);
 	};
 
 	watch(collection, (coll) => { attach(coll); }, { immediate: true });
 	onScopeDispose(detach);
 
-	return { rows, ready };
+	return { rows, ready, live };
 }
