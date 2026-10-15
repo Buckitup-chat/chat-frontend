@@ -1,5 +1,4 @@
-// The Local File backup envelope (Security & Recovery page); the other way an
-// account leaves the device is lib/wrapKeyShares.
+// The Local File backup envelope (Security & Recovery page).
 //
 // - Local File: the vault JSON encrypted under a password. PBKDF2-SHA-256
 //   (600k iterations, random salt) → AES-256-GCM. The previous format sliced
@@ -115,5 +114,3 @@ export const decryptBackupFile = async (fileText: string, password: string): Pro
 	const key = await passwordKey(password, fromB64(file.salt), iterations);
 	return fromUtf8(await aesDecrypt(key, fromB64(file.iv), fromB64(file.ct)));
 };
-
-// ---------- Shamir shares ----------

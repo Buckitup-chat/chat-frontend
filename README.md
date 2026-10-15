@@ -58,15 +58,13 @@ docs/           Architecture notes, invariants (docs/invariants.md), backlog, re
 netlify/        Netlify redirect function for SPA preview hosting
 ```
 
-## Account recovery (status)
+## Account recovery
 
-The one backup option a released build offers is the encrypted local file export: the vault JSON under a password (PBKDF2-SHA-256, 600k → AES-256-GCM).
+Signing in on a second device goes through [docs/device-link.md](docs/device-link.md): the backup travels between the two devices under an ML-KEM session, started by the account holder from their own account page and checked by a code they compare on both screens. A person with any working device is better served by it than by a recovery.
 
-The community backup's first half is in place: the account is sealed under a 32-byte wrap key and stored in `user_storage` where the key alone finds it (`src/lib/recovery/vault.ts`), and only that key is ever split. Splitting it by hand exists in the tree but is a development surface only: it is gated behind `SANDBOX_SURFACES` (`src/config/sandbox.ts`), which is the dev server and nothing else, because a screen that hands out key shares to copy-paste must not read as an offered way to back up an account in a public deployment.
+The community backup (Security & Recovery → Community backup) seals the account under a 32-byte wrap key, stored in `user_storage` where the key alone finds it (`src/lib/recovery/vault.ts`), and only that key is split: one half among guardians the owner chose from their contacts, whose shares travel in the dialogs, the other among independent nodes, with a smart contract recording who asked for a recovery and who approved it. An account is recovered from the login page, **Recover with friends**: a temporary account on the new device, guardians who check ten words on a call and approve it on chain, the owner's timelock and veto, and the shares sent back once the window opens; the recovery ends in a reshare. See [docs/backup-recovery-overview.md](docs/backup-recovery-overview.md), [docs/backup-recovery-plan.md](docs/backup-recovery-plan.md) and the [RFC](https://github.com/Community-secret-sharing/backitup-smart-contracts/blob/main/RFC_COMPARTMENTED_RECOVERY_WITH_CONTRACT.md).
 
-Signing in on a second device goes through [docs/device-link.md](docs/device-link.md): the backup travels between the two devices under an ML-KEM session, started by the account holder from their own account page and checked by a code they compare on both screens.
-
-The node-based flow that replaces it — Compartmented Multi-Secret Sharing across helper contacts and independent nodes, with a smart-contract condition layer — is under development. See [docs/backup-recovery-overview.md](docs/backup-recovery-overview.md), [docs/backup-recovery-plan.md](docs/backup-recovery-plan.md) and the [RFC](https://github.com/Community-secret-sharing/backitup-smart-contracts/blob/main/RFC_COMPARTMENTED_RECOVERY_WITH_CONTRACT.md).
+The encrypted local file export stays as well: the vault JSON under a password (PBKDF2-SHA-256, 600k → AES-256-GCM).
 
 ## Deployment
 

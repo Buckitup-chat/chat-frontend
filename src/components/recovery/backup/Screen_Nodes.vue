@@ -90,6 +90,19 @@ const rows = computed(() => {
 			statusClass: n.online ? 'cb-status-ok' : 'cb-status-warn',
 		};
 	});
+	// A reshare's node this device does not list now: kept until the owner removes it.
+	const unlisted = picked.value
+		.filter((n) => n.unlisted)
+		.map((n) => ({
+			key: n.descriptor.id,
+			id: n.descriptor.id,
+			operator: hostOf(n.descriptor.url),
+			host: n.descriptor.url,
+			picked: true,
+			selectable: true,
+			status: draft.state.nodesLoading ? 'checking…' : 'not answering now',
+			statusClass: 'cb-status-warn',
+		}));
 	const refused = Object.entries(store.refusedNodes ?? {}).map(([url, check]) => ({
 		key: url,
 		id: null,
@@ -100,7 +113,7 @@ const rows = computed(() => {
 		status: refusedNodeStatus(check.reason),
 		statusClass: 'cb-status-off',
 	}));
-	return [...known, ...refused];
+	return [...known, ...unlisted, ...refused];
 });
 
 const toggle = (id) => {
@@ -115,6 +128,10 @@ const messages = computed(() =>
 			if (p.kind === 'refused_node') {
 				const node = picked.value.find((n) => n.descriptor.id === p.nodeId);
 				if (!node) return null;
+				if (node.unlisted) {
+					const at = hostOf(node.descriptor.url);
+					return { key: `u${p.nodeId}`, text: draft.state.nodesLoading ? `Checking the node at ${at}…` : `The node at ${at} is not answering now. Remove it, or wait until it answers.`, removeNode: p.nodeId };
+				}
 				const name = nameOf(node);
 				if (p.reason === 'guardian_operator') {
 					const who = guardianName(p.guardian, store.candidates, $userPQ);

@@ -68,6 +68,16 @@ export const recoveryDeployment = (env: Record<string, string | undefined> = imp
 	};
 };
 
+/** recoveryDeployment, or null — with a warning — when the build names none this client knows: chats keep working without it. */
+export const maybeRecoveryDeployment = (env: Record<string, string | undefined> = import.meta.env): Deployment | null => {
+	try {
+		return recoveryDeployment(env);
+	} catch (e) {
+		console.warn('[recovery] no deployment:', e);
+		return null;
+	}
+};
+
 /** `eip155:<chainId>:<contract>`, lowercase: the namespace part of a `secret_ref` (07 § recovery_share). */
 export const deploymentNamespace = (d: Deployment): string => `eip155:${d.chainId}:${d.secretRecovery.toLowerCase()}`;
 
@@ -76,4 +86,7 @@ export const secretIdOf = (owner: string, label: string): string =>
 	keccak256(AbiCoder.defaultAbiCoder().encode(['address', 'string'], [owner, label]));
 
 /** `<namespace>/<id>`, canonical — lowercase hex, decimal chain id — as every recovery message names a secret. */
-export const secretRefOf = (d: Deployment, id: string): string => `${deploymentNamespace(d)}/${id.toLowerCase()}`;
+export const secretRefOf = (d: Deployment, id: string): string => secretRefIn(deploymentNamespace(d), id);
+
+/** secretRefOf for a deployment known by its namespace. */
+export const secretRefIn = (namespace: string, id: string): string => `${namespace}/${id.toLowerCase()}`;

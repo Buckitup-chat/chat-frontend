@@ -7,8 +7,9 @@ import { ref, watch } from 'vue';
 import { v7 as uuidv7 } from 'uuid';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
+import { markGuardianSlotChanged, useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
-import { deploymentNamespace, recoveryDeployment } from '@/lib/recovery/deployments';
+import { deploymentNamespace, maybeRecoveryDeployment } from '@/lib/recovery/deployments';
 import { liveInviteId, rosterAnswersDue } from '@/lib/recovery/inviteThread';
 import { GUARDIAN_SLOT, ROSTER_SLOT, InvitationError, answerInvite, recordRosterAnswers, sendInvite } from '@/lib/recovery/invitations';
 
@@ -21,14 +22,8 @@ export const useRecoveryInvitesStore = defineStore('recoveryInvites', () => {
 	 * build names none it knows, which leaves chats working and invitations
 	 * declinable only.
 	 */
-	const deployment = (() => {
-		try {
-			return deploymentNamespace(recoveryDeployment());
-		} catch (e) {
-			console.warn('[recovery] no deployment for invitations:', e);
-			return null;
-		}
-	})();
+	const known = maybeRecoveryDeployment();
+	const deployment = known ? deploymentNamespace(known) : null;
 	const approvesOn = (d) => deployment !== null && d === deployment;
 	/** Only a contact confirmed in person can be asked, or accepted. */
 	const isConfirmed = (userHash) => $userPQ.contactsMap?.[userHash]?.confirmed === true;
@@ -92,7 +87,11 @@ export const useRecoveryInvitesStore = defineStore('recoveryInvites', () => {
 	};
 
 	const answer = async (peerHash, inv, accept, onStatus) => {
+		const owner = $userPQ.currentUserHash;
 		answers.value = { ...answers.value, ...(await answerInvite(deps(), peerHash, inv, accept, onStatus)) };
+		// Consent changed: the shares kept for this owner follow it (§ Holding).
+		markGuardianSlotChanged(owner);
+		useRecoveryHoldingsStore().sweep({ force: true }).catch((e) => console.warn('[recovery] the shares kept could not follow the answer:', e));
 	};
 
 	// A dialog re-judges on every new row: one write in flight, and an outcome

@@ -13,6 +13,7 @@
             @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
             :invites="inviteViewsByMsgId" :can-invite="peerConfirmed" :inviting="inviting"
             @invite-guardian="guardianInvites.inviteGuardian" @answer-invite="guardianInvites.answerInvite"
+            :shares="shareViewsByMsgId" :giving-back="givingBack" @give-back-share="recoveryShares.giveBack"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge">
@@ -73,6 +74,7 @@ import GalleryViewer from '@/components/GalleryViewer.vue';
 import { useAvatarsStore } from '@/store/avatars.store';
 import { usePeerGallery } from '@/composables/usePeerGallery';
 import { useGuardianInvites } from '@/composables/useGuardianInvites';
+import { useRecoveryShares } from '@/composables/useRecoveryShares';
 
 const $route = useRoute();
 const $router = useRouter();
@@ -988,6 +990,13 @@ const guardianInvites = useGuardianInvites({
     peerName: chatName, swal: $swal, isAlive: () => pageAlive,
 });
 const { views: inviteViewsByMsgId, peerConfirmed, inviting } = guardianInvites;
+
+// Backup pieces (pq_recovery_shares § Holding): kept when the dialog opens.
+const recoveryShares = useRecoveryShares({
+    peerHash, messages: decryptedMessages,
+    peerName: chatName, swal: $swal, isAlive: () => pageAlive,
+});
+const { views: shareViewsByMsgId, givingBack } = recoveryShares;
 
 watch(dialogHash, (dh) => {
     if (!dh || !peerHash.value) return;

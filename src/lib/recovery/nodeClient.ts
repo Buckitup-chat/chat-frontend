@@ -4,7 +4,6 @@
 // and the holding check. The node, the SDK and this client produce the same
 // bytes; the golden vectors in tests/recoveryNodeClient.test.ts come from the
 // SDK.
-import { SigningKey, computeAddress } from 'ethers';
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { hmac } from '@noble/hashes/hmac';
@@ -16,7 +15,7 @@ import { toBytes } from '@/lib/pq/signature';
 import type { VerifiedCard } from '@/lib/pq/verifyCard';
 import { nodeShareDigest } from 'backitup-secret-recovery-sdk/lib/constants/messages';
 import type { Deployment } from './deployments';
-import { personalSignHex } from './evmSign';
+import { addressOf, personalSignHex } from './evmSign';
 import { NodeSetError, parseNodeUrl } from './nodeSet';
 
 const strip0x = (hex: string) => (hex.startsWith('0x') ? hex.slice(2) : hex);
@@ -348,7 +347,7 @@ export const requestRelease = async (
 	candidatePrivateKeyHex: string,
 	opts: NodeClientOptions = {},
 ): Promise<{ version: number; share: string }> => {
-	const recipient = computeAddress(new SigningKey(candidatePrivateKeyHex).publicKey).toLowerCase();
+	const recipient = addressOf(candidatePrivateKeyHex);
 	const secretId = id.toLowerCase();
 	// The body is what was signed, but the node id and the secret id, which the node and the path supply.
 	const body = { recipient, nonce: newNonce(), ts: nowOf(opts) };

@@ -29,24 +29,15 @@
 		</div>
 	</div>
 
-	<div class="cb-section">Time</div>
-	<div class="cb-group">
-		<div class="cb-setting flex-wrap">
-			<div class="flex-grow-1 d-flex flex-column gap-1">
-				<span class="fw-medium">Waiting period</span>
-				<span class="cb-small">{{ boundsText(DELAY_BOUNDS) }}</span>
-			</div>
-			<DurationInput v-model="w.delaySec" label="Waiting period" :invalid="bad('delaySec')" />
-		</div>
-		<div class="cb-setting flex-wrap">
-			<div class="flex-grow-1 d-flex flex-column gap-1">
-				<span class="fw-medium">Time to finish after the wait</span>
-				<span class="cb-small">{{ boundsText(WINDOW_BOUNDS) }}</span>
-			</div>
-			<DurationInput v-model="w.windowSec" label="Time to finish" :invalid="bad('windowSec')" />
-		</div>
+	<!-- A reshare keeps the waiting period: it is changed from Manage, on its own -->
+	<div v-if="draft.resharing.value" class="cb-small" data-test="reshare-time">
+		The waiting period ({{ durationText(w.delaySec) }}) and the time to finish ({{ durationText(w.windowSec) }}) stay as they are. Change them from Manage.
 	</div>
-	<div class="cb-small">If someone else starts a recovery, you have {{ delayWords }} to stop it from any of your devices.</div>
+	<template v-else>
+		<div class="cb-section">Time</div>
+		<PolicyFields v-model:delay-sec="w.delaySec" v-model:window-sec="w.windowSec" :problems="problems" />
+		<div class="cb-small">If someone else starts a recovery, you have {{ delayWords }} to stop it from any of your devices.</div>
+	</template>
 
 	<div class="cb-section">Nodes and fee</div>
 	<div class="cb-group">
@@ -72,10 +63,10 @@
 
 <script setup>
 import { computed, inject } from 'vue';
-import { DELAY_BOUNDS, WINDOW_BOUNDS, SPARES_BOUNDS, defaultSettings, durationText, plural, settingsProblems } from '@/lib/recovery/backupPlan';
+import { DELAY_BOUNDS, SPARES_BOUNDS, defaultSettings, durationText, plural } from '@/lib/recovery/backupPlan';
 import ScreenHeader from './ScreenHeader.vue';
 import Stepper from './Stepper.vue';
-import DurationInput from './DurationInput.vue';
+import PolicyFields from './PolicyFields.vue';
 import { DRAFT, NAV, SPARES_CAPTION, feeText } from './backupFlow';
 
 const FIELDS = ['threshold', 'approvals', 'spares', 'delaySec', 'windowSec'];
@@ -92,9 +83,8 @@ const guardianCount = computed(() => draft.guardians.value.length);
 const maxThreshold = computed(() => Math.max(guardianCount.value, 2));
 
 const problems = computed(() =>
-	settingsProblems({ ...draft.settings.value, ...w }, guardianCount.value, draft.nodes.value.length).filter((p) => FIELDS.includes(p.field)),
+	draft.settingsIssues({ ...draft.settings.value, ...w }, guardianCount.value, draft.nodes.value.length).filter((p) => FIELDS.includes(p.field)),
 );
-const bad = (field) => problems.value.some((p) => p.field === field);
 const approvalsError = computed(() => {
 	const p = problems.value.find((x) => x.field === 'approvals');
 	if (!p) return null;
@@ -105,9 +95,12 @@ const approvalsError = computed(() => {
 const delayWords = computed(() =>
 	w.delaySec >= DELAY_BOUNDS.min && w.delaySec <= DELAY_BOUNDS.max ? durationText(w.delaySec) : 'the waiting period',
 );
-const boundsText = (b) => `${durationText(b.min)} … ${durationText(b.max)}`;
 
-const reset = () => Object.assign(w, pick(defaultSettings(guardianCount.value, draft.nodes.value.length)));
+// A reshare's reset leaves the waiting period and the time to finish as the backup has them.
+const reset = () => {
+	const keep = draft.resharing.value ? { delaySec: w.delaySec, windowSec: w.windowSec } : {};
+	Object.assign(w, pick(defaultSettings(guardianCount.value, draft.nodes.value.length)), keep);
+};
 const save = () => {
 	draft.state.custom = { ...w };
 	draft.state.work = null;

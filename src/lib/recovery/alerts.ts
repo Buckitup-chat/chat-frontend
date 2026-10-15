@@ -3,8 +3,7 @@
 // docs/INTEGRATION.md § 9.5). The owner is told when a recovery of their
 // secret starts and when it reaches quorum — the veto path, so a backup is not
 // finished without a channel or an explicit skip (plan § 7.2).
-import { personalSignHex } from './evmSign';
-import { SigningKey, computeAddress } from 'ethers';
+import { addressOf, personalSignHex } from './evmSign';
 
 export type AlertKind = 'telegram' | 'webhook';
 
@@ -23,7 +22,7 @@ export class AlertsError extends Error {
 	}
 }
 
-const walletOf = (ownerKey: string) => computeAddress(new SigningKey(ownerKey).publicKey).toLowerCase();
+const walletOf = addressOf;
 
 export const subscribeMessage = (wallet: string, channel: AlertKind, target: string, ts: number): string =>
 	['Backitup notifications subscribe', `wallet: ${wallet.toLowerCase()}`, `channel: ${channel}`, `target: ${target}`, `ts: ${ts}`].join('\n');
@@ -45,14 +44,21 @@ const call = async (url: string, init: Parameters<typeof fetch>[1] = {}, fetchIm
 	return body;
 };
 
-/** The wallet's subscriptions on the server at `base` — kinds only, never targets. */
-export const listSubscriptions = async (base: string, ownerKey: string, fetchImpl?: typeof fetch): Promise<Subscription[]> => {
+/** `path` on the notification server at `base`. */
+const endpoint = (base: string, path: string) => `${base.replace(/\/+$/, '')}/api/notifications${path}`;
+
+/** A read of the wallet's own records at `path`, signed with the read message; `extra` joins the query. */
+const signedGet = async (base: string, ownerKey: string, path: string, extra: Record<string, string> = {}, fetchImpl?: typeof fetch) => {
 	const wallet = walletOf(ownerKey);
 	const ts = nowSec();
 	const sig = personalSignHex(ownerKey, readMessage(wallet, ts));
-	const q = new URLSearchParams({ wallet, ts: String(ts), sig });
-	return (await call(`${base.replace(/\/+$/, '')}/api/notifications/subscriptions?${q}`, {}, fetchImpl)) ?? [];
+	const q = new URLSearchParams({ wallet, ts: String(ts), sig, ...extra });
+	return (await call(`${endpoint(base, path)}?${q}`, {}, fetchImpl)) ?? [];
 };
+
+/** The wallet's subscriptions on the server at `base` — kinds only, never targets. */
+export const listSubscriptions = (base: string, ownerKey: string, fetchImpl?: typeof fetch): Promise<Subscription[]> =>
+	signedGet(base, ownerKey, '/subscriptions', {}, fetchImpl);
 
 /**
  * Subscribes a webhook. Resolves to its signing secret, which the server shows
@@ -63,7 +69,7 @@ export const subscribeWebhook = async (base: string, ownerKey: string, target: s
 	const ts = nowSec();
 	const sig = personalSignHex(ownerKey, subscribeMessage(wallet, 'webhook', target, ts));
 	return call(
-		`${base.replace(/\/+$/, '')}/api/notifications/subscriptions`,
+		endpoint(base, '/subscriptions'),
 		{ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ wallet, kind: 'webhook', target, ts, sig }) },
 		fetchImpl,
 	);
@@ -89,6 +95,22 @@ export const telegramReply = (botText: string, ownerKey: string, now = nowSec())
 	const message = subscribeMessage(wallet, 'telegram', target, ts);
 	return `${wallet} ${personalSignHex(ownerKey, message)} ${ts}`;
 };
+
+const unsubscribeMessage = (wallet: string, id: string, ts: number) =>
+	['Backitup notifications unsubscribe', `wallet: ${wallet.toLowerCase()}`, `id: ${id}`, `ts: ${ts}`].join('\n');
+
+/** Deletes subscription `id` of the wallet. */
+export const unsubscribe = async (base: string, ownerKey: string, id: string, fetchImpl?: typeof fetch): Promise<void> => {
+	const wallet = walletOf(ownerKey);
+	const ts = nowSec();
+	const sig = personalSignHex(ownerKey, unsubscribeMessage(wallet, id, ts));
+	const q = new URLSearchParams({ wallet, ts: String(ts), sig });
+	await call(`${endpoint(base, `/subscriptions/${encodeURIComponent(id)}`)}?${q}`, { method: 'DELETE' }, fetchImpl);
+};
+
+/** The wallet's alert history, newest first as the server keeps it. */
+export const alertHistory = (base: string, ownerKey: string, limit = 50, fetchImpl?: typeof fetch): Promise<unknown[]> =>
+	signedGet(base, ownerKey, '', { limit: String(limit) }, fetchImpl);
 
 /** The wallet address the bot is sent first. */
 export const alertWallet = walletOf;

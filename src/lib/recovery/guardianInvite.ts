@@ -2,9 +2,10 @@
 // pq_recovery_shares § Inviting). The owner needs the guardian's stealth
 // meta-address to derive their slot; it travels in the dialog, inside a reply
 // that proves the replier holds its keys.
-import { bytesToHex, randomBytes } from '@noble/hashes/utils';
+import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
 import { CURVE } from '@noble/secp256k1';
 import { SigningKey } from 'ethers';
+import { checkStealthAddress } from 'backitup-secret-recovery-sdk/lib/keys/stealth';
 import { hkdfDerive } from '@/lib/pq/hkdf';
 import { personalSign, personalSigner } from './evmSign';
 
@@ -46,6 +47,12 @@ export const metaKeysOf = (seed: Uint8Array): MetaKeys => {
 	};
 };
 
+/** The guardian's meta keys from the seed in the account's vault, or null while it has none. */
+export const metaKeysFromVault = async (vault: { guardianMetaSeed: () => Promise<string | null> }): Promise<MetaKeys | null> => {
+	const seed = await vault.guardianMetaSeed();
+	return seed ? metaKeysOf(hexToBytes(seed)) : null;
+};
+
 /** The spending key's compressed public key, or null unless both halves are points on the curve. */
 export const spendingKeyOf = (metaAddress: string): string | null => {
 	if (!META_ADDRESS.test(metaAddress)) return null;
@@ -68,6 +75,22 @@ const proofMessage = (inviteId: string, ownerUserHash: string, guardianUserHash:
 /** The acceptance proof: the spending key signs the invitation and both identities. */
 export const inviteProof = (keys: MetaKeys, inviteId: string, ownerUserHash: string, guardianUserHash: string): string =>
 	personalSign(keys.spendingPrivateKey, proofMessage(inviteId, ownerUserHash, guardianUserHash));
+
+/**
+ * Whether a guardian slot on chain — its stealth address and the ephemeral
+ * key the owner derived it from — is addressed to these keys: the viewing
+ * key derives the same address (§ Dying, a dropped guardian finding no slot).
+ */
+export const slotIsMine = (keys: MetaKeys, stealthAddress: string, ephemeralPubKey: string): boolean => {
+	const spendingPublicKey = spendingKeyOf(keys.metaAddress);
+	if (!spendingPublicKey) return false;
+	try {
+		return checkStealthAddress({ viewingPrivateKey: keys.viewingPrivateKey, spendingPublicKey }, ephemeralPubKey)?.toLowerCase() === stealthAddress.toLowerCase();
+	} catch {
+		// An ephemeral key that is no point derives nothing: not this guardian's slot.
+		return false;
+	}
+};
 
 export interface InviteReply {
 	inviteId: string;

@@ -5,6 +5,8 @@
 import { computed, reactive, watch } from 'vue';
 import { defaultSettings, settingsProblems, neededGuardians, relayerCanTake, healthOf, durationText, plural } from '@/lib/recovery/backupPlan';
 import { defaultNodeSet, setProblems, operatorOf, BUCKITUP } from '@/lib/recovery/nodeChoice';
+import { nodeHolds, unfinished } from '@/lib/recovery/backupRun';
+import { LOST_DELIVERIES } from '@/lib/recovery/receipts';
 
 export const DRAFT = Symbol('communityBackupDraft');
 export const NAV = Symbol('communityBackupNav');
@@ -38,6 +40,13 @@ export const isHttpsUrl = (url) => /^https:\/\/[^\s/]+\.[^\s]+$/i.test(String(ur
 /** "3 days" → "3-day", as in "3-day wait". */
 export const durationAdjective = (sec) => durationText(sec).replace(/s$/, '').replace(' ', '-');
 
+/** A contract bound ({ min, max } seconds) as a caption: "10 minutes … 365 days". */
+export const boundsText = (b, sep = ' … ') => `${durationText(b.min)}${sep}${durationText(b.max)}`;
+
+/** A moment as the screens date it; `t` is unix seconds. "Oct 13, 2026", with `time` "Oct 13, 2026, 10:00 AM". */
+export const dateText = (t, { time = false } = {}) =>
+	new Date(t * 1000).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', ...(time ? { hour: '2-digit', minute: '2-digit' } : {}) });
+
 /** "2 days ago", "5 minutes ago", "just now". */
 export const agoText = (sec, now = Math.floor(Date.now() / 1000)) => {
 	const d = Math.max(0, now - sec);
@@ -56,6 +65,16 @@ export const nodeOwnerName = (descriptor, $userPQ) => {
 	if ($userPQ?.currentUserHash && operator === $userPQ.currentUserHash) return 'You';
 	return $userPQ?.contactsMap?.[operator]?.name || hostOf(descriptor.url);
 };
+
+/** A node of a backup's record ({ id, url }), named by its operator when this device knows it, else by its address. */
+export const nodeRefName = (ref, known, $userPQ) => {
+	const node = known?.find((n) => n.descriptor.id === ref.id);
+	return node ? nodeOwnerName(node.descriptor, $userPQ) : hostOf(ref.url);
+};
+
+/** An account's name, as this device knows it: a contact's, else its card's, else the start of its user_hash. */
+export const nameOf = (userHash, $userPQ) =>
+	$userPQ?.contactsMap?.[userHash]?.name || $userPQ?.getUserByHash?.(userHash)?.name || `${userHash.slice(0, 10)}…`;
 
 /** A guardian's name: as a candidate, else as a contact. */
 export const guardianName = (userHash, candidates, $userPQ) =>
@@ -92,7 +111,7 @@ export const feeProblem = (choice, url, quote) => {
 
 // --- Alerts --------------------------------------------------------------------------
 
-const ALERT_NAMES = { app: 'app', telegram: 'Telegram', webhook: 'webhook' };
+export const ALERT_NAMES = { app: 'app', telegram: 'Telegram', webhook: 'webhook' };
 /** "app, Telegram"; as a title, "App · Telegram". */
 export const alertsText = (channels = ['app'], { title = false } = {}) => {
 	const names = channels.map((c) => ALERT_NAMES[c] ?? c);
@@ -101,21 +120,74 @@ export const alertsText = (channels = ['app'], { title = false } = {}) => {
 /** Whether a channel outside the app is on: the app alone can be lost with the phone. */
 export const hasOutsideAlerts = (alerts) => !!alerts?.channels?.some((c) => c !== 'app');
 
+// --- A finished backup -------------------------------------------------------------
+
+/** A finished backup that still protects the account: not revoked. */
+export const isLiveBackup = (run) => run?.step === 'done' && !run.revokedAt;
+
+/** Whether a change of the finished backup (a reshare) is being made: the controls wait for it. */
+export const changeInProgress = (store) => unfinished(store.reshare);
+/** What a control says while a change is being made. */
+export const FINISH_CHANGE_FIRST = 'A change to this backup is being made. Finish or discard the change first.';
+
 // --- Delivery and health ----------------------------------------------------------
 
 /**
- * Where guardian `userHash`'s piece stands: 'waiting' | 'sent' | 'delivered' | 'stored'.
- *
- * Phase 7.3 hook: `receipts` will carry what the guardians' apps report
- * (delivered, stored). Until then only `run.sent` is known, so a guardian is
- * 'sent' or 'waiting'.
+ * Where guardian `userHash`'s piece stands (receipts.ts Delivery): what the
+ * guardian said about it in their dialog, else what the run knows — 'sent'
+ * or 'waiting'. `receipts` is the backup store's, by userHash.
  */
 export const guardianDelivery = (run, userHash, receipts = {}) => receipts[userHash] ?? (run?.sent?.[userHash] ? 'sent' : 'waiting');
 
+/** A piece's state in a list row. */
+export const DELIVERY_WORDS = {
+	waiting: 'waiting',
+	sent: 'sent',
+	delivered: 'delivered',
+	stored: 'stored',
+	problem: 'problem',
+	given_back: 'given back',
+	dropped: 'dropped',
+};
+
+/**
+ * What the owner is told under a guardian whose piece no longer counts:
+ * kept with a problem, given back or dropped — each a prompt to reshare (the
+ * reshare itself is the roster's, plan § 7.4). Null for the other states.
+ */
+export const deliveryHint = (state, detail = '') => {
+	const reshare = 'A reshare replaces this piece.';
+	if (state === 'problem') return `${detail ? `They report: ${detail}.` : 'They report a problem with it.'} ${reshare}`;
+	if (state === 'given_back') return `They gave it back. ${reshare}`;
+	if (state === 'dropped') return `They no longer keep it${detail ? `: ${detail}` : ''}. ${reshare}`;
+	return null;
+};
+
+/** A guardian's piece in the roster, as the owner reads it. */
+export const ROSTER_TEXT = {
+	stored: 'holds a piece',
+	delivered: 'delivered',
+	sent: 'sent',
+	waiting: 'waiting for keys',
+	problem: 'has a problem',
+	given_back: 'gave it back',
+	dropped: 'dropped it',
+};
+
+/** A piece in these states no longer counts: each is a prompt to reshare. */
+export const LOST_STATES = LOST_DELIVERIES;
+
+/** Spare pieces still in the record: the shares past the guardians' that were not handed out. */
+export const sparesLeft = (run) => (run?.shares ?? []).slice(run?.guardians?.length ?? 0).filter(Boolean).length;
+
+/** How many spare pieces guardian `userHash` was handed (run.sparesGiven). */
+export const sparesHeldBy = (run, userHash) => Object.values(run?.sparesGiven ?? {}).filter((g) => g.guardian === userHash).length;
+
 /**
  * The health line of a finished backup: holders are the guardians whose piece
- * is 'stored'. Pieces sent but not yet stored are "on the way": a fresh backup
- * reads as arriving, not as broken.
+ * is 'stored'. Pieces sent or delivered but not yet stored are "on the way":
+ * a fresh backup reads as arriving, not as broken. A piece with a problem,
+ * given back or dropped is neither.
  */
 export const healthView = (run, receipts = {}) => {
 	const guardians = run?.guardians ?? [];
@@ -131,6 +203,80 @@ export const healthView = (run, receipts = {}) => {
 	else if (level === 'at_threshold') detail = `${needed} needed. If fewer than ${needed} guardians keep their piece, the backup stops working.`;
 	else if (level === 'broken') detail = `${needed} needed. Fewer than ${needed} guardians keep their piece: the backup stopped working.`;
 	return { total, needed, holders, onTheWay, level, detail };
+};
+
+/**
+ * The roster of a finished backup (plan § 7.4): its health, each guardian by
+ * what they said about their piece — with the hint under a piece that no
+ * longer counts, and the spare pieces they hold — and the call to reshare,
+ * or null: pieces that no longer count, or a backup at or below what it
+ * needs. `nameOf(userHash)` names a guardian.
+ */
+export const rosterView = (run, receipts = {}, receiptDetails = {}, nameOf = () => 'Guardian') => {
+	const health = healthView(run, receipts);
+	const rows = (run?.guardians ?? []).map((g) => {
+		const state = guardianDelivery(run, g.userHash, receipts);
+		return {
+			userHash: g.userHash,
+			name: nameOf(g.userHash),
+			state,
+			text: ROSTER_TEXT[state],
+			hint: deliveryHint(state, receiptDetails?.[g.userHash]?.detail),
+			spares: sparesHeldBy(run, g.userHash),
+			lost: LOST_STATES.includes(state),
+		};
+	});
+	const lost = rows.filter((r) => r.lost);
+	let prompt = null;
+	if (lost.length) {
+		const names = lost.map((r) => r.name).join(', ');
+		prompt = {
+			text: `${names} no longer ${lost.length === 1 ? 'keeps a piece' : 'keep a piece'} that counts. A reshare gives the guardians you pick new pieces and makes the old ones useless.`,
+			action: 'Reshare to replace',
+		};
+	} else if (health.level === 'broken') prompt = { text: 'The backup does not work now: too few guardians keep their piece. Reshare it to guardians who will.', action: 'Reshare to replace' };
+	else if (health.level === 'at_threshold') prompt = { text: 'One more lost piece and the backup stops working. Adding a guardian gives it a margin.', action: 'Add guardians' };
+	return { health, rows, lost, prompt };
+};
+
+/**
+ * The nodes of a finished backup: each by what it did with its part, or — once
+ * `holdings` (store.holdings) were checked for this record — by what it holds
+ * now; how many hold it against the node threshold, and the call to reshare
+ * once a node lost its part: every loss eats into the spare, and below the
+ * threshold the node half cannot be rebuilt. `nameOf(ref)` names a node.
+ */
+export const nodesView = (run, holdings, nameOf = (ref) => hostOf(ref.url)) => {
+	const checked = holdings?.runId && holdings.runId === run?.runId ? holdings.byNode : {};
+	const rows = (run?.nodes ?? []).map((n) => {
+		let state = 'waiting';
+		if (run.skippedNodes?.includes(n.id)) state = 'left_out';
+		else if (checked[n.id]) state = checked[n.id];
+		else if (nodeHolds(run, n.id)) state = 'holds';
+		else if (run.nodeOutcomes?.[n.id]?.state === 'failed') state = 'failed';
+		const [text, cls] = {
+			holds: ['holds its part', 'cb-status-ok'],
+			lost: ['lost its part', 'cb-status-warn'],
+			unreachable: ['not answering', 'cb-status-warn'],
+			changing: ['being changed', 'cb-status-off'],
+			left_out: ['left out', 'cb-status-warn'],
+			failed: ['did not take its part', 'cb-status-warn'],
+			waiting: ['waiting', 'cb-status-off'],
+		}[state];
+		return { id: n.id, name: nameOf(n), host: hostOf(n.url), state, text, cls };
+	});
+	const holding = rows.filter((r) => r.state === 'holds').length;
+	const lost = rows.filter((r) => r.state === 'lost').length;
+	const needed = run?.settings?.nodeThreshold ?? 0;
+	let prompt = null;
+	if (lost) {
+		const head = `${plural(lost, 'node')} lost ${lost === 1 ? 'its' : 'their'} part: ${holding} of ${rows.length} hold it, ${needed} needed.`;
+		prompt = {
+			text: holding < needed ? `${head} The node half cannot be rebuilt now: reshare to nodes that hold it.` : `${head} A reshare gives the nodes new parts before more are lost.`,
+			action: 'Reshare to replace',
+		};
+	}
+	return { rows, holding, lost, needed, prompt };
 };
 
 // --- Nodes -----------------------------------------------------------------------------
@@ -179,8 +325,14 @@ export const createBackupDraft = (store) => {
 		quote: null,
 		alerts: { telegram: false, webhook: false, skipped: false },
 		nodesLoading: false,
-		/** The run finished while this flow was open: the summary says so. */
-		justFinished: false,
+		/** The run finished while this flow was open — 'created' or 'changed' (a reshare): the summary says so. */
+		justFinished: null,
+		/**
+		 * Set while the setup is a reshare of the finished backup (plan § 7.4):
+		 * { guardians, nodes }, the userHashes and node refs ({ id, url }) it
+		 * has now. The screens then skip Alerts, and startPayload is a reshare's.
+		 */
+		reshare: null,
 	});
 
 	const guardians = computed(() => store.pickable.filter((c) => state.selected.includes(c.userHash)));
@@ -208,9 +360,25 @@ export const createBackupDraft = (store) => {
 	};
 
 	const suggested = computed(() => defaultNodeSet(store.nodes, guardianHashes.value));
-	const nodes = computed(() =>
-		state.nodeIds === null ? suggested.value.nodes : state.nodeIds.map((id) => store.nodes.find((n) => n.descriptor.id === id)).filter(Boolean),
-	);
+	/**
+	 * A node of the backup this device does not list now — it did not answer
+	 * the last check, or the check is still running. It stays in a reshare
+	 * until the owner removes it, refused like an offline node until it
+	 * answers; its operator is unknown, so it counts as one of its own.
+	 */
+	const unlistedNode = (ref) => ({ descriptor: { id: ref.id, url: ref.url, operator: `unlisted:${ref.id}` }, online: false, unlisted: true });
+	const nodes = computed(() => {
+		if (state.nodeIds === null) return suggested.value.nodes;
+		const kept = state.reshare?.nodes ?? [];
+		return state.nodeIds
+			.map((id) => {
+				const known = store.nodes.find((n) => n.descriptor.id === id);
+				if (known) return known;
+				const ref = kept.find((n) => n.id === id);
+				return ref ? unlistedNode(ref) : null;
+			})
+			.filter(Boolean);
+	});
 	/** Turns the suggested set into an explicit one, before the owner edits it. */
 	const pinNodes = () => {
 		if (state.nodeIds === null) state.nodeIds = suggested.value.nodes.map((n) => n.descriptor.id);
@@ -220,6 +388,14 @@ export const createBackupDraft = (store) => {
 		// A threshold keeps a spare node.
 		if (state.nodeThreshold !== null) state.nodeThreshold = Math.max(2, Math.min(state.nodeThreshold, ids.length - 1));
 	};
+
+	/**
+	 * What is wrong with settings `s`; a reshare keeps the backup's waiting
+	 * period and time to finish (store.start; setPolicy changes them), so
+	 * those are not its to judge.
+	 */
+	const settingsIssues = (s, guardianCount, nodeCount) =>
+		settingsProblems(s, guardianCount, nodeCount).filter((p) => !state.reshare || (p.field !== 'delaySec' && p.field !== 'windowSec'));
 
 	const settings = computed(() => {
 		const base = defaultSettings(guardians.value.length, nodes.value.length);
@@ -241,11 +417,12 @@ export const createBackupDraft = (store) => {
 		if (m === 0) return 'Pick at least 2 guardians.';
 		if (m === 1) return 'One guardian is not enough: a backup needs at least 2.';
 		if (m === 2 && !state.twoAck) return 'Confirm the warning above to use 2 guardians.';
-		if (state.nodesLoading && !store.nodes.length) return 'Looking for nodes…';
+		// A reshare waits for the check: until then the backup's nodes read as not answering.
+		if (state.nodesLoading && (!store.nodes.length || state.reshare)) return 'Looking for nodes…';
 		const short = operatorShortfall.value;
 		if (short) return `Add ${plural(short.need - short.have, 'more node operator')} to continue.`;
 		if (nodeIssues.value.length) return 'The nodes need attention: open Change settings, then Nodes.';
-		if (settingsProblems(settings.value, m, nodes.value.length).length) return 'Some settings are out of bounds: open Change settings.';
+		if (settingsIssues(settings.value, m, nodes.value.length).length) return 'Some settings are out of bounds: open Change settings.';
 		// The balance is read on the Fee and Review screens: not having read it yet is no reason to stop here.
 		if (feeChoice.value === 'self' && !state.quote) return null;
 		return feeProblem(feeChoice.value, state.fee.url, state.quote);
@@ -256,16 +433,58 @@ export const createBackupDraft = (store) => {
 		return `${plural(s.spares, 'spare piece')} · ${s.nodeThreshold} of ${nodes.value.length} nodes · ${durationAdjective(s.delaySec)} wait · ${feeText(feeChoice.value)}`;
 	});
 
-	/** What store.start takes. */
+	/**
+	 * Turns the draft into a reshare of `record`, the finished backup, filled
+	 * in from it: its guardians, pieces, approvals and spares, its nodes and
+	 * how it pays. The waiting period and the time to finish are the
+	 * record's — a reshare keeps them (store.start; setPolicy changes them).
+	 * A guardian who no longer agrees cannot be picked, and with fewer
+	 * guardians than the record's the counts start from their defaults.
+	 * `keep`, when given, are the guardians to pick of the record's — after
+	 * a recovery, those whose returned piece was not set aside (plan § 7.5);
+	 * the owner can still change the selection.
+	 */
+	const beginReshare = (record, { keep = null } = {}) => {
+		const hashes = record.guardians.map((g) => g.userHash);
+		const pickable = store.pickable.map((c) => c.userHash).filter((h) => !keep || keep.includes(h));
+		const s = record.settings;
+		const sameGuardians = hashes.every((h) => pickable.includes(h));
+		Object.assign(state, {
+			reshare: { guardians: hashes, nodes: record.nodes.map((n) => ({ id: n.id, url: n.url })) },
+			selected: hashes.filter((h) => pickable.includes(h)),
+			touched: true,
+			twoAck: hashes.length === 2,
+			custom: { spares: s.spares, delaySec: s.delaySec, windowSec: s.windowSec, ...(sameGuardians ? { threshold: s.threshold, approvals: s.approvals } : {}) },
+			work: null,
+			nodeIds: record.nodes.map((n) => n.id),
+			nodeThreshold: s.nodeThreshold,
+			fee: record.fee?.kind === 'self' ? { choice: 'self', url: '' } : record.fee?.url ? { choice: 'other', url: record.fee.url } : { choice: 'buckitup', url: '' },
+			quote: null,
+			justFinished: null,
+		});
+	};
+
+	const resharing = computed(() => !!state.reshare);
+	/** A reshare's guardians who are not in the backup now, and the backup's who are not picked: userHashes. */
+	const joining = computed(() => (state.reshare ? guardianHashes.value.filter((h) => !state.reshare.guardians.includes(h)) : []));
+	const leaving = computed(() => (state.reshare ? state.reshare.guardians.filter((h) => !guardianHashes.value.includes(h)) : []));
+	/** A reshare's nodes that are new, and the backup's that are not kept: refs ({ id, url }). */
+	const nodesJoining = computed(() =>
+		state.reshare ? nodes.value.filter((n) => !state.reshare.nodes.some((r) => r.id === n.descriptor.id)).map((n) => ({ id: n.descriptor.id, url: n.descriptor.url })) : [],
+	);
+	const nodesLeaving = computed(() => (state.reshare ? state.reshare.nodes.filter((r) => !nodes.value.some((n) => n.descriptor.id === r.id)) : []));
+
+	/** What store.start takes; a reshare keeps the backup's alerts, so it names none. */
 	const startPayload = () => {
 		const choice = feeChoice.value;
-		return {
+		const payload = {
 			guardians: guardians.value.map((g) => ({ userHash: g.userHash, metaAddress: g.metaAddress })),
 			settings: { ...settings.value },
 			nodes: [...nodes.value],
 			fee: choice === 'self' ? { kind: 'self' } : choice === 'other' ? { kind: 'relayer', url: state.fee.url.trim() } : { kind: 'relayer' },
-			alerts: { channels: [...alertChannels.value], skipped: !alertsConnected.value && state.alerts.skipped },
 		};
+		if (state.reshare) return { ...payload, reshare: true };
+		return { ...payload, alerts: { channels: [...alertChannels.value], skipped: !alertsConnected.value && state.alerts.skipped } };
 	};
 
 	return {
@@ -286,5 +505,12 @@ export const createBackupDraft = (store) => {
 		blockReason,
 		summaryLine,
 		startPayload,
+		beginReshare,
+		resharing,
+		joining,
+		leaving,
+		nodesJoining,
+		nodesLeaving,
+		settingsIssues,
 	};
 };

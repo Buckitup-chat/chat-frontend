@@ -77,6 +77,7 @@ if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
 
 class VaultKeyError extends Error {}
 
+/** What an account's vault holds that must be gone once it is destroyed (destroyUserVault). */
 export class LocalVaultMissingError extends VaultKeyError {
   constructor() {
     super('This account is listed on this device, but its encrypted keys are missing. Restore it from a backup or another device.');
@@ -776,6 +777,43 @@ export class EncryptionManagerPQ extends EventTarget {
     console.log(`Deleted user vault: ${userHash}`);
   }
 
+  /**
+   * Destroys an account on this device for good, or throws: its vault — the
+   * keys, crypt_skey among them, and anything else kept beside them, such as a
+   * recovery's candidate key — is cleared, and its row checked to be gone,
+   * before the account's card goes. A vault that does not clear
+   * leaves both in place, so the caller can try again; with `vaultId` it is
+   * found even once the card is gone. The account signed in now, if another,
+   * keeps its own vault open.
+   */
+  async destroyUserVault({ userHash, vaultId = null }) {
+    await this.#loadLocalUserCards();
+    const card = this.#localUserCards.find((i) => i.user_hash === userHash);
+    const id = vaultId ?? card?.vaultId ?? null;
+    if (this.#currentUserHash === userHash) await this.logout();
+    if (id) {
+      const stored = await this.#rawStore.get(`local-vault-${id}`);
+      if (stored) {
+        const vault = this.#currentVault?.id === id
+          ? this.#currentVault
+          : await connect({ vaultID: id, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS });
+        await vault.clear();
+        // A cleared vault has no row left; reading one would write an empty row
+        // back and ask for a passkey, so the row is what is checked.
+        if ((await this.#rawStore.get(`local-vault-${id}`)) != null) {
+          throw new Error('The account\'s vault on this device did not clear.');
+        }
+        if (stored.accountID) removeLocalAccount(stored.accountID);
+        if (this.#currentVault?.id === id) this.#currentVault = null;
+      }
+      await this.#rawStore.remove(`pq-vault-owner-${id}`);
+    }
+    if (card) {
+      this.#localUserCards = this.#localUserCards.filter((i) => i.user_hash !== userHash);
+      await this.#saveLocalUserCards();
+    }
+  }
+
   #normalizeKey(key) {
     if (!key) return null;
     // A copy: logout zeroes the session's key, never the vault's cached one.
@@ -918,6 +956,30 @@ export class EncryptionManagerPQ extends EventTarget {
     if (this.#currentVault !== vault) throw new Error('The account changed while the guardian keys were being read');
     this.#metaSeed = seed;
     return seed;
+  }
+
+  /**
+   * The community-backup recovery this account runs as its temporary account
+   * (plan § 7.5), or null. It lives in the account's vault beside its keys, so
+   * the candidate key in it never leaves the device and goes when the
+   * temporary account is destroyed, keys and vault together. Not exported:
+   * exportVaultKeys names what a backup carries.
+   */
+  async loadRecoveryProgress() {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+    const text = await this.#currentVault.get('recovery_progress');
+    return typeof text === 'string' ? JSON.parse(text) : null;
+  }
+
+  async saveRecoveryProgress(progress) {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+    await this.#currentVault.set('recovery_progress', JSON.stringify(progress));
+  }
+
+  /** The shared secret of an ML-KEM-1024 ciphertext made for this account's crypt_pkey: a share returned by hand. */
+  kemDecapsulate(cipherText) {
+    if (!this.#cryptSkey) throw new Error('Not authenticated or secret key not loaded');
+    return ml_kem1024.decapsulate(cipherText, this.#cryptSkey);
   }
 
   async exportVaultKeys() {
@@ -1150,48 +1212,63 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   /**
-   * Seals the account under a wrap key and publishes it where only that key
-   * can find it (lib/recovery/vault). The root record names the current vault
-   * and every earlier one not yet retired: the keys inside never change, so a
-   * vault left live would keep an old set of shares able to open the account,
-   * and a tombstone that fails is kept on the list for the next attempt
-   * rather than forgotten.
+   * Seals the account under a wrap key, publishes it where only that key can
+   * find it (lib/recovery/vault), and records it in the root as the current
+   * vault; the one it replaces joins the root's stale list. Nothing is
+   * retired here: until the backup the new vault belongs to is on chain and
+   * its shares are out, the previous one is still the owner's way back
+   * (retireRecoveryVaults).
    *
-   * Vault first, root second, tombstones last. A crash before the root write
-   * leaves the new vault live and unreferenced, which is safe only because
-   * its key is never shown before this returns (userPQ.store
-   * createRecoveryBackup); a failure after the root write leaves the previous
-   * backup usable, since nothing is retired until the new one is on record.
+   * Vault first, root second. A crash before the root write leaves the new
+   * vault live and unreferenced, which is safe only because the caller hands
+   * its key to nobody before this returns. Resolves to the vault's uuid.
    */
   async publishRecoveryVault(wrapKey, json) {
     const userHash = this.#currentUserHash;
     if (!userHash || !this.#signSkey || !this.#cryptSkey) {
       throw new Error('No user is currently logged in');
     }
-    // Each root patch is signed with whatever account is current when it is
-    // written; one switched in between would get this account's vault list.
-    const sameAccount = () => {
-      if (this.#currentUserHash !== userHash) throw new Error('The account changed while the backup was being written');
-    };
     // A root that is there but does not decrypt would fail the patch only
     // after the vault is already live; refuse before publishing anything.
     await this.#readRoot({ strict: true });
     const uuid = await publishVault({ userHash, signSkey: this.#signSkey, wrapKey, json });
-    sameAccount();
+    this.#sameAccount(userHash);
     // Only the address: mergeJsonPatch moves the vault it replaces onto
     // staleVaults against the base the patch actually lands on.
     await this.#writeRootPatch({ vaultUuid: uuid });
-    await this.#retireStaleVaults(sameAccount);
+    return uuid;
   }
 
-  /** Tombstones every vault the root lists as retired-pending; the ones that
-   * fail stay listed for the next attempt, and the failure is reported. */
-  async #retireStaleVaults(check) {
-    check();
-    const root = (await this.#readRoot({ strict: true })) || {};
+  #sameAccount(userHash) {
+    // Each root patch is signed with whatever account is current when it is
+    // written; one switched in between would get this account's vault list.
+    if (this.#currentUserHash !== userHash) throw new Error('The account changed while the backup was being written');
+  }
+
+  /**
+   * Tombstones every vault the root lists as stale, but `keep`: the keys
+   * inside a vault never change, so one left live keeps an old set of shares
+   * — and, after a recovery, the pieces returned and the node half released —
+   * able to open the account. With `keep` null (a revoked backup) the
+   * current vault goes too. A tombstone that fails stays on the list for the
+   * next attempt, and the failure is reported.
+   */
+  async retireRecoveryVaults({ keep = null } = {}) {
+    const userHash = this.#currentUserHash;
+    if (!userHash || !this.#signSkey || !this.#cryptSkey) {
+      throw new Error('No user is currently logged in');
+    }
+    let root = (await this.#readRoot({ strict: true })) || {};
+    if (keep === null && typeof root.vaultUuid === 'string') {
+      this.#sameAccount(userHash);
+      await this.#writeRootPatch({ vaultUuid: null });
+      root = (await this.#readRoot({ strict: true })) || {};
+    }
     const retired = [];
     let failure = null;
     for (const uuid of root.staleVaults ?? []) {
+      if (uuid === keep) continue;
+      this.#sameAccount(userHash);
       try {
         await this.#tombstoneRow(uuid);
         retired.push(uuid);
@@ -1200,10 +1277,10 @@ export class EncryptionManagerPQ extends EventTarget {
       }
     }
     if (retired.length) {
-      check();
+      this.#sameAccount(userHash);
       await this.#writeRootPatch({ retiredVaults: retired });
     }
-    if (failure) throw new Error('An earlier backup could not be retired; create the backup again to retry.', { cause: failure });
+    if (failure) throw new Error('An earlier backup could not be retired; try again.', { cause: failure });
   }
 
   // Update User Storage

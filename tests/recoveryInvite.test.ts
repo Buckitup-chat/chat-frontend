@@ -10,11 +10,13 @@ import {
 	metaKeysOf,
 	newInviteId,
 	newMetaSeed,
+	slotIsMine,
 	spendingKeyOf,
 	type CheckedReply,
 } from '@/lib/recovery/guardianInvite';
 import { NodeSetError, checkNodeSet, nodeSetHash, parseNodeEntry } from '@/lib/recovery/nodeSet';
 import { bytesToHex } from '@noble/hashes/utils';
+import { generateStealthAddress } from 'backitup-secret-recovery-sdk/lib/keys/stealth';
 
 const seed = Uint8Array.from({ length: 32 }, (_, i) => i + 1);
 const owner = 'u_' + 'a'.repeat(128);
@@ -154,5 +156,17 @@ describe('a node set', () => {
 		expect(parseNodeEntry(`n_${'0'.repeat(32)}@https://a.example/@x`).url).toBe('https://a.example/@x');
 		// The hash writes each entry's length in two bytes; a longer one would hash as another.
 		expect(() => parseNodeEntry(`n_${'0'.repeat(32)}@https://a.example/${'x'.repeat(0x10000)}`)).toThrow(/length field/);
+	});
+});
+
+describe('a guardian slot on chain', () => {
+	it('is this guardian’s when their viewing key derives its address from its ephemeral key', () => {
+		const mine = metaKeysOf(seed);
+		const other = metaKeysOf(new Uint8Array(32).fill(9));
+		const { address, ephemeralPubKey } = generateStealthAddress(mine.metaAddress);
+		expect(slotIsMine(mine, address, ephemeralPubKey)).toBe(true);
+		expect(slotIsMine(mine, address.toUpperCase().replace('0X', '0x'), ephemeralPubKey)).toBe(true);
+		expect(slotIsMine(other, address, ephemeralPubKey)).toBe(false);
+		expect(slotIsMine(mine, address, '0x02' + '00'.repeat(32))).toBe(false);
 	});
 });

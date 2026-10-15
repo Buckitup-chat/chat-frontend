@@ -62,12 +62,16 @@
 			<button class="btn btn-outline-light w-100" @click="setMode('restore')">Import from local backup</button>
 		</div>
 
-		<div v-if="sharesRestoreAvailable" class="px-3 w-100 mb-3">
-			<button class="btn btn-outline-light w-100" @click="setMode('shares')">Restore from shares</button>
-		</div>
-
 		<div class="px-3 w-100 mb-3">
 			<button class="btn btn-outline-light w-100" @click="setMode('connect')">Sync with other device</button>
+		</div>
+
+		<!-- After device-link on purpose: a person with any working device is better served by it. -->
+		<div v-if="recovering" class="px-3 w-100 mb-3">
+			<button class="btn btn-light w-100" data-test="continue-recovering" @click="continueRecovering()">Continue recovering</button>
+		</div>
+		<div v-else class="px-3 w-100 mb-3">
+			<button class="btn btn-outline-light w-100" data-test="recover-with-friends" @click="setMode('friends')">Recover with friends</button>
 		</div>
 
 		<div class="px-3 w-100 mb-3 opacity-50">
@@ -222,24 +226,20 @@
 
 <script setup>
 import { userPQStore } from '@/store/userPQ.store';
-import { isModalAvailable } from '@/components/modal/registry';
-
-// The button is hidden when the modal it opens is not in this build — asking
-// the registry rather than the flag keeps one owner of what is reachable.
-const sharesRestoreAvailable = isModalAvailable('account_restore_shares');
 
 import { userStore } from '@/store/user.store';
 
 
 
 import Account_Selector from '@/components/Account_Selector.vue';
-import { inject, ref, onMounted, onUnmounted } from 'vue';
+import { computed, inject, ref, onMounted, onUnmounted } from 'vue';
+import { useRecoveryRestoreStore } from '@/store/recoveryRestore.store';
 import * as $enigma from '@/libs/enigma';
 
 const $mitt = inject('$mitt');
 const $user = userStore();
 const $userPQ = userPQStore();
-// const $swal = inject('$swal');
+const $swal = inject('$swal');
 // const $loader = useLoader();
 // const $isProd = inject('$isProd');
 // const $router = inject('$router');
@@ -280,9 +280,28 @@ function setMode(m) {
 	mode.value = m;
 	if (m === 'create') $mitt.emit('modal::open', { id: 'account_create' });
 	if (m === 'restore') $mitt.emit('modal::open', { id: 'account_restore_local' });
-	if (m === 'shares') $mitt.emit('modal::open', { id: 'account_restore_shares' });
 	if (m === 'connect') $mitt.emit('modal::open', { id: 'account_link_device' });
+	if (m === 'friends') $mitt.emit('modal::open', { id: 'account_recover_friends' });
 }
+
+// A recovery started on this device goes on in its temporary account, while that account is still here.
+const $restore = useRecoveryRestoreStore();
+const recovering = computed(() => !!$restore.temporary && !!$userPQ.myLocalUsers?.some((u) => u.user_hash === $restore.temporary));
+// When its keys are gone or the passkey picked is another account's, the
+// person has to see why nothing happened.
+const RESUME_ERRORS = {
+	LocalVaultMissingError: ['This recovery\'s keys are missing on this device', 'Start the recovery again: your guardians will need to approve a new device.'],
+	AccountPasskeyMismatchError: ['That passkey belongs to another account', 'Try again and choose the passkey this recovery created.'],
+};
+const continueRecovering = async () => {
+	try {
+		await $userPQ.login($restore.temporary);
+	} catch (e) {
+		console.error('[recovery] could not sign in to the temporary account:', e);
+		const [title, text] = RESUME_ERRORS[e?.name] ?? ['The recovery could not be opened', e?.message ?? String(e)];
+		$swal.fire({ icon: 'error', title, text });
+	}
+};
 
 const connectVaultLocalApp = async () => {
 	const vaults = await $encryptionManager.getVaults();

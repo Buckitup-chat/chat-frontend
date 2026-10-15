@@ -2,6 +2,7 @@
 // profile or contacts write actually land on?
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { deriveVaultLocator } from '@/lib/pq/vaultEnvelope';
+import { fetchVault, VaultLookupError } from '@/lib/recovery/vault';
 
 let rows;          // uuid -> value_b64, null once tombstoned  (stand-in for the server + local KV)
 let vaults;
@@ -10,9 +11,33 @@ let refuseTombstones; // the server rejecting deletions, as it may any write
 let onRowWritten;     // hook run after each write; a test switches accounts from it
 let cards = new Map();
 
+let clearMode = 'clears'; // 'clears' | 'throws' | 'keeps': a vault whose clear fails, or claims to and does not
+// As @lo-fi/local-vault: clear() removes the vault's row, and reading a vault
+// whose row is gone writes an empty row back and asks for a passkey, which
+// fails for a vault with no account. peek() is the test's own look inside.
 const makeVault = (id) => {
 	const data = new Map();
-	return { id, async set(k, v) { data.set(k, v); }, async get(k) { return data.get(k); } };
+	let cleared = false;
+	const removeRow = (k) => (rawStore.remove ? rawStore.remove(k) : rawStore.delete(k));
+	return {
+		id,
+		async set(k, v) { data.set(k, v); },
+		async get(k) {
+			if (cleared) {
+				await rawStore.set(`local-vault-${id}`, { data: '' });
+				throw new Error('Vault lock-key access failed');
+			}
+			return data.get(k);
+		},
+		peek: (k) => data.get(k),
+		async clear() {
+			if (clearMode === 'throws') throw new Error('locked');
+			if (clearMode !== 'clears') return;
+			data.clear();
+			cleared = true;
+			await removeRow(`local-vault-${id}`);
+		},
+	};
 };
 
 vi.mock('@lo-fi/local-vault', () => ({
@@ -66,6 +91,8 @@ vi.mock('@/lib/data/userStorage', () => ({
 	// The real merge, so the fake lands a patch on its base the way the
 	// materializer does (slot map and vault list included).
 	putStorageJsonPatch: (opts) => landJsonPatch(opts),
+	// The public read a recovering device makes: every live row at the address.
+	getPublicStorageRowsByUuid: async (uuid) => (rows.get(uuid) ? [{ uuid, user_hash: 'any', value_b64: rows.get(uuid), deleted_flag: false }] : []),
 	saveStorageJsonPatch: async (opts) => { await landJsonPatch(opts); return 'synced'; },
 }));
 
@@ -97,6 +124,7 @@ const memoryStore = () => {
 
 beforeEach(() => {
 	cards = new Map();
+	clearMode = 'clears';
 	_setIntentStorageForTests(memoryStore());
 	setOutboxStorage(memoryStore());
 	_setAcceptedSnapshotStorageForTests(memoryStore());
@@ -216,34 +244,93 @@ describe('user_storage slot addressing', () => {
 	});
 });
 
+describe('destroying an account on this device', () => {
+	// The temporary account of a recovery, then the recovered one signed in on top of it.
+	const twoAccounts = async () => {
+		const em = new EncryptionManagerPQ();
+		const temp = await em.createUserVault({ name: 'Recovering account' });
+		await em.saveRecoveryProgress({ v: 1, candidateKey: '0x' + '11'.repeat(32) });
+		await em.createUserVault({ name: 'Me' });
+		const seed = await em.guardianMetaSeed();
+		return { em, temp, seed };
+	};
+
+	it('clears its vault — keys and the recovery\'s candidate key — then drops its card, and leaves the signed-in account its own vault', async () => {
+		const { em, temp, seed } = await twoAccounts();
+		const vault = vaults.get(temp.vaultId);
+		expect(await rawStore.get(`pq-vault-owner-${temp.vaultId}`)).toBe(temp.user_hash);
+		await em.destroyUserVault({ userHash: temp.user_hash });
+		for (const k of ['crypt_skey', 'sign_skey', 'evm_skey', 'recovery_progress']) expect(vault.peek(k)).toBeUndefined();
+		expect(await rawStore.get(`local-vault-${temp.vaultId}`)).toBeUndefined();
+		expect((await em.getLocalUserCards()).map((c) => c.user_hash)).not.toContain(temp.user_hash);
+		expect(await rawStore.get(`pq-vault-owner-${temp.vaultId}`)).toBeUndefined();
+		expect(await em.guardianMetaSeed()).toBe(seed);
+	});
+
+	it('keeps the card and the vault entry when the vault does not clear, and finds the vault by its id once the card is gone', async () => {
+		const { em, temp } = await twoAccounts();
+		clearMode = 'throws';
+		await expect(em.destroyUserVault({ userHash: temp.user_hash })).rejects.toThrow('locked');
+		clearMode = 'keeps';
+		await expect(em.destroyUserVault({ userHash: temp.user_hash })).rejects.toThrow(/did not clear/);
+		expect((await em.getLocalUserCards()).map((c) => c.user_hash)).toContain(temp.user_hash);
+		expect(await vaults.get(temp.vaultId).get('crypt_skey')).toBeDefined();
+
+		clearMode = 'clears';
+		await em.destroyUserVault({ userHash: 'u_' + 'f'.repeat(128), vaultId: temp.vaultId });
+		expect(vaults.get(temp.vaultId).peek('crypt_skey')).toBeUndefined();
+		expect(await rawStore.get(`local-vault-${temp.vaultId}`)).toBeUndefined();
+	});
+});
+
 describe('the recovery vault', () => {
 	const key = () => crypto.getRandomValues(new Uint8Array(32));
 	const at = (s) => rows.get(deriveVaultLocator(s));
 
-	it('lands at the address the key derives, and the next backup retires it', async () => {
+	const backup = (v) => JSON.stringify({ identity: { user_hash: 'u_' + 'a'.repeat(128) }, keys: { v } });
+
+	it('lands at the address the key derives, and the one it replaces stays until it is retired', async () => {
 		const em = await login();
 		const s1 = key();
-		await em.publishRecoveryVault(s1, '{"v":1}');
+		const first = await em.publishRecoveryVault(s1, backup(1));
+		expect(first).toBe(deriveVaultLocator(s1));
 		expect(at(s1)).toBeTruthy();
 		expect(at(s1)).not.toContain('"v":1');
 
+		// A reshare publishes its vault before it is on chain: the old one is still the way back.
 		const s2 = key();
-		await em.publishRecoveryVault(s2, '{"v":2}');
-		expect(at(s1)).toBeNull();
-		expect(at(s2)).toBeTruthy();
+		const second = await em.publishRecoveryVault(s2, backup(2));
+		expect((await fetchVault(s1)).keys.v).toBe(1);
+
+		// Its shares are out: the old key — and whatever was released with it — opens nothing.
+		await em.retireRecoveryVaults({ keep: second });
+		await expect(fetchVault(s1)).rejects.toBeInstanceOf(VaultLookupError);
+		expect((await fetchVault(s2)).keys.v).toBe(2);
+	});
+
+	it('retires the current vault too once the backup is revoked', async () => {
+		const em = await login();
+		const s1 = key();
+		await em.publishRecoveryVault(s1, backup(1));
+		const s2 = key();
+		await em.publishRecoveryVault(s2, backup(2));
+		await em.retireRecoveryVaults();
+		await expect(fetchVault(s1)).rejects.toBeInstanceOf(VaultLookupError);
+		await expect(fetchVault(s2)).rejects.toBeInstanceOf(VaultLookupError);
 	});
 
 	it('keeps a vault it could not retire on the list and retries it next time', async () => {
 		const em = await login();
 		const s1 = key();
 		await em.publishRecoveryVault(s1, '{}');
+		const keep = await em.publishRecoveryVault(key(), '{}');
 
 		refuseTombstones = true;
-		await expect(em.publishRecoveryVault(key(), '{}')).rejects.toThrow(/could not be retired/);
+		await expect(em.retireRecoveryVaults({ keep })).rejects.toThrow(/could not be retired/);
 		expect(at(s1)).toBeTruthy();
 
 		refuseTombstones = false;
-		await em.publishRecoveryVault(key(), '{}');
+		await em.retireRecoveryVaults({ keep });
 		expect(at(s1)).toBeNull();
 	});
 
@@ -293,6 +380,18 @@ describe('named JSON slots', () => {
 			em.patchSlotJson('holdings', { b: 2 }),
 		]);
 		expect(await em.loadSlotJson('holdings')).toEqual({ a: 1, b: 2 });
+	});
+
+	it('edits a keyed map by key, so a later patch keeps the entries an earlier one added', async () => {
+		const em = await login();
+		await em.patchSlotJson('guardian', { $keyed: ['answers'], answers: { i1: { answer: 'accept' } } });
+		await em.patchSlotJson('guardian', { $keyed: ['holdings'], holdings: { h1: { state: 'pending' } } });
+		await em.patchSlotJson('guardian', { $keyed: ['answers', 'holdings'], answers: { i2: { answer: 'decline' } }, holdings: { h2: { state: 'stored' } } });
+		await em.patchSlotJson('guardian', { $keyed: ['holdings'], holdings: { h1: null } });
+		expect(await em.loadSlotJson('guardian')).toEqual({
+			answers: { i1: { answer: 'accept' }, i2: { answer: 'decline' } },
+			holdings: { h2: { state: 'stored' } },
+		});
 	});
 
 	it('refuses to update a slot it cannot read rather than overwrite it', async () => {

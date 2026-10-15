@@ -62,15 +62,27 @@ export const parseInvite = (text: string): LinkInvite => {
 	return { room: m[1], fingerprint: m[2] };
 };
 
+/**
+ * Six digits two people compare to confirm they hold the same shared secret:
+ * the first four bytes of HKDF-SHA3-256(sharedSecret, salt, info), big-endian,
+ * mod 10⁶, zero-padded. Device-link derives its code this way, and so does a
+ * share returned by hand (pq_recovery_shares § Manual return), each under its
+ * own salt.
+ */
+export const sixDigitCode = (sharedSecret: Uint8Array, salt: string, info: string): string => {
+	const tag = hkdfDerive(sharedSecret, salt, info, 4);
+	const n = ((tag[0] << 24) | (tag[1] << 16) | (tag[2] << 8) | tag[3]) >>> 0;
+	return String(n % 1_000_000).padStart(6, '0');
+};
+
 // Both derivations take the room, so a session key is bound to the room it
 // was negotiated in and cannot be replayed into another.
 const sessionFrom = (sharedSecret: Uint8Array, room: string): LinkSession => {
 	const key = hkdfDerive(sharedSecret, DEVICE_LINK_SALT, `seal|${room}`, 32);
 	const macKey = hkdfDerive(sharedSecret, DEVICE_LINK_SALT, `mac|${room}`, 32);
-	const tag = hkdfDerive(sharedSecret, DEVICE_LINK_SALT, `sas|${room}`, 4);
+	const sas = sixDigitCode(sharedSecret, DEVICE_LINK_SALT, `sas|${room}`);
 	sharedSecret.fill(0);
-	const n = ((tag[0] << 24) | (tag[1] << 16) | (tag[2] << 8) | tag[3]) >>> 0;
-	return { key, macKey, sas: String(n % 1_000_000).padStart(6, '0') };
+	return { key, macKey, sas };
 };
 
 /**

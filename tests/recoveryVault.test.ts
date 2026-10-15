@@ -6,8 +6,6 @@
 // about the transport.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { newWrapKey, deriveVaultLocator, sealVault } from '@/lib/pq/vaultEnvelope';
-import { BackupFormatError } from '@/lib/backupCrypto';
-import { splitWrapKey, restoreFromShares } from '@/lib/wrapKeyShares';
 
 interface Row {
 	user_hash: string;
@@ -109,20 +107,6 @@ describe('the vault, published by an account and found by a key', () => {
 		const s = newWrapKey();
 		await expect(publish(s)).rejects.toThrow(/server did not take it/);
 		await expect(fetchVault(s)).rejects.toBeInstanceOf(VaultLookupError);
-	});
-
-	it('comes back from any k of the shares the key was split into', async () => {
-		const s = newWrapKey();
-		await publish(s);
-		const shares = splitWrapKey(s, 5, 3);
-		expect((await restoreFromShares([shares[3], shares[0], shares[4]])).identity.user_hash).toBe(OWNER);
-	});
-
-	it('refuses shares that do not combine before asking the server anything', async () => {
-		serverAnswers = false;
-		const [a] = splitWrapKey(newWrapKey(), 3, 2);
-		const [, b] = splitWrapKey(newWrapKey(), 3, 2);
-		await expect(restoreFromShares([a, b])).rejects.toBeInstanceOf(BackupFormatError);
 	});
 
 	it('lets a transport failure through untouched', async () => {

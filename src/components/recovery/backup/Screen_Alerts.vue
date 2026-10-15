@@ -40,7 +40,7 @@
 			</div>
 		</div>
 
-		<div class="cb-tile pickable" :class="{ picked: a.webhook || webhookOpen }" data-test="tile-webhook" @click="!a.webhook && (webhookOpen = !webhookOpen)">
+		<div class="cb-tile pickable" :class="{ picked: a.webhook || webhookOpen }" data-test="tile-webhook" @click="canAddWebhook && (webhookOpen = !webhookOpen)">
 			<div class="cb-tile-head">
 				<span class="cb-check" :class="{ on: a.webhook }">
 					<Check v-if="a.webhook" />
@@ -50,12 +50,13 @@
 					<span class="cb-muted">for email or SMS gateways</span>
 				</div>
 				<span v-if="a.webhook" class="cb-status-ok">connected</span>
+				<span v-if="a.webhook && canAddWebhook && !webhookSecret" class="cb-small">Add another</span>
 			</div>
 			<div v-if="webhookSecret" class="cb-tile-body" @click.stop>
 				<span class="cb-small">The receiving end checks each alert with this secret. It is shown only once: keep it now.</span>
 				<CopyField :value="webhookSecret" wrap />
 			</div>
-			<div v-else-if="webhookOpen && !a.webhook" class="cb-tile-body" @click.stop>
+			<div v-else-if="webhookOpen && canAddWebhook" class="cb-tile-body" @click.stop>
 				<div class="d-flex gap-2">
 					<input v-model="webhookUrl" type="url" class="form-control" placeholder="https://" aria-label="Webhook address" :disabled="connecting" />
 					<button class="btn btn-outline-dark" :disabled="!webhookOk || connecting" @click="connectWebhook">
@@ -77,37 +78,42 @@
 </template>
 
 <script setup>
-import { computed, inject, onMounted, ref } from 'vue';
+import { computed, inject, onMounted, ref, watch } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { durationText } from '@/lib/recovery/backupPlan';
 import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
 import Check from './Check.vue';
 import CopyField from './CopyField.vue';
-import { DRAFT, NAV, isHttpsUrl } from './backupFlow';
+import { DRAFT, NAV, isHttpsUrl, isLiveBackup } from './backupFlow';
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
 const store = useRecoveryBackupStore();
 
-/** Part of the setup, or adding alerts to a finished backup that has none. */
-const setup = store.run?.step !== 'done';
+/** Part of the setup, or adding a channel to a finished backup (from its card or Manage): several webhooks may be added then. */
+const setup = !isLiveBackup(store.run);
 const a = draft.state.alerts;
 const delaySec = computed(() => (setup ? draft.settings.value.delaySec : store.run?.settings?.delaySec));
 const delayWords = computed(() => (delaySec.value ? durationText(delaySec.value) : 'the waiting period'));
 
-// Channels already set up for this account count: the server lists kinds only.
+// The channels on are the server's list, kinds only: each reading of it sets them, on or off.
+const mirror = (list) => {
+	a.telegram = list.some((s) => s.kind === 'telegram');
+	a.webhook = list.some((s) => s.kind === 'webhook');
+};
+watch(() => store.subs, mirror);
 onMounted(async () => {
 	try {
-		const subs = await store.subscriptions();
-		if (subs.some((s) => s.kind === 'telegram')) a.telegram = true;
-		if (subs.some((s) => s.kind === 'webhook')) a.webhook = true;
+		mirror(await store.subscriptions());
 	} catch (e) {
 		console.warn('[recovery] alert channels could not be read:', e);
 	}
 });
 
 const webhookOpen = ref(false);
+/** A first webhook, or — on a finished backup — another one: several channels may be on at once. */
+const canAddWebhook = computed(() => !a.webhook || !setup);
 const webhookUrl = ref('');
 const webhookOk = computed(() => isHttpsUrl(webhookUrl.value));
 const webhookSecret = ref(null);
@@ -145,7 +151,7 @@ const saveAlerts = async () => {
 	saveError.value = null;
 	try {
 		await store.setAlerts({ channels: [...draft.alertChannels.value], skipped: false });
-		nav.close();
+		nav.back();
 	} catch (e) {
 		saveError.value = errorMessage(e);
 	} finally {

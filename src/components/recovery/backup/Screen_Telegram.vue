@@ -79,7 +79,7 @@ let timer = null;
 let left = false;
 const poll = async () => {
 	try {
-		const subs = await store.subscriptions();
+		const subs = await store.subscriptions({ refresh: true });
 		if (subs.some((s) => s.kind === 'telegram')) {
 			connected.value = true;
 			draft.state.alerts.telegram = true;

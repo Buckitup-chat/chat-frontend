@@ -7,8 +7,15 @@
 
 	<QuarantinedWritesBanner v-if="$userPQ.currentUser" />
 	<AccessGateBanner v-if="$userPQ.currentUser" />
+	<RecoveryAlertBanner v-if="$userPQ.currentUser && !$restore.active" />
+	<RecoveryFinaleBanner v-if="$userPQ.currentUser && !$restore.active" />
 
-	<div class="wrapper" v-if="$userPQ.currentUser">
+	<!-- Signed in as a temporary account that is recovering another: the recovery is all there is (plan § 7.5). -->
+	<div v-if="$restore.active" class="_recovering">
+		<RecoverScreen />
+	</div>
+
+	<div class="wrapper" v-else-if="$userPQ.currentUser">
 		<Menu class="_menu" :class="{ _opened: $menuOpened }" />
 
 		<div class="_menu_backdrop" :class="{ _opened: $menuOpened && $breakpoint.lt('md') }"
@@ -51,6 +58,13 @@
 	font-size: 12px;
 	text-align: center;
 	opacity: .92;
+}
+
+._recovering {
+	min-height: 100vh;
+	min-height: 100dvh;
+	overflow-y: auto;
+	padding: 16px 0;
 }
 
 ._login {
@@ -138,6 +152,8 @@
 <script setup>
 
 import { userPQStore } from '@/store/userPQ.store';
+import { useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
+import { useRecoveryHelpStore } from '@/store/recoveryHelp.store';
 import { useAvatarsStore } from '@/store/avatars.store';
 import { initPersistence } from '@/lib/data/persistence';
 
@@ -151,6 +167,10 @@ import { useMenu } from '@/composables/useMenu';
 import Loader from './components/Loader.vue';
 import QuarantinedWritesBanner from '@/components/QuarantinedWritesBanner.vue';
 import AccessGateBanner from '@/components/AccessGateBanner.vue';
+import RecoveryAlertBanner from '@/components/RecoveryAlertBanner.vue';
+import RecoverScreen from '@/components/recovery/restore/RecoverScreen.vue';
+import RecoveryFinaleBanner from '@/components/RecoveryFinaleBanner.vue';
+import { useRecoveryRestoreStore } from '@/store/recoveryRestore.store';
 import Menu from '@/views/menu/Menu_.vue';
 import Modal from '@/components/modal/Modal_.vue';
 import Swal from '@/components/swal/Swal_.vue';
@@ -158,6 +178,7 @@ import { ref, provide, watch, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 const $userPQ = userPQStore();
+const $restore = useRecoveryRestoreStore();
 // Created with the app, not with the first screen that shows a photo: it
 // sends the gallery into a dialog the first time this account writes there.
 useAvatarsStore();
@@ -199,5 +220,9 @@ watch(
 		await initPersistence();
 
 		$userPQ.initialize();
+		// The shares this account keeps as a guardian: read again on chain every few minutes (plan § 7.3).
+		useRecoveryHoldingsStore().watchWhileOpen();
+		// The pieces this account approved returning go by themselves once the send gate opens (plan § 7.5).
+		useRecoveryHelpStore().watchWhileOpen();
 	});
 </script>
