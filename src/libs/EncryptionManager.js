@@ -1,4 +1,4 @@
-import { connect, rawStorage, removeAll, supportsWebAuthn, supportsWAUserVerification } from '@lo-fi/local-vault';
+import { connect, rawStorage, supportsWebAuthn, supportsWAUserVerification } from '@lo-fi/local-vault';
 import '@lo-fi/local-vault/adapter/idb';
 import { removeLocalAccount } from '@lo-fi/local-data-lock';
 
@@ -352,7 +352,9 @@ export class EncryptionManager extends EventTarget {
 	 */
 	async clearVault() {
 		try {
-			await removeAll();
+			if (this.#vault?.id) {
+				await this.#rawStore.remove(`local-vault-${this.#vault.id}`);
+			}
 			await this.removeVaultID();
 			this.#vault = null;
 
@@ -406,8 +408,7 @@ export class EncryptionManager extends EventTarget {
 	async handleError(error, message) {
 		this.isAuth = false; // Use the setter
 		if (this.isCancelError(error)) {
-			console.warn(`${message}: Operation canceled by user. Clearing the vault.`);
-			await this.clearVault();
+			console.warn(`${message}: Passkey operation canceled; local vault preserved.`);
 		} else {
 			console.error(`${message}:`, error);
 		}

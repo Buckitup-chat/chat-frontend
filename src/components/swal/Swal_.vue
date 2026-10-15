@@ -48,10 +48,6 @@ const modalRegistry = {
 		modalClass: 'modal-sm',
 	},
 
-	update_backup_share_delay: {
-		component: 'Swal_UpdateBackupShareDelay',
-		modalClass: 'modal-sm',
-	},
 };
 
 onMounted(() => {

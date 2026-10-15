@@ -115,14 +115,14 @@ const isContact = computed(() => {
 });
 
 const addToContacts = async () => {
-	await $userPQ.saveContact(contact.value.user_hash, {
+	const saved = await $userPQ.saveContact(contact.value.user_hash, {
 		name: contact.value.name || '',
 		notes: '',
 		hidden: false
 	});
 	$swal.fire({
 		icon: 'success',
-		title: 'Added to contacts',
+		title: saved?.status && saved.status !== 'synced' ? 'Added to contacts on this device' : 'Added to contacts',
 		timer: 2000,
 		showConfirmButton: false,
 	});

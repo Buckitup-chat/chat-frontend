@@ -30,6 +30,7 @@ vi.mock('@lo-fi/local-vault', () => ({
 		if (addNewVault) {
 			const id = `vault-${vaults.size + 1}`;
 			vaults.set(id, makeVault(id));
+			await rawStore.set(`local-vault-${id}`, { accountID: `account-${id}`, data: 'sealed' });
 			return vaults.get(id);
 		}
 		return vaults.get(vaultID);
@@ -67,6 +68,7 @@ const signedInManager = async () => {
 	await vault.set('sign_skey', new Uint8Array(32).fill(1));
 	await vault.set('crypt_skey', new Uint8Array(32).fill(2));
 	vaults.set('vault-a', vault);
+	await rawStore.set('local-vault-vault-a', { accountID: 'account-vault-a', data: 'sealed' });
 	await rawStore.set('pq-vaults-registry', [{ user_hash: ACCOUNT, vaultId: 'vault-a', name: 'A' }]);
 	await recordAccepted('user_cards', ACCOUNT, {
 		user_hash: ACCOUNT, sign_pkey: 'c2lnbg==', contact_pkey: 'Y29udGFjdA==', contact_cert: 'Y2VydA==',

@@ -1,6 +1,7 @@
 // First: the page moves under the build base before anything creates the router.
 import './enterBase';
 import { createApp } from 'vue';
+import { installFileDropGuard } from '@/lib/fileDropGuard';
 
 import App from './App.vue';
 import { listenForInstallPrompt } from './composables/useInstallPrompt';
@@ -13,20 +14,12 @@ import '@fontsource/inter/700.css';
 import 'bootstrap';
 import './scss/app.scss';
 
-import { web3Store } from './store/web3.store.js';
 import { userStore } from './store/user.store.js';
 import { userPQStore } from './store/userPQ.store';
 import { createPinia } from 'pinia';
-import $socket from './libs/socket';
 import $mitt from './libs/emitter';
 import { useLoader } from './composables/useLoader';
 import $swal from './libs/swal';
-
-// dayjs
-import dayjs from 'dayjs';
-import relativeTime from 'dayjs/plugin/relativeTime';
-dayjs.locale('en');
-dayjs.extend(relativeTime);
 
 // libs
 import globalFilters from './libs/filters';
@@ -50,20 +43,12 @@ app.config.globalProperties.$breakpoint.init();
 app.provide('$mitt', $mitt);
 app.config.globalProperties.$mitt = $mitt;
 
-app.config.globalProperties.$date = dayjs;
-app.provide('$date', dayjs);
-
 const $isProd = !location.origin.includes('localhost') && !location.origin.includes('192');
 app.provide('$isProd', $isProd);
 app.config.globalProperties.$isProd = $isProd;
 
 app.config.globalProperties.$filters = globalFilters;
 app.config.globalProperties.$location = window.location;
-
-app.provide('$socket', $socket);
-
-// web3Store
-app.config.globalProperties.$web3 = web3Store();
 
 app.config.globalProperties.$user = userStore();
 
@@ -98,6 +83,7 @@ app.component('InfoTooltip', InfoTooltip);
 // (when enabled) elects a writer via BrowserCollectionCoordinator. A second
 // tab is no different from a second device, which the protocol must survive
 // anyway — signed rows, monotonic owner_timestamps, idempotent replays.
+installFileDropGuard();
 app.mount('#app');
 
 // Offline shell: precached build + encrypted-video streaming (src/sw.js).

@@ -78,6 +78,9 @@ const CONTRACTS: Record<string, { insert: WriteContract; update?: WriteContract 
 		// the manifest is read back only by resume's salted one-shot reader
 		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
 	},
+	vouch_tokens: {
+		insert: { dependencyClass: 'independent', confirmation: 'accepted' },
+	},
 };
 
 const FALLBACK: WriteContract = { dependencyClass: 'chained', confirmation: 'visible' };
@@ -91,6 +94,7 @@ export const OWNER_FIELD: Record<string, string> = {
 	dialog_message_reactions: 'reactor_hash',
 	dialog_message_receipts: 'peer_hash',
 	files: 'uploader_hash',
+	vouch_tokens: 'issuer_hash',
 };
 
 const SHAPE_OF_TABLE: Record<string, string> = {

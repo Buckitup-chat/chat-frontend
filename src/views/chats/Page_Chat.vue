@@ -11,6 +11,8 @@
             :avatar-src="$avatars.photoUrl" @show-avatar="openGallery"
             :checkpoint-signing="checkpointSigning"
             @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
+            :invites="inviteViewsByMsgId" :can-invite="peerConfirmed" :inviting="inviting"
+            @invite-guardian="guardianInvites.inviteGuardian" @answer-invite="guardianInvites.answerInvite"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge">
@@ -70,6 +72,7 @@ import { v7 as uuidv7 } from 'uuid';
 import GalleryViewer from '@/components/GalleryViewer.vue';
 import { useAvatarsStore } from '@/store/avatars.store';
 import { usePeerGallery } from '@/composables/usePeerGallery';
+import { useGuardianInvites } from '@/composables/useGuardianInvites';
 
 const $route = useRoute();
 const $router = useRouter();
@@ -978,6 +981,13 @@ const handleCreateCheckpoint = async () => {
         checkpointSigning.value = false;
     }
 };
+
+// Guardian invitations (pq_recovery_shares § Inviting).
+const guardianInvites = useGuardianInvites({
+    peerHash, dialogHash, messages: decryptedMessages,
+    peerName: chatName, swal: $swal, isAlive: () => pageAlive,
+});
+const { views: inviteViewsByMsgId, peerConfirmed, inviting } = guardianInvites;
 
 watch(dialogHash, (dh) => {
     if (!dh || !peerHash.value) return;

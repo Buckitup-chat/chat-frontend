@@ -44,6 +44,7 @@ const VERIFIABLE = new Set([
 	'dialog_message_reactions',
 	'dialog_message_receipts',
 	'files',
+	'vouch_tokens',
 ]);
 
 const VERIFIED: RowVerification = { status: 'verified' };
@@ -95,6 +96,7 @@ export function verifyRowWithKey(relation: string, row: Record<string, unknown>,
 		case 'dialog_keys':
 		case 'files':
 		case 'file_chunks':
+		case 'vouch_tokens':
 			return verifySignedFields(relation, row, authorSignPkey);
 		default:
 			return { status: 'unsupported', reason: 'no_local_verification' };

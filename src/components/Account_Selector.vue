@@ -116,8 +116,6 @@ h6 {
 </style>
 
 <script setup>
-import { web3Store } from '@/store/web3.store';
-
 import { userPQStore } from '@/store/userPQ.store';
 
 
@@ -127,7 +125,6 @@ import { inject, ref, onMounted, nextTick } from 'vue';
 import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
 
 const $mitt = inject('$mitt');
-const $web3 = web3Store();
 // const $user = userStore();
 const $userPQ = userPQStore();
 
@@ -256,8 +253,6 @@ const reset = () => {
 // 			},
 // 		});
 
-// 		await $user.checkMetaWallet();
-
 // 		nextTick(() => {
 // 			try {
 // 				$router.replace({ name: 'account_info' });
@@ -318,8 +313,6 @@ const signinPQ = async () => {
 		// 	},
 		// });
 
-		// await $user.checkMetaWallet();
-
 		nextTick(() => {
 			try {
 				$router.replace({ name: 'account_info' });
@@ -331,6 +324,19 @@ const signinPQ = async () => {
 		$mitt.emit('modal::close');
 	} catch (error) {
 		console.error('signin', error);
+		if (error?.name === 'LocalVaultMissingError') {
+			$swal.fire({
+				icon: 'error',
+				title: 'Account keys missing on this device',
+				text: 'Restore this account from a backup or another device.',
+			});
+		} else if (error?.name === 'AccountPasskeyMismatchError') {
+			$swal.fire({
+				icon: 'error',
+				title: 'Passkey belongs to another account',
+				text: 'Choose the Bitwarden passkey for the selected account and try again.',
+			});
+		}
 	}
 
 	console.log('is loader next')

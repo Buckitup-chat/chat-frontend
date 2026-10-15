@@ -85,15 +85,6 @@ export const modalRegistry = {
 		icon: '_icon_reload',
 	},
 
-	account_activate: {
-		header: false,
-		component: 'Modal_Account_Activate',
-		modalClass: 'modal-sm',
-		title: 'Account Activation',
-		icon: '_icon_profile',
-		bodyClass: 'p-0',
-	},
-
 	account_backup_local: {
 		header: true,
 		component: 'Modal_Account_Backup_Local',
@@ -131,13 +122,15 @@ export const modalRegistry = {
 		modalClass: 'modal-md',
 	},
 
-	contacts: {
-		header: true,
-		component: 'Modal_Contacts',
+	// Setting up a community backup and following its progress: one modal with
+	// its own screens and header (Modal_Community_Backup).
+	community_backup: {
+		header: false,
+		modalStatic: true,
+		component: 'Modal_Community_Backup',
 		modalClass: 'modal-md',
-		title: 'Verified contacts',
-		icon: '_icon_contacts',
 	},
+
 	...(SANDBOX_SURFACES ? SANDBOX_MODALS : {}),
 };
 

@@ -75,12 +75,13 @@ export function createSlotResolver(access: RootAccess) {
 	 */
 	const ensureSlotUuid = async (
 		name: string,
-		{ mint, writeRow, recallPendingMint, rememberPendingMint, forgetPendingMint }: {
+		{ mint, writeRow, recallPendingMint, rememberPendingMint, forgetPendingMint, writeMap }: {
 			mint: () => string;
 			writeRow: (uuid: string) => Promise<void>;
 			recallPendingMint?: () => Promise<string | null>;
 			rememberPendingMint?: (uuid: string) => Promise<void>;
 			forgetPendingMint?: () => Promise<void>;
+			writeMap?: (patch: RootRecord) => Promise<void>;
 		},
 	): Promise<{ uuid: string; created: boolean; orphaned?: string }> =>
 		serialize(async () => {
@@ -104,7 +105,7 @@ export function createSlotResolver(access: RootAccess) {
 			await writeRow(uuid);
 
 			const nextSlots = { ...(root.slots ?? {}), [name]: uuid };
-			await access.write({ slots: { [name]: uuid } });
+			await (writeMap ?? access.write)({ slots: { [name]: uuid } });
 			await forgetPendingMint?.();
 			cached = nextSlots;
 

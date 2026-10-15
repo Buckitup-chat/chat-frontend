@@ -16,14 +16,16 @@ import {
 } from '@/lib/data/userCardIntent';
 import { VaultLockedError } from '@/lib/data/keyCustody';
 import {
-  startLeaderElection, stopLeaderElection, currentSessionUserHash, onOutboxWake, awaitServerAccepted, awaitDeliveryVerdict,
+  startLeaderElection, stopLeaderElection, currentSessionUserHash, onOutboxWake, onOutboxChange, awaitServerAccepted, awaitDeliveryVerdict,
   currentSessionToken, sameSessionToken,
 } from '@/lib/data/outbox';
 import { recoverIntents, signAndDispatchIntent } from '@/lib/data/intentRecovery';
+import { requestContactAccess, applyContactAccessIntent } from '@/lib/data/contactVouches';
 import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch } from '@/lib/data/userStorage';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
 import { publishVault } from '@/lib/recovery/vault';
+import { newMetaSeed } from '@/lib/recovery/guardianInvite';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
@@ -32,6 +34,10 @@ import { clearSessions } from '@/lib/data/readSession';
 import { resetGate } from '@/lib/data/accessGate';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
+
+const CONTACT_ACCESS_RETRY_MS = 5_000;
+const CONTACT_ACCESS_RETRY_MAX_MS = 60_000;
+const CONTACT_ACCESS_HURRY_MS = 500;
 
 const VAULT_KEY_OPTIONS = {
   // Only the fields local-data-lock's getLockKey() actually reads survive the
@@ -70,6 +76,20 @@ if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
 }
 
 class VaultKeyError extends Error {}
+
+export class LocalVaultMissingError extends VaultKeyError {
+  constructor() {
+    super('This account is listed on this device, but its encrypted keys are missing. Restore it from a backup or another device.');
+    this.name = 'LocalVaultMissingError';
+  }
+}
+
+export class AccountPasskeyMismatchError extends VaultKeyError {
+  constructor() {
+    super('The selected passkey belongs to a different account. Choose the passkey for this account.');
+    this.name = 'AccountPasskeyMismatchError';
+  }
+}
 
 class CardNotDurableError extends Error {
   constructor(cause) {
@@ -118,6 +138,9 @@ export class EncryptionManagerPQ extends EventTarget {
   #slotResolver = null;
   #contactSkey = null;
   #evmSkey = null;
+  // The guardian meta seed (pq_recovery_shares § Inviting, The keys), hex,
+  // once read or made: guardianMetaSeed.
+  #metaSeed = null;
 
   constructor() {
     super();
@@ -256,6 +279,9 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, bytesToHex(evmPrivKey));
     await userVault.set(`contact_skey`, bytesToHex(contactPrivKey));
+    // The guardian meta seed is an account key like the others: made here, it
+    // reaches every device the way they do (pq_recovery_shares § Inviting).
+    await userVault.set(`meta_seed`, bytesToHex(newMetaSeed()));
 
     const identity = {
       user_hash: userHash,
@@ -273,6 +299,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards.push(identity);
 
     await this.#saveLocalUserCards();
+    await this.#rawStore.set(`pq-vault-owner-${userVault.id}`, userHash);
 
     // Bootstrap: the keys open locally (the card intent and snapshot are
     // sealed with them), the card is published and accepted, and only then is
@@ -338,7 +365,7 @@ export class EncryptionManagerPQ extends EventTarget {
     }
     try {
       startLeaderElection(userHash, () => {});
-      const card = await this.#passBootstrapCard(userHash, { mode: 'sign-in', deferDelivery: true });
+      const card = await this.#passBootstrapCard(userHash, { mode: 'sign-in', card: identity, deferDelivery: true });
       if (card === 'deferred') throw new LoginDeferredError(userHash);
     } catch (e) {
       await this.#abortBootstrap();
@@ -451,18 +478,76 @@ export class EncryptionManagerPQ extends EventTarget {
 
     if (!identity) throw new Error(`User ${userHash} not found in local identities`);
 
-    const vault = await connect({
-      vaultID: identity.vaultId,
-      storageType: 'idb',
-      keyOptions: VAULT_KEY_OPTIONS
-    });
+    // A card may retain an old vault ID while its passkey still opens a vault
+    // on this device. Check before connecting: the adapter creates an empty
+    // row for an unknown ID, which would hide the surviving vault.
+    const vaultEntry = identity.vaultId
+      ? await this.#rawStore.get(`local-vault-${identity.vaultId}`)
+      : null;
+    const discoverVault = !vaultEntry?.accountID || !vaultEntry?.data;
+    let vault;
+    if (discoverVault) {
+      const vaultKeys = await this.#rawStore.keys();
+      const [legacyCards, legacyCurrentVaultId] = await Promise.all([
+        this.#rawStore.get('vaults-registry'),
+        this.#rawStore.get('vault-id'),
+      ]);
+      const legacyVaultIds = new Set(Array.isArray(legacyCards)
+        ? legacyCards.map(card => card.vaultId)
+        : []);
+      if (legacyCurrentVaultId) legacyVaultIds.add(legacyCurrentVaultId);
+      const otherCardVaultIds = new Set(this.#localUserCards
+        .filter(card => card.user_hash !== userHash)
+        .map(card => card.vaultId));
+      const candidateKeys = vaultKeys
+        .filter(key => key.startsWith('local-vault-') &&
+          key !== `local-vault-${identity.vaultId}` &&
+          !otherCardVaultIds.has(key.slice('local-vault-'.length)) &&
+          !legacyVaultIds.has(key.slice('local-vault-'.length)));
+      const candidates = (await Promise.all(candidateKeys.map(async key => ({
+        key,
+        entry: await this.#rawStore.get(key),
+        owner: await this.#rawStore.get(`pq-vault-owner-${key.slice('local-vault-'.length)}`),
+      })))).filter(({ entry, owner }) => entry?.accountID && entry?.data && (owner === userHash || owner == null));
+      if (!candidates.length) throw new LocalVaultMissingError();
+      try {
+        vault = candidates.length === 1
+          ? await connect({ vaultID: candidates[0].key.slice('local-vault-'.length), storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS })
+          : await connect({ storageType: 'idb', discoverVault: true, keyOptions: VAULT_KEY_OPTIONS });
+      } catch (e) {
+        if (e?.message?.startsWith('No matching vault found in storage')) throw new LocalVaultMissingError();
+        throw e;
+      }
+    } else {
+      vault = await connect({ vaultID: identity.vaultId, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS });
+    }
 
     const signSkey = this.#normalizeKey(await vault.get('sign_skey'));
     const cryptSkey = this.#normalizeKey(await vault.get('crypt_skey'));
     const evmSkey = await vault.get('evm_skey');
     const contactSkey = await vault.get('contact_skey');
 
-    if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
+    if (discoverVault) {
+      const discoveredEntry = await this.#rawStore.get(`local-vault-${vault.id}`);
+      if (!discoveredEntry?.accountID || !discoveredEntry?.data) throw new LocalVaultMissingError();
+    }
+    if (!(signSkey instanceof Uint8Array)) {
+      if (discoverVault) throw new LocalVaultMissingError();
+      throw new VaultKeyError('Failed to load secret key from vault');
+    }
+
+    if (discoverVault) {
+      const matches = this.#signKeyMatchesIdentity(signSkey, identity);
+      if (!matches) {
+        try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
+        throw new AccountPasskeyMismatchError();
+      }
+      identity.vaultId = vault.id;
+      await this.#saveLocalUserCards();
+      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
+    } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`)) && this.#signKeyMatchesIdentity(signSkey, identity)) {
+      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
+    }
 
     this.#currentVault = vault;
     this.#signSkey = signSkey;
@@ -521,6 +606,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#cryptSkey = null;
     this.#evmSkey = null;
     this.#contactSkey = null;
+    this.#metaSeed = null;
     this.#currentVault = null;
     this.#bootstrapUserHash = null;
   }
@@ -535,6 +621,7 @@ export class EncryptionManagerPQ extends EventTarget {
   #outboxOnlineListener = null;
   #outboxVisibleListener = null;
   #outboxWakeUnsubscribe = null;
+  #outboxChangeUnsubscribe = null;
 
   #signingKeyOf(userHash) {
     return async () => {
@@ -554,6 +641,7 @@ export class EncryptionManagerPQ extends EventTarget {
       recoverIntents(userHash, signingKey, {
         materializeMessage: materializeMessageIntent,
         materializeStorage: materializeStorageIntent,
+        applyContactAccess: async (entry) => this.#afterContactAccess(userHash, await applyContactAccessIntent(entry, this.#contactAccessSession(userHash))),
       })
     ).catch((e) =>
       console.warn('[EncryptionManagerPQ] intent recovery failed:', e)
@@ -586,6 +674,9 @@ export class EncryptionManagerPQ extends EventTarget {
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', this.#outboxVisibleListener);
     }
+    this.#outboxChangeUnsubscribe = onOutboxChange((changedUserHash) => {
+      if (changedUserHash === userHash && this.#contactAccessRetry) this.#hurryContactAccessRetry(userHash);
+    });
     this.#outboxWakeUnsubscribe = onOutboxWake((wokenUserHash) => {
       if (wokenUserHash === userHash) {
         drainPendingWrites(userHash, signSkey);
@@ -607,6 +698,10 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#outboxVisibleListener = null;
     this.#outboxWakeUnsubscribe?.();
     this.#outboxWakeUnsubscribe = null;
+    this.#outboxChangeUnsubscribe?.();
+    this.#outboxChangeUnsubscribe = null;
+    clearTimeout(this.#contactAccessRetry);
+    this.#contactAccessRetry = null;
   }
 
   async #clearAccountReadCache() {
@@ -629,6 +724,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#cryptSkey = null;
     }
     this.#evmSkey = null;
+    this.#metaSeed = null;
     this.#currentUserHash = null;
     this.#bootstrapUserHash = null;
     this.#currentVault = null;
@@ -668,6 +764,7 @@ export class EncryptionManagerPQ extends EventTarget {
         removeLocalAccount(vaultData.accountID);
       }
       await this.#rawStore.remove(`local-vault-${vaultId}`);
+      await this.#rawStore.remove(`pq-vault-owner-${vaultId}`);
     } catch (e) {
       console.warn('Could not delete from local-vault', e);
     }
@@ -681,11 +778,19 @@ export class EncryptionManagerPQ extends EventTarget {
 
   #normalizeKey(key) {
     if (!key) return null;
-    if (key instanceof Uint8Array) return key;
+    // A copy: logout zeroes the session's key, never the vault's cached one.
+    if (key instanceof Uint8Array) return new Uint8Array(key);
     if (typeof key === 'object' && !ArrayBuffer.isView(key)) {
       return new Uint8Array(Object.values(key).map(v => Number(v)));
     }
     return null;
+  }
+
+  #signKeyMatchesIdentity(signSkey, identity) {
+    try {
+      const challenge = new TextEncoder().encode('buckitup/local-vault/account-binding/v1');
+      return ml_dsa87.verify(ml_dsa87.sign(challenge, signSkey), challenge, decodeHexOrBase64(identity.sign_pkey));
+    } catch { return false; }
   }
 
   #dispatchAuthChange() {
@@ -785,8 +890,34 @@ export class EncryptionManagerPQ extends EventTarget {
     return bytesToHex(signature.toCompactRawBytes());
   }
 
-  async getEvmSkey() {
-    return this.#evmSkey;
+  /**
+   * The guardian meta seed, hex, read from the vault. Made with the account
+   * (createUserVault), so every device of it holds the same one; with
+   * `create`, an account made before the seed existed makes it here, at its
+   * first acceptance.
+   */
+  async guardianMetaSeed({ create = false } = {}) {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+    if (this.#metaSeed) return this.#metaSeed;
+    const vault = this.#currentVault;
+    // One seed per account, ever: a second one would answer some owners with
+    // keys the first never derives. Another tab shares the vault, so the
+    // check is made again, under a lock, against the vault itself.
+    const make = async () => {
+      let seed = (await vault.get('meta_seed')) ?? null;
+      if (!seed && create) {
+        seed = bytesToHex(newMetaSeed());
+        await vault.set('meta_seed', seed);
+      }
+      return seed;
+    };
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+    const seed = await (create && locks ? locks.request(`meta_seed:${vault.id}`, make) : make());
+    // A logout or switch while this ran leaves the seed in its own vault and
+    // nothing in this session.
+    if (this.#currentVault !== vault) throw new Error('The account changed while the guardian keys were being read');
+    this.#metaSeed = seed;
+    return seed;
   }
 
   async exportVaultKeys() {
@@ -822,7 +953,15 @@ export class EncryptionManagerPQ extends EventTarget {
 
     await this.#loadLocalUserCards();
     const existing = this.#localUserCards.find(i => i.user_hash === identity.user_hash);
-    const userVault = existing
+    // A registry card can outlive its encrypted vault (for example after an
+    // older client cleared all local-vault entries). A backup supplies the
+    // missing private keys, so create a fresh passkey-protected vault instead
+    // of trying to connect to the empty row that local-vault auto-created.
+    const existingVault = existing?.vaultId
+      ? await this.#rawStore.get(`local-vault-${existing.vaultId}`)
+      : null;
+    const reuseExistingVault = !!existingVault?.accountID && !!existingVault?.data;
+    const userVault = reuseExistingVault
       ? await connect({ vaultID: existing.vaultId, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS })
       : await connect({
         storageType: 'idb',
@@ -834,6 +973,13 @@ export class EncryptionManagerPQ extends EventTarget {
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, keys.evm_skey);
     await userVault.set(`contact_skey`, keys.contact_skey);
+    if (keys.meta_seed) {
+      // Owners may hold meta-addresses from the seed already here: replacing
+      // it would leave this device unable to approve for them.
+      const present = reuseExistingVault ? await userVault.get(`meta_seed`) : null;
+      if (!present) await userVault.set(`meta_seed`, keys.meta_seed);
+      else if (present !== keys.meta_seed) console.warn('[vault] the imported guardian seed differs from this device\'s; this device keeps its own');
+    }
 
     identity.vaultId = userVault.id;
     if (existing) {
@@ -842,6 +988,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#localUserCards.push(identity);
     }
     await this.#saveLocalUserCards();
+    await this.#rawStore.set(`pq-vault-owner-${userVault.id}`, identity.user_hash);
 
     // Same card boundary as registration: the card may not exist on this Pi
     // yet, and the session activates only once it is accepted.
@@ -987,10 +1134,11 @@ export class EncryptionManagerPQ extends EventTarget {
    * between the two leaves an unreferenced row rather than a map pointing at
    * nothing.
    */
-  async #ensureSlot(name, writeRow) {
+  async #ensureSlot(name, writeRow, { writeMap } = {}) {
     const { uuid, orphaned } = await this.#slots().ensureSlotUuid(name, {
       mint: randomSlotUuid,
       writeRow,
+      writeMap,
       recallPendingMint: () => kvGet(this.#pendingSlotMintKey(name)),
       rememberPendingMint: (uuid) => kvSet(this.#pendingSlotMintKey(name), uuid),
       forgetPendingMint: () => kvDelete(this.#pendingSlotMintKey(name)),
@@ -1157,6 +1305,11 @@ export class EncryptionManagerPQ extends EventTarget {
   // contact } }. An edit is a patch by user_hash (storageIntent
   // mergeJsonPatch): its fields merge into the stored contact, null deletes it.
 
+  async saveContacts(edits) {
+    const { value, status } = await this.saveSlotJson('contacts', { contacts: edits });
+    return { contacts: Object.values(value?.contacts ?? {}), status };
+  }
+
   /** Applies `edits` to the contacts the server holds; resolves to the accepted list. */
   async patchContacts(edits) {
     const record = await this.patchSlotJson('contacts', { contacts: edits });
@@ -1165,6 +1318,49 @@ export class EncryptionManagerPQ extends EventTarget {
 
   async loadContacts() {
     return Object.values((await this.loadSlotJson('contacts'))?.contacts ?? {});
+  }
+
+  async setContactAccess(issuerHash, subjectHash, granted) {
+    if (!issuerHash || this.#currentUserHash !== issuerHash || !this.#signSkey) return 'skipped';
+    return this.#afterContactAccess(issuerHash, await requestContactAccess(subjectHash, granted, this.#contactAccessSession(issuerHash)));
+  }
+
+  #contactAccessRetry = null;
+  #contactAccessRetryDelay = CONTACT_ACCESS_RETRY_MS;
+
+  #contactAccessSession(issuerHash) {
+    const session = currentSessionToken();
+    return {
+      issuerHash,
+      signingKey: this.#signingKeyOf(issuerHash),
+      stillCurrent: () => this.#currentUserHash === issuerHash && sameSessionToken(session, currentSessionToken()),
+    };
+  }
+
+  #afterContactAccess(issuerHash, result) {
+    if (result !== 'retry') {
+      this.#contactAccessRetryDelay = CONTACT_ACCESS_RETRY_MS;
+      return result;
+    }
+    if (this.#contactAccessRetry || this.#currentUserHash !== issuerHash) return result;
+    const delay = this.#contactAccessRetryDelay;
+    this.#contactAccessRetryDelay = Math.min(delay * 2, CONTACT_ACCESS_RETRY_MAX_MS);
+    this.#scheduleContactAccessRetry(issuerHash, delay);
+    return result;
+  }
+
+  #hurryContactAccessRetry(issuerHash) {
+    clearTimeout(this.#contactAccessRetry);
+    this.#contactAccessRetryDelay = CONTACT_ACCESS_RETRY_MS;
+    this.#scheduleContactAccessRetry(issuerHash, CONTACT_ACCESS_HURRY_MS);
+  }
+
+  #scheduleContactAccessRetry(issuerHash, delay) {
+    const session = currentSessionToken();
+    this.#contactAccessRetry = setTimeout(() => {
+      this.#contactAccessRetry = null;
+      if (this.#currentUserHash === issuerHash && sameSessionToken(session, currentSessionToken())) this.#recoverIntents(issuerHash);
+    }, delay);
   }
 
   // Named JSON slots
@@ -1194,6 +1390,32 @@ export class EncryptionManagerPQ extends EventTarget {
    * without a read-modify-write here. A value that is there and does not
    * decrypt fails the update instead of being overwritten.
    */
+  async saveSlotJson(name, patch) {
+    const userHash = this.#currentUserHash;
+    const signSkey = this.#signSkey;
+    if (!userHash || !signSkey || !this.#cryptSkey) throw new Error('No user is currently logged in');
+    const sameAccount = () => {
+      if (this.#currentUserHash !== userHash) throw new Error('The account changed before this write ran; nothing was written');
+    };
+    const statuses = [];
+    const save = async (uuid, jsonPatch, knownEmpty = false) => {
+      sameAccount();
+      statuses.push(await saveStorageJsonPatch({ userHash, uuid, jsonPatch, signSkey, knownEmpty }));
+    };
+    const mapped = await this.#slotUuid(name);
+    let slotUuid = null;
+    await this.#ensureSlot(name, async (uuid) => {
+      sameAccount();
+      const base = await this.#readJsonAt(uuid, `The ${name} slot`, { strict: true });
+      await save(uuid, patch, !mapped && base === null);
+      slotUuid = uuid;
+    }, { writeMap: (mapPatch) => save(this.#rootSlotUuid(), mapPatch) });
+    if (this.#currentUserHash !== userHash) throw new Error('The account changed while this write was out');
+    const value = await this.#readJsonAt(slotUuid, `The ${name} slot`, { strict: true });
+    const status = ['awaiting-approval', 'awaiting-recovery', 'queued'].find((s) => statuses.includes(s)) ?? 'synced';
+    return { value, status };
+  }
+
   async patchSlotJson(name, patch) {
     const userHash = this.#currentUserHash;
     const signSkey = this.#signSkey;

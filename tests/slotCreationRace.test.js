@@ -15,6 +15,7 @@ vi.mock('@lo-fi/local-vault', () => ({
 		if (addNewVault) {
 			const id = `vault-${vaults.size + 1}`;
 			vaults.set(id, makeVault(id));
+			await rawStore.set(`local-vault-${id}`, { accountID: `account-${id}`, data: 'sealed' });
 			return vaults.get(id);
 		}
 		return vaults.get(vaultID);

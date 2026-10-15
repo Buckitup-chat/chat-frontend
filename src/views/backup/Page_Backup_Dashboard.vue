@@ -10,27 +10,9 @@
 					Choose a backup or recovery method for your account.
 				</div>
 
-				<!-- Blockchain -->
-				<div class="card mb-3 shadow-sm border-0" style="opacity: 0.7;">
-					<div class="card-body">
-						<div class="d-flex align-items-center mb-2">
-							<i class="_icon_network bg-dark fs-3 me-3" style="width: 2rem; height: 2rem;"></i>
-							<h5 class="card-title mb-0 fw-bold">Blockchain Recovery</h5>
-							<span class="badge bg-secondary ms-2 rounded-pill">Coming Soon</span>
-						</div>
-						<p class="card-text text-secondary mb-3">
-							Link a crypto wallet for on-chain authentication.
-						</p>
-						<div class="d-flex gap-2">
-							<button class="btn btn-outline-dark flex-fill" disabled>
-								+ Create Backup
-							</button>
-							<button class="btn btn-dark flex-fill" disabled>
-								<i class="bi bi-arrow-clockwise"></i> Restore
-							</button>
-						</div>
-					</div>
-				</div>
+				<!-- Community backup: guardians and nodes. No Restore here: recovery
+				     starts from the login page, where the person who needs it is. -->
+				<CommunityBackupCard />
 
 				<!-- Local File -->
 				<div class="card mb-3 shadow-sm border-0">
@@ -104,6 +86,7 @@ import { userPQStore } from '@/store/userPQ.store';
 
 import { inject } from 'vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
+import CommunityBackupCard from '@/components/recovery/backup/CommunityBackupCard.vue';
 
 const $userPQ = userPQStore();
 const $modal = inject('$modal');

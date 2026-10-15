@@ -298,10 +298,11 @@ export async function decideCardConstruction(
 	if (ops.rejected !== null) return { kind: 'rejected', reason: ops.rejected };
 
 	if (shapeCard.kind === 'unverified') return blocked('card_unverified');
-	if (mode === 'sign-in') return blocked(live ? 'card_unproven' : 'shape_unavailable');
+	if (mode === 'sign-in' && !live) return blocked('shape_unavailable');
 	if (mode === 'import' && !live) return blocked('shape_unavailable');
 	const pending = await readPendingCardWrites(userHash);
 	if ('kind' in pending) return pending;
+	if (mode === 'sign-in' && pending.inFlight) return blocked('card_unproven');
 	const ownerTimestamp = await nextCardTimestamp(userHash, pending.highest ?? 0);
 	return typeof ownerTimestamp === 'number' ? { kind: 'author-bootstrap', ownerTimestamp } : ownerTimestamp;
 }

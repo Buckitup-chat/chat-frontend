@@ -319,9 +319,9 @@ describe('blocked: state that cannot be proven is never "no card"', () => {
 		expect(await decideCardConstruction(USER, 'sign-in')).toEqual({ kind: 'blocked', reason: 'bootstrap_unconfirmed' });
 	});
 
-	it('sign-in: the live shape has no card and nothing else proves one; a shape that failed proves nothing either', async () => {
+	it('sign-in: a live shape with no card can bootstrap it; a failed shape cannot prove absence', async () => {
 		await goLive();
-		expect(await decideCardConstruction(USER, 'sign-in')).toEqual({ kind: 'blocked', reason: 'card_unproven' });
+		expect(await decideCardConstruction(USER, 'sign-in')).toMatchObject({ kind: 'author-bootstrap' });
 		shape.fail();
 		expect(await decideCardConstruction(USER, 'sign-in')).toEqual({ kind: 'blocked', reason: 'shape_unavailable' });
 	});

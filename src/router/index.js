@@ -101,12 +101,6 @@ const routes = [
 				component: () => import('../views/account/Page_Account_Settings.vue'),
 				meta: { auth: true, name: 'Account Settings', sub: true },
 			},
-			{
-				path: 'transactions',
-				name: 'account_transactions',
-				component: () => import('../views/account/Page_Account_Transactions.vue'),
-				meta: { auth: true, name: 'Account Transactions', sub: true },
-			},
 		],
 	},
 	{

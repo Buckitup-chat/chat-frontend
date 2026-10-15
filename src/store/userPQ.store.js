@@ -377,7 +377,7 @@ export const userPQStore = defineStore('userPQ', () => {
     contactsMap.value = shown;
   };
 
-  const writeContacts = async (edits) => {
+  const writeContacts = async (edits, { onDevice = false } = {}) => {
     const account = currentUserHash.value;
     const session = contactsSession;
     const generation = ++contactsEdits;
@@ -392,8 +392,10 @@ export const userPQStore = defineStore('userPQ', () => {
     session.editsOut.push(edit);
     const stillCurrent = () => currentUserHash.value === account && contactsSession === session;
     let next;
+    let status = 'synced';
     try {
-      next = await em.value.patchContacts(edits);
+      if (onDevice) ({ contacts: next, status } = await em.value.saveContacts(edits));
+      else next = await em.value.patchContacts(edits);
     } catch (e) {
       session.editsOut.splice(session.editsOut.indexOf(edit), 1);
       if (stillCurrent()) takeBack(session, edit);
@@ -406,31 +408,51 @@ export const userPQStore = defineStore('userPQ', () => {
     if (stillCurrent() && generation === contactsEdits) {
       contactsMap.value = Object.fromEntries(next.map((c) => [c.user_hash, c]));
     }
+    return status;
   };
 
   const saveContact = async (userHash, contactData) => {
     if (!em.value || !currentUserHash.value) return false;
-    await writeContacts({ [userHash]: { ...storedFields(contactData), user_hash: userHash } });
-    return true;
+    const status = await writeContacts({ [userHash]: { ...storedFields(contactData), user_hash: userHash } }, { onDevice: true });
+    return { status };
   };
 
   /**
    * Marks a contact as met in person, with the key the handshake proved —
    * adding it if it is not a contact yet. The caller has checked that key
    * against the contact's certified card (lib/pq/verifyCard).
+   *
+   * Done once the contact is durable on this device; resolves to
+   * `{ status }`, where anything but 'synced' means the server does not have
+   * it yet ('awaiting-approval': this account's writes wait for the device
+   * owner). The device-access vouch does not wait for that: it is a row of
+   * its own, which the device takes whatever it holds of this account's
+   * contacts.
    */
   const confirmContact = async (userHash, contactPkey, fields = {}) => {
     if (!em.value || !currentUserHash.value) return false;
-    await writeContacts({
+    const account = currentUserHash.value;
+    const status = await writeContacts({
       [userHash]: { ...storedFields(fields), user_hash: userHash, contact_pkey: contactPkey, confirmed: true },
-    });
-    return true;
+    }, { onDevice: true });
+    await setDeviceAccess(account, userHash, true);
+    return { status };
+  };
+
+  const setDeviceAccess = async (account, userHash, granted) => {
+    try {
+      await em.value.setContactAccess(account, userHash, granted);
+    } catch (e) {
+      console.warn(`[contacts] device access for a contact was not ${granted ? 'granted' : 'revoked'}:`, e);
+    }
   };
 
   const deleteContact = async (userHash) => {
     if (!em.value || !currentUserHash.value) return false;
-    await writeContacts({ [userHash]: null });
-    return true;
+    const account = currentUserHash.value;
+    const status = await writeContacts({ [userHash]: null }, { onDevice: true });
+    await setDeviceAccess(account, userHash, false);
+    return { status };
   };
 
   const getUserByHash = (userHash) => {
@@ -442,22 +464,13 @@ export const userPQStore = defineStore('userPQ', () => {
     return myLocalUsers.value.find(u => u.user_hash === userHash);
   };
 
-  const getEvmPrivateKey = async () => {
-    if (!em.value) return null;
-    return await em.value.getEvmSkey();
-  };
-
-  const getEvmMetaKeys = async () => {
-    const skey = await getEvmPrivateKey();
-    if (!skey) return null;
-    return {
-      privateKey: skey
-    };
-  };
-
   const exportBackup = async () => {
     if (!em.value) throw new Error('Not signed in.');
     const keys = await em.value.exportVaultKeys();
+    // The guardian seed travels with the other keys: a restored account or a
+    // linked device derives the same guardian keys.
+    const metaSeed = await em.value.guardianMetaSeed();
+    if (metaSeed) keys.meta_seed = metaSeed;
     if (!keys.contact_skey) {
       // A vault restored before contact_skey was carried has none, and an
       // import refuses a backup without it - so refuse here, before it is
@@ -564,8 +577,6 @@ export const userPQStore = defineStore('userPQ', () => {
     getUserByHash,
     getMyUserByHash,
 
-    getEvmPrivateKey,
-    getEvmMetaKeys,
     exportBackup,
     createRecoveryBackup,
     importBackup,

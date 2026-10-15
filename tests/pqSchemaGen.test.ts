@@ -29,6 +29,7 @@ describe('schema.generated.ts', () => {
 			'dialog_message_receipts',
 			'files',
 			'file_chunks',
+			'vouch_tokens',
 		]);
 	});
 
