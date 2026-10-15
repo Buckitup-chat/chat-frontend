@@ -243,6 +243,8 @@ replays another guardian's meta-address is refused.
 
 ### 7.2 Creating a backup
 
+The screens, for the designer: [design-recovery-backup.md](design-recovery-backup.md).
+
 **Simple screen:** pick at least three guardians among the contacts who
 accepted; everything else has a default:
 
