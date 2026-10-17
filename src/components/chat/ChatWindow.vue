@@ -392,27 +392,27 @@
       <div class="context-menu-divider"></div>
       <button v-if="contextMenuMsg && contextMenuMsg._raw && contextMenuMsg._raw.sign_hash && !contextMenuMsg._deleted"
         type="button" class="context-menu-action" @click="startReply(contextMenuMsg)">
-        <i class="_icon_reply menu-icon"></i>Reply
+        <i class="_icon_reply icon-inline"></i>Reply
       </button>
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !isPhotoOnly(contextMenuMsg)" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
-        <i class="_icon_edit_pen menu-icon"></i>Edit
+        <i class="_icon_edit_pen icon-inline"></i>Edit
       </button>
       <button v-if="canAcknowledge" type="button" class="context-menu-action"
         @click="acknowledgeFromContext">
-        <i class="_icon_eye menu-icon"></i>Confirm read
+        <i class="_icon_eye icon-inline"></i>Confirm read
       </button>
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !contextMenuMsg._deleted"
         type="button" class="context-menu-action context-menu-danger" @click="deleteFromContext">
-        <i class="_icon_delete menu-icon"></i>Delete
+        <i class="_icon_delete icon-inline"></i>Delete
       </button>
       <!-- §4.3 "!": rejected outright — the action is to discard the local copy -->
       <button v-if="contextMenuMsg && contextMenuMsg._optimistic && contextMenuMsg._syncStatus === 'error'"
         type="button" class="context-menu-action context-menu-danger" @click="discardFromContext">
-        <i class="_icon_delete menu-icon"></i>Discard failed message
+        <i class="_icon_delete icon-inline"></i>Discard failed message
       </button>
       <button type="button" class="context-menu-action" @click="copyMessageText">
-        <i class="_icon_copy menu-icon"></i>Copy text
+        <i class="_icon_copy icon-inline"></i>Copy text
       </button>
     </div>
   </div>
@@ -1153,8 +1153,7 @@ watch(() => props.messages, () => {
   pointer-events: none;
 }
 .drop-notice { margin: 0 4px 6px; font-size: 12px; color: #a15c00; }
-.attach-btn ._icon_attach { width: 24px; height: 24px; background-color: #3d3d3d; }
-.context-menu-action .menu-icon { display: inline-block; width: 16px; height: 16px; margin-right: 0.5rem; vertical-align: -3px; background-color: currentColor; }
+.attach-btn ._icon_attach { width: 1.5rem; height: 1.5rem; }
 
 .chat-header {
   background-color: #ffffff;

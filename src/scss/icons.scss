@@ -40,7 +40,8 @@ $_icons: (
 	'tag',
 	'unlock',
 	'attach',
-	'reply'
+	'reply',
+	'arrow_down'
 );
 
 @each $name in $_icons {
@@ -52,4 +53,12 @@ $_icons: (
 		display: block;
 		background-color: $black;
 	}
+}
+
+// An icon set inline with text: the text's colour, sitting on its baseline.
+.icon-inline {
+	display: inline-block;
+	vertical-align: -0.15em;
+	margin-right: 0.5rem;
+	background-color: currentColor;
 }

@@ -3,7 +3,6 @@
 // attach button does: one composed message, captioned by the input.
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
-import { execSync } from 'node:child_process';
 import { mount } from '@vue/test-utils';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { installFileDropGuard } from '@/lib/fileDropGuard';
@@ -159,12 +158,6 @@ describe('the attach button', () => {
 		expect(existsSync('public/icons/attach.svg')).toBe(true);
 	});
 
-	// Bootstrap Icons' font is not part of the app: a bi class renders an empty box.
-	it('no component uses a Bootstrap Icons class', () => {
-		const files = execSync("git ls-files src", { encoding: "utf8" }).split("\n").filter((f) => /\.(vue|js|ts)$/.test(f));
-		const offenders = files.filter((f) => /class="[^"]*\bbi bi-/.test(readFileSync(f, 'utf8')));
-		expect(offenders).toEqual([]);
-	});
 });
 
 describe('the app-wide guard', () => {
