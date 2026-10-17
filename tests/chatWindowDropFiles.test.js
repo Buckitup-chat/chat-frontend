@@ -2,6 +2,8 @@
 // Files dropped over an open dialog, or pasted into its input, send as the
 // attach button does: one composed message, captioned by the input.
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync, existsSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { mount } from '@vue/test-utils';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { installFileDropGuard } from '@/lib/fileDropGuard';
@@ -148,10 +150,20 @@ describe('a room, which has no peer and takes no files', () => {
 });
 
 describe('the attach button', () => {
-	it('draws the line paperclip of the UI icon set, not an emoji', () => {
+	it('draws the paperclip of the app\'s own icon set, not an emoji', () => {
 		const w = render();
-		expect(w.find('.attach-btn i.bi.bi-paperclip').exists()).toBe(true);
+		expect(w.find('.attach-btn i._icon_attach').exists()).toBe(true);
 		expect(w.find('.attach-btn').text()).toBe('');
+		// A class draws nothing unless the set defines it and its mask exists.
+		expect(readFileSync('src/scss/icons.scss', 'utf8')).toMatch(/'attach'/);
+		expect(existsSync('public/icons/attach.svg')).toBe(true);
+	});
+
+	// Bootstrap Icons' font is not part of the app: a bi class renders an empty box.
+	it('no component uses a Bootstrap Icons class', () => {
+		const files = execSync("git ls-files src", { encoding: "utf8" }).split("\n").filter((f) => /\.(vue|js|ts)$/.test(f));
+		const offenders = files.filter((f) => /class="[^"]*\bbi bi-/.test(readFileSync(f, 'utf8')));
+		expect(offenders).toEqual([]);
 	});
 });
 

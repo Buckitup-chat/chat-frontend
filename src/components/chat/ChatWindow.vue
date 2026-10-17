@@ -363,7 +363,7 @@
           <input ref="fileInput" type="file" multiple class="d-none" @change="onFilePicked" />
           <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
             style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;" title="Attach a file" @click="fileInput?.click()">
-            <i class="bi bi-paperclip"></i>
+            <i class="_icon_attach"></i>
           </button>
         </template>
         <input type="text" class="form-control me-2 rounded-pill px-3" v-model="newMessage"
@@ -392,27 +392,27 @@
       <div class="context-menu-divider"></div>
       <button v-if="contextMenuMsg && contextMenuMsg._raw && contextMenuMsg._raw.sign_hash && !contextMenuMsg._deleted"
         type="button" class="context-menu-action" @click="startReply(contextMenuMsg)">
-        <i class="bi bi-reply me-2"></i>Reply
+        <i class="_icon_reply menu-icon"></i>Reply
       </button>
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !isPhotoOnly(contextMenuMsg)" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
-        <i class="bi bi-pencil me-2"></i>Edit
+        <i class="_icon_edit_pen menu-icon"></i>Edit
       </button>
       <button v-if="canAcknowledge" type="button" class="context-menu-action"
         @click="acknowledgeFromContext">
-        <i class="bi bi-eye me-2"></i>Confirm read
+        <i class="_icon_eye menu-icon"></i>Confirm read
       </button>
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !contextMenuMsg._deleted"
         type="button" class="context-menu-action context-menu-danger" @click="deleteFromContext">
-        <i class="bi bi-trash me-2"></i>Delete
+        <i class="_icon_delete menu-icon"></i>Delete
       </button>
       <!-- §4.3 "!": rejected outright — the action is to discard the local copy -->
       <button v-if="contextMenuMsg && contextMenuMsg._optimistic && contextMenuMsg._syncStatus === 'error'"
         type="button" class="context-menu-action context-menu-danger" @click="discardFromContext">
-        <i class="bi bi-trash me-2"></i>Discard failed message
+        <i class="_icon_delete menu-icon"></i>Discard failed message
       </button>
       <button type="button" class="context-menu-action" @click="copyMessageText">
-        <i class="bi bi-clipboard me-2"></i>Copy text
+        <i class="_icon_copy menu-icon"></i>Copy text
       </button>
     </div>
   </div>
@@ -1153,7 +1153,8 @@ watch(() => props.messages, () => {
   pointer-events: none;
 }
 .drop-notice { margin: 0 4px 6px; font-size: 12px; color: #a15c00; }
-.attach-btn .bi { font-size: 18px; color: #5a5a5a; }
+.attach-btn ._icon_attach { width: 24px; height: 24px; background-color: #3d3d3d; }
+.context-menu-action .menu-icon { display: inline-block; width: 16px; height: 16px; margin-right: 0.5rem; vertical-align: -3px; background-color: currentColor; }
 
 .chat-header {
   background-color: #ffffff;

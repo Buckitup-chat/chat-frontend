@@ -38,7 +38,9 @@ $_icons: (
 	'timer',
 	'notifications',
 	'tag',
-	'unlock'
+	'unlock',
+	'attach',
+	'reply'
 );
 
 @each $name in $_icons {
