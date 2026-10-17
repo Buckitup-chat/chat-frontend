@@ -6,7 +6,7 @@
 			<div class="mb-4">
 				<div class="d-flex align-items-center mb-2" style="cursor: pointer;" @click="isConfirmedOpen = !isConfirmedOpen">
 					<i class="_icon_arrow_down icon-inline" :class="{ 'chevron-closed': !isConfirmedOpen }"></i>
-					<span class="ms-2 fw-bold fs-6">Confirmed</span>
+					<span class="fw-bold fs-6">Confirmed</span>
 				</div>
 				<div v-show="isConfirmedOpen" class="_rooms_container ps-2">
 					<div v-if="confirmedRooms.length === 0" class="text-muted small">You have no rooms</div>
@@ -27,7 +27,7 @@
 			<div>
 				<div class="d-flex align-items-center mb-2" style="cursor: pointer;" @click="isNotConfirmedOpen = !isNotConfirmedOpen">
 					<i class="_icon_arrow_down icon-inline" :class="{ 'chevron-closed': !isNotConfirmedOpen }"></i>
-					<span class="ms-2 fw-bold fs-6">Not Confirmed</span>
+					<span class="fw-bold fs-6">Not Confirmed</span>
 				</div>
 				<div v-show="isNotConfirmedOpen" class="_rooms_container ps-2">
 					<div v-if="notConfirmedRooms.length === 0" class="text-muted small">You have no rooms</div>
