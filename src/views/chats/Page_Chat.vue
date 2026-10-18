@@ -409,10 +409,11 @@ watch(dialogHash, () => { editHistory.value = null; });
 watch(
     () => {
         const id = editHistory.value?.msg.id;
-        return id ? (rawVersions.value || []).filter((v) => v.message_id === id).map((v) => v.sign_hash).sort().join() : null;
+        // Archived versions only accrue, so their count is enough to see one arrive.
+        return id ? (rawVersions.value || []).filter((v) => v.message_id === id).length : null;
     },
     (now, before) => {
-        if (now && before !== null && now !== before) handleShowHistory(editHistory.value.msg.id, { reload: true });
+        if (now !== null && before !== null && now > before) handleShowHistory(editHistory.value.msg.id, { reload: true });
     },
 );
 
