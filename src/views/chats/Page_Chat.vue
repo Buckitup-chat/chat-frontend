@@ -381,7 +381,7 @@ const fmtClock = (unixSec) => {
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
-const handleShowHistory = async (messageId) => {
+const handleShowHistory = async (messageId, { reload = false } = {}) => {
     const msg = decryptedMessages.value.find((m) => m.id === messageId);
     if (!msg) return;
     const history = (await $dialogs.getMessageHistory(dialogHash.value, messageId))
@@ -397,9 +397,24 @@ const handleShowHistory = async (messageId) => {
         // current-revision ones — for history the count is what matters
         (reactionsByVersion[r.message_sign_hash] ??= []).push('•');
     }
+    // A peer's edit reaches the message shape and the versions shape
+    // separately: opened in between, the list would miss the version that
+    // was archived a moment later. A reload lands only while that same history
+    // is still open.
+    if (reload && editHistory.value?.msg.id !== messageId) return;
     editHistory.value = { msg, history, reactionsByVersion };
 };
 watch(dialogHash, () => { editHistory.value = null; });
+// While the history is open, a version of its message that arrives reloads it.
+watch(
+    () => {
+        const id = editHistory.value?.msg.id;
+        return id ? (rawVersions.value || []).filter((v) => v.message_id === id).map((v) => v.sign_hash).sort().join() : null;
+    },
+    (now, before) => {
+        if (now && before !== null && now !== before) handleShowHistory(editHistory.value.msg.id, { reload: true });
+    },
+);
 
 // Reactions (deleted rows filtered below — the shape carries the full table slice)
 const { rows: rawAllReactions } = useCollectionRows(

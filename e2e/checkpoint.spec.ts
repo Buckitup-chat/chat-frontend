@@ -24,7 +24,7 @@ test('signing a checkpoint puts the marker in both feeds and matches itself', as
 	await sendMessage(alice.page, before);
 	await expect(bubble(bob.page, before)).toBeVisible({ timeout: 90_000 });
 
-	await alice.page.locator('.chat-header').getByRole('button').first().click();
+	await alice.page.locator('.chat-header').getByTitle('Sign a checkpoint of this dialog\'s history').click();
 	await expect(alice.page.locator('.swal2-popup')).toContainText('Checkpoint signed', { timeout: 60_000 });
 	await alice.page.locator('.swal2-popup').waitFor({ state: 'hidden' });
 

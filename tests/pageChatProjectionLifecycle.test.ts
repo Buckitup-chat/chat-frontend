@@ -447,4 +447,28 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 			wrapper.unmount();
 		}
 	});
+	// A peer's edit reaches the message shape and the versions shape
+	// separately. History opened in between must reload when the version lands.
+	it("an open edit history reloads when its message's archived version arrives", async () => {
+		const row = await signedRow(nextMessageId(), "after the edit", {});
+		deliverShape(row);
+		const history = vi.spyOn(store, "getMessageHistory");
+		history.mockResolvedValueOnce([]);
+		const wrapper = mountChat();
+		try {
+			await waitUntil(() => wrapper.text().includes("after the edit"));
+			wrapper.findComponent({ name: "ChatWindow" }).vm.$emit("showHistory", row.message_id);
+			await waitUntil(() => wrapper.findComponent({ name: "EditHistoryModal" }).exists());
+			expect(wrapper.findComponent({ name: "EditHistoryModal" }).props("history")).toEqual([]);
+
+			history.mockResolvedValueOnce([{ signHash: "dms_old", ownerTimestamp: 1_700_000_400, deletedFlag: false, verified: true, text: "before the edit" }]);
+			collections.dialog.versions.rows.set(`${row.message_id}|dms_old`, { message_id: row.message_id, sign_hash: "dms_old", dialog_hash: dialogHash });
+			collections.dialog.versions.notify();
+
+			await waitUntil(() => (wrapper.findComponent({ name: "EditHistoryModal" }).props("history") || []).length === 1);
+			expect(history).toHaveBeenCalledTimes(2);
+		} finally {
+			wrapper.unmount();
+		}
+	});
 });
