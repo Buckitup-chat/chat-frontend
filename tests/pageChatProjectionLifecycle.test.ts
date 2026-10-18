@@ -471,4 +471,24 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 			wrapper.unmount();
 		}
 	});
+	it("a version that lands while the history is first loading is shown, not lost", async () => {
+		const row = await signedRow(nextMessageId(), "edited meanwhile", {});
+		deliverShape(row);
+		const history = vi.spyOn(store, "getMessageHistory");
+		history.mockImplementationOnce(async () => {
+			collections.dialog.versions.rows.set(`${row.message_id}|dms_old`, { message_id: row.message_id, sign_hash: "dms_old", dialog_hash: dialogHash });
+			collections.dialog.versions.notify();
+			await new Promise((r) => setTimeout(r, 50));
+			return [];
+		});
+		history.mockResolvedValueOnce([{ signHash: "dms_old", ownerTimestamp: 1_700_000_400, deletedFlag: false, verified: true, text: "before" }]);
+		const wrapper = mountChat();
+		try {
+			await waitUntil(() => wrapper.text().includes("edited meanwhile"));
+			wrapper.findComponent({ name: "ChatWindow" }).vm.$emit("showHistory", row.message_id);
+			await waitUntil(() => (wrapper.findComponent({ name: "EditHistoryModal" }).exists() && (wrapper.findComponent({ name: "EditHistoryModal" }).props("history") || []).length === 1));
+		} finally {
+			wrapper.unmount();
+		}
+	});
 });

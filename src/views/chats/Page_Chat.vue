@@ -381,9 +381,18 @@ const fmtClock = (unixSec) => {
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
+// A peer's edit reaches the message shape and the versions shape
+// separately, so a history can open before the version it should show has
+// arrived. Each load remembers how many archived versions it saw: one that
+// arrives meanwhile, or while the history stays open, loads it again, and
+// only the latest load is shown.
+const versionCountOf = (messageId) => (rawVersions.value || []).filter((v) => v.message_id === messageId).length;
+let historyLoad = 0;
 const handleShowHistory = async (messageId, { reload = false } = {}) => {
     const msg = decryptedMessages.value.find((m) => m.id === messageId);
     if (!msg) return;
+    const load = ++historyLoad;
+    const seen = versionCountOf(messageId);
     const history = (await $dialogs.getMessageHistory(dialogHash.value, messageId))
         .map((v) => ({ ...v, time: v.ownerTimestamp ? fmtClock(v.ownerTimestamp) : '' }));
 
@@ -397,23 +406,16 @@ const handleShowHistory = async (messageId, { reload = false } = {}) => {
         // current-revision ones — for history the count is what matters
         (reactionsByVersion[r.message_sign_hash] ??= []).push('•');
     }
-    // A peer's edit reaches the message shape and the versions shape
-    // separately: opened in between, the list would miss the version that
-    // was archived a moment later. A reload lands only while that same history
-    // is still open.
+    if (load !== historyLoad) return;
     if (reload && editHistory.value?.msg.id !== messageId) return;
-    editHistory.value = { msg, history, reactionsByVersion };
+    editHistory.value = { msg, history, reactionsByVersion, seen };
+    if (versionCountOf(messageId) > seen) handleShowHistory(messageId, { reload: true });
 };
 watch(dialogHash, () => { editHistory.value = null; });
-// While the history is open, a version of its message that arrives reloads it.
 watch(
-    () => {
-        const id = editHistory.value?.msg.id;
-        // Archived versions only accrue, so their count is enough to see one arrive.
-        return id ? (rawVersions.value || []).filter((v) => v.message_id === id).length : null;
-    },
-    (now, before) => {
-        if (now !== null && before !== null && now > before) handleShowHistory(editHistory.value.msg.id, { reload: true });
+    () => (editHistory.value ? versionCountOf(editHistory.value.msg.id) : null),
+    (now) => {
+        if (now !== null && now > editHistory.value.seen) handleShowHistory(editHistory.value.msg.id, { reload: true });
     },
 );
 
