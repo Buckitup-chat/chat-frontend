@@ -538,16 +538,19 @@ export class EncryptionManagerPQ extends EventTarget {
       throw new VaultKeyError('Failed to load secret key from vault');
     }
 
+    // The card's vault ID is only a pointer: a stale or swapped one opens a
+    // vault that holds another account's keys. Signing in on those keys would
+    // sign this account's writes with a key its card does not carry, so the
+    // binding is checked on every path, not only when the vault is discovered.
+    if (!this.#signKeyMatchesIdentity(signSkey, identity)) {
+      try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
+      throw new AccountPasskeyMismatchError();
+    }
     if (discoverVault) {
-      const matches = this.#signKeyMatchesIdentity(signSkey, identity);
-      if (!matches) {
-        try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
-        throw new AccountPasskeyMismatchError();
-      }
       identity.vaultId = vault.id;
       await this.#saveLocalUserCards();
       await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
-    } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`)) && this.#signKeyMatchesIdentity(signSkey, identity)) {
+    } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`))) {
       await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
     }
 
