@@ -26,7 +26,7 @@ cleanupOutdatedCaches();
 precacheAndRoute(self.__WB_MANIFEST);
 
 registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html'), {
-	denylist: [/\/encrypted-video\//, /\/api\//],
+	denylist: [/\/encrypted-video\//, /\/api\//, /\/sandbox\//],
 }));
 
 // ---------- encrypted video streaming ----------

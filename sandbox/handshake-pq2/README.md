@@ -18,7 +18,16 @@ is the one the app would make.
 
 On both phones, in Chrome (Android) or Safari (iOS):
 
-**https://raw.githack.com/Buckitup-chat/chat-frontend/sandbox-handshake-pq2/sandbox/handshake-pq2/dist/index.html**
+**https://buckitup.xyz/app/sandbox/handshake-pq2/index.html**
+
+The app's build (`npm run build`) builds this page from source into
+`dist/sandbox/handshake-pq2/`, so every deploy serves the current one. Keep
+`index.html` in the address: the server answers any other path under `/app/`
+with the app itself. The app's service worker leaves `/sandbox/` to the
+network and does not precache the page.
+
+The committed `dist/` here serves the same page from the repository:
+https://raw.githack.com/Buckitup-chat/chat-frontend/main/sandbox/handshake-pq2/dist/index.html
 
 Allow the camera. On iOS, allow "Local Network" if asked — without it
 Safari cannot reach the other phone directly.
