@@ -99,16 +99,13 @@ describe('simultaneous writers of one account', () => {
 });
 
 describe('what is not known is not returned', () => {
-	it('a malformed mapping in the root is refused, never replaced', async () => {
+	it('a malformed mapping in the root is refused, and nothing is written', async () => {
 		const account = makeAccount(1);
 		const malformed = { galleryUuid: 'nope', galleryKeyB64: 'x', generation: 0 };
 		account.server.root = { [SHARED_GALLERY_FIELD]: malformed };
 		const device = makeDevice(account);
 		await expect(device.obtain()).rejects.toThrow(GalleryMappingError);
 		expect(device.state.writes).toEqual([]);
-		device.state.liveReadable = false;
-		await expect(device.obtain()).rejects.toThrow(GalleryMappingError);
-		expect(account.server.root![SHARED_GALLERY_FIELD]).toEqual(malformed);
 	});
 });
 

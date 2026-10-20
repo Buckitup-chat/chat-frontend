@@ -356,7 +356,9 @@ export const useAvatarsStore = defineStore('avatars', () => {
 
 	const ensureShared = (owner, { force = false } = {}) => {
 		if (!force && shared.value.owner === owner && shared.value.mapping) return Promise.resolve(shared.value.mapping);
-		if (ensuring?.owner === owner) return ensuring.promise;
+		if (ensuring?.owner === owner) {
+			return force ? ensuring.promise.then((mapping) => mapping ?? ensureShared(owner, { force: true })) : ensuring.promise;
+		}
 		if (!force && notReadyUntil.owner === owner && notReadyUntil.at > Date.now()) return Promise.resolve(null);
 		const promise = (async () => {
 			for (let attempt = 0; attempt < 2; attempt++) {
