@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { getThumb, putThumb, forgetThumb, loadOwed, updateOwed, forgetAccountAvatars } from '@/lib/avatars/localStore';
+import {
+	getThumb, putThumb, forgetThumb, loadGranted, markGranted, getPeerGrant, putPeerGrant, forgetAccountAvatars,
+} from '@/lib/avatars/localStore';
 import { useMemoryAvatarStore } from './helpers/avatarLocalStore';
 
 // What this device keeps about profile photos: sealed per account, one
-// thumbnail per contact, gone with the account.
+// thumbnail and one grant per contact, gone with the account.
 
 const A = 'u_' + 'a'.repeat(128);
 const B = 'u_' + 'b'.repeat(128);
@@ -36,23 +38,25 @@ describe('avatar local store', () => {
 		expect(await getThumb(B, PEER)).toBeNull();
 	});
 
-	it('keeps owed deliveries, merging concurrent updates, and drops settled ones', async () => {
-		await Promise.all([
-			updateOwed(A, (o) => { o.P1 = { change: true }; }),
-			updateOwed(A, (o) => { o.P2 = { first: true }; }),
-		]);
-		expect(Object.keys(await loadOwed(A)).sort()).toEqual(['P1', 'P2']);
-		await updateOwed(A, (o) => { o.P1 = {}; });
-		expect(Object.keys(await loadOwed(A))).toEqual(['P2']);
+	it('keeps a contact\'s grant sealed, one per contact, per account', async () => {
+		const KEY = 'K'.repeat(42) + 'w';
+		await putPeerGrant(A, PEER, { galleryUuid: 'g1', galleryKeyB64: KEY, messageId: 'dmsg_1' });
+		await putPeerGrant(A, PEER, { galleryUuid: 'g1', galleryKeyB64: KEY, messageId: 'dmsg_2' });
+		expect(await getPeerGrant(A, PEER)).toEqual({ galleryUuid: 'g1', galleryKeyB64: KEY, messageId: 'dmsg_2' });
+		expect([...raw.values()].join('')).not.toContain(KEY);
+		expect(await getPeerGrant(B, PEER)).toBeNull();
 	});
 
 	it('removing an account removes all it kept, and nothing of another account', async () => {
 		await putThumb(A, PEER, { avatarId: '1'.repeat(32), thumb: 'a' });
-		await updateOwed(A, (o) => { o.P1 = { change: true }; });
+		await markGranted(A, 'P1', 'g1');
+		await putPeerGrant(A, PEER, { galleryUuid: 'g1', galleryKeyB64: 'k', messageId: 'dmsg_1' });
 		await putThumb(B, PEER, { avatarId: '1'.repeat(32), thumb: 'b' });
 		await forgetAccountAvatars(A);
 		expect(await getThumb(A, PEER)).toBeNull();
-		expect(await loadOwed(A)).toEqual({});
+		expect(await loadGranted(A)).toEqual({});
+		expect(await getPeerGrant(A, PEER)).toBeNull();
 		expect((await getThumb(B, PEER))?.thumb).toBe('b');
 	});
 });
+

@@ -129,21 +129,21 @@ describe('EncryptionManagerPQ.logout(): per-account disk caches (§8.4)', () => 
 });
 
 describe('EncryptionManagerPQ.deleteUserVault(): the account\'s photo records', () => {
-	it('removes the contacts\' thumbnails and the owed deliveries it kept, and no other account\'s', async () => {
+	it('removes the contacts\' thumbnails and the grant record it kept, and no other account\'s', async () => {
 		const { useMemoryAvatarStore } = await import('./helpers/avatarLocalStore');
-		const { putThumb, getThumb, updateOwed, loadOwed } = await import('@/lib/avatars/localStore');
+		const { putThumb, getThumb, markGranted, loadGranted } = await import('@/lib/avatars/localStore');
 		useMemoryAvatarStore();
 		const OTHER = 'u_' + 'e'.repeat(128);
 		const PEER = 'u_' + 'c'.repeat(128);
 		await putThumb(ACCOUNT, PEER, { avatarId: '1'.repeat(32), thumb: 'a' });
-		await updateOwed(ACCOUNT, (o) => { o[PEER] = { change: true }; });
+		await markGranted(ACCOUNT, PEER, '0b7e3a52-9c1d-4f6e-8a2b-3c4d5e6f7a8b');
 		await putThumb(OTHER, PEER, { avatarId: '1'.repeat(32), thumb: 'b' });
 
 		const em = await signedInManager();
 		await em.deleteUserVault(ACCOUNT);
 
 		expect(await getThumb(ACCOUNT, PEER)).toBeNull();
-		expect(await loadOwed(ACCOUNT)).toEqual({});
+		expect(await loadGranted(ACCOUNT)).toEqual({});
 		expect((await getThumb(OTHER, PEER))?.thumb).toBe('b');
 	});
 });

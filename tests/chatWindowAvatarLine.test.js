@@ -57,6 +57,22 @@ describe('photo-only messages stay out of the chat feed', () => {
 	});
 });
 
+describe('a gallery access grant has no chat row', () => {
+	const KEY = 'B'.repeat(42) + 'w';
+	const grant = { kind: 'avatar_gallery_access', version: 1, galleryUuid: '0b7e3a52-9c1d-4f6e-8a2b-3c4d5e6f7a8b', galleryKeyB64: KEY };
+	const unreadable = { kind: 'unknown', type: 'avatar_gallery_access', value: [2, 'x', KEY] };
+
+	it('hides a grant-only message, readable or not, verified or not', () => {
+		for (const parts of [[grant], [unreadable]]) {
+			for (const over of [{}, { _verify: 'invalid' }, { _verify: 'blocked' }, { isMine: true, _syncStatus: 'error' }]) {
+				const w = render([message(parts, { text: '', ...over })]);
+				expect(w.find('.message-bubble').exists()).toBe(false);
+				expect(w.html()).not.toContain(KEY);
+			}
+		}
+	});
+});
+
 describe('the chat header picture', () => {
 	it('opens the peer\'s gallery', async () => {
 		const w = render([]);

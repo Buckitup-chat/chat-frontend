@@ -1,5 +1,5 @@
 <template>
-  <div class="_account">
+  <div class="_account" ref="root">
     <div class="_avatar">
       <Avatar :name="acc.user_hash" variant="bauhaus" v-if="acc.user_hash && !avatarSrc" />
       <img loading="lazy" :src="avatarSrc" v-if="avatarSrc" @error="(event) => (event.target.src = defaultAvatar)" />
@@ -89,7 +89,7 @@ import { userPQStore } from '@/store/userPQ.store';
 
 
 import Avatar from 'vue-boring-avatars';
-import { computed } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 import { useAvatarsStore } from '@/store/avatars.store';
 
 const defaultAvatar = '/img/profile.webp';
@@ -105,6 +105,21 @@ const acc = computed(() => {
   return self ? { ...$userPQ.currentUser } : account;
 });
 
+const root = ref(null);
+const onScreen = ref(typeof IntersectionObserver === 'undefined');
+let observer = null;
+onMounted(() => {
+  if (onScreen.value || !root.value) return;
+  observer = new IntersectionObserver((entries) => {
+    if (!entries.some((e) => e.isIntersecting)) return;
+    onScreen.value = true;
+    observer?.disconnect();
+    observer = null;
+  });
+  observer.observe(root.value);
+});
+onBeforeUnmount(() => observer?.disconnect());
+
 // The own account keeps its picture as a data URL. A list of network cards
 // carries no photos: a contact's comes from the cache its dialog left next to
 // the contact.
@@ -112,8 +127,7 @@ const avatarSrc = computed(() => {
   if (typeof acc.value?.avatar === 'string') return acc.value.avatar;
   if (self) return '';
   const hash = acc.value?.user_hash;
-  return $avatars.contactAvatarSrc(acc.value?.avatar ?? $userPQ.contactsMap?.[hash]?.avatar, hash)
-    || $avatars.peerAvatarSrc(hash);
+  return $avatars.peerAvatarSrc(hash, { fetch: onScreen.value, fallback: acc.value?.avatar ?? $userPQ.contactsMap?.[hash]?.avatar });
 });
 
 const shortCode = computed(() => {
