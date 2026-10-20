@@ -12,6 +12,7 @@ import { createIdentity, type Identity } from './identity';
 import { FRAME_DATA_CHARS, FRAME_PREFIX, type FrameSize } from './frames';
 import { PREFIX } from './protocol';
 import type { UserCardRow } from '@/lib/data/types';
+import tutorialUrl from '../../../public/img/handshake_tutorial.svg';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const withCamera = !new URLSearchParams(location.search).has('nocamera');
@@ -29,6 +30,8 @@ interface Settings {
 	frameSize: FrameSize;
 	fps: number;
 	camera: 'user' | 'environment';
+	/** app: as QRScannerEngine.vue — the browser's BarcodeDetector where there is one, qr-scanner's defaults; bundled: qr-scanner's own decoder at up to 1080 px. */
+	decoder: 'app' | 'bundled';
 	mode: 'honest' | 'impostor';
 }
 // Only settings and the public card of the last confirmed peer are stored.
@@ -56,6 +59,7 @@ const settings: Settings = {
 	turnPass: '',
 	relayOnly: true,
 	camera: 'user',
+	decoder: 'app',
 	mode: 'honest',
 	...stored<Partial<Settings>>(SETTINGS_KEY),
 };
@@ -69,6 +73,7 @@ let identity: Identity = createIdentity(settings.name);
 
 let engine: HandshakeEngine | null = null;
 let scanner: QrScanner | null = null;
+let scannerDecoder: Settings['decoder'] | null = null;
 let currentCode = '';
 let lastOutcome: Outcome | null = null;
 let sessionStart = 0;
@@ -99,17 +104,33 @@ const log = (line: string) => {
 	console.log('[pq2]', line);
 };
 
+// The app's colours for the code (QRScannerEngine.vue): black while scanning,
+// purple once the other phone is read, dark purple once its key is proved.
+const stageColor: Record<Stage, string> = {
+	idle: '#000',
+	A: '#000',
+	B: '#8e2b77',
+	C: '#611e52',
+	D: '#611e52',
+	F: '#611e52',
+	done: '#611e52',
+};
+
 let shownStage: Stage = 'idle';
 const show = async (code: string, stage: Stage) => {
 	currentCode = code;
 	if (stage !== shownStage) {
 		// Frames change several times a second; the text and the buzz follow the steps.
 		shownStage = stage;
-		$('qrWrap').dataset.stage = stage;
 		$('stage').textContent = stageText[stage];
 		navigator.vibrate?.(40);
 	}
-	await QRCode.toCanvas($<HTMLCanvasElement>('qr'), code, { errorCorrectionLevel: 'L', margin: 2, scale: 2 });
+	await QRCode.toCanvas($<HTMLCanvasElement>('qr'), code, {
+		errorCorrectionLevel: 'L',
+		margin: 0,
+		width: 720, // drawn at twice the 360 px it is shown at, so the modules stay sharp
+		color: { dark: stageColor[stage], light: '#ffffff' },
+	});
 };
 
 const renderWho = () => {
@@ -120,21 +141,25 @@ const renderWho = () => {
 		turn: `TURN${settings.relayOnly ? ', relay only' : ''}`,
 		frames: `animated QR, ${settings.frameSize}, ${settings.fps}/s`,
 	}[settings.channel];
-	$('who').textContent = `${identity.card.name} · ${identity.userHash.slice(0, 12)}… · ${ice}${mode}`;
+	const name = identity.card.name ?? '';
+	$('avatar').textContent = name.replace(/^Phone\s+/, '').slice(0, 2).toUpperCase();
+	$('who').textContent = name;
+	$('whoMeta').textContent = `[${identity.userHash.slice(2, 7)}] · ${ice}${mode}`;
 };
 
+// Laid out as the app's "Contact found": a divider, the name and [hash], then the six digits.
 const renderResult = (outcome: Outcome, timings: Timings) => {
 	const box = $('result');
 	box.hidden = false;
 	box.className = outcome.kind;
-	$('qrWrap').dataset.outcome = outcome.kind;
-	const code = 'code' in outcome && outcome.code ? `<div class="code">${outcome.code}</div><div class="detail">Compare: the other phone must show the same six digits.</div>` : '';
+	const code = 'code' in outcome && outcome.code ? `<div class="code">${outcome.code}</div><div class="detail">The other phone must show the same six digits.</div>` : '';
+	const who = (name: string, hash: string) => `<div class="name"><b>${escapeHtml(name)}</b><span>[${hash.slice(2, 7)}]</span></div>`;
 	if (outcome.kind === 'confirmed') {
-		box.innerHTML = `<div class="headline">✅ Confirmed: ${escapeHtml(outcome.peerName)}</div>${code}<div class="detail">${outcome.peerHash.slice(0, 16)}…<br>${outcome.card ? 'card valid · key certified · post-quantum signature ok' : 'identity key matches · optical and post-quantum signatures ok'}</div>`;
+		box.innerHTML = `<div class="divider">Contact found</div><div class="badge">✅ Confirmed</div>${who(outcome.peerName, outcome.peerHash)}${code}<div class="detail">${outcome.card ? 'card valid · key certified · post-quantum signature ok' : 'identity key matches · optical and post-quantum signatures ok'}</div>`;
 	} else if (outcome.kind === 'verified') {
-		box.innerHTML = `<div class="headline">🟡 Key verified in person, not confirmed</div>${code}<div class="detail">${escapeHtml(outcome.reason)}<br>${outcome.peerHash.slice(0, 16)}…</div>`;
+		box.innerHTML = `<div class="divider">Contact found</div><div class="badge">🟡 Key verified in person, not confirmed</div>${who('Unconfirmed', outcome.peerHash)}${code}<div class="detail">${escapeHtml(outcome.reason)}</div>`;
 	} else {
-		box.innerHTML = `<div class="headline">⌛ Session expired</div><div class="detail">${escapeHtml(outcome.reason)}</div>`;
+		box.innerHTML = `<div class="badge">⌛ Session expired</div><div class="detail">${escapeHtml(outcome.reason)}</div>`;
 	}
 	$('stage').textContent = '';
 	const list = $('timings');
@@ -153,34 +178,56 @@ const clearResult = () => {
 	box.className = '';
 	box.replaceChildren();
 	$('timingsBox').hidden = true;
-	delete $('qrWrap').dataset.outcome;
+};
+
+// ---------- what the page shows: idle, scanning, done ----------
+
+type View = 'idle' | 'scanning' | 'done';
+const setView = (view: View) => {
+	// As the app: the header and the introduction while idle, the code and the
+	// camera while scanning; the code stays up when done, for a phone still reading it.
+	$('head').hidden = view === 'scanning';
+	$('intro').hidden = view !== 'idle';
+	$('qrWrap').hidden = view === 'idle';
+	$('scannerWrap').hidden = view !== 'scanning' || !withCamera;
+	$('stage').hidden = view !== 'scanning';
+	const start = $('start');
+	start.textContent = { idle: 'Start handshake scanning', scanning: 'Scanning... Click to stop', done: 'Scan again' }[view];
+	start.className = view === 'done' ? 'btn btn-outline wide' : 'btn btn-dark btn-lg wide';
+	if (view === 'scanning') $('settings').hidden = true;
 };
 
 // ---------- camera and screen ----------
 
 const startCamera = async () => {
+	if (!withCamera) return;
 	const video = $<HTMLVideoElement>('video');
-	video.dataset.camera = settings.camera;
-	if (!withCamera) {
-		video.hidden = true;
-		return;
+	if (scanner && scannerDecoder !== settings.decoder) {
+		scanner.destroy();
+		scanner = null;
 	}
-	video.hidden = false;
 	if (!scanner) {
 		// qr-scanner prefers the browser's BarcodeDetector whenever the browser
-		// lists QR among its formats, and falls back only when it throws. A
-		// browser can list QR and still find nothing; the decoder qr-scanner
-		// ships reads the same in every browser.
-		(QrScanner as unknown as { _disableBarcodeDetector: boolean })._disableBarcodeDetector = true;
+		// lists QR among its formats, and falls back only when it throws. The app
+		// leaves it so. "bundled" turns it off: a browser can list QR and still
+		// find nothing, and the decoder qr-scanner ships reads the same everywhere.
+		const bundled = settings.decoder === 'bundled';
+		(QrScanner as unknown as { _disableBarcodeDetector: boolean })._disableBarcodeDetector = bundled;
+		scannerDecoder = settings.decoder;
 		scanner = new QrScanner(video, (result) => onScan(result.data), {
 			returnDetailedScanResult: true,
 			onDecodeError: () => framesScanned++,
 			preferredCamera: settings.camera,
-			maxScansPerSecond: 12,
+			highlightScanRegion: true,
+			highlightCodeOutline: true,
+			...(bundled ? { maxScansPerSecond: 12 } : {}),
 			calculateScanRegion: (v) => {
 				const size = Math.round(Math.min(v.videoWidth, v.videoHeight) * 0.95);
+				const x = Math.round((v.videoWidth - size) / 2);
+				const y = Math.round((v.videoHeight - size) / 2);
+				if (!bundled) return { x, y, width: size, height: size };
 				const scaled = Math.min(size, 1080);
-				return { x: Math.round((v.videoWidth - size) / 2), y: Math.round((v.videoHeight - size) / 2), width: size, height: size, downScaledWidth: scaled, downScaledHeight: scaled };
+				return { x, y, width: size, height: size, downScaledWidth: scaled, downScaledHeight: scaled };
 			},
 		});
 	} else {
@@ -192,7 +239,7 @@ const startCamera = async () => {
 		log(`camera did not start: ${(e as Error).message ?? e}`);
 		return;
 	}
-	log(`camera: ${video.videoWidth}×${video.videoHeight}, qr-scanner's own decoder`);
+	log(`camera: ${video.videoWidth}×${video.videoHeight}, ${settings.decoder === 'bundled' ? "qr-scanner's bundled decoder" : `as the app (BarcodeDetector ${'BarcodeDetector' in window ? 'present' : 'absent'})`}`);
 	// Tells a camera that looks at codes and finds none from one that is not scanning at all.
 	const session = sessionStart;
 	framesScanned = 0;
@@ -274,14 +321,25 @@ const startSession = async () => {
 			lastOutcome = outcome;
 			stopCamera();
 			letScreenSleep();
+			setView('done');
 			renderResult(outcome, timings);
 			navigator.vibrate?.(outcome.kind === 'confirmed' ? [200, 80, 200] : [500]);
 			if (outcome.kind === 'confirmed' && outcome.card && settings.mode === 'honest') localStorage.setItem(LAST_PEER_KEY, JSON.stringify(outcome.card));
 		},
 	});
+	setView('scanning');
 	engine.start();
 	await startCamera();
 	await keepScreenOn();
+};
+
+const stopSession = () => {
+	engine?.stop();
+	engine = null;
+	stopCamera();
+	letScreenSleep();
+	clearResult();
+	setView('idle');
 };
 
 // ---------- settings ----------
@@ -296,6 +354,7 @@ const fillSettings = () => {
 	$<HTMLSelectElement>('frameSize').value = settings.frameSize;
 	$<HTMLSelectElement>('fps').value = String(settings.fps);
 	$<HTMLSelectElement>('camera').value = settings.camera;
+	$<HTMLSelectElement>('decoder').value = settings.decoder;
 	$<HTMLSelectElement>('mode').value = settings.mode;
 	const met = stored<UserCardRow>(LAST_PEER_KEY);
 	$('impostorHint').textContent = met
@@ -317,6 +376,7 @@ $('applySettings').addEventListener('click', () => {
 	settings.frameSize = $<HTMLSelectElement>('frameSize').value as FrameSize;
 	settings.fps = Number($<HTMLSelectElement>('fps').value);
 	settings.camera = $<HTMLSelectElement>('camera').value as Settings['camera'];
+	settings.decoder = $<HTMLSelectElement>('decoder').value as Settings['decoder'];
 	settings.mode = $<HTMLSelectElement>('mode').value as Settings['mode'];
 	const name = $<HTMLInputElement>('name').value.trim();
 	if (name && name !== settings.name) {
@@ -325,17 +385,21 @@ $('applySettings').addEventListener('click', () => {
 	}
 	saveSettings();
 	$('settings').hidden = true;
-	void startSession();
+	renderWho();
 });
 
 $('newIdentity').addEventListener('click', () => {
 	identity = createIdentity(settings.name);
-	void startSession();
+	renderWho();
 });
 
 // ---------- buttons ----------
 
-$('restart').addEventListener('click', () => void startSession());
+// One button, as the app's: start, stop while scanning, scan again when done.
+$('start').addEventListener('click', () => {
+	if (engine && !lastOutcome) stopSession();
+	else void startSession();
+});
 $('manual').addEventListener('click', () => {
 	const text = prompt('Paste the other phone\'s current code');
 	if (text) void engine?.read(text);
@@ -359,4 +423,6 @@ Object.assign(window, {
 	},
 });
 
-void startSession();
+$<HTMLImageElement>('tutorial').src = tutorialUrl;
+renderWho();
+setView('idle');

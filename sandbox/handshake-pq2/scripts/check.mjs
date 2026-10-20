@@ -43,6 +43,7 @@ const phone = async (init = {}) => {
 	const page = await context.newPage();
 	page.on('pageerror', (e) => console.log('pageerror:', e.message));
 	await page.goto(url);
+	await page.click('#start');
 	await page.waitForFunction(() => window.__pq2?.code());
 	return page;
 };
@@ -75,7 +76,7 @@ try {
 	// does); she shows Alice's identity to Bob.
 	const aliceCard = await bob.evaluate(() => JSON.parse(localStorage.getItem('pq2.lastPeerCard')));
 	const mallory = await phone({ 'pq2.settings': JSON.stringify({ mode: 'impostor' }), 'pq2.lastPeerCard': JSON.stringify(aliceCard) });
-	await bob.evaluate(() => document.getElementById('restart').click());
+	await bob.evaluate(() => document.getElementById('start').click());
 	await bob.waitForFunction(() => window.__pq2.stage() === 'A');
 	const [, b2] = await handshake(mallory, bob);
 	check('a phone showing Alice\'s identity with its own key is not confirmed by Bob', b2?.kind === 'verified' && /does not certify/.test(b2?.reason ?? ''), `${b2?.kind}: ${b2?.reason}`);
