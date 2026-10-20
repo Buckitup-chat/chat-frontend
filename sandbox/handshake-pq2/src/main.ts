@@ -128,7 +128,7 @@ const show = async (code: string, stage: Stage) => {
 	await QRCode.toCanvas($<HTMLCanvasElement>('qr'), code, {
 		errorCorrectionLevel: 'L',
 		margin: 0,
-		width: 720, // drawn at twice the 360 px it is shown at, so the modules stay sharp
+		scale: 4, // a small canvas: CSS scales it up with image-rendering: pixelated, sharp at any size
 		color: { dark: stageColor[stage], light: '#ffffff' },
 	});
 };
@@ -142,7 +142,7 @@ const renderWho = () => {
 		frames: `animated QR, ${settings.frameSize}, ${settings.fps}/s`,
 	}[settings.channel];
 	const name = identity.card.name ?? '';
-	$('avatar').textContent = name.replace(/^Phone\s+/, '').slice(0, 2).toUpperCase();
+	$('avatar').textContent = (name.split(/\s+/).pop() ?? '').slice(0, 2).toUpperCase();
 	$('who').textContent = name;
 	$('whoMeta').textContent = `[${identity.userHash.slice(2, 7)}] · ${ice}${mode}`;
 };
@@ -153,11 +153,11 @@ const renderResult = (outcome: Outcome, timings: Timings) => {
 	box.hidden = false;
 	box.className = outcome.kind;
 	const code = 'code' in outcome && outcome.code ? `<div class="code">${outcome.code}</div><div class="detail">The other phone must show the same six digits.</div>` : '';
-	const who = (name: string, hash: string) => `<div class="name"><b>${escapeHtml(name)}</b><span>[${hash.slice(2, 7)}]</span></div>`;
-	if (outcome.kind === 'confirmed') {
-		box.innerHTML = `<div class="divider">Contact found</div><div class="badge">✅ Confirmed</div>${who(outcome.peerName, outcome.peerHash)}${code}<div class="detail">${outcome.card ? 'card valid · key certified · post-quantum signature ok' : 'identity key matches · optical and post-quantum signatures ok'}</div>`;
-	} else if (outcome.kind === 'verified') {
-		box.innerHTML = `<div class="divider">Contact found</div><div class="badge">🟡 Key verified in person, not confirmed</div>${who('Unconfirmed', outcome.peerHash)}${code}<div class="detail">${escapeHtml(outcome.reason)}</div>`;
+	if (outcome.kind !== 'expired') {
+		const [badge, name, detail] = outcome.kind === 'confirmed'
+			? ['✅ Confirmed', outcome.peerName, outcome.card ? 'card valid · key certified · post-quantum signature ok' : 'identity key matches · optical and post-quantum signatures ok']
+			: ['🟡 Key verified in person, not confirmed', 'Unconfirmed', outcome.reason];
+		box.innerHTML = `<div class="divider">Contact found</div><div class="badge">${badge}</div><div class="name"><b>${escapeHtml(name)}</b><span>[${outcome.peerHash.slice(2, 7)}]</span></div>${code}<div class="detail">${escapeHtml(detail)}</div>`;
 	} else {
 		box.innerHTML = `<div class="badge">⌛ Session expired</div><div class="detail">${escapeHtml(outcome.reason)}</div>`;
 	}
