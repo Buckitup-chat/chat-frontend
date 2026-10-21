@@ -25,8 +25,9 @@ const scanners = [];
 vi.mock('qr-scanner', () => ({
 	default: class FakeQrScanner {
 		static _disableBarcodeDetector = false;
-		constructor(video, onDecode) {
+		constructor(video, onDecode, options) {
 			this.onDecode = onDecode;
+			this.options = options;
 			this.decoderAtCreation = !FakeQrScanner._disableBarcodeDetector ? 'BarcodeDetector' : 'qr-scanner';
 			this.starts = [];
 			this.stops = 0;
@@ -529,12 +530,13 @@ describe('the scanner: what reaches WebRTC', () => {
 		return peerConnections[0];
 	};
 
-	it('decodes with qr-scanner\'s own decoder, not BarcodeDetector', async () => {
+	it('reads with the browser\'s BarcodeDetector and qr-scanner\'s defaults, as the PQ1 scanner did', async () => {
 		const wrapper = await mountScanner();
-		expect(scanners[0].decoderAtCreation).toBe('qr-scanner');
-		// The switch is global: it is put back, so another scanner (device link) keeps the browser's decoder.
-		const QrScanner = (await import('qr-scanner')).default;
-		expect(QrScanner._disableBarcodeDetector).toBe(false);
+		expect(scanners[0].decoderAtCreation).toBe('BarcodeDetector');
+		const { options } = scanners[0];
+		expect(options).not.toHaveProperty('maxScansPerSecond');
+		const region = options.calculateScanRegion({ videoWidth: 1280, videoHeight: 720 });
+		expect(region).toEqual({ x: 298, y: 18, width: 684, height: 684 });
 		wrapper.unmount();
 	});
 

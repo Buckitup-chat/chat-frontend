@@ -5,7 +5,7 @@
 				<canvas ref="qrCodeRef"></canvas>
 			</div>
 		</div>
-		<!-- The camera's own preview, small: the code is what the other phone reads. -->
+		<!-- The code on top, the camera under it, one square each: the PQ1 layout, which read well on phones. -->
 		<div class="_qrh_scanner" :class="{ _hidden: !scanning }">
 			<video ref="qrScannerRef" muted playsinline></video>
 		</div>
@@ -91,36 +91,21 @@ const log = (line) => console.debug('[handshake]', line);
 
 onMounted(() => {
 	if (!qrScannerRef.value) return;
-	// qr-scanner prefers the browser's BarcodeDetector whenever the browser
-	// lists QR among its formats, and falls back only when it throws. A browser
-	// can list QR and still find nothing in a dense code on a screen; the
-	// decoder qr-scanner ships reads the same in every browser. The switch is
-	// global and read when a scanner picks its decoder, at construction: it is
-	// set for this one and put back, so other scanners (device link) keep the
-	// browser's.
-	const previous = QrScanner._disableBarcodeDetector;
-	QrScanner._disableBarcodeDetector = true;
-	try {
-		qrScanner = new QrScanner(qrScannerRef.value, (result) => onScan(result.data), {
-			returnDetailedScanResult: true,
-			preferredCamera: 'user',
-			maxScansPerSecond: 12,
-			calculateScanRegion: (video) => {
-				const size = Math.round(Math.min(video.videoWidth, video.videoHeight) * 0.95);
-				const scaled = Math.min(size, 1080);
-				return {
-					x: Math.round((video.videoWidth - size) / 2),
-					y: Math.round((video.videoHeight - size) / 2),
-					width: size,
-					height: size,
-					downScaledWidth: scaled,
-					downScaledHeight: scaled,
-				};
-			},
-		});
-	} finally {
-		QrScanner._disableBarcodeDetector = previous;
-	}
+	// The scanner the PQ1 handshake used, which read these codes well on phones:
+	// qr-scanner's defaults, so the browser's BarcodeDetector where there is one
+	// (Chrome on Android), its default scan rate and downscaling, and a square
+	// scan region of 95% of the frame. The sandbox's own decoder at 1080 px read
+	// worse on the phones it was tried on.
+	qrScanner = new QrScanner(qrScannerRef.value, (result) => onScan(result.data), {
+		returnDetailedScanResult: true,
+		preferredCamera: 'user',
+		highlightScanRegion: true,
+		highlightCodeOutline: true,
+		calculateScanRegion: (video) => {
+			const size = Math.min(video.videoWidth, video.videoHeight) * 0.95;
+			return { x: (video.videoWidth - size) / 2, y: (video.videoHeight - size) / 2, width: size, height: size };
+		},
+	});
 });
 
 onBeforeUnmount(() => {
@@ -147,7 +132,7 @@ const draw = (code, s) => {
 	QRCode.toCanvas(qrCodeRef.value, code, {
 		errorCorrectionLevel: 'L',
 		width: QR_PIXELS,
-		margin: 2,
+		margin: 0,
 		color: { dark: colorOf(s) },
 	}).catch((e) => log(`the code could not be drawn: ${e?.message ?? e}`));
 };
@@ -309,10 +294,9 @@ defineExpose({ toggleScanner, stopScan });
 	max-height: 100dvh;
 
 	._qrh_wrapper {
-		width: min(100%, 480px);
+		width: min(100%, 360px);
 		aspect-ratio: 1;
 		margin-bottom: 0.75rem;
-		border-radius: 0.5rem;
 		background: #fff;
 
 		&._hidden {
@@ -330,10 +314,11 @@ defineExpose({ toggleScanner, stopScan });
 	}
 
 	._qrh_scanner {
-		width: 4.5rem;
+		width: min(100%, 360px);
 		aspect-ratio: 1;
-		border-radius: 50%;
+		border-radius: 1rem;
 		overflow: hidden;
+		position: relative;
 		margin-bottom: 0.5rem;
 
 		&._hidden {
@@ -346,7 +331,6 @@ defineExpose({ toggleScanner, stopScan });
 			width: 100%;
 			height: 100%;
 			object-fit: cover;
-			transform: scaleX(-1);
 		}
 	}
 }
