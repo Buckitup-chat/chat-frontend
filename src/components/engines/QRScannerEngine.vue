@@ -92,18 +92,19 @@ const log = (line) => console.debug('[handshake]', line);
 onMounted(() => {
 	if (!qrScannerRef.value) return;
 	// The scanner the PQ1 handshake used, which read these codes well on phones:
-	// qr-scanner's defaults, so the browser's BarcodeDetector where there is one
-	// (Chrome on Android), its default scan rate and downscaling, and a square
-	// scan region of 95% of the frame. The sandbox's own decoder at 1080 px read
-	// worse on the phones it was tried on.
+	// the browser's BarcodeDetector where there is one (Chrome on Android),
+	// qr-scanner's default scan rate, and a square region of 95% of the frame
+	// read at full resolution. qr-scanner's bundled decoder at 1080 px, 12 scans
+	// a second, read worse on the phones it was tried on. The region is whole
+	// pixels: qr-scanner reuses its canvas only while the size is unchanged.
 	qrScanner = new QrScanner(qrScannerRef.value, (result) => onScan(result.data), {
 		returnDetailedScanResult: true,
 		preferredCamera: 'user',
 		highlightScanRegion: true,
 		highlightCodeOutline: true,
 		calculateScanRegion: (video) => {
-			const size = Math.min(video.videoWidth, video.videoHeight) * 0.95;
-			return { x: (video.videoWidth - size) / 2, y: (video.videoHeight - size) / 2, width: size, height: size };
+			const size = Math.round(Math.min(video.videoWidth, video.videoHeight) * 0.95);
+			return { x: Math.round((video.videoWidth - size) / 2), y: Math.round((video.videoHeight - size) / 2), width: size, height: size };
 		},
 	});
 });
