@@ -50,7 +50,7 @@
 							<span class="d-flex gap-1">
 								<span v-for="i in 3" :key="i" class="pg-tick" :class="{ on: i <= r.ticks }"></span>
 							</span>
-							<span class="pg-state" :class="{ stored: r.state === 'stored' }">{{ r.state }}</span>
+							<span class="pg-state" :class="{ stored: r.state === 'stored' }">{{ DELIVERY_WORDS[r.state] }}</span>
 						</div>
 					</div>
 				</template>
@@ -86,19 +86,20 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { userPQStore } from '@/store/userPQ.store';
-import { canDiscard, canFinishWithoutPending, nodesDone, nodesPending, stepNumber } from '@/lib/recovery/backupRun';
+import { canDiscard, canFinishWithoutPending, nodeHolds, nodesDone, nodesPending, stepNumber } from '@/lib/recovery/backupRun';
 import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
 import Check from './Check.vue';
-import { DRAFT, NAV, STEP_LABELS, agoText, guardianDelivery, guardianName, hostOf, nodeOwnerName } from './backupFlow';
-const TICKS = { waiting: 0, sent: 1, delivered: 2, stored: 3 };
+import { DELIVERY_WORDS, DRAFT, NAV, STEP_LABELS, agoText, guardianDelivery, guardianName, nodeRefName } from './backupFlow';
+// sent → delivered → stored; a piece that no longer counts shows how far it got before.
+const TICKS = { waiting: 0, sent: 1, delivered: 2, stored: 3, problem: 2, given_back: 2, dropped: 2 };
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
 const store = useRecoveryBackupStore();
 const $userPQ = userPQStore();
 
-const run = computed(() => store.run);
+const run = computed(() => store.current);
 const current = computed(() => (run.value ? stepNumber(run.value) : 1));
 const isDone = computed(() => run.value?.step === 'done');
 
@@ -114,7 +115,21 @@ const otherError = computed(() => (!store.running && store.stopped && !['nodes_f
 const interrupted = computed(() => !!run.value && !isDone.value && !store.running && store.runsHere && !nodesFailed.value && !regPending.value && !otherError.value);
 const discardable = computed(() => !!run.value && canDiscard(run.value));
 
-const title = computed(() => (interrupted.value ? 'Your backup was not finished' : isDone.value ? 'Backup created' : 'Creating your backup'));
+/** The run shown is a reshare: remembered, since once done it is the record, which names no reshare. */
+const wasReshare = ref(false);
+watch(
+	() => run.value?.reshareOf,
+	(r) => {
+		if (r) wasReshare.value = true;
+	},
+	{ immediate: true },
+);
+const changing = computed(() => wasReshare.value);
+const title = computed(() => {
+	if (interrupted.value) return changing.value ? 'The change to your backup was not finished' : 'Your backup was not finished';
+	if (isDone.value) return changing.value ? 'Backup changed' : 'Backup created';
+	return changing.value ? 'Changing your backup' : 'Creating your backup';
+});
 const existsText = computed(() =>
 	current.value >= 3 ? 'The backup already exists on the network, so nothing has to start over.' : 'Nothing is on the network yet: you can continue, or cancel it.',
 );
@@ -141,18 +156,14 @@ const shownSteps = computed(() =>
 	}).filter((s) => !collapsed.value || s.n >= 4),
 );
 
-const nodeName = (ref) => {
-	const known = store.nodes.find((n) => n.descriptor.id === ref.id);
-	if (!known) return hostOf(ref.url);
-	return nodeOwnerName(known.descriptor, $userPQ);
-};
+const nodeName = (ref) => nodeRefName(ref, store.nodes, $userPQ);
 const nodeRows = computed(() =>
 	(run.value?.nodes ?? []).map((n) => {
 		const outcome = run.value.nodeOutcomes[n.id];
 		let text = store.running ? 'sending…' : 'waiting';
 		let cls = 'cb-status-off';
 		if (run.value.skippedNodes.includes(n.id)) text = 'left out';
-		else if (outcome?.state === 'held' || outcome?.state === 'staged') [text, cls] = ['✓', 'cb-status-ok'];
+		else if (nodeHolds(run.value, n.id)) [text, cls] = ['✓', 'cb-status-ok'];
 		else if (outcome?.state === 'failed') [text, cls] = [store.running ? 'offline · retrying' : 'did not take its part', 'cb-status-warn'];
 		return { id: n.id, name: nodeName(n), text, cls };
 	}),
@@ -168,7 +179,7 @@ const nodesFailedText = computed(() => {
 
 const guardianRows = computed(() =>
 	(run.value?.guardians ?? []).map((g) => {
-		const state = guardianDelivery(run.value, g.userHash);
+		const state = guardianDelivery(run.value, g.userHash, store.receipts);
 		return { userHash: g.userHash, name: guardianName(g.userHash, store.candidates, $userPQ), state, ticks: TICKS[state] };
 	}),
 );
@@ -202,7 +213,7 @@ watch(
 	isDone,
 	(done) => {
 		if (done) {
-			draft.state.justFinished = true;
+			draft.state.justFinished = changing.value ? 'changed' : 'created';
 			nav.replace('done');
 		}
 	},

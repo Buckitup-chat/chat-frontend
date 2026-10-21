@@ -21,6 +21,7 @@ import {
 } from '@/lib/data/outbox';
 import { recoverIntents, signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import { requestContactAccess, applyContactAccessIntent } from '@/lib/data/contactVouches';
+import { claimDeviceIfUnowned } from '@/lib/data/deviceOwner';
 import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch } from '@/lib/data/userStorage';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
@@ -29,6 +30,7 @@ import { newMetaSeed } from '@/lib/recovery/guardianInvite';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
+import { forgetAccountAvatars } from '@/lib/avatars/localStore';
 import { clearSessions } from '@/lib/data/readSession';
 import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
@@ -77,10 +79,18 @@ if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
 
 class VaultKeyError extends Error {}
 
+/** What an account's vault holds that must be gone once it is destroyed (destroyUserVault). */
 export class LocalVaultMissingError extends VaultKeyError {
   constructor() {
     super('This account is listed on this device, but its encrypted keys are missing. Restore it from a backup or another device.');
     this.name = 'LocalVaultMissingError';
+  }
+}
+
+export class AccountPasskeyMismatchError extends VaultKeyError {
+  constructor() {
+    super('The selected passkey belongs to a different account. Choose the passkey for this account.');
+    this.name = 'AccountPasskeyMismatchError';
   }
 }
 
@@ -242,7 +252,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
   // Vaults Management
 
-  async createUserVault({ name, notes, avatar, avatarDataUrl }) {
+  async createUserVault({ name, notes }) {
     const userVault = await connect({
       storageType: 'idb',
       addNewVault: true,
@@ -292,6 +302,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards.push(identity);
 
     await this.#saveLocalUserCards();
+    await this.#rawStore.set(`pq-vault-owner-${userVault.id}`, userHash);
 
     // Bootstrap: the keys open locally (the card intent and snapshot are
     // sealed with them), the card is published and accepted, and only then is
@@ -306,14 +317,7 @@ export class EncryptionManagerPQ extends EventTarget {
     }
     this.#activateSession(userHash, identity);
 
-    let avatarUuid = null;
-    if (avatar instanceof Blob || avatar instanceof File) {
-      avatarUuid = await this.encryptAndStoreAvatar(avatar);
-    } else if (typeof avatar === 'string') {
-      avatarUuid = avatar;
-    }
-
-    await this.updateUserStorage({ name, notes, avatarUuid, avatarDataUrl });
+    await this.updateUserStorage({ name, notes });
 
     return this.#localUserCards.find(i => i.user_hash === userHash);
   }
@@ -477,26 +481,76 @@ export class EncryptionManagerPQ extends EventTarget {
 
     if (!identity) throw new Error(`User ${userHash} not found in local identities`);
 
-    // local-vault's adapter silently creates an empty row for an unknown ID.
-    // Detect that condition first, or the real loss is hidden behind a generic
-    // "Vault lock-key access failed" and WebAuthn is never even requested.
+    // A card may retain an old vault ID while its passkey still opens a vault
+    // on this device. Check before connecting: the adapter creates an empty
+    // row for an unknown ID, which would hide the surviving vault.
     const vaultEntry = identity.vaultId
       ? await this.#rawStore.get(`local-vault-${identity.vaultId}`)
       : null;
-    if (!vaultEntry?.accountID || !vaultEntry?.data) throw new LocalVaultMissingError();
-
-    const vault = await connect({
-      vaultID: identity.vaultId,
-      storageType: 'idb',
-      keyOptions: VAULT_KEY_OPTIONS
-    });
+    const discoverVault = !vaultEntry?.accountID || !vaultEntry?.data;
+    let vault;
+    if (discoverVault) {
+      const vaultKeys = await this.#rawStore.keys();
+      const [legacyCards, legacyCurrentVaultId] = await Promise.all([
+        this.#rawStore.get('vaults-registry'),
+        this.#rawStore.get('vault-id'),
+      ]);
+      const legacyVaultIds = new Set(Array.isArray(legacyCards)
+        ? legacyCards.map(card => card.vaultId)
+        : []);
+      if (legacyCurrentVaultId) legacyVaultIds.add(legacyCurrentVaultId);
+      const otherCardVaultIds = new Set(this.#localUserCards
+        .filter(card => card.user_hash !== userHash)
+        .map(card => card.vaultId));
+      const candidateKeys = vaultKeys
+        .filter(key => key.startsWith('local-vault-') &&
+          key !== `local-vault-${identity.vaultId}` &&
+          !otherCardVaultIds.has(key.slice('local-vault-'.length)) &&
+          !legacyVaultIds.has(key.slice('local-vault-'.length)));
+      const candidates = (await Promise.all(candidateKeys.map(async key => ({
+        key,
+        entry: await this.#rawStore.get(key),
+        owner: await this.#rawStore.get(`pq-vault-owner-${key.slice('local-vault-'.length)}`),
+      })))).filter(({ entry, owner }) => entry?.accountID && entry?.data && (owner === userHash || owner == null));
+      if (!candidates.length) throw new LocalVaultMissingError();
+      try {
+        vault = candidates.length === 1
+          ? await connect({ vaultID: candidates[0].key.slice('local-vault-'.length), storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS })
+          : await connect({ storageType: 'idb', discoverVault: true, keyOptions: VAULT_KEY_OPTIONS });
+      } catch (e) {
+        if (e?.message?.startsWith('No matching vault found in storage')) throw new LocalVaultMissingError();
+        throw e;
+      }
+    } else {
+      vault = await connect({ vaultID: identity.vaultId, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS });
+    }
 
     const signSkey = this.#normalizeKey(await vault.get('sign_skey'));
     const cryptSkey = this.#normalizeKey(await vault.get('crypt_skey'));
     const evmSkey = await vault.get('evm_skey');
     const contactSkey = await vault.get('contact_skey');
 
-    if (!(signSkey instanceof Uint8Array)) throw new VaultKeyError('Failed to load secret key from vault');
+    if (discoverVault) {
+      const discoveredEntry = await this.#rawStore.get(`local-vault-${vault.id}`);
+      if (!discoveredEntry?.accountID || !discoveredEntry?.data) throw new LocalVaultMissingError();
+    }
+    if (!(signSkey instanceof Uint8Array)) {
+      if (discoverVault) throw new LocalVaultMissingError();
+      throw new VaultKeyError('Failed to load secret key from vault');
+    }
+
+    if (discoverVault) {
+      const matches = this.#signKeyMatchesIdentity(signSkey, identity);
+      if (!matches) {
+        try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
+        throw new AccountPasskeyMismatchError();
+      }
+      identity.vaultId = vault.id;
+      await this.#saveLocalUserCards();
+      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
+    } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`)) && this.#signKeyMatchesIdentity(signSkey, identity)) {
+      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
+    }
 
     this.#currentVault = vault;
     this.#signSkey = signSkey;
@@ -504,7 +558,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#evmSkey = evmSkey;
     this.#contactSkey = contactSkey;
     if (!(this.#cryptSkey instanceof Uint8Array)) {
-      console.warn('Crypt key not found in vault, avatar encryption will not work');
+      console.warn('Crypt key not found in vault, storage slots will not open');
     }
     this.#bootstrapUserHash = userHash;
     return identity;
@@ -528,6 +582,19 @@ export class EncryptionManagerPQ extends EventTarget {
     // Writes queued before a reload/crash can replay now that the signing key
     // is available again. Background: a slow drain must not delay login.
     this.#startOutboxDrain();
+    this.#claimDevice(userHash);
+  }
+
+  // The first person to sign in on a device owns it: one whose card reached it
+  // by sync claims it here (deviceOwner.ts). Background, like the drain; a
+  // claim the device could not answer is tried again when it comes back.
+  #claimDevice(userHash) {
+    if (this.#deviceClaimSettled === userHash) return;
+    const signingKey = this.#signingKeyOf(userHash);
+    void claimDeviceIfUnowned(userHash, async (challenge) => ml_dsa87.sign(challenge, await signingKey())).then(({ claim }) => {
+      if (claim === 'refused') console.warn('[EncryptionManagerPQ] the device refused this account\'s owner claim');
+      if (claim !== 'unavailable' && this.#currentUserHash === userHash) this.#deviceClaimSettled = userHash;
+    });
   }
 
   // Registration and import: open the account locally without activating it.
@@ -569,6 +636,7 @@ export class EncryptionManagerPQ extends EventTarget {
   // another user must not be replayed with this session's auth.
   #outboxOnlineListener = null;
   #outboxVisibleListener = null;
+  #deviceClaimSettled = null;
   #outboxWakeUnsubscribe = null;
   #outboxChangeUnsubscribe = null;
 
@@ -611,11 +679,13 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#outboxOnlineListener = () => {
       resumePendingWrites(userHash, signSkey);
       this.#recoverIntents(userHash);
+      this.#claimDevice(userHash);
     };
     this.#outboxVisibleListener = () => {
       if (document.visibilityState !== 'visible') return;
       resumePendingWrites(userHash, signSkey);
       this.#recoverIntents(userHash);
+      this.#claimDevice(userHash);
     };
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.#outboxOnlineListener);
@@ -715,13 +785,53 @@ export class EncryptionManagerPQ extends EventTarget {
         removeLocalAccount(vaultData.accountID);
       }
       await this.#rawStore.remove(`local-vault-${vaultId}`);
+      await this.#rawStore.remove(`pq-vault-owner-${vaultId}`);
     } catch (e) {
       console.warn('Could not delete from local-vault', e);
     }
+    // Contacts' thumbnails and the dialogs owed a photo leave with the account.
+    await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
 
     this.#localUserCards.splice(identityIndex, 1);
     await this.#saveLocalUserCards();
     console.log(`Deleted user vault: ${userHash}`);
+  }
+
+  /**
+   * Destroys an account on this device for good, or throws: its vault — the
+   * keys, crypt_skey among them, and anything else kept beside them, such as a
+   * recovery's candidate key — is cleared, and its row checked to be gone,
+   * before the account's card goes. A vault that does not clear
+   * leaves both in place, so the caller can try again; with `vaultId` it is
+   * found even once the card is gone. The account signed in now, if another,
+   * keeps its own vault open.
+   */
+  async destroyUserVault({ userHash, vaultId = null }) {
+    await this.#loadLocalUserCards();
+    const card = this.#localUserCards.find((i) => i.user_hash === userHash);
+    const id = vaultId ?? card?.vaultId ?? null;
+    if (this.#currentUserHash === userHash) await this.logout();
+    if (id) {
+      const stored = await this.#rawStore.get(`local-vault-${id}`);
+      if (stored) {
+        const vault = this.#currentVault?.id === id
+          ? this.#currentVault
+          : await connect({ vaultID: id, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS });
+        await vault.clear();
+        // A cleared vault has no row left; reading one would write an empty row
+        // back and ask for a passkey, so the row is what is checked.
+        if ((await this.#rawStore.get(`local-vault-${id}`)) != null) {
+          throw new Error('The account\'s vault on this device did not clear.');
+        }
+        if (stored.accountID) removeLocalAccount(stored.accountID);
+        if (this.#currentVault?.id === id) this.#currentVault = null;
+      }
+      await this.#rawStore.remove(`pq-vault-owner-${id}`);
+    }
+    if (card) {
+      this.#localUserCards = this.#localUserCards.filter((i) => i.user_hash !== userHash);
+      await this.#saveLocalUserCards();
+    }
   }
 
   #normalizeKey(key) {
@@ -732,6 +842,13 @@ export class EncryptionManagerPQ extends EventTarget {
       return new Uint8Array(Object.values(key).map(v => Number(v)));
     }
     return null;
+  }
+
+  #signKeyMatchesIdentity(signSkey, identity) {
+    try {
+      const challenge = new TextEncoder().encode('buckitup/local-vault/account-binding/v1');
+      return ml_dsa87.verify(ml_dsa87.sign(challenge, signSkey), challenge, decodeHexOrBase64(identity.sign_pkey));
+    } catch { return false; }
   }
 
   #dispatchAuthChange() {
@@ -856,10 +973,6 @@ export class EncryptionManagerPQ extends EventTarget {
     return this.#currentUserHash === userHash ? card : null;
   }
 
-  async getEvmSkey() {
-    return this.#evmSkey;
-  }
-
   /**
    * The guardian meta seed, hex, read from the vault. Made with the account
    * (createUserVault), so every device of it holds the same one; with
@@ -888,6 +1001,30 @@ export class EncryptionManagerPQ extends EventTarget {
     if (this.#currentVault !== vault) throw new Error('The account changed while the guardian keys were being read');
     this.#metaSeed = seed;
     return seed;
+  }
+
+  /**
+   * The community-backup recovery this account runs as its temporary account
+   * (plan § 7.5), or null. It lives in the account's vault beside its keys, so
+   * the candidate key in it never leaves the device and goes when the
+   * temporary account is destroyed, keys and vault together. Not exported:
+   * exportVaultKeys names what a backup carries.
+   */
+  async loadRecoveryProgress() {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+    const text = await this.#currentVault.get('recovery_progress');
+    return typeof text === 'string' ? JSON.parse(text) : null;
+  }
+
+  async saveRecoveryProgress(progress) {
+    if (!this.#currentVault) throw new Error('Vault not loaded');
+    await this.#currentVault.set('recovery_progress', JSON.stringify(progress));
+  }
+
+  /** The shared secret of an ML-KEM-1024 ciphertext made for this account's crypt_pkey: a share returned by hand. */
+  kemDecapsulate(cipherText) {
+    if (!this.#cryptSkey) throw new Error('Not authenticated or secret key not loaded');
+    return ml_kem1024.decapsulate(cipherText, this.#cryptSkey);
   }
 
   async exportVaultKeys() {
@@ -958,6 +1095,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#localUserCards.push(identity);
     }
     await this.#saveLocalUserCards();
+    await this.#rawStore.set(`pq-vault-owner-${userVault.id}`, identity.user_hash);
 
     // Same card boundary as registration: the card may not exist on this Pi
     // yet, and the session activates only once it is accepted.
@@ -1049,16 +1187,6 @@ export class EncryptionManagerPQ extends EventTarget {
     });
   }
 
-  async #writeSlotRow(uuid, valueB64, hashB64) {
-    await putStorageRow({
-      userHash: this.#currentUserHash,
-      uuid,
-      valueB64,
-      hashB64,
-      signSkey: this.#signSkey,
-    });
-  }
-
   /** Signed tombstone; deletion is a revision like any other and fails like one. */
   async #tombstoneRow(uuid) {
     await putStorageRow({
@@ -1129,48 +1257,63 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   /**
-   * Seals the account under a wrap key and publishes it where only that key
-   * can find it (lib/recovery/vault). The root record names the current vault
-   * and every earlier one not yet retired: the keys inside never change, so a
-   * vault left live would keep an old set of shares able to open the account,
-   * and a tombstone that fails is kept on the list for the next attempt
-   * rather than forgotten.
+   * Seals the account under a wrap key, publishes it where only that key can
+   * find it (lib/recovery/vault), and records it in the root as the current
+   * vault; the one it replaces joins the root's stale list. Nothing is
+   * retired here: until the backup the new vault belongs to is on chain and
+   * its shares are out, the previous one is still the owner's way back
+   * (retireRecoveryVaults).
    *
-   * Vault first, root second, tombstones last. A crash before the root write
-   * leaves the new vault live and unreferenced, which is safe only because
-   * its key is never shown before this returns (userPQ.store
-   * createRecoveryBackup); a failure after the root write leaves the previous
-   * backup usable, since nothing is retired until the new one is on record.
+   * Vault first, root second. A crash before the root write leaves the new
+   * vault live and unreferenced, which is safe only because the caller hands
+   * its key to nobody before this returns. Resolves to the vault's uuid.
    */
   async publishRecoveryVault(wrapKey, json) {
     const userHash = this.#currentUserHash;
     if (!userHash || !this.#signSkey || !this.#cryptSkey) {
       throw new Error('No user is currently logged in');
     }
-    // Each root patch is signed with whatever account is current when it is
-    // written; one switched in between would get this account's vault list.
-    const sameAccount = () => {
-      if (this.#currentUserHash !== userHash) throw new Error('The account changed while the backup was being written');
-    };
     // A root that is there but does not decrypt would fail the patch only
     // after the vault is already live; refuse before publishing anything.
     await this.#readRoot({ strict: true });
     const uuid = await publishVault({ userHash, signSkey: this.#signSkey, wrapKey, json });
-    sameAccount();
+    this.#sameAccount(userHash);
     // Only the address: mergeJsonPatch moves the vault it replaces onto
     // staleVaults against the base the patch actually lands on.
     await this.#writeRootPatch({ vaultUuid: uuid });
-    await this.#retireStaleVaults(sameAccount);
+    return uuid;
   }
 
-  /** Tombstones every vault the root lists as retired-pending; the ones that
-   * fail stay listed for the next attempt, and the failure is reported. */
-  async #retireStaleVaults(check) {
-    check();
-    const root = (await this.#readRoot({ strict: true })) || {};
+  #sameAccount(userHash) {
+    // Each root patch is signed with whatever account is current when it is
+    // written; one switched in between would get this account's vault list.
+    if (this.#currentUserHash !== userHash) throw new Error('The account changed while the backup was being written');
+  }
+
+  /**
+   * Tombstones every vault the root lists as stale, but `keep`: the keys
+   * inside a vault never change, so one left live keeps an old set of shares
+   * — and, after a recovery, the pieces returned and the node half released —
+   * able to open the account. With `keep` null (a revoked backup) the
+   * current vault goes too. A tombstone that fails stays on the list for the
+   * next attempt, and the failure is reported.
+   */
+  async retireRecoveryVaults({ keep = null } = {}) {
+    const userHash = this.#currentUserHash;
+    if (!userHash || !this.#signSkey || !this.#cryptSkey) {
+      throw new Error('No user is currently logged in');
+    }
+    let root = (await this.#readRoot({ strict: true })) || {};
+    if (keep === null && typeof root.vaultUuid === 'string') {
+      this.#sameAccount(userHash);
+      await this.#writeRootPatch({ vaultUuid: null });
+      root = (await this.#readRoot({ strict: true })) || {};
+    }
     const retired = [];
     let failure = null;
     for (const uuid of root.staleVaults ?? []) {
+      if (uuid === keep) continue;
+      this.#sameAccount(userHash);
       try {
         await this.#tombstoneRow(uuid);
         retired.push(uuid);
@@ -1179,10 +1322,10 @@ export class EncryptionManagerPQ extends EventTarget {
       }
     }
     if (retired.length) {
-      check();
+      this.#sameAccount(userHash);
       await this.#writeRootPatch({ retiredVaults: retired });
     }
-    if (failure) throw new Error('An earlier backup could not be retired; create the backup again to retry.', { cause: failure });
+    if (failure) throw new Error('An earlier backup could not be retired; try again.', { cause: failure });
   }
 
   // Update User Storage
@@ -1195,7 +1338,7 @@ export class EncryptionManagerPQ extends EventTarget {
    * `cardPublished` when the public card went out with it. Throws only when
    * the change can never reach the server.
    */
-  async updateUserStorage({ name, notes, avatarUuid, avatarDataUrl }) {
+  async updateUserStorage({ name, notes }) {
     if (!this.#currentUserHash) {
       throw new Error('No user is currently logged in');
     }
@@ -1204,8 +1347,8 @@ export class EncryptionManagerPQ extends EventTarget {
     }
 
     // 1. Encrypt profile and save to DB.
-    // A field left undefined here (e.g. avatarUuid on a plain name/notes
-    // save) must be omitted from the patch, not written as undefined — a
+    // A field left undefined here (e.g. notes on a plain rename) must be
+    // omitted from the patch, not written as undefined — a
     // full-record spread would have serialized it away and silently erased
     // the existing value. Merging (storageIntent.ts's mergeJsonPatch) also
     // means the slot map, the vault's address and any other field written by
@@ -1214,7 +1357,6 @@ export class EncryptionManagerPQ extends EventTarget {
     const patch = {};
     if (name !== undefined) patch.name = name;
     if (notes !== undefined) patch.notes = notes;
-    if (avatarUuid !== undefined) patch.avatarUuid = avatarUuid;
     const rootStatus = await saveStorageJsonPatch({
       userHash: this.#currentUserHash,
       uuid: this.#rootSlotUuid(),
@@ -1233,11 +1375,9 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#localUserCards[idx] = {
       ...current,
       name: name !== undefined ? name : current.name,
-      avatar: avatarDataUrl !== undefined ? avatarDataUrl : current.avatar,
       userStorage: {
         ...current.userStorage,
         notes: notes !== undefined ? notes : current.userStorage?.notes,
-        avatarUuid: avatarUuid !== undefined ? avatarUuid : current.userStorage?.avatarUuid
       }
     };
 
@@ -1277,7 +1417,7 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!root) return null;
     // A root record holding only the slot map is not a profile: the account
     // created a slot before ever saving one.
-    if (root.name === undefined && root.notes === undefined && root.avatarUuid === undefined) {
+    if (root.name === undefined && root.notes === undefined) {
       return null;
     }
     return root;
@@ -1349,14 +1489,18 @@ export class EncryptionManagerPQ extends EventTarget {
 
   /**
    * A named slot's JSON value, or null when the slot was never written or
-   * does not decrypt. For readers only: a writer goes through patchSlotJson,
-   * which refuses rather than build on a value it could not read.
+   * does not decrypt — `strict` tells the two apart by throwing for the
+   * second. For readers only: a writer goes through patchSlotJson, which
+   * refuses rather than build on a value it could not read.
    */
-  async loadSlotJson(name) {
+  async loadSlotJson(name, { strict = false } = {}) {
     if (!this.#currentUserHash) throw new Error('No user is currently logged in');
-    if (!this.#cryptSkey) return null;
+    if (!this.#cryptSkey) {
+      if (strict) throw new Error('Crypt key not loaded');
+      return null;
+    }
     const uuid = await this.#slotUuid(name);
-    return uuid ? this.#readJsonAt(uuid, `the ${name} slot`) : null;
+    return uuid ? this.#readJsonAt(uuid, `The ${name} slot`, { strict }) : null;
   }
 
   /**
@@ -1411,72 +1555,21 @@ export class EncryptionManagerPQ extends EventTarget {
     return this.#decryptJson(accepted.value_b64);
   }
 
-  // Avatar Encryption
-
-  async encryptAndStoreAvatar(imageBlob) {
-    console.log('encryptAndStoreAvatar:', { userHash: this.#currentUserHash, hasCryptSkey: !!this.#cryptSkey });
-
-    if (!this.#currentUserHash) {
-      throw new Error('No user is currently logged in');
-    }
-
-    if (!this.#cryptSkey) {
-      console.error('Crypt key not loaded!');
-      throw new Error('Crypt key not loaded');
-    }
-
-    const uuid = crypto.randomUUID();
-    const arrayBuffer = await imageBlob.arrayBuffer();
-    const imageData = new Uint8Array(arrayBuffer);
-
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-
-    const encryptedData = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      await this.#deriveKeyFromCryptSkey(),
-      imageData
-    );
-
-    const ivData = new Uint8Array([...iv, ...new Uint8Array(encryptedData)]);
-    const combined = arrayToBase64(ivData);
-
-    // The caller publishes this uuid inside the profile revision, so the
-    // avatar must be accepted by the server FIRST — otherwise a profile can
-    // sync successfully while pointing at an avatar row that never landed,
-    // and another device renders a broken reference.
-    await this.#writeSlotRow(uuid, combined, bytesToHex(sha256(new Uint8Array(encryptedData))));
-
-    return uuid;
+  /**
+   * The current profile photo as this device shows it in the account list
+   * and menu: kept in the local registry next to the card, never published.
+   * The photos themselves live in the avatars slot (lib/avatars/gallery).
+   */
+  async setLocalAvatar({ avatarId, dataUrl }) {
+    const idx = this.#localUserCards.findIndex(u => u.user_hash === this.#currentUserHash);
+    if (idx === -1) throw new Error('No user is currently logged in');
+    this.#localUserCards[idx] = { ...this.#localUserCards[idx], avatar: dataUrl, avatarId };
+    await this.#saveLocalUserCards();
+    return this.#localUserCards[idx];
   }
 
-  async loadAvatar(uuid) {
-    if (!this.#currentUserHash) {
-      throw new Error('No user is currently logged in');
-    }
-
-    if (!this.#cryptSkey) {
-      throw new Error('Crypt key not loaded');
-    }
-
-    const storage = await getStorageRow(this.#currentUserHash, uuid);
-    if (!storage || !storage.value_b64) {
-      return null;
-    }
-
-    const combined = decodeHexOrBase64(storage.value_b64);
-
-    const iv = combined.slice(0, 12);
-    const encryptedData = combined.slice(12);
-
-    const decryptedData = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
-      await this.#deriveKeyFromCryptSkey(),
-      encryptedData
-    );
-
-    return new Blob([decryptedData], { type: 'image/webp' });
-  }
-
+  // The key every storage slot's JSON is sealed with. The salt names the
+  // first thing it sealed; it stays, or every stored slot stops opening.
   async #deriveKeyFromCryptSkey() {
     const keyMaterial = await crypto.subtle.importKey(
       'raw',

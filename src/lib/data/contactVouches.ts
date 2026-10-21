@@ -1,7 +1,8 @@
-import { api } from '@/api/client';
+import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { signFields, type SignableFields } from '@/lib/pq/signature';
 import { signableFields, wireBool } from '@/lib/pq/schema';
 import { getVerifiedSignPkey } from './cardRegistry';
+import { claimDeviceIfUnowned } from './deviceOwner';
 import { IngestError, sendMutationsAndAwaitShape } from './ingest';
 import { enqueueIntent, intentsOf, resolveIntent, updateIntent, type IntentEntry } from './intents';
 import { resolveSigningKey, type SigningKeySource } from './keyCustody';
@@ -11,28 +12,6 @@ import { readShapeOnce } from './shapeRead';
 import { nextOwnerTimestamp } from './time';
 
 const USER_HASH = /^u_[0-9a-f]{128}$/;
-const DEVICE_ID = /^[^.\s]+$/;
-
-export interface DeviceIdentity {
-	deviceId: string;
-	adminHash: string | null;
-}
-
-export async function readDeviceIdentity(): Promise<DeviceIdentity | null> {
-	let body: unknown;
-	try {
-		body = await api.getDeviceIdentity();
-	} catch {
-		return null;
-	}
-	if (!body || typeof body !== 'object') return null;
-	const { device_id: deviceId, admin } = body as { device_id?: unknown; admin?: { user_hash?: unknown } | null };
-	if (typeof deviceId !== 'string' || !DEVICE_ID.test(deviceId)) return null;
-	if (admin === null || admin === undefined) return { deviceId, adminHash: null };
-	const adminHash = admin.user_hash;
-	if (typeof adminHash !== 'string' || !USER_HASH.test(adminHash)) return null;
-	return { deviceId, adminHash };
-}
 
 export type VouchStep = 'inserted' | 'updated' | 'unchanged' | 'unverified';
 
@@ -203,7 +182,8 @@ async function setContactVouches(request: ContactVouchRequest, granted: boolean,
 	const { issuerHash, subjectHash, signingKey, stillCurrent } = request;
 	const fenced = () => new SessionFencedError('contact vouches: the account changed before the rows were sent');
 
-	const identity = await readDeviceIdentity();
+	// An ownerless device is claimed first: whoever acts here has signed in here (deviceOwner.ts).
+	const { identity } = await claimDeviceIfUnowned(issuerHash, async (challenge) => ml_dsa87.sign(challenge, await resolveSigningKey(signingKey)));
 	if (!stillCurrent()) throw fenced();
 	if (!identity) return { kind: 'skipped', reason: 'identity-unavailable' };
 	if (identity.adminHash === null) return { kind: 'skipped', reason: 'no-owner' };

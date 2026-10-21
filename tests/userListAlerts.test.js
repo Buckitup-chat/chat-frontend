@@ -25,6 +25,10 @@ vi.mock('@/store/userPQ.store', () => ({
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({ alertingPeers: alerting, checkpointAlerts: alertEntries, scanCheckpointAlerts }),
 }));
+// Contacts' photos are not what this file tests; their store pulls in the
+// vault library, which only loads in a browser.
+const refreshPeerAvatars = vi.fn(async () => {});
+vi.mock('@/store/avatars.store', () => ({ useAvatarsStore: () => ({ contactAvatarSrc: () => '', peerAvatarSrc: () => '', refreshPeerAvatars }) }));
 vi.mock('@/store/transfers.store', () => ({
 	useTransfersStore: () => ({ transferPeers }),
 }));
@@ -44,6 +48,12 @@ describe('checkpoint alerts in the dialogs list', () => {
 		scanCheckpointAlerts.mockClear();
 		mountList();
 		expect(scanCheckpointAlerts).toHaveBeenCalledWith([PEER_A, PEER_B]);
+	});
+
+	it('asks for the listed contacts\' photos when the list opens', () => {
+		refreshPeerAvatars.mockClear();
+		mountList();
+		expect(refreshPeerAvatars).toHaveBeenCalledWith([PEER_A, PEER_B]);
 	});
 
 	it('marks only the dialogs that moved', () => {

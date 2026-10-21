@@ -33,7 +33,7 @@ import type { BackupContents } from '@/lib/backupContents';
 import { deliveryRecord, deliveryTag, splitFriendsHalf } from './shareSplit';
 import type { BackupSettings } from './backupPlan';
 import type { NodeRef } from './nodeClient';
-import type { ShareInput } from './gateway';
+import type { Fee, ShareInput } from './gateway';
 
 export type RunStep = 'prepared' | 'published' | 'submitted' | 'registered' | 'done' | 'discarded';
 
@@ -46,8 +46,65 @@ export const stepNumber = (run: BackupRun): number => {
 	return nodesPending(run).length ? 4 : 5;
 };
 
-/** Steps 1–2 can be discarded: nothing is on chain yet. */
-export const canDiscard = (run: BackupRun): boolean => run.step === 'prepared' || run.step === 'published';
+/** Steps 1–2 can be discarded: nothing is on chain yet; and a reshare another change overtook, which can never land. */
+export const canDiscard = (run: BackupRun): boolean => run.step === 'prepared' || run.step === 'published' || (!!run.reshareOf && run.superseded !== undefined);
+
+/** Whether `run` is still being made: neither finished nor dropped. */
+export const unfinished = (run: BackupRun | null | undefined): run is BackupRun => !!run && run.step !== 'done' && run.step !== 'discarded';
+
+/**
+ * The backup slot. `run` is the backup's record — the first run until it is
+ * done — and `reshare` the next version while it is being made: the record
+ * stays as it is, the backup on chain, until the reshare is done and takes
+ * its place.
+ */
+export interface BackupSlot {
+	run?: BackupRun | null;
+	reshare?: BackupRun | null;
+}
+
+/** The run being made, if any: an unfinished reshare, else an unfinished record. */
+export const activeRun = (slot: BackupSlot | null | undefined): BackupRun | null =>
+	unfinished(slot?.reshare) ? slot!.reshare! : unfinished(slot?.run) ? slot!.run! : null;
+
+/**
+ * The backup's record once a reshare of it is done: what the reshare changed
+ * — the version, the split and its keys, the guardians and nodes, the counts
+ * and threshold, what was sent and deposited — over what it did not: the
+ * secret and its label, the waiting period and the time to finish (setPolicy
+ * alone changes those; reshareWithSig does not), the alerts, how owner
+ * actions pay, a revocation. Spares handed out belong to the old split and
+ * go with it.
+ */
+export const promoteReshare = (record: BackupRun, done: BackupRun): BackupRun => {
+	const changed: BackupRun = { ...done };
+	delete changed.reshareOf;
+	delete changed.superseded;
+	delete changed.sparesGiven;
+	return {
+		...changed,
+		label: record.label,
+		secretId: record.secretId,
+		owner: record.owner,
+		deployment: record.deployment,
+		startedAt: record.startedAt,
+		settings: { ...done.settings, delaySec: record.settings.delaySec, windowSec: record.settings.windowSec },
+		...(record.fee ? { fee: record.fee } : {}),
+		...(record.alerts ? { alerts: record.alerts } : {}),
+		...(record.revokedAt ? { revokedAt: record.revokedAt } : {}),
+	};
+};
+
+/**
+ * The secret the owner's backup has on chain, and how owner actions on it
+ * pay: the record's, a reshare in progress changing nothing; null before
+ * the secret is registered, and once it is revoked.
+ */
+export const registeredSecretOf = (slot: BackupSlot | null | undefined): { secretId: string; fee?: Fee } | null => {
+	const r = slot?.run;
+	if (!r?.secretId || r.revokedAt || (r.step !== 'registered' && r.step !== 'done')) return null;
+	return { secretId: r.secretId, fee: r.fee };
+};
 
 export interface RunGuardian {
 	userHash: string;
@@ -57,8 +114,22 @@ export interface RunGuardian {
 
 export type NodeOutcome = { state: 'held' } | { state: 'staged' } | { state: 'failed'; error: string; at: number };
 
+/** What a reshare moves on from: the secret, and the version it replaces. */
+export interface ReshareOf {
+	secretId: string;
+	version: number;
+}
+
 /** The run, and once done the backup's record. Secret material is kept here, encrypted under the owner's account. */
 export interface BackupRun {
+	/** Set when this run reshares an existing backup (RunInput.reshareOf). */
+	reshareOf?: ReshareOf;
+	/** A reshare's: the version another change took the secret to first. Such a run stops for good; it can only be discarded. */
+	superseded?: number;
+	/** Unix seconds the owner revoked the backup for good (plan § 7.4). */
+	revokedAt?: number;
+	/** Spare pieces handed to guardians of the backup, by share index. */
+	sparesGiven?: Record<string, { guardian: string; messageId: string }>;
 	runId: string;
 	/** The on-chain label: random, so the secret id links to nothing. */
 	label: string;
@@ -103,7 +174,7 @@ export interface BackupRun {
 	/** The device that runs it; another shows its progress rather than starting a second. */
 	device: string;
 	/** How the registration is paid: the free service (optionally another one), or the owner's own address. */
-	fee?: { kind: 'relayer'; url?: string } | { kind: 'self' };
+	fee?: Fee;
 	/** The alert channels set up with it, or that the owner skipped them. */
 	alerts?: { channels: ('app' | 'telegram' | 'webhook')[]; skipped: boolean };
 }
@@ -116,6 +187,12 @@ export interface RunInput {
 	nodes: NodeRef[];
 	device: string;
 	now: number;
+	/**
+	 * A reshare of an existing backup: the same secret on chain at its next
+	 * version, under a new S, a new split and new node shares, so the old
+	 * version's bytes open nothing (§ Dying). Absent for a first backup.
+	 */
+	reshareOf?: ReshareOf;
 }
 
 /** The node set as a share names it: the threshold and each node as `<id>@<url>`. */
@@ -151,6 +228,7 @@ export const prepareRun = (input: RunInput): BackupRun => {
 		startedAt: input.now,
 		updatedAt: input.now,
 		device: input.device,
+		...(input.reshareOf ? { reshareOf: { ...input.reshareOf } } : {}),
 	};
 };
 
@@ -187,12 +265,15 @@ export const sharePartOf = (run: BackupRun, i: number, secretRef: string, now: n
 	nodeSet: nodeSetOf(run.settings.nodeThreshold, run.nodes),
 });
 
+/** Whether node `id` took its share of `run`: it holds it, or holds it staged for the next version. */
+export const nodeHolds = (run: BackupRun, id: string): boolean => ['held', 'staged'].includes(run.nodeOutcomes[id]?.state ?? '');
+
 /** Nodes still owed their share: neither holding it, nor staged, nor skipped. */
 export const nodesPending = (run: BackupRun): NodeRef[] =>
-	run.nodes.filter((n) => !run.skippedNodes.includes(n.id) && !['held', 'staged'].includes(run.nodeOutcomes[n.id]?.state ?? ''));
+	run.nodes.filter((n) => !run.skippedNodes.includes(n.id) && !nodeHolds(run, n.id));
 
 /** Nodes that took their share. */
-export const nodesDone = (run: BackupRun): number => run.nodes.filter((n) => ['held', 'staged'].includes(run.nodeOutcomes[n.id]?.state ?? '')).length;
+export const nodesDone = (run: BackupRun): number => run.nodes.filter((n) => nodeHolds(run, n.id)).length;
 
 /** Whether the run may finish without the nodes still pending: the rest already reach the node threshold. */
 export const canFinishWithoutPending = (run: BackupRun): boolean => nodesDone(run) >= run.settings.nodeThreshold;
@@ -202,10 +283,18 @@ export interface RunDeps {
 	/** Persists the run; the next step waits for it. */
 	save: (run: BackupRun) => Promise<void>;
 	exportAccount: () => Promise<BackupContents>;
-	/** Seals `json` under `wrapKey` and stores it where the key alone finds it; resolves to its uuid. */
+	/** Seals `json` under `wrapKey` and stores it where the key alone finds it, as the account's current vault; resolves to its uuid. */
 	publishVault: (wrapKey: Uint8Array, json: string) => Promise<string>;
+	/**
+	 * Tombstones the account's earlier vaults, all but `keep`: their keys —
+	 * and, after a recovery, the pieces returned and the node half released —
+	 * would otherwise still open the account.
+	 */
+	retireVaults: (keep: string) => Promise<void>;
 	/** Signs addSecret as the owner and submits it; resolves to the secret id and the dispatch. */
 	register: (fields: { label: string; shares: ShareInput[]; threshold: bigint; recoveryDelay: bigint; recoveryWindow: bigint }) => Promise<{ id: string; txHash?: string }>;
+	/** Signs reshare of secret `id` as its owner and submits it. */
+	reshare: (fields: { id: string; shares: ShareInput[]; threshold: bigint }) => Promise<{ txHash?: string }>;
 	/** The secret's id for this owner and label, without the chain. */
 	secretIdOf: (owner: string, label: string) => string;
 	/** The secret's version once on chain, else null; throws when the chain does not answer. */
@@ -223,7 +312,7 @@ export const REGISTRATION_WAIT_MS = 10 * 60_000;
 const POLL_MS = 5_000;
 
 export class RunStoppedError extends Error {
-	constructor(readonly run: BackupRun, readonly reason: 'registration_pending' | 'nodes_failed', message: string) {
+	constructor(readonly run: BackupRun, readonly reason: 'registration_pending' | 'nodes_failed' | 'version_moved', message: string) {
 		super(message);
 	}
 }
@@ -278,8 +367,24 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 	}
 
 	if (run.step === 'published' || run.step === 'submitted') {
-		const id = deps.secretIdOf(run.owner, run.label);
-		let version = await deps.readVersion(id);
+		const id = run.reshareOf ? run.reshareOf.secretId : deps.secretIdOf(run.owner, run.label);
+		const of = run.reshareOf;
+		// Another change moved the secret on: nothing of this one may be sent.
+		const moved = async (v: number) => {
+			await step({ superseded: v });
+			throw new RunStoppedError(run, 'version_moved', `The backup is at version ${v} on the network: another change landed first. Discard this one and start again.`);
+		};
+		// A reshare is on chain once the secret reaches exactly the version after the one it replaced; any other is not this one.
+		const readVersion = async () => {
+			const v = await deps.readVersion(id);
+			if (v === null) return null;
+			if (!of) return v;
+			if (v <= of.version) return null;
+			return v === of.version + 1 ? v : moved(v);
+		};
+		let version = await readVersion();
+		// Before this reshare was sent, a next version on chain is someone else's.
+		if (of && version !== null && run.step === 'published') await moved(version);
 		// The step and its time are saved before the registration leaves: a run
 		// that stops after the broadcast waits for it rather than sending again
 		// blindly. One not on chain after REGISTRATION_WAIT_MS is handed over
@@ -290,17 +395,19 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 			if (!run.shareInputs) await step({ shareInputs: shareInputsOf(run) });
 			await step({ step: 'submitted', secretId: id, submittedAt: deps.now() });
 			try {
-				const { txHash } = await deps.register({
-					label: run.label,
-					shares: run.shareInputs!,
-					threshold: BigInt(run.settings.approvals),
-					recoveryDelay: BigInt(run.settings.delaySec),
-					recoveryWindow: BigInt(run.settings.windowSec),
-				});
+				const { txHash } = run.reshareOf
+					? await deps.reshare({ id, shares: run.shareInputs!, threshold: BigInt(run.settings.approvals) })
+					: await deps.register({
+							label: run.label,
+							shares: run.shareInputs!,
+							threshold: BigInt(run.settings.approvals),
+							recoveryDelay: BigInt(run.settings.delaySec),
+							recoveryWindow: BigInt(run.settings.windowSec),
+						});
 				await step({ txHash });
 			} catch (e) {
 				if (e instanceof RunInterruptedError) throw e;
-				version = await deps.readVersion(id);
+				version = await readVersion();
 				if (version === null) {
 					// Not handed over: the next attempt may submit at once.
 					await step({ submittedAt: 0 });
@@ -310,7 +417,7 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 		}
 		const deadline = deps.now() * 1000 + REGISTRATION_WAIT_MS;
 		while (version === null) {
-			version = await deps.readVersion(id);
+			version = await readVersion();
 			if (version !== null) break;
 			if (deps.now() * 1000 >= deadline) {
 				throw new RunStoppedError(run, 'registration_pending', 'The network has not confirmed the registration yet.');
@@ -358,6 +465,10 @@ export const advance = async (run: BackupRun, deps: RunDeps, onStep?: (run: Back
 		const failed = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
 		if (failed) throw failed.reason;
 		if (nodesPending(run).length) throw new RunStoppedError(run, 'nodes_failed', 'Some nodes did not take their part.');
+		// Only now, with this version on chain and every piece out, does the old vault stop being the way
+		// back: retired any earlier, a reshare that never landed would strand the owner. A failure stops the
+		// run short of done, and continuing it retires again.
+		await deps.retireVaults(run.vaultUuid!);
 		await step((r) => ({ step: 'done', ...scrubbed(r) }));
 	}
 	return run;

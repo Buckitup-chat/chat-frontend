@@ -1,14 +1,12 @@
 // TODO: PHASE 4 - DELETE THIS FILE after PQ migration complete
-// This is the Web3/Ethereum-based store being replaced by userPQ.store.js
+// The pre-PQ account store, being replaced by userPQ.store.js
 // Keep commented code for reference during migration
 
 import { defineStore } from 'pinia';
 import * as $enigma from '../libs/enigma';
 import { Wallet } from 'ethers';
-import { web3Store } from './web3.store'; // TODO: PHASE 4 - web3Store also deleted
 import { ref, watch, reactive, computed } from 'vue';
 import { clearLockKeyCache } from '@lo-fi/local-data-lock';
-import $swal from '../libs/swal';
 import * as Y from 'yjs';
 import { toRaw } from 'vue';
 //import { WebrtcProvider } from 'y-webrtc';
@@ -25,7 +23,7 @@ export const userStore = defineStore('user', () => {
 
 	const defaultAvatar = '/img/profile.webp';
 	const accountInfoKeys = ['name', 'notes', 'avatar'];
-	const contactKeys = ['publicKey', 'address', 'name', 'notes', 'avatar', 'hidden', 'metaPublicKey'];
+	const contactKeys = ['publicKey', 'address', 'name', 'notes', 'avatar', 'hidden'];
 	const backupKeys = ['tag', 'shares'];
 
 	const account = ref();
@@ -35,10 +33,8 @@ export const userStore = defineStore('user', () => {
 	const contacts = computed(() => Object.values(contactsMap));
 
 	const rooms = reactive([]);
-	const registeredMetaWallet = ref();
 
 	const vaults = ref([]);
-	const isOnline = ref(navigator.onLine);
 
 	const logout = async () => {
 		await encryptionManager.disconnect();
@@ -50,21 +46,6 @@ export const userStore = defineStore('user', () => {
 		}
 		for (const key in contactsMap) {
 			delete contactsMap[key];
-		}
-		contacts.length = 0;
-		registeredMetaWallet.value = null;
-	};
-
-	const checkMetaWallet = async () => {
-		try {
-			if (account.value && !registeredMetaWallet.value) {
-				const metaPublicKey = await web3Store().registryContract.metaPublicKeys(account.value.address);
-				if (metaPublicKey && metaPublicKey.length > 2) {
-					registeredMetaWallet.value = true;
-				}
-			}
-		} catch (error) {
-			console.error('checkMetaWallet error', error);
 		}
 	};
 
@@ -387,8 +368,6 @@ export const userStore = defineStore('user', () => {
 			}
 
 			const wallet = new Wallet(privateKeyHex);
-			const signature = await wallet.signMessage(privateKeyHex);
-			const meta = await web3Store().bukitupClient.generateKeysFromSignature(signature);
 			const combinedKeyPairB64 = $enigma.combineKeypair(privateKeyB64, publicKeyB64);
 
 			const account = {
@@ -398,8 +377,6 @@ export const userStore = defineStore('user', () => {
 				privateKeyB64,
 				publicKey: publicKeyHex,
 				publicKeyB64,
-				metaPublicKey: meta.spendingKeyPair.account.publicKey,
-				metaPrivateKey: meta.spendingKeyPair.privatekey,
 				combinedKeyPairB64,
 			};
 
@@ -417,19 +394,6 @@ export const userStore = defineStore('user', () => {
 				Promise.all(deletions).then(resolve).catch(reject);
 			});
 		});
-	}
-
-	function checkOnline() {
-		if (!isOnline.value) {
-			$swal.fire({
-				icon: 'error',
-				title: 'No connection to Internet',
-				footer: 'Connect to Internet to continue',
-				timer: 15000,
-			});
-			return false;
-		}
-		return true;
 	}
 
 	return {
@@ -455,10 +419,6 @@ export const userStore = defineStore('user', () => {
 		contactKeys,
 		backupKeys,
 
-		checkMetaWallet,
-		registeredMetaWallet,
-		checkOnline,
-		isOnline,
 
 		openStorage,
 	};

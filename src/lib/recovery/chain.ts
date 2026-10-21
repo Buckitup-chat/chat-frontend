@@ -5,10 +5,11 @@
 // "The secret is not on chain" and "the chain did not answer" are different
 // answers, and a caller acting on the first must never get it from the second
 // (audit N-C1): an RPC failure is a ChainUnavailableError, never a null.
-import { Contract, EventLog, JsonRpcProvider, isAddress, isError, isHexString, type Result } from 'ethers';
+import { Contract, EventLog, JsonRpcProvider, getBytes, isAddress, isError, isHexString, type Result } from 'ethers';
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
 import { nonceKey, registryNonceKey } from 'backitup-secret-recovery-sdk/lib/contract/nonceKey';
 import type { Deployment, RecoveryContract } from './deployments';
+import { slotIsMine, type MetaKeys } from './guardianInvite';
 
 export { RoundState };
 
@@ -249,3 +250,87 @@ export class RecoveryChain {
 		return logs.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index).map((log) => ROUND_EVENTS[log.eventName](log.args, log.blockNumber));
 	}
 }
+
+/** The reads of RecoveryChain a guardian keeping shares needs. */
+export interface GuardianChain {
+	readSecret: (id: string) => Promise<{ version: bigint; revoked: boolean } | null>;
+	guardiansAt: (id: string, version: bigint) => Promise<string[]>;
+	shareAt: (id: string, version: bigint, stealthAddress: string) => Promise<{ ephemeralPubKey: string; shareEncrypted: string }>;
+}
+
+/** The reads that list a version's guardian slots. */
+export type SlotReader = Pick<GuardianChain, 'guardiansAt' | 'shareAt'>;
+
+/** A guardian slot addressed to this guardian: its stealth address and the ephemeral key it derives from. */
+export interface SlotFound {
+	stealthAddress: string;
+	ephemeralPubKey: string;
+}
+
+/** A secret as the keeping rules read it (holdings.ts SecretOnChain). */
+export interface SecretSeen {
+	version: number;
+	revoked: boolean;
+}
+
+/**
+ * The chain as one keeping pass asks it (holdings.ts judgeShare, shouldDrop):
+ * each secret and each version's slots are read once, and `known` seeds
+ * secrets already read. A slot is this guardian's when their viewing key
+ * derives its address (guardianInvite.slotIsMine); without the guardian's
+ * keys nothing is known, and nothing drops on it. Without a chain every read
+ * fails, as for a chain that does not answer.
+ */
+export const guardianChainReads = (
+	chain: GuardianChain | null,
+	metaKeys: () => Promise<MetaKeys | null>,
+	known: ReadonlyMap<string, SecretSeen | null> = new Map(),
+) => {
+	const secrets = new Map<string, Promise<SecretSeen | null>>([...known].map(([id, s]) => [id, Promise.resolve(s)]));
+	const slots = new Map<string, Promise<{ address: string; ephemeralPubKey: string; shareEncrypted: string }[]>>();
+	const once = <T>(cache: Map<string, Promise<T>>, key: string, read: () => Promise<T>): Promise<T> => {
+		let p = cache.get(key);
+		if (!p) {
+			p = read();
+			cache.set(key, p);
+			// A failed read is asked again, not remembered.
+			p.catch(() => cache.delete(key));
+		}
+		return p;
+	};
+	const live = (): GuardianChain => {
+		if (!chain) throw new ChainUnavailableError('this app names no network to read');
+		return chain;
+	};
+	const readSecret = (id: string) =>
+		once(secrets, id, async () => {
+			const s = await live().readSecret(id);
+			return s ? { version: Number(s.version), revoked: s.revoked } : null;
+		});
+	const slotsOf = (id: string, version: number) =>
+		once(slots, `${id}|${version}`, async () => {
+			const c = live();
+			const addresses = await c.guardiansAt(id, BigInt(version));
+			return Promise.all(addresses.map(async (address) => ({ address, ...(await c.shareAt(id, BigInt(version), address)) })));
+		});
+	const mine = (listed: Awaited<ReturnType<typeof slotsOf>>, keys: MetaKeys): SlotFound | null => {
+		const s = listed.find((x) => slotIsMine(keys, x.address, x.ephemeralPubKey));
+		return s ? { stealthAddress: s.address, ephemeralPubKey: s.ephemeralPubKey } : null;
+	};
+	return {
+		readSecret,
+		slotsAt: async (id: string, version: number) => (await slotsOf(id, version)).map((s) => getBytes(s.shareEncrypted)),
+		/** This guardian's slot of `version`, or null: none addressed to their keys, or no keys. */
+		mySlot: async (id: string, version: number): Promise<SlotFound | null> => {
+			const keys = await metaKeys();
+			return keys ? mine(await slotsOf(id, version), keys) : null;
+		},
+		/** Whether a slot of `version` is this guardian's; null while none are listed or without the keys. */
+		addressedToMe: async (id: string, version: number): Promise<boolean | null> => {
+			const listed = await slotsOf(id, version);
+			if (!listed.length) return null;
+			const keys = await metaKeys();
+			return keys ? !!mine(listed, keys) : null;
+		},
+	};
+};

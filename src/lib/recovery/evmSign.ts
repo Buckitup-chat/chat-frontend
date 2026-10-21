@@ -30,3 +30,13 @@ export const personalSigner = (message: string, signatureB64: string): { publicK
 		return null;
 	}
 };
+
+/** The address of a private key, lowercase. */
+export const addressOf = (privateKeyHex: string): string => computeAddress(new SigningKey(privateKeyHex).publicKey).toLowerCase();
+
+/** A private key as ethers takes it: `0x` hex (the vault keeps `evm_skey` without the prefix). */
+export const hexPrivateKey = (key: string): string => (key.startsWith('0x') ? key : `0x${key}`);
+
+/** The account's EVM key from its vault: what signs every owner action on a backup. */
+export const ownerKeyOf = async (vault: { exportVaultKeys: () => Promise<{ evm_skey: string }> }): Promise<string> =>
+	hexPrivateKey((await vault.exportVaultKeys()).evm_skey);

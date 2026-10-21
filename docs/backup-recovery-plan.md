@@ -200,7 +200,7 @@ The slices, in build order:
   `buckitup-sdk-0.0.24.tgz` goes, and with it Account activation and the older
   registry it writes to: nothing opens that modal, and Phase 7 reads no
   registry, since the meta-address travels in the dialog (7.1).
-- The Sepolia entry of `bcConfig.json` carries the v2 addresses and start
+- `src/lib/recovery/deployments.ts` carries the v2 addresses and start
   blocks. The relayer and the notification servers are configuration with
   ours as the default, since the design assumes many of each. Nodes are not
   configured: the client knows the nodes it syncs with or has met, plus any URL
@@ -242,6 +242,8 @@ device and after the guardian restores their account; an acceptance that
 replays another guardian's meta-address is refused.
 
 ### 7.2 Creating a backup
+
+The screens, for the designer: [design-recovery-backup.md](design-recovery-backup.md).
 
 **Simple screen:** pick at least three guardians among the contacts who
 accepted; everything else has a default:

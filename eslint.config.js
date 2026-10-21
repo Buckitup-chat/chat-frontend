@@ -20,12 +20,9 @@ export default [
 				process: 'readonly',
 				// Build-time constants injected by Vite (see vite.config.js `define`)
 				API_URL: 'readonly',
-				API_SURL: 'readonly',
-				API_SPATH: 'readonly',
 				ELECTRIC_API_URL: 'readonly',
 				HANDSHAKE_DEV_TURN: 'readonly',
 				IS_PRODUCTION: 'readonly',
-				IS_PRODUCTION_API: 'readonly',
 				TM_BOT: 'readonly',
 			},
 		},

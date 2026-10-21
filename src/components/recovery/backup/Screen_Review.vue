@@ -1,5 +1,6 @@
 <template>
-	<ScreenHeader title="Create your backup" :step="3" step-label="Review" back />
+	<ScreenHeader v-if="resharing" title="Change your backup" back />
+	<ScreenHeader v-else title="Create your backup" :step="3" step-label="Review" back />
 
 	<div class="cb-block">
 		<div class="d-flex review-faces">
@@ -8,7 +9,7 @@
 		<div class="cb-headline" data-test="review-headline">any {{ needed }} of {{ draft.guardians.value.length }}</div>
 		<div class="cb-muted">
 			{{ plural(s.spares, 'spare piece') }} · {{ s.nodeThreshold }} of {{ draft.nodes.value.length }} nodes<br />
-			{{ durationAdjective(s.delaySec) }} wait · alerts: {{ draft.state.alerts.skipped && !draft.alertsConnected.value ? 'none' : alertsText(draft.alertChannels.value) }}<br />
+			{{ durationAdjective(s.delaySec) }} wait<template v-if="!resharing"> · alerts: {{ draft.state.alerts.skipped && !draft.alertsConnected.value ? 'none' : alertsText(draft.alertChannels.value) }}</template><br />
 			Network fee: {{ feeText(draft.feeChoice.value) }}
 		</div>
 	</div>
@@ -16,12 +17,19 @@
 	<div v-if="draft.feeChoice.value === 'self' && draft.state.quote" class="cb-small">
 		Estimated fee ≈ {{ amount(draft.state.quote.estimate) }} {{ CURRENCY }}, from your address {{ shortAddress(draft.state.quote.address) }}.
 	</div>
+	<template v-if="resharing">
+		<div v-if="joining.length" class="cb-small" data-test="joining">Joining: {{ joining.join(', ') }}</div>
+		<div v-if="leaving.length" class="cb-small" data-test="leaving">Leaving: {{ leaving.join(', ') }}</div>
+		<div v-if="nodesJoining.length" class="cb-small" data-test="nodes-joining">Nodes joining: {{ nodesJoining.join(', ') }}</div>
+		<div v-if="nodesLeaving.length" class="cb-small" data-test="nodes-leaving">Nodes leaving: {{ nodesLeaving.join(', ') }}</div>
+		<div class="cb-muted">Every guardian gets a new piece and the old pieces stop working. A guardian left out keeps nothing that works.</div>
+	</template>
 	<div class="cb-muted">If fewer than {{ needed }} guardians keep their piece, the backup stops working. You will see it here.</div>
 
 	<div v-if="error" class="cb-error" data-test="create-error">{{ error }}</div>
 	<div class="cb-actions">
 		<button class="btn btn-dark w-100" :disabled="!!blocked || creating" data-test="create" @click="create">
-			<span v-if="creating" class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Create backup
+			<span v-if="creating" class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>{{ resharing ? 'Reshare' : 'Create backup' }}
 		</button>
 		<div v-if="blocked" class="cb-small text-center">{{ blocked }}</div>
 	</div>
@@ -30,17 +38,27 @@
 <script setup>
 import { computed, inject, onMounted, ref } from 'vue';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
+import { userPQStore } from '@/store/userPQ.store';
 import { neededGuardians, plural } from '@/lib/recovery/backupPlan';
 import errorMessage from '@/utils/errorMessage';
 import ScreenHeader from './ScreenHeader.vue';
 import ContactAvatar from './ContactAvatar.vue';
-import { CURRENCY, DRAFT, NAV, alertsText, amount, durationAdjective, feeText, shortAddress } from './backupFlow';
+import { CURRENCY, DRAFT, NAV, alertsText, amount, durationAdjective, feeText, guardianName, nodeRefName, shortAddress } from './backupFlow';
 
 const draft = inject(DRAFT);
 const nav = inject(NAV);
 const store = useRecoveryBackupStore();
+const $userPQ = userPQStore();
 
 const s = computed(() => draft.settings.value);
+/** A reshare of the finished backup keeps the backup's alerts, and says who joins and who leaves. */
+const resharing = computed(() => draft.resharing.value);
+const nameOf = (h) => guardianName(h, store.candidates, $userPQ);
+const joining = computed(() => draft.joining.value.map(nameOf));
+const leaving = computed(() => draft.leaving.value.map(nameOf));
+const nodeName = (ref) => nodeRefName(ref, store.nodes, $userPQ);
+const nodesJoining = computed(() => draft.nodesJoining.value.map(nodeName));
+const nodesLeaving = computed(() => draft.nodesLeaving.value.map(nodeName));
 const needed = computed(() => neededGuardians(s.value));
 
 // Paying yourself: the balance is read again right before Create.
@@ -56,7 +74,7 @@ onMounted(async () => {
 const blocked = computed(() => {
 	if (draft.blockReason.value) return draft.blockReason.value;
 	if (draft.feeChoice.value === 'self' && !draft.state.quote) return 'Reading the balance…';
-	if (!draft.alertsConnected.value && !draft.state.alerts.skipped) return 'Set up alerts or skip them first.';
+	if (!resharing.value && !draft.alertsConnected.value && !draft.state.alerts.skipped) return 'Set up alerts or skip them first.';
 	return null;
 });
 

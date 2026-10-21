@@ -417,11 +417,27 @@ export async function saveStorageJsonPatch(
 	return sync.status === 'syncing' ? 'queued' : sync.status;
 }
 
+/**
+ * A write the server has not taken yet, but this device holds durably in the
+ * outbox, which delivers it when the network returns: not lost, not done. A
+ * caller that can act on a local value (and queue its own follow-ups the
+ * same way) tells it apart from a write that failed.
+ */
+export class StorageNotOnServerError extends Error {
+	constructor(readonly status: StorageSyncStatus, cause?: unknown) {
+		super('Saved on this device, but the server did not take it', { cause: cause ?? status });
+	}
+}
+
 // 'awaiting-recovery' is a durable local intent, not a server verdict: it
 // throws here just like 'failed', or a caller would report as saved (or show
-// shares for) a row the server does not have yet.
+// shares for) a row the server does not have yet. Queued writes throw
+// StorageNotOnServerError.
 async function settledOnServer(write: UpsertResult): Promise<UserStorageRow> {
 	const sync = await write.sync;
+	if (sync.status === 'queued' || sync.status === 'syncing' || sync.status === 'awaiting-approval') {
+		throw new StorageNotOnServerError(sync.status, sync.error);
+	}
 	if (sync.status !== 'synced') {
 		throw new Error('Saved on this device, but the server did not take it', { cause: sync.error ?? sync.status });
 	}

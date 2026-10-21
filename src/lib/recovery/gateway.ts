@@ -76,7 +76,7 @@ const ROUTES: { [K in keyof Bodies]: string } = {
 	registerKeys: 'register-keys',
 };
 
-const gatewayOf = (send: (name: keyof Bodies, body: unknown) => Promise<Dispatch>): Gateway =>
+const gatewayFrom = (send: (name: keyof Bodies, body: unknown) => Promise<Dispatch>): Gateway =>
 	Object.fromEntries((Object.keys(ROUTES) as (keyof Bodies)[]).map((name) => [name, (body: unknown) => send(name, body)])) as Gateway;
 
 // The relayer's DTOs (backitup-recovery-backend) take uints as decimal
@@ -91,7 +91,7 @@ const RELAYER_TIMEOUT_MS = 30_000;
 /** A relayer at `baseUrl` (its routes are `<base>/api/relayer/<route>`). */
 export const relayerGateway = (baseUrl: string, fetchImpl: typeof fetch = fetch): Gateway => {
 	const base = baseUrl.replace(/\/+$/, '');
-	return gatewayOf(async (name, body) => {
+	return gatewayFrom(async (name, body) => {
 		const route = ROUTES[name];
 		const res = await fetchImpl(`${base}/api/relayer/${route}`, {
 			method: 'POST',
@@ -165,9 +165,24 @@ export const directGateway = (chain: RecoveryChain, payerPrivateKey: string): Ga
 		await tx.wait(1, RECEIPT_TIMEOUT_MS);
 		return { txHash: tx.hash, status: 'PROCESSED' };
 	};
-	return gatewayOf((name, body) => {
+	return gatewayFrom((name, body) => {
 		const sent = queue.then(() => submit(name, body));
 		queue = sent.catch(() => undefined);
 		return sent;
 	});
+};
+
+/** How a backup pays for what it sends: the relayer (ours unless another is named), or the owner's own address. */
+export type Fee = { kind: 'relayer'; url?: string } | { kind: 'self' };
+
+/**
+ * The gateway a backup's owner signs through: straight to the contract from
+ * `ownerKey`'s address when the backup pays its own fee, else the relayer it
+ * names, else `fallbackUrl` (the deployment's).
+ */
+export const gatewayOf = (chain: RecoveryChain, fee: Fee | null | undefined, ownerKey: string, fallbackUrl: string | null, fetchImpl?: typeof fetch): Gateway => {
+	if (fee?.kind === 'self') return directGateway(chain, ownerKey);
+	const url = (fee?.kind === 'relayer' && fee.url) || fallbackUrl;
+	if (!url) throw new Error('This network has no relayer: the backup has to pay its own fee.');
+	return relayerGateway(url, fetchImpl);
 };

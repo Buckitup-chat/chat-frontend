@@ -22,6 +22,10 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({ EncryptionManagerPQ: { getInstanc
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => ({ currentUserHash: OWNER, contactsMap: { [GUARDIAN]: { confirmed: true } } }) }));
 vi.mock('@/store/dialogs.store', () => ({ useDialogsStore: () => ({ sendMessage: vi.fn() }) }));
 
+const holdingsStore = { sweep: vi.fn(async () => ({ read: true })) };
+const marked = [];
+vi.mock('@/store/recoveryHoldings.store', () => ({ useRecoveryHoldingsStore: () => holdingsStore, markGuardianSlotChanged: (o) => marked.push(o) }));
+
 const { useRecoveryInvitesStore } = await import('@/store/recoveryInvites.store');
 
 const judged = new Map([[INVITE, { state: 'accepted', metaAddress: META, problems: [] }]]);
@@ -62,5 +66,16 @@ describe('the roster write-back', () => {
 		expect(store.approvesOn('eip155:10:0x45907bd5636ccece1819fcd6433dec71c78f3bb3')).toBe(false);
 		expect(store.isConfirmed(GUARDIAN)).toBe(true);
 		expect(store.isConfirmed('u_' + 'c'.repeat(128))).toBe(false);
+	});
+});
+
+describe('answering as a guardian', () => {
+	it('has the shares kept for that owner follow the new answer', async () => {
+		em.guardianMetaSeed = vi.fn(async () => '07'.repeat(32));
+		const store = useRecoveryInvitesStore();
+		await store.answer(GUARDIAN, { inviteId: INVITE, messageId: 'dmsg_01', deployment: DEPLOYMENT }, false);
+		expect(slots.guardian.answers[INVITE]).toMatchObject({ answer: 'decline', inviteMessageId: 'dmsg_01' });
+		expect(marked).toEqual([OWNER]);
+		expect(holdingsStore.sweep).toHaveBeenCalledWith({ force: true });
 	});
 });

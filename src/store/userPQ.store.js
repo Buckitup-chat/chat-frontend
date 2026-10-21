@@ -1,5 +1,4 @@
 import { defineStore } from 'pinia';
-import { newWrapKey } from '@/lib/pq/vaultEnvelope';
 import { ref, shallowRef, computed, watch, onScopeDispose } from 'vue';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
@@ -141,10 +140,12 @@ export const userPQStore = defineStore('userPQ', () => {
     showingCachedCards.value = false;
   };
 
-  const registerNewUser = async ({ name = "Anonymous", notes, avatar, avatarDataUrl }) => {
+  // A photo chosen at creation is the gallery's first (avatars.store
+  // addPhoto), added by the caller once the account exists.
+  const registerNewUser = async ({ name = "Anonymous", notes }) => {
     await initialize();
 
-    const newIdentity = await em.value.createUserVault({ name, notes, avatar, avatarDataUrl });
+    const newIdentity = await em.value.createUserVault({ name, notes });
 
     currentUser.value = newIdentity;
 
@@ -179,7 +180,6 @@ export const userPQStore = defineStore('userPQ', () => {
           userStorage: {
             ...identity.userStorage,
             notes: profile.notes,
-            avatarUuid: profile.avatarUuid
           }
         };
       }
@@ -256,6 +256,16 @@ export const userPQStore = defineStore('userPQ', () => {
     console.log(`[userStore] Account ${userHash} deleted`);
   };
 
+  // The strict removal a recovery's temporary account needs (recoveryFinale):
+  // throws unless the vault is verifiably cleared, and finds the vault by id
+  // once its card is gone.
+  const destroyAccount = async ({ userHash, vaultId = null }) => {
+    if (!em.value) throw new Error('Not initialized');
+    await em.value.destroyUserVault({ userHash, vaultId });
+    if (currentUser.value?.user_hash === userHash) currentUser.value = null;
+    await refreshMyLocalUsers();
+  };
+
   const refreshAllData = async () => {
     await refreshMyLocalUsers();
   };
@@ -288,19 +298,17 @@ export const userPQStore = defineStore('userPQ', () => {
   // device; pending while the server does not have all of it yet (offline,
   // the outbox sends it when the connection is back), awaitingApproval while
   // it waits for the device owner's approval. Throws when it can never get there.
-  const updateCurrentUserProfile = async ({ name, notes, avatarUuid, avatarDataUrl }) => {
+  const updateCurrentUserProfile = async ({ name, notes }) => {
     if (!em.value || !currentUserHash.value) return null;
 
-    const saved = await em.value.updateUserStorage({ name, notes, avatarUuid, avatarDataUrl });
+    const saved = await em.value.updateUserStorage({ name, notes });
 
     if (currentUser.value) {
       if (name !== undefined) currentUser.value.name = name;
-      if (avatarDataUrl !== undefined) currentUser.value.avatar = avatarDataUrl;
       if (!currentUser.value.userStorage) {
         currentUser.value.userStorage = {};
       }
       if (notes !== undefined) currentUser.value.userStorage.notes = notes;
-      if (avatarUuid !== undefined) currentUser.value.userStorage.avatarUuid = avatarUuid;
     }
 
     // updateUserStorage publishes the card when it changed. A second
@@ -310,6 +318,34 @@ export const userPQStore = defineStore('userPQ', () => {
 
     await refreshMyLocalUsers();
     return { pending: saved.pending || card === 'queued', awaitingApproval: saved.awaitingApproval === true };
+  };
+
+  // The current gallery photo as this device draws the account: menu,
+  // account list, profile. A data URL kept locally (EncryptionManagerPQ
+  // setLocalAvatar); null when the gallery is empty.
+  const setOwnAvatarImage = async ({ avatarId, dataUrl }) => {
+    if (!em.value || !currentUserHash.value) return;
+    const account = currentUserHash.value;
+    await em.value.setLocalAvatar({ avatarId, dataUrl });
+    if (currentUser.value && currentUserHash.value === account) {
+      currentUser.value = { ...currentUser.value, avatar: dataUrl, avatarId };
+    }
+    await refreshMyLocalUsers();
+  };
+
+  /**
+   * Caches a contact's current avatar next to the contact (pq_avatars § What
+   * a reader keeps): `{ id, photo }` — the photo's id and its wire element,
+   * whose ThumbHash the lists blur in at once and whose bytes make the small
+   * picture this device keeps (avatars.store contactAvatarSrc) — or null when
+   * their gallery is empty. The dialog stays the source of truth; this only
+   * spares the contact list from reading every dialog. Someone who is not a
+   * contact is not made one by it.
+   */
+  const cacheContactAvatar = async (userHash, avatar) => {
+    if (!em.value || !currentUserHash.value || !contactsMap.value[userHash]) return false;
+    await writeContacts({ [userHash]: { user_hash: userHash, avatar } });
+    return true;
   };
 
   // What a contact keeps in the contacts slot, out of whatever the caller
@@ -460,19 +496,6 @@ export const userPQStore = defineStore('userPQ', () => {
     return myLocalUsers.value.find(u => u.user_hash === userHash);
   };
 
-  const getEvmPrivateKey = async () => {
-    if (!em.value) return null;
-    return await em.value.getEvmSkey();
-  };
-
-  const getEvmMetaKeys = async () => {
-    const skey = await getEvmPrivateKey();
-    if (!skey) return null;
-    return {
-      privateKey: skey
-    };
-  };
-
   const exportBackup = async () => {
     if (!em.value) throw new Error('Not signed in.');
     const keys = await em.value.exportVaultKeys();
@@ -491,27 +514,6 @@ export const userPQStore = defineStore('userPQ', () => {
       identity: currentUser.value,
       keys
     };
-  };
-
-  // The account sealed under a fresh wrap key and published where only that
-  // key can find it; the key is the one thing a share scheme ever splits
-  // (docs/backup-recovery-overview.md §6), and it never leaves this function.
-  // Split before publishing, so a parameter the split refuses leaves no vault
-  // behind; publish before returning, so nothing is shown until the server has
-  // the vault - shares of a key that opens nothing are worse than none.
-  const createRecoveryBackup = async ({ total, threshold }) => {
-    const backup = await exportBackup();
-    // Loaded here and not at the top: Shamir and its Buffer polyfill serve
-    // this one dev-gated screen and have no place in the startup bundle.
-    const { splitWrapKey } = await import('@/lib/wrapKeyShares');
-    const wrapKey = newWrapKey();
-    try {
-      const shares = splitWrapKey(wrapKey, total, threshold);
-      await em.value.publishRecoveryVault(wrapKey, JSON.stringify(backup));
-      return shares;
-    } finally {
-      wrapKey.fill(0);
-    }
   };
 
   const importBackup = async (backupData) => {
@@ -578,6 +580,8 @@ export const userPQStore = defineStore('userPQ', () => {
     contactsMap,
     saveContact,
     confirmContact,
+    cacheContactAvatar,
+    setOwnAvatarImage,
     deleteContact,
 
     initialize,
@@ -586,6 +590,7 @@ export const userPQStore = defineStore('userPQ', () => {
     logout,
     endSession,
     deleteAccount,
+    destroyAccount,
     updateCurrentUserName,
     updateCurrentUserProfile,
     refreshMyLocalUsers,
@@ -595,10 +600,7 @@ export const userPQStore = defineStore('userPQ', () => {
     getUserByHash,
     getMyUserByHash,
 
-    getEvmPrivateKey,
-    getEvmMetaKeys,
     exportBackup,
-    createRecoveryBackup,
     importBackup,
     signContactChallenge,
     signHandshakePQ,

@@ -50,6 +50,8 @@ const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number; saveDe
 	const deposits: { node: string; share: string; version: number }[] = [];
 	const sent: { guardian: string; part: RecoverySharePart }[] = [];
 	const vaults: { key: string; json: string }[] = [];
+	/** Each retirement, with the step the run had reached and the shares out by then. */
+	const retired: { keep: string; step: string; sent: number; deposits: number }[] = [];
 	let reads = 0;
 	let clock = 1000;
 	const deps: RunDeps = {
@@ -64,10 +66,20 @@ const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number; saveDe
 			vaults.push({ key: bytesToHex(key), json });
 			return 'vault-uuid';
 		},
+		retireVaults: async (keep) => {
+			const last = saved.at(-1)!;
+			retired.push({ keep, step: last.step, sent: sent.length, deposits: deposits.length });
+		},
 		register: async (fields) => {
 			const id = deps.secretIdOf(OWNER, fields.label);
 			registered.set(id, { version: 1, fields });
 			return { id, txHash: '0xtx' };
+		},
+		reshare: async (fields) => {
+			const prev = registered.get(fields.id);
+			if (!prev) throw new Error('SecretDoesNotExist');
+			registered.set(fields.id, { version: prev.version + 1, fields });
+			return { txHash: '0xreshare' };
 		},
 		secretIdOf: (owner, label) => `0x${bytesToHex(new TextEncoder().encode(owner + label)).slice(0, 64)}`,
 		readVersion: async (id) => {
@@ -89,7 +101,7 @@ const fakeNetwork = (opts: { down?: string[]; confirmAfterReads?: number; saveDe
 		},
 		secretRefOf: (id) => `eip155:11155111:0xd9ff/${id}`,
 	};
-	return { deps, saved, registered, deposits, sent, vaults, tick: (sec: number) => (clock += sec) };
+	return { deps, saved, registered, deposits, sent, vaults, retired, tick: (sec: number) => (clock += sec) };
 };
 
 describe('a prepared run', () => {
@@ -309,5 +321,103 @@ describe('node outcomes', () => {
 		const err = await advance(newRun(), net.deps).catch((e) => e);
 		expect(err).toBeInstanceOf(RunAbortedError);
 		expect(Object.values(net.saved.at(-1)!.nodeOutcomes).some((o) => o.state === 'failed')).toBe(false);
+	});
+});
+
+describe('a reshare', () => {
+	it('moves the same secret to its next version under a new S, and sends the new shares', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const reshared = prepareRun({
+			deployment: 'eip155:11155111:0xd9ff',
+			owner: OWNER,
+			guardians: GUARDIANS.slice(0, 3).map(({ userHash, metaAddress }) => ({ userHash, metaAddress })),
+			settings: defaultSettings(3, 5),
+			nodes: NODES,
+			device: 'laptop',
+			now: 2000,
+			reshareOf: { secretId: first.secretId!, version: first.version! },
+		});
+		expect(reshared.wrapKey).not.toBe(first.wrapKey);
+		const done = await advance(reshared, net.deps);
+		expect(done).toMatchObject({ step: 'done', secretId: first.secretId, version: 2 });
+		expect(net.registered.size).toBe(1);
+		expect(net.sent.slice(4).map((s) => s.part.version)).toEqual([2, 2, 2]);
+		expect(net.deposits.filter((d) => d.version === 2)).toHaveLength(NODES.length);
+	});
+
+	it('retires the vault it replaces only once it is on chain and every piece is out, keeping its own', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const sent = net.sent.length;
+		const deposits = net.deposits.length;
+		const done = await advance({ ...resharing(first), vaultUuid: undefined }, { ...net.deps, publishVault: async () => 'vault-2' });
+		expect(done.step).toBe('done');
+		expect(net.retired.at(-1)).toEqual({ keep: 'vault-2', step: 'registered', sent: sent + 3, deposits: deposits + NODES.length });
+	});
+
+	it('retires nothing for a reshare that has not landed, or whose pieces are not all out', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const retiredBefore = net.retired.length;
+		const pending = await advance(resharing(first), { ...net.deps, reshare: async () => ({}) }).catch((e) => e);
+		expect(pending.reason).toBe('registration_pending');
+		const down = await advance(resharing(first), { ...fakeNetwork({ down: [NODES[0].id] }).deps, readVersion: net.deps.readVersion, reshare: net.deps.reshare, retireVaults: net.deps.retireVaults }).catch((e) => e);
+		expect(down.reason).toBe('nodes_failed');
+		expect(net.retired).toHaveLength(retiredBefore);
+	});
+
+	it('stops short of done when the old vault could not be retired, and retires it when continued', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		let refuse = true;
+		const deps = { ...net.deps, retireVaults: async (keep: string) => (refuse ? Promise.reject(new Error('rejected')) : net.deps.retireVaults(keep)) };
+		await expect(advance(resharing(first), deps)).rejects.toThrow('rejected');
+		const stopped = net.saved.at(-1)!;
+		expect(stopped.step).toBe('registered');
+		refuse = false;
+		expect((await advance(stopped, deps)).step).toBe('done');
+	});
+
+	it('waits for the next version, not the one it replaces', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const run = { ...prepareRun({ deployment: 'x', owner: OWNER, guardians: GUARDIANS.slice(0, 3).map(({ userHash, metaAddress }) => ({ userHash, metaAddress })), settings: defaultSettings(3, 5), nodes: NODES, device: 'd', now: 1, reshareOf: { secretId: first.secretId!, version: first.version! } }), step: 'submitted' as const, submittedAt: 1000 };
+		// Submitted, not yet mined: the chain still shows version 1, which is not this reshare.
+		const stopped = await advance(run, { ...net.deps, reshare: async () => ({}) }).catch((e) => e);
+		expect(stopped).toBeInstanceOf(RunStoppedError);
+		expect(stopped.reason).toBe('registration_pending');
+	});
+
+	const resharing = (first: BackupRun, over: Partial<BackupRun> = {}): BackupRun => ({
+		...prepareRun({ deployment: 'x', owner: OWNER, guardians: GUARDIANS.slice(0, 3).map(({ userHash, metaAddress }) => ({ userHash, metaAddress })), settings: defaultSettings(3, 5), nodes: NODES, device: 'd', now: 1, reshareOf: { secretId: first.secretId!, version: first.version! } }),
+		...over,
+	});
+
+	it('stops, sending nothing, when another change took the secret further than the next version', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const sentBefore = net.sent.length;
+		// This reshare went out; meanwhile two other changes landed.
+		net.registered.set(first.secretId!, { version: 3, fields: {} });
+		const stopped = await advance(resharing(first, { step: 'submitted', submittedAt: 1000 }), net.deps).catch((e) => e);
+		expect(stopped).toBeInstanceOf(RunStoppedError);
+		expect(stopped.reason).toBe('version_moved');
+		expect(net.sent.length).toBe(sentBefore);
+		expect(net.deposits.filter((d) => d.version === 3)).toHaveLength(0);
+		expect(net.saved.at(-1)).toMatchObject({ superseded: 3, step: 'submitted' });
+		expect(canDiscard(net.saved.at(-1)!)).toBe(true);
+	});
+
+	it('does not take a next version it never sent for its own', async () => {
+		const net = fakeNetwork();
+		const first = await advance(newRun(), net.deps);
+		const published = { ...resharing(first), step: 'published' as const, vaultUuid: 'v' };
+		// Another device's reshare landed at the next version before this one was sent.
+		net.registered.set(first.secretId!, { version: 2, fields: {} });
+		let reshared = false;
+		const stopped = await advance(published, { ...net.deps, reshare: async () => ((reshared = true), {}) }).catch((e) => e);
+		expect(stopped).toMatchObject({ reason: 'version_moved' });
+		expect(reshared).toBe(false);
 	});
 });

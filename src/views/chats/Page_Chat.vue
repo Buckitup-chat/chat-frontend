@@ -8,10 +8,12 @@
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.discardFailedItem(id)"
             @show-image="handleShowImage" @play-video="handlePlayVideo" @play-audio="handlePlayAudio"
+            :avatar-src="$avatars.photoUrl" @show-avatar="openGallery"
             :checkpoint-signing="checkpointSigning"
             @create-checkpoint="handleCreateCheckpoint" @checkpoint-info="handleCheckpointInfo"
             :invites="inviteViewsByMsgId" :can-invite="peerConfirmed" :inviting="inviting"
             @invite-guardian="guardianInvites.inviteGuardian" @answer-invite="guardianInvites.answerInvite"
+            :shares="shareViewsByMsgId" :giving-back="givingBack" @give-back-share="recoveryShares.giveBack"
             @sendMessage="handleSendMessage"
             @toggleReaction="handleToggleReaction" @editMessage="handleEditMessage"
             @acknowledgeMessage="handleAcknowledge">
@@ -35,6 +37,8 @@
             :sent-at="fileState.msg?.timestamp || ''"
             :checking="fileStateChecking"
             @close="fileState = null" @refresh="handleFileStateAction" />
+        <GalleryViewer v-if="viewer.index.value !== null && viewer.frames.value.length" :frames="viewer.frames.value"
+            :index="viewer.index.value" count-join="of" @update:index="viewer.show" @close="viewer.close" />
     </div>
 </template>
 
@@ -66,7 +70,11 @@ import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
 import { claimPendingEdit, submitPendingEdit, failPendingEdit, awaitPendingEditUnlock, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
 import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
 import { v7 as uuidv7 } from 'uuid';
+import GalleryViewer from '@/components/GalleryViewer.vue';
+import { useAvatarsStore } from '@/store/avatars.store';
+import { usePeerGallery } from '@/composables/usePeerGallery';
 import { useGuardianInvites } from '@/composables/useGuardianInvites';
+import { useRecoveryShares } from '@/composables/useRecoveryShares';
 
 const $route = useRoute();
 const $router = useRouter();
@@ -74,6 +82,7 @@ const $swal = inject('$swal');
 const $userPQ = userPQStore();
 const $dialogs = useDialogsStore();
 const $transfers = useTransfersStore();
+const $avatars = useAvatarsStore();
 
 const peerHash = computed(() => $route.params.address);
 const dialogHash = computed(() => $dialogs.getDialogHash(peerHash.value));
@@ -90,12 +99,6 @@ const chatName = computed(() => {
     return address;
 });
 
-const avatarUrl = computed(() => {
-    const address = peerHash.value;
-    if (!address) return '';
-    const contact = $userPQ.contacts.find((e) => e.user_hash === address) || $userPQ.getUserByHash(address);
-    return contact?.avatar || '';
-});
 
 const avatarHash = computed(() => peerHash.value || '');
 
@@ -109,7 +112,7 @@ const dialogCollections = computed(() => (dialogHash.value ? getDialogCollection
 // fill the gap until the shape catches up — a live row always wins per key,
 // so a working persistence sees no change in behavior. getRowKey mirrors
 // collections.ts's own getKey for this table.
-const { rows: rawMessages } = useCollectionRows(
+const { rows: rawMessages, live: messagesLive } = useCollectionRows(
     computed(() => dialogCollections.value?.messages ?? null),
     { readCache: { table: 'dialog_messages', dialogHash: () => dialogHash.value, getRowKey: (r) => r.message_id } }
 );
@@ -266,6 +269,7 @@ const scheduleDecrypt = (newRows) => {
                     parts: decrypted.parts || [],
                     authorName: decrypted.isMine ? 'Me' : name,
                     _decrypted: decrypted.decrypted === true,
+                    _awaitingKey: decrypted.awaitingKey === true,
                 }];
                 })(row));
             }
@@ -697,6 +701,12 @@ const handleToggleReaction = async (messageId, emoji) => {
     }
 };
 
+// ---------- profile photos (pq_avatars) ----------
+
+const { avatarUrl, viewer, openGallery } = usePeerGallery({
+    peerHash, messages: decryptedMessages, rows: rawMessages, live: messagesLive,
+});
+
 // ---------- §2.3 downloads ----------
 
 // One batch = one composed message (screen 02); the queue store owns the
@@ -980,6 +990,13 @@ const guardianInvites = useGuardianInvites({
     peerName: chatName, swal: $swal, isAlive: () => pageAlive,
 });
 const { views: inviteViewsByMsgId, peerConfirmed, inviting } = guardianInvites;
+
+// Backup pieces (pq_recovery_shares § Holding): kept when the dialog opens.
+const recoveryShares = useRecoveryShares({
+    peerHash, messages: decryptedMessages,
+    peerName: chatName, swal: $swal, isAlive: () => pageAlive,
+});
+const { views: shareViewsByMsgId, givingBack } = recoveryShares;
 
 watch(dialogHash, (dh) => {
     if (!dh || !peerHash.value) return;

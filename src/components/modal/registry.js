@@ -1,36 +1,5 @@
-// Every modal the app can open, and the single question of whether one can be
-// opened at all.
-//
-// open() returns early on an unknown id, so an entry missing from this table is
-// not merely hidden — no emitter can reach it. That makes the table the
-// authority on reachability, and the thing a screen asks before rendering a
-// button whose only job is to open one.
-
-import { SANDBOX_SURFACES } from '@/config/sandbox';
-
-// Splitting the wrap key by hand into shares is scaffolding for the community
-// scheme, not a backup method (see config/sandbox). The gate belongs here rather
-// than on the buttons, because any component can emit modal::open with an id:
-// hiding an entry point would leave the modal itself reachable. The chunks do
-// still ship — the loader in Modal_.vue is a glob over ./views — so this is a
-// reachability gate, not a size one.
-const SANDBOX_MODALS = {
-	account_restore_shares: {
-		header: true,
-		component: 'Modal_Account_Restore_Shares',
-		modalClass: 'modal-md',
-		title: 'Restore account',
-		icon: '_icon_shares',
-	},
-	account_backup_shamir_create: {
-		header: true,
-		component: 'Modal_Backup_Shamir_Create',
-		modalClass: 'modal-md',
-		title: 'Shamir Shares Backup',
-		icon: '_icon_shares',
-		modalStatic: true,
-	},
-};
+// Every modal the app can open. open() returns early on an unknown id, so an
+// entry missing from this table is not merely hidden — no emitter can reach it.
 
 export const modalRegistry = {
 	add_contact: {
@@ -85,13 +54,21 @@ export const modalRegistry = {
 		icon: '_icon_reload',
 	},
 
-	account_activate: {
-		header: false,
-		component: 'Modal_Account_Activate',
+	// Recovery with friends: the recovering device's temporary account (plan § 7.5).
+	account_recover_friends: {
+		header: true,
+		component: 'Modal_Recover_Friends',
 		modalClass: 'modal-sm',
-		title: 'Account Activation',
-		icon: '_icon_profile',
-		bodyClass: 'p-0',
+		title: 'Recover with friends',
+		icon: '_icon_contacts',
+	},
+
+	// A guardian helping someone back in (plan § 7.5).
+	recovery_help: {
+		header: false,
+		modalStatic: true,
+		component: 'Modal_Recovery_Help',
+		modalClass: 'modal-md',
 	},
 
 	account_backup_local: {
@@ -139,16 +116,4 @@ export const modalRegistry = {
 		component: 'Modal_Community_Backup',
 		modalClass: 'modal-md',
 	},
-
-	contacts: {
-		header: true,
-		component: 'Modal_Contacts',
-		modalClass: 'modal-md',
-		title: 'Verified contacts',
-		icon: '_icon_contacts',
-	},
-	...(SANDBOX_SURFACES ? SANDBOX_MODALS : {}),
 };
-
-/** Whether this modal exists in this build. */
-export const isModalAvailable = (id) => Object.hasOwn(modalRegistry, id);
