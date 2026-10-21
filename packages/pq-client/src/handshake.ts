@@ -9,10 +9,10 @@ import { concatBytes, randomBytes } from '@noble/hashes/utils';
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { base64urlDecode, decode as decodeQwbp } from 'qwbp';
-import { hkdfDerive, sixDigits } from './hkdf';
-import { contactKeyVouch, type ContactKeyVouch } from './verifyCard';
-import { toBase64, toBase64Url, toBytes } from './signature';
-import type { UserCardRow } from './types';
+import { hkdfDerive, sixDigits } from './hkdf.js';
+import { contactKeyVouch, type ContactKeyVouch } from './verifyCard.js';
+import { toBase64, toBase64Url, toBytes } from './signature.js';
+import type { UserCardRow } from './types.js';
 
 export const PREFIX = 'PQ2';
 export const TRANSCRIPT_TAG = 'buckitup/handshake/v2\n';

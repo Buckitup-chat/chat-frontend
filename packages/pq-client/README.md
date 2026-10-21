@@ -21,9 +21,8 @@ import { signFields, verifyFields } from '@buckitup/pq-client/signature';
 import { verifyCard } from '@buckitup/pq-client/verifyCard';
 ```
 
-Each module is its own entry point (`@buckitup/pq-client/<module>`). The build
-is ES2022 modules with extensionless relative imports, for a bundler (Vite,
-webpack, esbuild).
+Each module is its own entry point (`@buckitup/pq-client/<module>`), an ES2022
+module that loads in Node and in any bundler.
 
 ## Develop
 
@@ -33,7 +32,7 @@ the app's suite (`npm test` at the repository root), including the golden
 vectors that pin every derivation.
 
 ```sh
-npm run build -w @buckitup/pq-client   # → packages/pq-client/dist
+npm run build -w @buckitup/pq-client   # → packages/pq-client/dist, then loads each module in Node
 ```
 
 ## Licence

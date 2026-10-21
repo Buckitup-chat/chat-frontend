@@ -7,14 +7,14 @@
 
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { verifyFields, deriveSignHash, canonicalPayload, toBase64 } from './signature';
-import { signableFields } from './schema';
+import { verifyFields, deriveSignHash, canonicalPayload, toBase64 } from './signature.js';
+import { signableFields } from './schema.js';
 import type {
 	DialogMessageRow,
 	DialogMessageVersionRow,
 	DialogMessageReactionRow,
 	DialogMessageReceiptRow,
-} from './types';
+} from './types.js';
 
 export type RowVerdict =
 	| { status: 'ok' }

@@ -13,9 +13,9 @@
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { verifyFields, toBytes } from './signature';
-import { signableFields } from './schema';
-import type { UserCardRow } from './types';
+import { verifyFields, toBytes } from './signature.js';
+import { signableFields } from './schema.js';
+import type { UserCardRow } from './types.js';
 
 export interface VerifiedCard {
 	userHash: string;
