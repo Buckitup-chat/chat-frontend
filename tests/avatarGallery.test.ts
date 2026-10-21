@@ -3,7 +3,7 @@ import {
 	galleryOf, snapshotParts, newAvatarId,
 	ownGalleryOf, nextAt, addPatch, setMainPatch, removePatch, type GalleryMessage,
 } from '@/lib/avatars/gallery';
-import { decodeContent, encodeContent, type AvatarPhoto, type ContentPart } from '@/lib/pq/content';
+import { decodeContent, encodeContent, type AvatarPhoto, type ContentPart } from '@buckitup/pq-client/content';
 import { mergeJsonPatch, stripPatchDirectives } from '@/lib/data/storageIntent';
 
 // pq_avatars § The gallery a reader sees.

@@ -1,9 +1,9 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { fromBase64 } from '@/lib/pq/signature';
+import { fromBase64 } from '@buckitup/pq-client/signature';
 import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
-import { encodeContent } from '@/lib/pq/content';
+import { encodeContent } from '@buckitup/pq-client/content';
 import { markTouched, _resetTouchedForTests } from '@/lib/data/readCache';
 import { setDialogCacheRow, clearDialogCacheDb } from './helpers/mainDialogCache';
 

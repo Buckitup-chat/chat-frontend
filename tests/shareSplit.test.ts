@@ -16,7 +16,7 @@ import {
 	splitFriendsHalf,
 	type ShareToCheck,
 } from '@/lib/recovery/shareSplit';
-import { joinHalves, newWrapKey, splitIntoHalves } from '@/lib/pq/vaultEnvelope';
+import { joinHalves, newWrapKey, splitIntoHalves } from '@buckitup/pq-client/vaultEnvelope';
 import type { NodeSet } from '@/lib/recovery/nodeSet';
 
 const nodes: NodeSet = {

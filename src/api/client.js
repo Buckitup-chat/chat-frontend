@@ -3,12 +3,12 @@ import {
   signFields,
   deriveSignHash,
   toBase64,
-} from "@/lib/pq/signature";
-import { proveChallenge } from "@/lib/pq/challengeProof";
+} from "@buckitup/pq-client/signature";
+import { proveChallenge } from "@buckitup/pq-client/challengeProof";
 
 // Row columns are padded base64 (toBase64); the canonical payload builder
-// lives in the protocol module — see src/lib/pq/signature.ts. The challenge
-// proof is src/lib/pq/challengeProof.ts.
+// lives in the protocol module — see packages/pq-client/src/signature.ts. The challenge
+// proof is packages/pq-client/src/challengeProof.ts.
 
 const SIGN_HASH_RELATIONS = new Set(['dialog_messages', 'dialog_messages_versions']);
 

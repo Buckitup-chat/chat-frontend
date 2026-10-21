@@ -10,7 +10,7 @@
 // reload nor logout. A server restart drops all sessions; a 401 on a locally
 // valid token triggers a fresh open.
 
-import { proveChallenge } from '@/lib/pq/challengeProof';
+import { proveChallenge } from '@buckitup/pq-client/challengeProof';
 import { markShapeBlocked, markShapeUnblocked, isShapeBlocked } from './accessGate';
 
 declare const ELECTRIC_API_URL: string;

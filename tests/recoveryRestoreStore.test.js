@@ -10,7 +10,7 @@ import { reactive } from 'vue';
 import { bytesToHex } from '@noble/hashes/utils';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { toBase64 } from '@/lib/pq/signature';
+import { toBase64 } from '@buckitup/pq-client/signature';
 import { returnOf } from '@/lib/recovery/recovering';
 import { checkBinding } from '@/lib/recovery/recoveryBinding';
 import { helpRequestText } from '@/lib/recovery/restoring';

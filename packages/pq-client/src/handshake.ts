@@ -12,7 +12,7 @@ import { base64urlDecode, decode as decodeQwbp } from 'qwbp';
 import { hkdfDerive, sixDigits } from './hkdf';
 import { contactKeyVouch, type ContactKeyVouch } from './verifyCard';
 import { toBase64, toBase64Url, toBytes } from './signature';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from './types';
 
 export const PREFIX = 'PQ2';
 export const TRANSCRIPT_TAG = 'buckitup/handshake/v2\n';

@@ -8,8 +8,8 @@ import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, toBase64 } from '@/lib/pq/signature';
-import { cardVouchesForContactKey } from '@/lib/pq/verifyCard';
+import { signFields, toBase64 } from '@buckitup/pq-client/signature';
+import { cardVouchesForContactKey } from '@buckitup/pq-client/verifyCard';
 
 const identity = (seed: number) => {
 	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));

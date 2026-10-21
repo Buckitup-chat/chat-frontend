@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash } from '@/lib/pq/signature';
+import { signFields, deriveSignHash } from '@buckitup/pq-client/signature';
 import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { _setOwnObservedTailsStorageForTests, _setRawOwnObservedTailsStorageForTests, getOwnObservedTails } from '@/lib/data/ownObservedTails';

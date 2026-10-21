@@ -6,8 +6,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { sha3_512 } from '@noble/hashes/sha3';
-import { signFields, toBase64, fromBase64 } from '@/lib/pq/signature';
-import { chunkDataHash, encryptChunk, generateEncSecret } from '@/lib/pq/fileCrypto';
+import { signFields, toBase64, fromBase64 } from '@buckitup/pq-client/signature';
+import { chunkDataHash, encryptChunk, generateEncSecret } from '@buckitup/pq-client/fileCrypto';
 
 // The chunk cache as chunkCache.ts keeps it: bytes under the hash they were stored with.
 const cache = new Map<string, { bytes: Uint8Array; dataHash: string }>();

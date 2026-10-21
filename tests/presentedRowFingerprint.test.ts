@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
+import { presentedRowFingerprint } from '@buckitup/pq-client/verifyDialogRow';
 
 const baseRow = () => ({
 	message_id: 'dmsg_' + 'a'.repeat(8) + '-0000-7000-8000-000000000000',

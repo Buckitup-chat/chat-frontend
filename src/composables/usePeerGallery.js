@@ -2,7 +2,7 @@ import { ref, computed, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useAvatarsStore } from '@/store/avatars.store';
 import { galleryOf } from '@/lib/avatars/gallery';
-import { isAvatarPart } from '@/lib/pq/content';
+import { isAvatarPart } from '@buckitup/pq-client/content';
 import { useGalleryViewer } from '@/composables/useGalleryViewer';
 
 /**

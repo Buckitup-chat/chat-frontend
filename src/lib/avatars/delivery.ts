@@ -22,7 +22,7 @@
 // next message into that dialog — with the current photo and any removals
 // it missed.
 
-import { isAvatarPart, type AvatarPart, type AvatarRemovedPart, type ContentPart } from '@/lib/pq/content';
+import { isAvatarPart, type AvatarPart, type AvatarRemovedPart, type ContentPart } from '@buckitup/pq-client/content';
 import { serialized } from '@/lib/data/serialized';
 import type { GalleryEntry } from './gallery';
 import type { Owed, OwedMap } from './localStore';

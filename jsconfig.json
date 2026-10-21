@@ -1,7 +1,8 @@
 {
   "compilerOptions": {
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@buckitup/pq-client/*": ["./packages/pq-client/src/*"]
     }
   },
   "exclude": ["node_modules", "dist"]

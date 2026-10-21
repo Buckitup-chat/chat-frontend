@@ -7,11 +7,11 @@
 // the guardian made. The recovering app imports nothing until they match.
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { hkdfDerive } from '@/lib/pq/hkdf';
-import { sixDigitCode } from '@/lib/pq/deviceLink';
-import { assertSealed, openSealed, sealWithKey, VaultEnvelopeError } from '@/lib/pq/vaultEnvelope';
-import { decodeContent, encodeContent, type RecoveryBindingPart, type RecoveryShareReturnPart } from '@/lib/pq/content';
-import { fromBase64, toBase64, toBytes } from '@/lib/pq/signature';
+import { hkdfDerive } from '@buckitup/pq-client/hkdf';
+import { sixDigitCode } from '@buckitup/pq-client/deviceLink';
+import { assertSealed, openSealed, sealWithKey, VaultEnvelopeError } from '@buckitup/pq-client/vaultEnvelope';
+import { decodeContent, encodeContent, type RecoveryBindingPart, type RecoveryShareReturnPart } from '@buckitup/pq-client/content';
+import { fromBase64, toBase64, toBytes } from '@buckitup/pq-client/signature';
 
 export const RECOVERY_RETURN_SALT = 'buckitup/recovery-return/v1';
 export const BLOCK_TAG = 'BUCKITUP-SHARE';

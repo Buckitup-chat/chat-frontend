@@ -13,7 +13,7 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { api } from '@/api/client';
 import { HandshakeEngine, type Outcome, type HandshakeIdentity } from '@/lib/handshake/engine';
-import { signOptical } from '@/lib/pq/handshake';
+import { signOptical } from '@buckitup/pq-client/handshake';
 import { QwbpChannel } from '@/lib/handshake/qwbpChannel';
 import type { UserCardRow } from '@/lib/data/types';
 

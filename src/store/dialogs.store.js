@@ -25,11 +25,11 @@ import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDia
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyReplicatedRow } from '@/lib/data/rowVerification';
 import { projectionReplacement } from '@/lib/data/operationLifecycle';
-import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError, fileRefsOf } from '@/lib/pq/content';
+import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError, fileRefsOf } from '@buckitup/pq-client/content';
 import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
-} from '@/lib/pq/checkpoint';
+} from '@buckitup/pq-client/checkpoint';
 import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
 import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
 import { openVideo } from '@/lib/data/videoStream';
@@ -1524,7 +1524,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         }
     };
 
-    // ---------- signed DAG checkpoint (src/lib/pq/checkpoint.ts) ----------
+    // ---------- signed DAG checkpoint (packages/pq-client/src/checkpoint.ts) ----------
     //
     // A checkpoint attests "this device held this causally complete local
     // state and it materialized to this view". It rides an ordinary message

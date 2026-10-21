@@ -11,7 +11,7 @@ import {
 	toBase64,
 	padBase64,
 	fromBase64,
-} from '@/lib/pq/signature';
+} from '@buckitup/pq-client/signature';
 
 // The payload is a wire contract with the Elixir server
 // (Chat.Data.Integrity.signature_payload/1). These vectors pin the exact

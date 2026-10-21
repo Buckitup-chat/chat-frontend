@@ -7,7 +7,7 @@
 // the device never sees it, so nobody else can produce them.
 
 import { rgbaToThumbHash, thumbHashToDataURL } from 'thumbhash';
-import { fromBase64, toBase64 } from '@/lib/pq/signature';
+import { fromBase64, toBase64 } from '@buckitup/pq-client/signature';
 
 export interface ImagePreview {
 	widthAspect: number;

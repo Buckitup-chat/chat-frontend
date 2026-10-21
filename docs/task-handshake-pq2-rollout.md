@@ -30,8 +30,8 @@ relay, and building from `main` alone builds the old design.
 
 ### 1. The protocol module (pure, no DOM)
 
-- Create `src/lib/pq/handshake.ts` from `sandbox/handshake-pq2/src/protocol.ts`.
-  It already uses the app's own `src/lib/pq` (signature, HKDF, card checks).
+- Create `packages/pq-client/src/handshake.ts` from `sandbox/handshake-pq2/src/protocol.ts`.
+  It already uses the app's own `packages/pq-client/src` (signature, HKDF, card checks).
 - Keep the spec's names (§7):
   - `encode` and `parse` for A–D;
   - `transcript`;

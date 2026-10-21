@@ -3,7 +3,7 @@ import { loadOwed, updateOwed } from '@/lib/avatars/localStore';
 import { useMemoryAvatarStore } from './helpers/avatarLocalStore';
 import { createAvatarDelivery, changeMessage, PROBE_CONCURRENCY, type DeliveryDeps } from '@/lib/avatars/delivery';
 import { galleryOf, type GalleryEntry, type GalleryMessage } from '@/lib/avatars/gallery';
-import type { AvatarPhoto, ContentPart } from '@/lib/pq/content';
+import type { AvatarPhoto, ContentPart } from '@buckitup/pq-client/content';
 
 // pq_avatars § Delivery, driven through fakes that keep the contract: a sent
 // message lands in the peer's dialog, and the next probe of it sees it.

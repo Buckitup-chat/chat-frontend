@@ -14,7 +14,7 @@ import type {
 	DialogMessageVersionRow,
 	DialogMessageReactionRow,
 	DialogMessageReceiptRow,
-} from '@/lib/data/types';
+} from './types';
 
 export type RowVerdict =
 	| { status: 'ok' }
