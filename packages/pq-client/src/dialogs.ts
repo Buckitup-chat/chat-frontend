@@ -8,9 +8,10 @@
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { hmac } from '@noble/hashes/hmac';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
+import { bytesToHex } from '@noble/hashes/utils';
+import { openAesGcm as open, sealAesGcm as seal } from './aesGcm.js';
 import { hkdfDerive } from './hkdf.js';
-import { fromBase64, toBase64 } from './signature.js';
+import { toBase64, toBytes } from './signature.js';
 
 const utf8 = (s: string) => new TextEncoder().encode(s);
 
@@ -28,8 +29,7 @@ const concat = (...parts: Uint8Array[]): Uint8Array => {
  * A binary column as it arrives: base64 with or without padding (rows written
  * and rows read from a shape), or PostgreSQL's `\x` hex.
  */
-export const decodeColumn = (value: string): Uint8Array =>
-	value.startsWith('\\x') ? hexToBytes(value.slice(2)) : fromBase64(value);
+export const decodeColumn = (value: string): Uint8Array => toBytes(value);
 
 /** `di_` + hex(SHA3-512(the two user hashes, sorted, concatenated as UTF-8)). */
 export const dialogHash = (userA: string, userB: string): string => {
@@ -46,22 +46,6 @@ export const deriveSenderMsgKey = (signSkey: Uint8Array, cryptSkey: Uint8Array, 
 	hkdfDerive(concat(signSkey, cryptSkey, utf8(peerHash)), 'buckitup/dialog-mk/v1', 'dialog-mk', 32);
 
 const wrapKeyOf = (sharedSecret: Uint8Array) => hkdfDerive(sharedSecret, 'buckitup/dialog-wrap/v1', 'wrap', 32);
-
-// new Uint8Array(…) copies into a plain ArrayBuffer, which WebCrypto's types require.
-const aesKey = (raw: Uint8Array, use: 'encrypt' | 'decrypt') =>
-	crypto.subtle.importKey('raw', new Uint8Array(raw), 'AES-GCM', false, [use]);
-
-/** nonce(12) || AES-256-GCM(key, plaintext). */
-const seal = async (key: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array> => {
-	const nonce = crypto.getRandomValues(new Uint8Array(12));
-	const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, await aesKey(key, 'encrypt'), new Uint8Array(plaintext));
-	return concat(nonce, new Uint8Array(ct));
-};
-
-const open = async (key: Uint8Array, sealed: Uint8Array): Promise<Uint8Array> =>
-	new Uint8Array(await crypto.subtle.decrypt(
-		{ name: 'AES-GCM', iv: sealed.subarray(0, 12) }, await aesKey(key, 'decrypt'), sealed.slice(12),
-	));
 
 /**
  * The two dialog_keys columns that carry `senderMsgKey` to the peer:
