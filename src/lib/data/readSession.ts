@@ -184,10 +184,10 @@ async function requestSession(
 			return null;
 		case 'unknown_user':
 			return UNKNOWN_USER;
+		case 'bad_proof':
+		case 'unknown_shape':
+			return null;
 		case 'refused':
-			// A bad challenge or signature (401) or an unknown shape (400) ends this
-			// attempt; any other refusal is not one the protocol defines.
-			if (outcome.status === 401 || outcome.status === 400) return null;
 			throw new Error(`read_session for ${shape}: HTTP ${outcome.status}`);
 	}
 }

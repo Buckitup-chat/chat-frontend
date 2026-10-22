@@ -105,7 +105,10 @@ describe('@buckitup/pq-client transport', () => {
 		expect(opened.kind === 'opened' && opened.expiresAt).toBeGreaterThanOrEqual(before + 300_000);
 		expect(await t.openReadSession(USER, 'dialog_messages', sign)).toEqual({ kind: 'unknown_user' });
 		expect(await t.openReadSession(USER, 'dialog_messages', sign)).toEqual({ kind: 'not_in_trust_chain' });
-		expect(await t.openReadSession(USER, 'dialog_messages', sign)).toEqual({ kind: 'refused', status: 400, error: 'unknown_shape' });
+		expect(await t.openReadSession(USER, 'dialog_messages', sign)).toEqual({ kind: 'unknown_shape' });
+		// A proof by another key: the fake refuses it as the server does.
+		const other = ml_dsa87.keygen(randomBytes(32));
+		expect(await t.openReadSession(USER, 'dialog_messages', (m) => ml_dsa87.sign(m, other.secretKey))).toEqual({ kind: 'bad_proof' });
 	});
 
 	it('reads a shape once under a fresh where, with the caller\'s bearer token, and reports a required session', async () => {
@@ -116,14 +119,14 @@ describe('@buckitup/pq-client transport', () => {
 		const server = fakeServer(() => answers.shift()!);
 		const t = createTransport({ baseUrl: 'https://x.example/electric/v1', fetch: server.fetchImpl });
 
-		expect(await t.readShapeOnce('user_cards', `user_hash = '${USER}'`, { authorization: 'Bearer tok' })).toEqual({ ok: true, rows: [{ user_hash: USER }] });
+		expect(await t.readShapeOnce('user_cards', `user_hash = '${USER}'`, { authorization: 'Bearer tok' })).toEqual({ kind: 'rows', rows: [{ user_hash: USER }] });
 		const { url, init } = server.seen[0];
 		const where = decodeURIComponent(new URL(url).searchParams.get('where')!);
 		expect(url.startsWith('https://x.example/electric/v1/shapes?table=user_cards&')).toBe(true);
 		expect(where).toMatch(new RegExp(`^user_hash = '${USER}' AND (\\d+)=\\1$`));
 		expect(new Headers(init?.headers).get('authorization')).toBe('Bearer tok');
 
-		expect(await t.readShapeOnce('user_storage', 'true')).toEqual({ ok: false, readSessionRequired: 'user_storage' });
+		expect(await t.readShapeOnce('user_storage', 'true')).toEqual({ kind: 'read_session_required', shape: 'user_storage' });
 	});
 
 	it('a fresh where is new on every call and true for every row', () => {

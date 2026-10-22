@@ -21,10 +21,10 @@ export const electricUrl = (path: string): string => transport.url(path);
 export const readShapeOnce = async <T>(table: string, where: string, signal?: AbortSignal): Promise<T[]> => {
 	const read = () => transport.readShapeOnce<T>(table, where, { signal, authorization: bearerFor(table) || undefined });
 	let res = await read();
-	if (!res.ok && 'readSessionRequired' in res
-		&& await handleShapeAuth401({ error: 'read_session_required', shape: res.readSessionRequired }, table)) {
+	if (res.kind === 'read_session_required'
+		&& await handleShapeAuth401({ error: 'read_session_required', shape: res.shape }, table)) {
 		res = await read();
 	}
-	if (res.ok) return res.rows;
-	throw new Error(`${table} read failed: HTTP ${'status' in res ? res.status : 401}`);
+	if (res.kind === 'rows') return res.rows;
+	throw new Error(`${table} read failed: HTTP ${res.kind === 'failed' ? res.status : 401}`);
 };

@@ -41,7 +41,11 @@ export type ReadSessionOutcome =
 	| { kind: 'unknown_user' }
 	/** No vouch chain from the owner for device.<id>.storage.read.<shape>. */
 	| { kind: 'not_in_trust_chain' }
-	/** Any other refusal (bad challenge or signature, unknown shape). */
+	/** The challenge was unknown, expired or used, or the signature did not verify: prove again. */
+	| { kind: 'bad_proof' }
+	/** The server has no shape by that name. */
+	| { kind: 'unknown_shape' }
+	/** An answer the protocol does not define. */
 	| { kind: 'refused'; status: number; error: string | null };
 
 /** The request got no answer, or an answer that is not the API's. */
@@ -93,10 +97,10 @@ export interface Transport {
 }
 
 export type ShapeReadResponse<T> =
-	| { ok: true; rows: T[] }
+	| { kind: 'rows'; rows: T[] }
 	/** Access mode trust: open a read session for `shape` and read again. */
-	| { ok: false; readSessionRequired: string }
-	| { ok: false; status: number };
+	| { kind: 'read_session_required'; shape: string }
+	| { kind: 'failed'; status: number };
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -128,10 +132,10 @@ export function createTransport(options: TransportOptions): Transport {
 		return `${origin}${u}`;
 	};
 
-	const send = async (path: string, init: NonNullable<Parameters<typeof fetch>[1]>, opts: RequestOptions = {}, target = `${base}${path}`): Promise<Response> => {
+	const send = async (path: string, init: NonNullable<Parameters<typeof fetch>[1]>, opts: RequestOptions = {}): Promise<Response> => {
 		const signal = opts.signal ?? AbortSignal.timeout(opts.timeoutMs ?? options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 		try {
-			return await doFetch(target, { ...init, signal });
+			return await doFetch(`${base}${path}`, { ...init, signal });
 		} catch (e) {
 			if (isNoAnswer(e)) throw new TransportError(`${path}: no answer (${(e as Error)?.message ?? e})`, { network: true });
 			throw e;
@@ -198,22 +202,23 @@ export function createTransport(options: TransportOptions): Transport {
 			if (resp.status >= 500) throw new TransportError(`read_session for ${shape}: HTTP ${resp.status}`, { status: resp.status });
 			const error = ((await resp.json().catch(() => null)) as { error?: string } | null)?.error ?? null;
 			if (resp.status === 401 && error === 'unknown_user') return { kind: 'unknown_user' };
+			if (resp.status === 401) return { kind: 'bad_proof' };
 			if (resp.status === 403 && error === NOT_IN_TRUST_CHAIN) return { kind: 'not_in_trust_chain' };
+			if (resp.status === 400) return { kind: 'unknown_shape' };
 			return { kind: 'refused', status: resp.status, error };
 		},
 
 		async readShapeOnce<T>(table: string, where: string, opts: RequestOptions & { authorization?: string } = {}) {
-			const path = `/shapes?table=${table}&where=${encodeURIComponent(freshWhere(where))}&offset=-1`;
-			const resp = await send('/shapes', {
+			const resp = await send(`/shapes?table=${table}&where=${encodeURIComponent(freshWhere(where))}&offset=-1`, {
 				headers: opts.authorization ? { Authorization: opts.authorization } : undefined,
-			}, opts, url(path));
+			}, opts);
 			if (resp.status === 401) {
 				const body = (await resp.json().catch(() => null)) as { error?: string; shape?: string } | null;
-				if (body?.error === 'read_session_required' && body.shape) return { ok: false, readSessionRequired: body.shape };
+				if (body?.error === 'read_session_required' && body.shape) return { kind: 'read_session_required', shape: body.shape };
 			}
-			if (!resp.ok) return { ok: false, status: resp.status };
+			if (!resp.ok) return { kind: 'failed', status: resp.status };
 			const log = await json<Array<{ value?: T }>>(resp, '/shapes');
-			return { ok: true, rows: log.map((r) => r.value).filter((v): v is T => v !== null && v !== undefined) };
+			return { kind: 'rows', rows: log.map((r) => r.value).filter((v): v is T => v !== null && v !== undefined) };
 		},
 	};
 }
