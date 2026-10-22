@@ -443,7 +443,7 @@ async function runE2E() {
 		// ---- 2. Alice derives her key and wraps it for Bob ----
 		const dialogHash = DialogCrypto.computeDialogHash(alice.userHash, bob.userHash);
 		const aliceKey = DialogCrypto.deriveSenderMsgKey(
-			alice.sign.secretKey, alice.kem.secretKey, alice.contactSkey, bob.userHash);
+			alice.sign.secretKey, alice.kem.secretKey, bob.userHash);
 		const wrapped = await DialogCrypto.wrapSenderMsgKey(aliceKey, bob.kem.publicKey);
 
 		const keyFields = {
@@ -510,7 +510,7 @@ async function runE2E() {
 
 		// ---- 5. Bob replies with a quote (his own key, wrapped for Alice) ----
 		const bobKey = DialogCrypto.deriveSenderMsgKey(
-			bob.sign.secretKey, bob.kem.secretKey, bob.contactSkey, alice.userHash);
+			bob.sign.secretKey, bob.kem.secretKey, alice.userHash);
 		const wrappedForAlice = await DialogCrypto.wrapSenderMsgKey(bobKey, alice.kem.publicKey);
 		const bobKeyFields = {
 			dialog_hash: dialogHash, sender_hash: bob.userHash, peer_hash: alice.userHash,

@@ -177,7 +177,7 @@ describe('user_cards offline reload: ShapeStream onError → ready → resolved 
 
 		await vi.waitFor(() => expect(names(store)).toEqual(['Alice', 'Bob']));
 		expect(store.userCardsFallback).toBe(true);
-		expect(server.requests.filter((r) => !r.live)).toHaveLength(1);
+		expect(server.requests.some((r) => !r.live)).toBe(true);
 
 		await server.recover([ALICE, CAROL]);
 

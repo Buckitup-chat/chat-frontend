@@ -210,7 +210,7 @@ beforeEach(async () => {
 	await waitUntil(() => outbox.isLeader());
 	store = useDialogsStore();
 	dialogHash = store.getDialogHash(peer.userHash)!;
-	senderKey = DialogCrypto.deriveSenderMsgKey(me.sign.secretKey, me.kem.secretKey, bytesToHex(me.contactSk), peer.userHash);
+	senderKey = DialogCrypto.deriveSenderMsgKey(me.sign.secretKey, me.kem.secretKey, peer.userHash);
 	const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, peer.kem.publicKey);
 	const keyFields = {
 		dialog_hash: dialogHash, sender_hash: me.userHash, peer_hash: peer.userHash,

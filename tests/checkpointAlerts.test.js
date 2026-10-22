@@ -4,7 +4,6 @@
 // author's own) and the pointer store backed by memory.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash } from '@/lib/pq/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
@@ -127,7 +126,7 @@ describe('checkpoint alerts', () => {
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer);
 		seedKeyRow();
-		key = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, bytesToHex(me.contactSk), peer);
+		key = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, peer);
 	});
 
 	// The full pipeline on real rows: a signed checkpoint in the feed, the

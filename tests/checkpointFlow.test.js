@@ -13,7 +13,6 @@
 //   rejects — and tails/closure logic degenerates to "every row is a tail".
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
@@ -228,7 +227,7 @@ describe('checkpoint through the store', () => {
 		collections.dialog.keys.rows.set(`${dialogHash}|${author.userHash}`,
 			signedDialogKeyRow(author, { dialog_hash: dialogHash, peer_hash: peer }));
 		senderKey = DialogCrypto.deriveSenderMsgKey(
-			author.signSkey, author.kemSkey, bytesToHex(author.contactSk), peer,
+			author.signSkey, author.kemSkey, peer,
 		);
 	});
 

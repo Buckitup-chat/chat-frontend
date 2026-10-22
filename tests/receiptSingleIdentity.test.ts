@@ -2,7 +2,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { mount } from '@vue/test-utils';
-import { bytesToHex } from '@noble/hashes/utils';
 import { fromBase64 } from '@/lib/pq/signature';
 import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import { encodeContent } from '@/lib/pq/content';
@@ -19,7 +18,7 @@ type Mutation = { modified?: DialogMessageReceiptRow; changes: DialogMessageRece
 const ME = makeTestIdentity(50);
 const PEER = makeTestIdentity(51);
 const DIALOG = DialogCrypto.computeDialogHash(ME.userHash, PEER.userHash);
-const PEER_KEY = DialogCrypto.deriveSenderMsgKey(PEER.signSkey, PEER.kemSkey, bytesToHex(PEER.contactSk), ME.userHash);
+const PEER_KEY = DialogCrypto.deriveSenderMsgKey(PEER.signSkey, PEER.kemSkey, ME.userHash);
 
 const signedMessage = async (id: string, text: string, tweak: Record<string, unknown> = {}) => {
 	const fields = {

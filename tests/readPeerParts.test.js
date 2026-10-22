@@ -4,7 +4,6 @@
 // bundle — and a delivered receipt only when it verifies against the peer.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, fromBase64 } from '@/lib/pq/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { makeTestIdentity, signRow } from './helpers/signedFixtures';
@@ -89,14 +88,14 @@ describe('readPeerParts', () => {
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash);
 		// The peer's key, wrapped for this account, as the peer publishes it.
-		peerKey = DialogCrypto.deriveSenderMsgKey(peer.signSkey, peer.kemSkey, bytesToHex(peer.contactSk), me.userHash);
+		peerKey = DialogCrypto.deriveSenderMsgKey(peer.signSkey, peer.kemSkey, me.userHash);
 		const wrapped = await DialogCrypto.wrapSenderMsgKey(peerKey, fromBase64(me.card.crypt_pkey));
 		collections.dialog.keys.rows.set(`${dialogHash}|${peer.userHash}`, signRow(peer, {
 			dialog_hash: dialogHash, sender_hash: peer.userHash, peer_hash: me.userHash,
 			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
 			deleted_flag: false, owner_timestamp: 1_700_000_000,
 		}));
-		myKey = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, bytesToHex(me.contactSk), peer.userHash);
+		myKey = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 		collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, signRow(me, {
 			dialog_hash: dialogHash, sender_hash: me.userHash, peer_hash: peer.userHash,
 			peer_kem_wrap_key_b64: 'AQ', peer_wrapped_msg_key_b64: 'Ag', deleted_flag: false, owner_timestamp: 1_700_000_000,

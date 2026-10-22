@@ -205,7 +205,7 @@ const receiptsSettled = async (count: number) => {
 };
 
 const peerSends = async (dialogHash: string, texts: string[], firstTail: DialogMessageRow) => {
-	const key = DialogCrypto.deriveSenderMsgKey(PEER.sign.secretKey, PEER.kem.secretKey, bytesToHex(PEER.contactSk), app!.store.currentUserHash as unknown as string);
+	const key = DialogCrypto.deriveSenderMsgKey(PEER.sign.secretKey, PEER.kem.secretKey, app!.store.currentUserHash as unknown as string);
 	const myCard = server.table('user_cards').get(app!.store.currentUserHash as unknown as string)!;
 	const myKemPk = Uint8Array.from(atob(myCard.crypt_pkey!.padEnd(Math.ceil(myCard.crypt_pkey!.length / 4) * 4, '=')), (c) => c.charCodeAt(0));
 	const wrapped = await DialogCrypto.wrapSenderMsgKey(key, myKemPk);

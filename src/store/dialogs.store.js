@@ -652,11 +652,9 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 const em = EncryptionManagerPQ.getInstance();
                 const keys = await em.exportVaultKeys();
                 const signSkey = safeBase64Decode(keys.sign_skey, 'sign_skey');
-                const kemSkey = safeBase64Decode(keys.crypt_skey, 'crypt_skey');
+                const cryptSkey = safeBase64Decode(keys.crypt_skey, 'crypt_skey');
 
-                const senderMsgKey = DialogCrypto.deriveSenderMsgKey(
-                    signSkey, kemSkey, keys.evm_skey, keyRow.peer_hash
-                );
+                const senderMsgKey = DialogCrypto.deriveSenderMsgKey(signSkey, cryptSkey, keyRow.peer_hash);
                 senderMsgKeys.value[cacheKey] = senderMsgKey;
                 return senderMsgKey;
             }

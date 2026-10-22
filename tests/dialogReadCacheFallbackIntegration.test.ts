@@ -129,7 +129,7 @@ describe('IndexedDB read-cache fallback: real dialog gate through Page_Chat.vue 
 
 		const store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash)!;
-		senderKey = DialogCrypto.deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, bytesToHex(peer.contactSk), me.userHash);
+		senderKey = DialogCrypto.deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, me.userHash);
 
 		const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, me.kem.publicKey);
 		const keyFields = {

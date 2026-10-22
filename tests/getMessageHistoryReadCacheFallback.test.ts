@@ -77,7 +77,7 @@ beforeEach(async () => {
 	await clearDialogCacheDb();
 	_resetTouchedForTests();
 
-	senderKey = DialogCrypto.deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, bytesToHex(peer.contactSk), me.userHash);
+	senderKey = DialogCrypto.deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, me.userHash);
 	const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, me.kem.publicKey);
 	keysRowKey = `${DIALOG_HASH}|${peer.userHash}`;
 	const keyFields = {

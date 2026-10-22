@@ -1,7 +1,7 @@
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { sha3_256, sha3_512 } from '@noble/hashes/sha3';
 import { hmac } from '@noble/hashes/hmac';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
+import { bytesToHex } from '@noble/hashes/utils';
 
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 
@@ -28,21 +28,15 @@ export class DialogCrypto {
     /**
      * Derive the sender_msg_key using HKDF-SHA3-256
      */
-    static deriveSenderMsgKey(signSkey, kemSkey, contactSkey, peerUserHash) {
+    static deriveSenderMsgKey(signSkey, cryptSkey, peerUserHash) {
         // Convert peer_user_hash string to bytes
         const peerHashBytes = this.strToBytes(peerUserHash);
-        
-        // IKM = sign_skey || kem_skey || contact_skey || peer_user_hash
-        // Convert hex contactSkey to bytes if it's hex, or handle raw bytes
-        const contactSkeyBytes = typeof contactSkey === 'string' ? hexToBytes(contactSkey) : contactSkey;
-        
-        const IKM = new Uint8Array(
-            signSkey.length + kemSkey.length + contactSkeyBytes.length + peerHashBytes.length
-        );
+
+        // IKM = sign_skey || crypt_skey || peer_user_hash
+        const IKM = new Uint8Array(signSkey.length + cryptSkey.length + peerHashBytes.length);
         IKM.set(signSkey, 0);
-        IKM.set(kemSkey, signSkey.length);
-        IKM.set(contactSkeyBytes, signSkey.length + kemSkey.length);
-        IKM.set(peerHashBytes, signSkey.length + kemSkey.length + contactSkeyBytes.length);
+        IKM.set(cryptSkey, signSkey.length);
+        IKM.set(peerHashBytes, signSkey.length + cryptSkey.length);
 
         const salt = this.strToBytes("buckitup/dialog-mk/v1");
 

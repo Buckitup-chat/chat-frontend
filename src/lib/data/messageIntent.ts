@@ -50,8 +50,8 @@ async function signSkeyBytes(): Promise<Uint8Array> {
 export async function ownSenderMsgKey(peerHash: string): Promise<Uint8Array> {
 	const keys = await vaultKeys();
 	const signSkey = decode(keys.sign_skey, 'sign_skey');
-	const kemSkey = decode(keys.crypt_skey, 'crypt_skey');
-	return DialogCrypto.deriveSenderMsgKey(signSkey, kemSkey, keys.evm_skey, peerHash);
+	const cryptSkey = decode(keys.crypt_skey, 'crypt_skey');
+	return DialogCrypto.deriveSenderMsgKey(signSkey, cryptSkey, peerHash);
 }
 
 const pendingKeyPublish = new Map<string, Promise<void>>();

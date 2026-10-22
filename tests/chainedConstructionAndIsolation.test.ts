@@ -117,7 +117,7 @@ beforeEach(async () => {
 	store = useDialogsStore();
 	dialogHash = store.getDialogHash(peer.userHash)!;
 	collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, signedDialogKeyRow(me, { dialog_hash: dialogHash, peer_hash: peer.userHash }));
-	myKey = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, me.vault.evm_skey, peer.userHash);
+	myKey = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 	collections.dialog.messages.rows.set(MESSAGE_ID, signRow(me, {
 		message_id: MESSAGE_ID, dialog_hash: dialogHash, sender_hash: me.userHash,
 		content_b64: await DialogCrypto.encryptContent(myKey, encodeContent([{ kind: 'text', text: 'original' }])),

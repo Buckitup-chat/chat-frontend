@@ -98,7 +98,7 @@ vi.mock('vue-router', () => ({
 }));
 
 const dialogHashOf = (me: Identity, peer: Identity) => DialogCrypto.computeDialogHash(me.userHash, peer.userHash);
-const senderKeyOf = (author: Identity, other: Identity) => DialogCrypto.deriveSenderMsgKey(author.sign.secretKey, author.kem.secretKey, bytesToHex(author.contactSk), other.userHash);
+const senderKeyOf = (author: Identity, other: Identity) => DialogCrypto.deriveSenderMsgKey(author.sign.secretKey, author.kem.secretKey, other.userHash);
 
 const signedMessage = async (dialogHash: string, key: SenderKey, id: string, text: string, tweak: Record<string, unknown> = {}) => {
 	const fields = {

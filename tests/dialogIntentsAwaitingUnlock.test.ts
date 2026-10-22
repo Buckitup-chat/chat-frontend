@@ -150,7 +150,7 @@ beforeEach(async () => {
 	page = await boot();
 	dialogHash = page.store.getDialogHash(peer.userHash)!;
 	collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, signedDialogKeyRow(me, { dialog_hash: dialogHash, peer_hash: peer.userHash }));
-	myKey = (await DialogCrypto()).deriveSenderMsgKey(me.signSkey, me.kemSkey, me.vault.evm_skey, peer.userHash);
+	myKey = (await DialogCrypto()).deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 	tip = await messageRevision('original', 1_700_000_100, null);
 	collections.dialog.messages.rows.set(MESSAGE_ID, tip);
 	await page.store.admitMessageRow(tip); // as the chat does when it renders the message

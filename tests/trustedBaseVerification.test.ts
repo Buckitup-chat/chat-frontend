@@ -175,7 +175,7 @@ describe('dialog_keys: only a verified key row gives a key', () => {
 		setActivePinia(createPinia());
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash)!;
-		peerSenderKey = DialogCrypto.deriveSenderMsgKey(peer.signSkey, peer.kemSkey, peer.vault.evm_skey, me.userHash);
+		peerSenderKey = DialogCrypto.deriveSenderMsgKey(peer.signSkey, peer.kemSkey, me.userHash);
 		const myCryptPkey = Uint8Array.from(atob(me.card.crypt_pkey as string), (c) => c.charCodeAt(0));
 		const wrapped = await DialogCrypto.wrapSenderMsgKey(peerSenderKey, myCryptPkey) as { peerKemWrapKeyB64: string; peerWrappedMsgKeyB64: string };
 		peerKeyRow = signedDialogKeyRow(peer, {
@@ -217,7 +217,7 @@ describe('dialog_keys: only a verified key row gives a key', () => {
 		keyRowAt({ ...own, peer_hash: me.userHash });
 		expect(await store.getSenderMsgKey(dialogHash, me.userHash)).toBeNull();
 		keyRowAt(own);
-		const expected = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, me.vault.evm_skey, peer.userHash);
+		const expected = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 		expect(sameBytes(await store.getSenderMsgKey(dialogHash, me.userHash), expected)).toBe(true);
 	});
 });
@@ -271,7 +271,7 @@ describe('checkpoints: read only from admitted revisions', () => {
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash)!;
 		collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, signedDialogKeyRow(me, { dialog_hash: dialogHash, peer_hash: peer.userHash }));
-		myKey = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, me.vault.evm_skey, peer.userHash);
+		myKey = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 	});
 	const message = async (parts: unknown[], refs: Record<string, string> = {}, ts = 1_700_000_500) => signRow(me, {
 		message_id: `dmsg_0199cccc-0000-7000-8000-${String(++seq).padStart(12, '0')}`,

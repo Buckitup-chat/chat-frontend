@@ -146,7 +146,7 @@ describe('tombstone admission through the feed', () => {
 		};
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peerId.userHash);
-		senderKey = DialogCrypto.deriveSenderMsgKey(author.sign.secretKey, author.kem.secretKey, bytesToHex(author.contactSk), peerId.userHash);
+		senderKey = DialogCrypto.deriveSenderMsgKey(author.sign.secretKey, author.kem.secretKey, peerId.userHash);
 		const ownWrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, peerId.kem.publicKey);
 		collections.dialog.keys.rows.set(`${dialogHash}|${author.userHash}`, signedKeyRow(author, {
 			dialog_hash: dialogHash, sender_hash: author.userHash, peer_hash: peerId.userHash,
@@ -159,7 +159,7 @@ describe('tombstone admission through the feed', () => {
 		// does it: wrapped to our ML-KEM public key in the peer's dialog_keys
 		// row. Without it the gate parks the peer's rows on "no key" and
 		// nothing downstream — including receipts — ever happens.
-		peerSenderKey = DialogCrypto.deriveSenderMsgKey(peerId.sign.secretKey, peerId.kem.secretKey, bytesToHex(peerId.contactSk), author.userHash);
+		peerSenderKey = DialogCrypto.deriveSenderMsgKey(peerId.sign.secretKey, peerId.kem.secretKey, author.userHash);
 		const wrapped = await DialogCrypto.wrapSenderMsgKey(peerSenderKey, author.kem.publicKey);
 		collections.dialog.keys.rows.set(`${dialogHash}|${peerId.userHash}`, signedKeyRow(peerId, {
 			dialog_hash: dialogHash, sender_hash: peerId.userHash, peer_hash: author.userHash,
