@@ -4,11 +4,11 @@ import {
   deriveSignHash,
   toBase64,
 } from "@buckitup/pq-client/signature";
-import { proveChallenge } from "@buckitup/pq-client/challengeProof";
+import { transport } from "@/lib/data/transport";
 
 // Row columns are padded base64 (toBase64); the canonical payload builder
-// lives in the protocol module — see packages/pq-client/src/signature.ts. The challenge
-// proof is packages/pq-client/src/challengeProof.ts.
+// lives in the protocol module — see packages/pq-client/src/signature.ts.
+// Requests go through the protocol library's transport (src/lib/data/transport.ts).
 
 const SIGN_HASH_RELATIONS = new Set(['dialog_messages', 'dialog_messages_versions']);
 
@@ -21,37 +21,12 @@ const timedFetch = (url, init = {}) =>
   fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 
 export const api = {
-  ingestWithAuthEach: async (mutations, signSkey) => {
-    const challengeResp = await api.getChallenge();
-    const signature = await proveChallenge(challengeResp.challenge, (message) => ml_dsa87.sign(message, signSkey));
+  ingestWithAuthEach: (mutations, signSkey) =>
+    transport.ingestEachResponse(mutations, (message) => ml_dsa87.sign(message, signSkey)),
 
-    return timedFetch(`${ELECTRIC_API_URL}/ingest_each`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        auth: {
-          challenge_id: challengeResp.challenge_id,
-          signature,
-        },
-        mutations,
-      }),
-    });
-  },
+  getDeviceIdentity: () => transport.deviceIdentity(),
 
-  getDeviceIdentity: async () => {
-    const resp = await timedFetch(`${ELECTRIC_API_URL}/device_identity`, {
-      headers: { accept: "application/json" },
-    });
-    if (!resp.ok) throw new Error(`device_identity: HTTP ${resp.status}`);
-    return resp.json();
-  },
-
-  getChallenge: async () => {
-    const resp = await timedFetch(`${ELECTRIC_API_URL}/challenge`, {
-      headers: { accept: "application/json" },
-    });
-    return resp.json();
-  },
+  getChallenge: () => transport.challenge(),
 
   claimOwner: (userHash, challengeId, signature) =>
     timedFetch(`${ELECTRIC_API_URL}/owner_claim`, {
