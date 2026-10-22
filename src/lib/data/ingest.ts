@@ -21,7 +21,7 @@ import {
 } from './outbox';
 import { setWriteProber, syncBlockedWrites } from './accessGate';
 import type { IngestRowResult } from './types';
-import { checkResults, NOT_IN_TRUST_CHAIN, TransportError } from '@buckitup/pq-client/transport';
+import { checkResults, isNoAnswer, NOT_IN_TRUST_CHAIN, TransportError } from '@buckitup/pq-client/transport';
 
 export class IngestError extends Error {
 	/** true when retrying can never succeed (server-side validation) */
@@ -111,8 +111,7 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 		if (e instanceof VaultLockedError || e instanceof AccountMismatchError) throw e;
 		// Only a request that got no answer — fetch failed or timed out — is a
 		// fact about connectivity; a server that answered with garbage is not.
-		const network = (e instanceof TransportError && e.network)
-			|| e instanceof TypeError || (e as Error)?.name === 'TimeoutError' || (e as Error)?.name === 'AbortError';
+		const network = (e instanceof TransportError && e.network) || isNoAnswer(e);
 		throw new IngestError(`ingest network error: ${e}`, { permanent: false, network });
 	}
 

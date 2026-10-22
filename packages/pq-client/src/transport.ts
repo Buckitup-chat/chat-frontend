@@ -104,7 +104,8 @@ export type ShapeReadResponse<T> =
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-const isNoAnswer = (e: unknown): boolean =>
+/** The request got no answer: fetch failed, timed out or was aborted. */
+export const isNoAnswer = (e: unknown): boolean =>
 	e instanceof TypeError || (e as Error)?.name === 'TimeoutError' || (e as Error)?.name === 'AbortError';
 
 /**
