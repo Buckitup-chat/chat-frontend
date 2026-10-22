@@ -8,7 +8,7 @@
 //   2. an authenticator without PRF: create and get succeed and the page
 //      says "no PRF", with no error.
 //
-//   npm run build                                   # or: npm run build:sandbox:prf
+//   npm run build                                   # or: npm run build:sandboxes
 //   node sandbox/prf-probe/scripts/check.mjs        # serves dist/sandbox/prf-probe
 //
 // PRF_PROBE_DIST names another directory to serve (e.g. sandbox/prf-probe/dist
@@ -24,7 +24,7 @@ const dist = resolve(process.env.PRF_PROBE_DIST ?? join(root, 'dist', 'sandbox',
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
 
 if (!(await stat(join(dist, 'index.html')).then((s) => s.isFile(), () => false))) {
-	console.error(`no build at ${dist}: run \`npm run build:sandbox:prf\` first`);
+	console.error(`no build at ${dist}: run \`npm run build:sandboxes\` first`);
 	process.exit(2);
 }
 

@@ -17,7 +17,7 @@ creation time (`localStorage["prfProbe.credential"]`).
 
 **https://buckitup.xyz/app/sandbox/prf-probe/index.html**
 
-The app's build (`npm run build`, script `build:sandbox:prf`) builds this page
+The app's build (`npm run build`, script `build:sandboxes`) builds this page
 into `dist/sandbox/prf-probe/`, so every deploy serves the current one. Keep
 `index.html` in the address: the server answers any other path under `/app/`
 with the app itself. The app's service worker leaves `/sandbox/` to the
@@ -65,7 +65,7 @@ From the repository root:
 
 ```bash
 npx vite --config sandbox/prf-probe/vite.config.ts --host     # dev server
-npm run build:sandbox:prf                                      # → dist/sandbox/prf-probe
+npm run build:sandboxes                                        # → dist/sandbox/prf-probe
 node sandbox/prf-probe/scripts/check.mjs                       # Chromium, virtual authenticator
 npx tsc -p sandbox/prf-probe/tsconfig.json                     # types
 ```

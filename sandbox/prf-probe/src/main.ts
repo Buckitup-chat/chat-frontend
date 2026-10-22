@@ -258,13 +258,6 @@ function summarize(): Summary {
 	const hybridGets = gets.filter(viaHybrid);
 	const lastCreate = creates.at(-1);
 
-	// Every salt1 fingerprint per credential, from creates and gets.
-	const byCredential = new Map<string, string[]>();
-	for (const s of [...creates, ...gets]) {
-		const fp = s.step === 'create' ? s.prfFirstAtCreate : s.prfFirst;
-		if (!fp || !s.credentialId) continue;
-		byCredential.set(s.credentialId, [...(byCredential.get(s.credentialId) ?? []), fp]);
-	}
 	const getFps = new Map<string, string[]>();
 	for (const s of gets) {
 		if (s.prfFirst && s.credentialId) getFps.set(s.credentialId, [...(getFps.get(s.credentialId) ?? []), s.prfFirst]);
