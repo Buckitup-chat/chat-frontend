@@ -11,8 +11,9 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "node --max-old-space-size=4096 node_modules/.bin/vite build && npm run build:sandbox",
+    "build": "node --max-old-space-size=4096 node_modules/.bin/vite build && npm run build:sandbox && npm run build:sandbox:prf",
     "build:sandbox": "vite build --config sandbox/handshake-pq2/vite.config.ts --outDir ../../dist/sandbox/handshake-pq2 --emptyOutDir",
+    "build:sandbox:prf": "vite build --config sandbox/prf-probe/vite.config.ts --outDir ../../dist/sandbox/prf-probe --emptyOutDir",
     "preview": "vite preview",
     "lint": "eslint src",
     "format": "prettier --write src",

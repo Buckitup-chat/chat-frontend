@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+	<meta name="theme-color" content="#ffffff" />
+	<meta name="referrer" content="no-referrer" />
+	<title>BuckitUp PRF probe</title>
+</head>
+<body>
+	<div class="sheet">
+		<header>
+			<div class="title-block">
+				<div class="icon-badge" aria-hidden="true">🔑</div>
+				<div>
+					<div class="title">Passkey PRF probe</div>
+					<div class="subtitle">Does this device's passkey support the PRF extension?</div>
+				</div>
+			</div>
+		</header>
+
+		<section class="intro">
+			<ol>
+				<li>Tap <b>1. Create passkey</b> and confirm with your fingerprint, face or PIN.</li>
+				<li>Tap <b>2. Get with PRF (this passkey)</b> <b>twice</b>.</li>
+				<li>Tap <b>3. Get with PRF (any passkey)</b> once.</li>
+				<li>Optional, on a computer: <b>4. Cross-device</b>, then scan the QR code with a phone that
+					already made a passkey on this page.</li>
+				<li>Tap <b>Copy report</b> and paste it into the support table.</li>
+			</ol>
+			<p class="hint">
+				Nothing leaves this device: there is no server. The passkey is a throwaway test one named
+				"prf-probe-…" (delete it afterwards in your password manager if you like). The page shows only
+				short fingerprints of the PRF outputs, never the outputs themselves, and keeps only the passkey's
+				id in this browser.
+			</p>
+		</section>
+
+		<div class="divider">Environment</div>
+		<dl id="env" class="kv"></dl>
+
+		<div class="divider">Steps</div>
+		<div class="steps">
+			<button id="create" class="btn btn-dark btn-lg wide">1. Create passkey with PRF</button>
+			<button id="getThis" class="btn btn-dark btn-lg wide">2. Get with PRF (this passkey)</button>
+			<button id="getAny" class="btn btn-dark btn-lg wide">3. Get with PRF (any passkey)</button>
+			<button id="getHybrid" class="btn btn-outline btn-lg wide">4. Cross-device (phone via QR)</button>
+			<p class="hint center">
+				Step 4 asks the browser for a passkey on another device. On a computer it shows a QR code: scan it
+				with a phone that made a passkey on this page (open the same address there and run step 1 first).
+			</p>
+			<div id="stored" class="hint center"></div>
+		</div>
+
+		<div class="divider">Summary</div>
+		<dl id="summary" class="kv"></dl>
+
+		<div class="row">
+			<button id="copy" class="btn btn-dark">Copy report</button>
+			<button id="forget" class="btn btn-outline">Forget stored passkey</button>
+			<button id="clear" class="btn btn-outline">Clear results</button>
+		</div>
+		<div id="copyStatus" class="hint center"></div>
+
+		<div class="divider">Log</div>
+		<ol id="log" reversed></ol>
+
+		<details>
+			<summary>Report JSON</summary>
+			<pre id="report"></pre>
+		</details>
+	</div>
+
+	<script type="module" src="./src/main.ts"></script>
+</body>
+</html>

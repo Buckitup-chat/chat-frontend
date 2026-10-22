@@ -1,0 +1,129 @@
+/* The handshake sandbox's look (sandbox/handshake-pq2/src/style.css, after the
+   app's own): a white sheet, black buttons, readable on a phone. */
+:root {
+	--dark: #000;
+	--primary: #8e2b77;
+	--text: #212529;
+	--muted: #6c757d;
+	--line: #ccc;
+	--block: #f2f2f2;
+	--ok: #1d7a15;
+	--warn: #8a5a10;
+	--bad: #dc3545;
+	--radius: 1rem;
+	font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+	color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+	margin: 0;
+	background: #fff;
+	color: var(--text);
+	padding: env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 16px);
+}
+
+.sheet { max-width: 500px; margin: 0 auto; padding: 1rem; }
+
+header { display: flex; align-items: center; margin-bottom: 0.5rem; }
+.title-block { display: flex; align-items: center; gap: 0.5rem; }
+.icon-badge {
+	flex: none;
+	width: 2.5rem;
+	height: 2.5rem;
+	border-radius: 50%;
+	background: var(--dark);
+	color: #fff;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 1.1rem;
+}
+.title { font-size: 1.25rem; }
+.subtitle { color: var(--muted); font-size: 0.8rem; }
+
+.intro {
+	background: var(--block);
+	border-radius: var(--radius);
+	padding: 0.75rem 1rem;
+	font-size: 0.9rem;
+}
+.intro ol { margin: 0 0 0.5rem; padding-left: 1.25rem; }
+.intro li { margin: 0.2rem 0; }
+
+.divider {
+	display: flex;
+	align-items: center;
+	text-align: center;
+	margin: 1rem 0 0.5rem;
+	font-weight: bold;
+	color: #333;
+}
+.divider::before,
+.divider::after {
+	content: '';
+	flex: 1;
+	border-bottom: 1px solid var(--line);
+	margin: 0 10px;
+}
+
+.hint { color: var(--muted); font-size: 0.875rem; margin: 0.25rem 0; }
+.hint.center { text-align: center; }
+
+/* Key–value lists: environment and summary. */
+.kv {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: 0.25rem 0.75rem;
+	margin: 0;
+	font-size: 0.85rem;
+}
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; word-break: break-word; white-space: pre-line; font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem; }
+.kv dd.yes { color: var(--ok); font-weight: 600; }
+.kv dd.no { color: var(--bad); font-weight: 600; }
+.kv dd.unknown { color: var(--warn); }
+
+.steps { display: flex; flex-direction: column; align-items: center; }
+
+/* Bootstrap's .btn, .btn-dark, .btn-outline-dark, .btn-lg */
+.btn {
+	font: inherit;
+	font-size: 1rem;
+	line-height: 1.5;
+	padding: 0.375rem 0.75rem;
+	border-radius: 0.375rem;
+	border: 1px solid var(--dark);
+	cursor: pointer;
+}
+.btn:disabled { opacity: 0.4; cursor: default; }
+.btn-dark { background: var(--dark); color: #fff; }
+.btn-outline { background: transparent; color: var(--dark); }
+.btn-outline:active { background: var(--dark); color: #fff; }
+.btn-lg { font-size: 1.1rem; padding: 0.5rem 1rem; border-radius: 0.5rem; }
+.wide { width: min(100%, 360px); margin: 0.3rem 0; }
+
+.row { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center; margin: 0.75rem 0 0.25rem; }
+
+#log {
+	font: 12px/1.4 ui-monospace, Menlo, monospace;
+	padding-left: 28px;
+	margin: 4px 0;
+	word-break: break-word;
+}
+#log li.ok { color: var(--ok); }
+#log li.error { color: var(--bad); }
+
+details { width: 100%; margin-top: 0.5rem; }
+summary { color: var(--muted); padding: 4px 0; }
+#report {
+	font: 11px/1.35 ui-monospace, Menlo, monospace;
+	background: var(--block);
+	border-radius: 0.5rem;
+	padding: 0.5rem;
+	white-space: pre-wrap;
+	word-break: break-all;
+	user-select: all;
+}
