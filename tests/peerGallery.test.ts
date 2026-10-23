@@ -40,7 +40,7 @@ const electricBody = (rows: Row[]) => JSON.stringify([
 ]);
 
 const fakeFetch = async (input: string | URL): Promise<Response> => {
-	const url = new URL(String(input));
+	const url = new URL(String(input), 'http://host'); // the client may request a path on its own origin
 	const where = url.searchParams.get('where') ?? '';
 	requests.push(where);
 	if (respond) return respond();
