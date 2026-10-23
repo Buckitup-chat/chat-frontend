@@ -18,18 +18,35 @@ is the one the app would make.
 
 On both phones, in Chrome (Android) or Safari (iOS):
 
-**https://raw.githack.com/Buckitup-chat/chat-frontend/sandbox-handshake-pq2/sandbox/handshake-pq2/dist/index.html**
+**https://buckitup.xyz/app/sandbox/handshake-pq2/index.html**
+
+The app's build (`npm run build`) builds this page from source into
+`dist/sandbox/handshake-pq2/`, so every deploy serves the current one. Keep
+`index.html` in the address: the server answers any other path under `/app/`
+with the app itself. The app's service worker leaves `/sandbox/` to the
+network and does not precache the page.
+
+The committed `dist/` here serves the same page from the repository:
+https://raw.githack.com/Buckitup-chat/chat-frontend/main/sandbox/handshake-pq2/dist/index.html
 
 Allow the camera. On iOS, allow "Local Network" if asked — without it
 Safari cannot reach the other phone directly.
 
 ## Test by hand
 
-Hold the phones face to face, screens towards each other, about 25–40 cm
-apart: closer, a front camera does not focus. Each screen shows its code;
-the small preview in the corner is its camera. The frame around the code
-changes colour as the session advances (grey A → purple B → dark purple C →
-blue D), and turns green, amber or red at the end.
+The page looks like the app's "Add contact": tap "Start handshake scanning"
+on both phones. Hold the phones face to face, screens towards each other,
+about 25–40 cm apart: closer, a front camera does not focus. Each screen
+shows its code, with its camera under it. The code changes colour as the
+session advances, as in the app: black while showing A, purple once the
+other phone is read (B), dark purple once its key is proved (C, D). At the
+end the result appears under the code — ✅ confirmed, 🟡 verified only, or
+⌛ expired — with the six digits.
+
+⚙︎ → QR decoder chooses how the camera reads codes. "As the app" (the
+default) is what the app does: the browser's own detector where there is one
+(Chrome on Android), qr-scanner's defaults otherwise. "Bundled" is
+qr-scanner's own decoder on every browser, at up to 1080 px.
 
 | # | Setup | Expected |
 |---|---|---|
@@ -50,7 +67,7 @@ identity instead. Without the reload, B would see its own identity and
 ignore the code.
 
 What to report: the result on each phone, whether the six digits matched,
-the "Timings" list, and — on failures — the log (long-press to copy, or a
+the "Timings" list, and — on failures — the Log at the bottom (long-press to copy, or a
 screenshot). The log names the ICE candidates each side offered (`host` or
 `srflx`, and the address), which tells whether the phones could reach each
 other at all.
