@@ -4,7 +4,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import { randomBytes } from '@noble/hashes/utils';
 import { hmac } from '@noble/hashes/hmac';
 import { sha3_256 } from '@noble/hashes/sha3';
-import { hkdfDerive } from './hkdf';
+import { hkdfDerive, sixDigits } from './hkdf';
 import { sealWithKey, assertSealed, openSealed, VaultEnvelopeError } from './vaultEnvelope';
 import { toBase64, fromBase64, toBase64Url } from './signature';
 
@@ -69,11 +69,8 @@ export const parseInvite = (text: string): LinkInvite => {
  * share returned by hand (pq_recovery_shares § Manual return), each under its
  * own salt.
  */
-export const sixDigitCode = (sharedSecret: Uint8Array, salt: string, info: string): string => {
-	const tag = hkdfDerive(sharedSecret, salt, info, 4);
-	const n = ((tag[0] << 24) | (tag[1] << 16) | (tag[2] << 8) | tag[3]) >>> 0;
-	return String(n % 1_000_000).padStart(6, '0');
-};
+export const sixDigitCode = (sharedSecret: Uint8Array, salt: string, info: string): string =>
+	sixDigits(hkdfDerive(sharedSecret, salt, info, 4));
 
 // Both derivations take the room, so a session key is bound to the room it
 // was negotiated in and cannot be replayed into another.

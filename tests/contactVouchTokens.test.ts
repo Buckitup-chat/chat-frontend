@@ -24,13 +24,15 @@ vi.mock('vue-router', async () => {
 });
 vi.mock('@/components/Account_Item.vue', () => ({ default: { render: () => null } }));
 const ScannerEngine = defineComponent({
-	emits: ['completed', 'scanning', 'countdown'],
+	emits: ['completed', 'scanning'],
 	setup(_, { expose }) {
 		expose({ toggleScanner: async () => {}, stopScan: () => {} });
 		return () => h('div');
 	},
 });
 vi.mock('@/components/engines/QRScannerEngine.vue', () => ({ default: ScannerEngine }));
+// No relay in these tests: the fake backend answers what they are about.
+vi.mock('@/lib/data/turnCredentials', () => ({ prefetchRelay: async () => {}, relayIceServers: async () => [], clearRelayCredentials: () => {} }));
 
 const DEVICE_ID = 'Server_test_node';
 const READ = `device.${DEVICE_ID}.storage.read`;
@@ -268,7 +270,13 @@ const confirmByQr = async (peer: Client, shownKey = cardOf(peer.hash).contact_pk
 	const Modal = (await import('@/components/modal/views/Modal_QrHandshake.vue')).default;
 	const wrapper = mount(Modal, { global: { provide: { $swal: swal, $mitt: { emit: vi.fn() }, $router: { push: vi.fn() } } } });
 	await flushPromises();
-	wrapper.findComponent(ScannerEngine).vm.$emit('completed', { user_hash: peer.hash, name: peer.name, contact_pkey: shownKey });
+	// The scanner's result: confirmed only when the key shown in person is the one the peer's card certifies.
+	const card = cardOf(peer.hash);
+	const confirmed = shownKey === card.contact_pkey;
+	wrapper.findComponent(ScannerEngine).vm.$emit('completed', {
+		user_hash: peer.hash, name: peer.name, contact_pkey: shownKey, confirmed, card: confirmed ? card : null, sas: '123456',
+		cause: confirmed ? null : 'refused',
+	});
 	await flushPromises();
 	await wrapper.findAll('button').find((b) => /Save contact|Open contact/.test(b.text()))!.trigger('click');
 	await vi.waitFor(() => expect(swal.fire).toHaveBeenCalled(), { timeout: 15_000 });
@@ -383,7 +391,7 @@ describe('FRON-23: access follows the vouches, not the local contact flag', () =
 		let vouchesFail = true;
 		let attempts = 0;
 		vouches.unavailable = () => { attempts++; return vouchesFail; };
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		expect(confirmedOf(store, Bob)).toBe(true);
 		await vi.waitFor(() => expect(attempts).toBeGreaterThan(0), { timeout: 10_000 });
 		expect(gateAllows(Owner.hash, Bob.hash, 'read') || gateAllows(Owner.hash, Bob.hash, 'write')).toBe(false);
@@ -409,14 +417,15 @@ describe('FRON-23: confirming again, removing, and confirming after removal', ()
 		await register(Owner);
 		deviceIdentity = identityFor(accountOf(Owner));
 		const { store } = Owner.app;
-		const bobKey = cardOf(Bob.hash).contact_pkey as string;
+		const bobCard = cardOf(Bob.hash) as never;
+		const bobKey = cardOf(Bob.hash).contact_pkey;
 		const both = () => [READ, WRITE].map((kind) => vouchOf(kind, Owner.hash, Bob.hash));
 
-		await store.confirmContact(Bob.hash, bobKey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, bobCard, bobKey, { name: 'Bob' });
 		await vi.waitFor(() => expect(vouches.rows.size).toBe(2), { timeout: 10_000 });
 		const granted = both().map((row) => ({ ...row! }));
 
-		await store.confirmContact(Bob.hash, bobKey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, bobCard, bobKey, { name: 'Bob' });
 		await settle();
 		expect(vouches.posts).toHaveLength(2);
 		expect(both()).toEqual(granted);
@@ -426,7 +435,7 @@ describe('FRON-23: confirming again, removing, and confirming after removal', ()
 		const revoked = both().map((row) => ({ ...row! }));
 		revoked.forEach((row, i) => expect(row.owner_timestamp).toBeGreaterThan(granted[i].owner_timestamp));
 
-		await store.confirmContact(Bob.hash, bobKey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, bobCard, bobKey, { name: 'Bob' });
 		await vi.waitFor(() => expect(both().map((row) => row?.deleted_flag)).toEqual([false, false]), { timeout: 10_000 });
 		both().forEach((row, i) => expect(row!.owner_timestamp).toBeGreaterThan(revoked[i].owner_timestamp));
 
@@ -443,7 +452,7 @@ describe('FRON-23: what the server already holds', () => {
 		await register(Owner);
 		deviceIdentity = identityFor(accountOf(Owner));
 		const { store } = Owner.app;
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(vouches.rows.size).toBe(2), { timeout: 10_000 });
 		await store.deleteContact(Bob.hash);
 		await vi.waitFor(() => expect([READ, WRITE].map((k) => vouchOf(k, Owner.hash, Bob.hash)?.deleted_flag)).toEqual([true, true]), { timeout: 10_000 });
@@ -455,7 +464,7 @@ describe('FRON-23: what the server already holds', () => {
 		const read = vouchOf(READ, Owner.hash, Bob.hash)!;
 		vouches.rows.set(`${READ}|${Owner.hash}|${Bob.hash}`, { ...read, owner_timestamp: read.owner_timestamp + 1 });
 
-		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(vouchOf(WRITE, Owner.hash, Bob.hash)?.deleted_flag).toBe(false), { timeout: 10_000 });
 		await settle();
 		expect(vouches.posts.slice(before).map((p) => [p.row.kind, p.type, p.result.status])).toEqual([[WRITE, 'update', 'ok']]);
@@ -466,7 +475,7 @@ describe('FRON-23: what the server already holds', () => {
 		const before = await grantedThenRevoked();
 		vouches.shapeLag = 1;
 
-		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect([READ, WRITE].map((k) => vouchOf(k, Owner.hash, Bob.hash)?.deleted_flag)).toEqual([false, false]), { timeout: 15_000 });
 		await settle();
 		const posts = vouches.posts.slice(before).map((p) => `${p.row.kind === READ ? 'read' : 'write'} ${p.type} ${p.result.status}`);
@@ -492,7 +501,7 @@ describe('FRON-23: no owner vouch without a proven owner and device', () => {
 		deviceIdentity = answer;
 		const { store } = Owner.app;
 
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		expect(confirmedOf(store, Bob)).toBe(true);
 		await vi.waitFor(() => expect(deviceIdentityRequests).toBeGreaterThan(0), { timeout: 10_000 });
 		await settle();
@@ -508,7 +517,7 @@ describe('FRON-23: an ownerless device', () => {
 		deviceIdentity = identityFor(null, accountOf(Owner));
 		const { store } = Owner.app;
 
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 
 		await vi.waitFor(() => expect(vouches.rows.size).toBe(2), { timeout: 10_000 });
 		expect(claimedBy).toEqual(accountOf(Owner));
@@ -529,7 +538,7 @@ describe('FRON-23: the account that starts a grant is the one that signs it', ()
 		const before = deviceIdentityRequests;
 		const { store } = Owner.app;
 
-		const confirming = store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		const confirming = store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(deviceIdentityRequests).toBe(before + 1), { timeout: 10_000 });
 		await store.logout();
 		await store.registerNewUser({ name: 'Second' } as never);
@@ -552,7 +561,7 @@ describe('FRON-23: contact actions that are not a confirmed handshake', () => {
 		const { store, $dialogs } = Owner.app;
 
 		const swal = await confirmByQr(Bob, cardOf(Owner.hash).contact_pkey);
-		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ icon: 'success', title: 'Contact added' }));
+		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ icon: 'warning', title: 'Key verified in person; not yet confirmed' }));
 		expect(confirmedOf(store, Bob)).toBeFalsy();
 
 		await store.saveContact(stranger(9).user_hash, { name: 'Added by id', contact_pkey: 'pkC' });
@@ -578,7 +587,7 @@ describe('FRON-23: failures between the two rows and across sessions', () => {
 		let writeFails = true;
 		let writeAttempts = 0;
 		vouches.unavailable = (row) => row.kind === WRITE && writeFails && ++writeAttempts > 0;
-		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(writeAttempts).toBeGreaterThan(0), { timeout: 10_000 });
 		expect(vouchOf(WRITE, Owner.hash, Bob.hash)).toBeUndefined();
 
@@ -604,7 +613,7 @@ describe('FRON-23: failures between the two rows and across sessions', () => {
 		let vouchesFail = true;
 		let attempts = 0;
 		vouches.unavailable = () => { attempts++; return vouchesFail; };
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(attempts).toBeGreaterThan(0), { timeout: 10_000 });
 
 		await store.logout();
@@ -644,7 +653,7 @@ describe('FRON-23: the confirmed contact\'s own client', () => {
 
 		await startApp(Owner);
 		await signIn(Owner);
-		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(vouches.rows.size, 'the owner\'s client published the grants').toBe(2), { timeout: 10_000 });
 
 		const beforeBobReturns = bobWrites().length;
@@ -669,7 +678,7 @@ describe('FRON-23: a revoke the server has not seen yet', () => {
 		let down = true;
 		let attempts = 0;
 		vouches.unavailable = () => { attempts++; return down; };
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(attempts).toBeGreaterThan(0), { timeout: 10_000 });
 		await store.deleteContact(Bob.hash);
 
@@ -696,7 +705,7 @@ describe('FRON-23: a revoke the server has not seen yet', () => {
 		let writeDown = true;
 		let writeAttempts = 0;
 		vouches.unavailable = (row) => row.kind === WRITE && writeDown && ++writeAttempts > 0;
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => {
 			expect(liveGrants()).toEqual([READ]);
 			expect(writeAttempts).toBeGreaterThan(0);
@@ -727,7 +736,7 @@ describe('FRON-23: a revoke the server has not seen yet', () => {
 		await register(Owner);
 		deviceIdentity = identityFor(accountOf(Owner));
 		const { store } = Owner.app;
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(liveGrants()).toEqual([READ, WRITE]), { timeout: 10_000 });
 
 		vouches.shapeDown = true;
@@ -765,7 +774,7 @@ describe('FRON-23: a scope that cannot be finished now is not reported finished'
 		await register(Owner);
 		deviceIdentity = identityFor(accountOf(Owner));
 		const { store } = Owner.app;
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(stateOf()).toEqual([false, false]), { timeout: 10_000 });
 
 		const genuine = vouchOf(READ, Owner.hash, Bob.hash)!;
@@ -792,7 +801,7 @@ describe('FRON-23: a scope that cannot be finished now is not reported finished'
 		await register(Owner);
 		deviceIdentity = identityFor(accountOf(Owner));
 		const { store } = Owner.app;
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(stateOf()).toEqual([false, false]), { timeout: 10_000 });
 		await store.deleteContact(Bob.hash);
 		await vi.waitFor(() => expect(stateOf()).toEqual([true, true]), { timeout: 10_000 });
@@ -802,7 +811,7 @@ describe('FRON-23: a scope that cannot be finished now is not reported finished'
 		let attempts = 0;
 		vouches.unavailable = () => { attempts++; return down; };
 		vouches.shapeLag = 1;
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(attempts).toBeGreaterThan(0), { timeout: 10_000 });
 
 		await startApp(Owner);
@@ -840,7 +849,7 @@ describe('transitive access: the owner vouches for A, A confirms B in person', (
 		return { hash: id.userHash, account: { user_hash: id.userHash, sign_pkey: id.signPkeyB64 }, vouch };
 	};
 	const annConfirmsBob = async () => {
-		await Ann.app.store.confirmContact(Bob.hash, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await Ann.app.store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 	};
 	const annVouchesBob = () => [READ, WRITE].map((k) => vouchOf(k, Ann.hash, Bob.hash)?.deleted_flag);
 
@@ -849,7 +858,7 @@ describe('transitive access: the owner vouches for A, A confirms B in person', (
 		await register(Ann);
 		await register(Owner);
 		deviceIdentity = identityFor(accountOf(Owner));
-		await Owner.app.store.confirmContact(Ann.hash, cardOf(Ann.hash).contact_pkey, { name: 'Ann' });
+		await Owner.app.store.confirmContact(Ann.hash, cardOf(Ann.hash) as never, cardOf(Ann.hash).contact_pkey, { name: 'Ann' });
 		await vi.waitFor(() => expect(access(Owner.hash, Ann)).toEqual({ read: true, write: true }), { timeout: 10_000 });
 
 		await switchTo(Ann);
@@ -896,7 +905,7 @@ describe('transitive access: the owner vouches for A, A confirms B in person', (
 		await register(Ann);
 		await register(Owner);
 		deviceIdentity = identityFor(accountOf(Owner));
-		await Owner.app.store.confirmContact(Ann.hash, cardOf(Ann.hash).contact_pkey, { name: 'Ann' });
+		await Owner.app.store.confirmContact(Ann.hash, cardOf(Ann.hash) as never, cardOf(Ann.hash).contact_pkey, { name: 'Ann' });
 		await vi.waitFor(() => expect(access(Owner.hash, Ann)).toEqual({ read: true, write: true }), { timeout: 10_000 });
 
 		await switchTo(Ann);
@@ -924,7 +933,7 @@ describe('transitive access: the owner vouches for A, A confirms B in person', (
 		await register(Ann);
 		await register(Owner);
 		deviceIdentity = identityFor(accountOf(Owner));
-		await Owner.app.store.confirmContact(Ann.hash, cardOf(Ann.hash).contact_pkey, { name: 'Ann' });
+		await Owner.app.store.confirmContact(Ann.hash, cardOf(Ann.hash) as never, cardOf(Ann.hash).contact_pkey, { name: 'Ann' });
 		await vi.waitFor(() => expect(access(Owner.hash, Ann)).toEqual({ read: true, write: true }), { timeout: 10_000 });
 
 		await switchTo(Ann);
@@ -987,11 +996,11 @@ describe('transitive access from an account whose own writes still wait for appr
 		const annToBob = () => vouches.posts.filter((p) => p.row.issuer_hash === Ann.hash && p.row.subject_hash === Bob.hash);
 		const contacts = () => Ann.app.store.contactsMap as Record<string, { confirmed?: boolean } | undefined>;
 
-		expect(cardVouchesForContactKey(cardOf(Bob.hash) as never, cardOf(Ann.hash).contact_pkey as string)).toBe(false);
+		expect(cardVouchesForContactKey(cardOf(Bob.hash) as never, Bob.hash, cardOf(Ann.hash).contact_pkey as string)).toBe(false);
 		await confirmByQr(Bob, cardOf(Ann.hash).contact_pkey);
 		expect(contacts()[Bob.hash]?.confirmed).toBeFalsy();
 
-		expect(cardVouchesForContactKey(cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey as string)).toBe(true);
+		expect(cardVouchesForContactKey(cardOf(Bob.hash) as never, Bob.hash, cardOf(Bob.hash).contact_pkey as string)).toBe(true);
 		const swal = await confirmByQr(Bob);
 		expect(swal.fire).not.toHaveBeenCalledWith(expect.objectContaining({ icon: 'error' }));
 		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ title: 'Contact confirmed on this device' }));

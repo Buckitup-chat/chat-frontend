@@ -76,8 +76,10 @@ relay, and building from `main` alone builds the old design.
   `src/libs/QRHandshakeManager.js`.
 - Add `EncryptionManagerPQ.signHandshakePQ(M)` and `signedOwnCard()` (spec
   §5 step 6).
-- Change `confirmContact` to `confirmContact(userHash, card, fields?)`: it
-  takes the verified card and runs `cardVouchesForContactKey` itself (§6).
+- Change `confirmContact` to `confirmContact(userHash, card, contactPkey,
+  fields?)`: it takes the verified card and the key the handshake proved in
+  person, and checks them itself (§6) — the card is `userHash`'s, verifies,
+  is not a deleted account's, and certifies that key.
   Today it checks **nothing** — it writes `confirmed: true` for whatever key it
   is given, and the only check is in `Modal_QrHandshake.vue`. Move the check
   into the store, keep it in no caller, and finish the §6 contract
@@ -136,17 +138,17 @@ relay, and building from `main` alone builds the old design.
   screen before the scanner. At session start, use what is cached or wait at
   most 1 s, then go without.
 - **Until the backend endpoint exists:** a dev-only setting
-  (`VITE_HANDSHAKE_TURN_URL`, `…_USER`, `…_PASS`) for a local TURN server with
-  a static user, e.g. coturn:
+  (`HANDSHAKE_TURN_URL`, `…_USER`, `…_PASS`, in the environment or
+  `.env.local`) for a local TURN server with a static user, e.g. coturn:
 
   ```
   docker run --network=host coturn/coturn -n --lt-cred-mech --user=pq2:<password> --realm=buckitup --listening-port=3478 --fingerprint --no-cli
   ```
 
-  Read them only under `import.meta.env.DEV`, as `src/config/sandbox.ts`
-  gates dev-only surfaces: Vite inlines any `VITE_*` value set at build time,
-  so without the guard a developer's `.env.local` or a hosting variable puts
-  the password into the deployed bundle. Remove the setting when the endpoint
+  No `VITE_` prefix: Vite inlines any `VITE_*` value set at build time, so a
+  developer's `.env.local` or a hosting variable would put the password into
+  the deployed bundle. `vite.config.js` reads them and defines them on the dev
+  server only; every build gets null. Remove the setting when the endpoint
   lands.
 
 ### 5. Tests (spec §8)

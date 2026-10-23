@@ -21,6 +21,9 @@ export interface Identity {
 	card: UserCardRow;
 }
 
+/** ML-DSA-87 under the identity key. */
+export const signPq = (message: Uint8Array, signSkey: Uint8Array): Uint8Array => ml_dsa87.sign(message, signSkey);
+
 export const createIdentity = (name: string): Identity => {
 	const sign = ml_dsa87.keygen(randomBytes(32));
 	const crypt = ml_kem1024.keygen(randomBytes(64));

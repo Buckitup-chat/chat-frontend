@@ -21,6 +21,7 @@ export default [
 				// Build-time constants injected by Vite (see vite.config.js `define`)
 				API_URL: 'readonly',
 				ELECTRIC_API_URL: 'readonly',
+				HANDSHAKE_DEV_TURN: 'readonly',
 				IS_PRODUCTION: 'readonly',
 				TM_BOT: 'readonly',
 			},
@@ -81,6 +82,13 @@ export default [
 			'vue/no-unused-vars': 'warn',
 			'vue/no-ref-as-operand': 'warn',
 			'vue/no-side-effects-in-computed-properties': 'warn',
+
+			// `import.meta.env` taken whole is inlined into the bundle with every
+			// VITE_* variable set at build time; name the one you read.
+			'no-restricted-syntax': ['error', {
+				selector: "MemberExpression[object.type='MetaProperty'][property.name='env']:not(MemberExpression > MemberExpression.object)",
+				message: 'Read import.meta.env.NAME, not import.meta.env as a whole: the whole object puts every VITE_* value into the bundle.',
+			}],
 		},
 	},
 ];

@@ -1,5 +1,5 @@
 import { getUserCardsCollection } from './collections';
-import { readAcceptedBase } from './acceptedSnapshot';
+import { readAcceptedBase, freshestOf } from './acceptedSnapshot';
 import { enqueueIntent, intentsOf } from './intents';
 import { signAndDispatchIntent } from './intentRecovery';
 import { DurabilityError, type DeliveryHandle } from './ingest';
@@ -227,6 +227,37 @@ async function shapeCardOf(row: UserCardRow | undefined): Promise<ShapeCard> {
 	return verification.status === 'verified' ? { kind: 'card', row } : { kind: 'unverified' };
 }
 
+/**
+ * The freshest self-signed card of this account the device knows, or null: the
+ * card the server last accepted from this device, or the card the live
+ * user_cards shape holds — the two sources an update's timestamp is decided
+ * from (decideCardConstruction), each verified. A deleted card is no card.
+ */
+export async function freshestOwnCard(userHash: string): Promise<UserCardRow | null> {
+	let accepted: ShapeCard = { kind: 'none' };
+	try {
+		const read = await readAcceptedBase('user_cards', userHash, userHash);
+		// What goes to a peer verifies, wherever it was kept.
+		if (read.kind === 'present') accepted = await shapeCardOf(read.row);
+	} catch (e) {
+		console.warn('[userCardIntent] the accepted card cannot be read:', e);
+	}
+	const shapeCard = await liveShapeCard(userHash);
+	const freshest = freshestOf(accepted.kind === 'card' ? accepted.row : null, shapeCard.kind === 'card' ? shapeCard.row : null);
+	return freshest && !freshest.deleted_flag && freshest.sign_b64 ? freshest : null;
+}
+
+/**
+ * The account's card in the user_cards shape, verified — only while the
+ * shape is live: a stale or failed shape proves neither the card nor its
+ * absence. The lookup an ordinary card update dates itself from, and that
+ * freshestOwnCard sends.
+ */
+async function liveShapeCard(userHash: string): Promise<ShapeCard> {
+	const cards = getUserCardsCollection();
+	return shapeCardOf(isLiveNow(cards) ? cards.get(userHash) as UserCardRow | undefined : undefined);
+}
+
 export async function acceptedCardTimestamp(userHash: string): Promise<number | null> {
 	const accepted = await readAcceptedBase('user_cards', userHash, userHash);
 	return accepted.kind === 'present' ? timestampOf(accepted.row.owner_timestamp) : null;
@@ -261,7 +292,7 @@ export async function decideCardConstruction(
 	const cards = getUserCardsCollection();
 
 	if (mode === 'update') {
-		let shapeCard = await shapeCardOf(isLiveNow(cards) ? cards.get(userHash) as UserCardRow | undefined : undefined);
+		let shapeCard = await liveShapeCard(userHash);
 		const pending = await readPendingCardWrites(userHash);
 		if ('kind' in pending) return pending;
 		if (accepted.kind === 'missing' && !pending.inFlight && shapeCard.kind !== 'card') {

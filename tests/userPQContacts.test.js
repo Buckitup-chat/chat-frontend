@@ -4,6 +4,7 @@
 // neither another tab's change nor a list this tab never loaded is written over.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
+import { makeTestIdentity, resignedCard } from './helpers/signedFixtures';
 
 class FakeEM extends EventTarget {
 	#userHash = null;
@@ -50,7 +51,11 @@ vi.mock('@/lib/data/attach', () => ({ preloadWithRetry: async () => false }));
 const { userPQStore } = await import('@/store/userPQ.store');
 const { mergeJsonPatch, stripPatchDirectives } = await import('@/lib/data/storageIntent');
 
-const A = 'u_' + 'a'.repeat(128);
+// Ann has a real, self-signed card: confirmContact verifies the card it is given.
+const ann = makeTestIdentity(31, 'Ann');
+const annCard = ann.card;
+const A = ann.userHash;
+const pkA = annCard.contact_pkey;
 const B = 'u_' + 'b'.repeat(128);
 
 describe('the contacts slot', () => {
@@ -65,31 +70,31 @@ describe('the contacts slot', () => {
 	});
 
 	it('confirms a contact only through confirmContact; saveContact ignores a confirmed field', async () => {
-		await store.confirmContact(A, 'pkA', { name: 'Ann' });
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann' });
 		// A view object mixing in network card fields must not confirm anyone.
 		await store.saveContact(B, { name: 'Bob', contact_pkey: 'pkB', confirmed: true });
-		expect(fake.stored.contacts[A]).toMatchObject({ confirmed: true, contact_pkey: 'pkA' });
+		expect(fake.stored.contacts[A]).toMatchObject({ confirmed: true, contact_pkey: pkA });
 		expect(fake.stored.contacts[B]).toMatchObject({ contact_pkey: 'pkB' });
 		expect(fake.stored.contacts[B].confirmed).toBeFalsy();
 	});
 
 	it('keeps a contact confirmed in person as confirmed, and one added by id as not', async () => {
-		await store.confirmContact(A, 'pkA', { name: 'Ann' });
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann' });
 		await store.saveContact(B, { name: 'Bob', contact_pkey: 'pkB' });
-		expect(fake.stored.contacts[A]).toMatchObject({ confirmed: true, contact_pkey: 'pkA' });
+		expect(fake.stored.contacts[A]).toMatchObject({ confirmed: true, contact_pkey: pkA });
 		expect(fake.stored.contacts[B]).toMatchObject({ contact_pkey: 'pkB' });
 		expect(fake.stored.contacts[B].confirmed).toBeFalsy();
 	});
 
 	it('keeps every other contact whole when one is deleted', async () => {
-		await store.confirmContact(A, 'pkA', { name: 'Ann' });
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann' });
 		await store.saveContact(B, { name: 'Bob', contact_pkey: 'pkB' });
 		await store.deleteContact(B);
-		expect(fake.list).toEqual([{ user_hash: A, name: 'Ann', contact_pkey: 'pkA', confirmed: true }]);
+		expect(fake.list).toEqual([{ user_hash: A, name: 'Ann', contact_pkey: pkA, confirmed: true, confirmedAt: expect.any(Number) }]);
 	});
 
 	it('keeps a confirmation another tab wrote after this one loaded', async () => {
-		await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA' });
+		await store.saveContact(A, { name: 'Ann', contact_pkey: pkA });
 		// The other tab scanned Ann in person; this tab's copy still says unconfirmed.
 		fake.stored.contacts[A] = { ...fake.stored.contacts[A], confirmed: true };
 		await store.saveContact(B, { name: 'Bob', contact_pkey: 'pkB' });
@@ -98,21 +103,21 @@ describe('the contacts slot', () => {
 	});
 
 	it('adds to the list the server holds even when this tab never loaded it', async () => {
-		fake.stored = { contacts: { [A]: { user_hash: A, name: 'Ann', contact_pkey: 'pkA', confirmed: true } } };
+		fake.stored = { contacts: { [A]: { user_hash: A, name: 'Ann', contact_pkey: pkA, confirmed: true } } };
 		store.contactsMap = {};
 		await store.saveContact(B, { name: 'Bob', contact_pkey: 'pkB' });
 		expect(fake.list.map((c) => c.user_hash).sort()).toEqual([A, B].sort());
 	});
 
 	it('does not unconfirm a contact when it is saved again without the flag', async () => {
-		await store.confirmContact(A, 'pkA', { name: 'Ann' });
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann' });
 		await store.saveContact(A, { hidden: true });
 		expect(fake.stored.contacts[A]).toMatchObject({ confirmed: true, hidden: true });
 	});
 
 	it('does not carry a deleted contact\'s confirmation into one added again before either is sent', async () => {
 		const { mergeJsonPatch: merge, stripPatchDirectives: strip } = await import('@/lib/data/storageIntent');
-		const stored = { contacts: { [A]: { user_hash: A, name: 'Ann', contact_pkey: 'pkA', confirmed: true } } };
+		const stored = { contacts: { [A]: { user_hash: A, name: 'Ann', contact_pkey: pkA, confirmed: true } } };
 		// Two unsent patches of the slot coalesce before either is signed.
 		const coalesced = merge({ contacts: { [A]: null } }, { contacts: { [A]: { user_hash: A, name: 'Ann again', contact_pkey: 'pkA2' } } });
 		expect(strip(merge(stored, coalesced)).contacts).toEqual({ [A]: { user_hash: A, name: 'Ann again', contact_pkey: 'pkA2' } });
@@ -120,8 +125,58 @@ describe('the contacts slot', () => {
 
 	it('confirms a contact added by id once it is scanned in person, with the key the handshake proved', async () => {
 		await store.saveContact(A, { name: 'Ann', contact_pkey: 'pk-from-the-network' });
-		await store.confirmContact(A, 'pk-proved-in-person');
-		expect(fake.list).toEqual([{ user_hash: A, name: 'Ann', contact_pkey: 'pk-proved-in-person', confirmed: true }]);
+		await store.confirmContact(A, annCard, pkA);
+		expect(fake.list).toEqual([{ user_hash: A, name: 'Ann', contact_pkey: pkA, confirmed: true, confirmedAt: expect.any(Number) }]);
+	});
+
+	it('refuses a card that is not a verified card of the contact, and writes nothing', async () => {
+		const bob = makeTestIdentity(32, 'Bob');
+		const refused = [
+			null,
+			bob.card, // another identity's card
+			{ ...annCard, name: 'Ann (edited)' }, // its signature no longer covers it
+			resignedCard(ann, { contact_pkey: bob.card.contact_pkey }), // a key Ann's identity never certified
+		];
+		for (const card of refused) {
+			await expect(store.confirmContact(A, card, pkA, { name: 'Ann' })).rejects.toThrow(/cannot be confirmed/);
+		}
+		// Ann's own, valid card, but the key shown in person is someone else's: Mallory showing Ann's user_hash.
+		await expect(store.confirmContact(A, annCard, bob.card.contact_pkey, { name: 'Ann' })).rejects.toThrow(/cannot be confirmed/);
+		await expect(store.confirmContact(A, annCard, undefined, { name: 'Ann' })).rejects.toThrow(/cannot be confirmed/);
+		// Ann's account deleted: its last card verifies and certifies the key, and still confirms nothing.
+		await expect(store.confirmContact(A, resignedCard(ann, { deleted_flag: true }), pkA, { name: 'Ann' })).rejects.toThrow(/account is deleted/);
+		expect(fake.stored).toBeNull();
+		expect(store.contactsMap[A]).toBeUndefined();
+	});
+
+	it('stores the key proved in person and stamps the confirmation; the caller\'s fields set neither', async () => {
+		const before = Math.floor(Date.now() / 1000);
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann', contact_pkey: 'pk-from-the-caller', confirmed: false, confirmedAt: 1 });
+		const saved = fake.stored.contacts[A];
+		expect(saved).toMatchObject({ name: 'Ann', contact_pkey: pkA, confirmed: true });
+		expect(saved.confirmedAt).toBeGreaterThanOrEqual(before);
+		await store.saveContact(A, { name: 'Ann', confirmedAt: 1 });
+		expect(fake.stored.contacts[A].confirmedAt).toBe(saved.confirmedAt);
+	});
+
+	it('takes the confirmation away when a save changes the contact\'s key, and keeps it when the key stays', async () => {
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann' });
+		await store.saveContact(A, { name: 'Ann', contact_pkey: pkA, notes: 'met at the café' });
+		expect(fake.stored.contacts[A]).toMatchObject({ confirmed: true, notes: 'met at the café' });
+		await store.saveContact(A, { contact_pkey: 'pk-someone-said-is-new' });
+		expect(fake.stored.contacts[A].confirmed).toBeUndefined();
+		expect(fake.stored.contacts[A].confirmedAt).toBeUndefined();
+		expect(store.contactsMap[A].confirmed).toBeUndefined();
+	});
+
+	it('takes the confirmation away against the stored contact, not this tab\'s copy', async () => {
+		await store.saveContact(A, { name: 'Ann', contact_pkey: 'pk-old' });
+		// Another tab confirmed Ann in person with her card's key; this tab still shows the old key, unconfirmed.
+		fake.stored.contacts[A] = { ...fake.stored.contacts[A], contact_pkey: pkA, confirmed: true, confirmedAt: 5 };
+		await store.saveContact(A, { contact_pkey: pkA });
+		expect(fake.stored.contacts[A]).toMatchObject({ contact_pkey: pkA, confirmed: true, confirmedAt: 5 });
+		await store.saveContact(A, { contact_pkey: 'pk-old' });
+		expect(fake.stored.contacts[A].confirmed).toBeUndefined();
 	});
 
 	it('shows an edit at once, and does not let an older write\'s answer undo a newer edit', async () => {
@@ -162,14 +217,14 @@ describe('the contacts slot', () => {
 		};
 
 		it('rejects with the error and takes the edit back: an unconfirmed contact does not show as confirmed', async () => {
-			await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA' });
+			await store.saveContact(A, { name: 'Ann', contact_pkey: pkA });
 			const held = holdNextPatch();
-			const write = store.confirmContact(A, 'pk-proved');
+			const write = store.confirmContact(A, annCard, pkA);
 			expect(store.contactsMap[A].confirmed).toBe(true); // shown at once
 			const error = new Error('the server refused the write');
 			held.fail(error);
 			await expect(write).rejects.toBe(error);
-			expect(store.contactsMap[A]).toEqual({ user_hash: A, name: 'Ann', contact_pkey: 'pkA' });
+			expect(store.contactsMap[A]).toEqual({ user_hash: A, name: 'Ann', contact_pkey: pkA });
 			expect(fake.stored.contacts[A].confirmed).toBeUndefined();
 		});
 
@@ -183,7 +238,7 @@ describe('the contacts slot', () => {
 		});
 
 		it('does not undo a newer edit of the same contact that is still out, and hands it what to go back to', async () => {
-			await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA' });
+			await store.saveContact(A, { name: 'Ann', contact_pkey: pkA });
 			const older = holdNextPatch();
 			const first = store.saveContact(A, { name: 'An' });
 			const newer = holdNextPatch();
@@ -197,7 +252,7 @@ describe('the contacts slot', () => {
 		});
 
 		it('rolls back when newer and older writes fail in reverse order', async () => {
-			await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA' });
+			await store.saveContact(A, { name: 'Ann', contact_pkey: pkA });
 			expect(fake.stored.contacts[A].name).toBe('Ann');
 			expect(store.contactsMap[A].name).toBe('Ann');
 			const older = holdNextPatch();
@@ -216,7 +271,7 @@ describe('the contacts slot', () => {
 		});
 
 		it('does not undo an edit of the same contact the server has taken since', async () => {
-			await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA' });
+			await store.saveContact(A, { name: 'Ann', contact_pkey: pkA });
 			const older = holdNextPatch();
 			const first = store.saveContact(A, { name: 'An' });
 			await store.saveContact(A, { name: 'Anna' });
@@ -226,9 +281,9 @@ describe('the contacts slot', () => {
 		});
 
 		it('takes back only its own contact when another contact\'s edit is still out', async () => {
-			await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA' });
+			await store.saveContact(A, { name: 'Ann', contact_pkey: pkA });
 			const older = holdNextPatch();
-			const first = store.confirmContact(A, 'pk-proved');
+			const first = store.confirmContact(A, annCard, pkA);
 			const newer = holdNextPatch();
 			const second = store.saveContact(B, { name: 'Bob' });
 			older.fail(new Error('lost'));
@@ -245,7 +300,7 @@ describe('the contacts slot', () => {
 			// The first edit's answer is held, then the second's; the test settles
 			// them in the order under test.
 			const twoEdits = async () => {
-				await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA' });
+				await store.saveContact(A, { name: 'Ann', contact_pkey: pkA });
 				const older = holdNextPatch();
 				const first = store.saveContact(A, { name: 'An' });
 				const newer = holdNextPatch();
@@ -313,7 +368,7 @@ describe('the contacts slot', () => {
 		});
 
 		it('does not bring the previous account\'s contacts back after a switch', async () => {
-			await store.saveContact(A, { name: 'Ann', contact_pkey: 'pkA' });
+			await store.saveContact(A, { name: 'Ann', contact_pkey: pkA });
 			const held = holdNextPatch();
 			const write = store.saveContact(A, { name: 'An' });
 			await store.logout();
@@ -340,7 +395,7 @@ describe('the cached avatar of a contact', () => {
 	});
 
 	it('is kept next to the contact, and a save of the contact leaves it', async () => {
-		await store.confirmContact(A, 'pkA', { name: 'Ann' });
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann' });
 		expect(await store.cacheContactAvatar(A, cached)).toBe(true);
 		expect(fake.stored.contacts[A]).toMatchObject({ confirmed: true, avatar: cached });
 		// A view object carries the cache back in; a save writes only what a contact is.

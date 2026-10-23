@@ -5,7 +5,7 @@ import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { HandshakeEngine, type EngineOptions, type Outcome, type Stage } from '../src/engine';
 import { FakeNetwork } from '../src/channel';
 import { createIdentity, type Identity } from '../src/identity';
-import { encode, parse, signOptical, transcript } from '../src/protocol';
+import { encode, parse, signOptical, transcript } from '@/lib/pq/handshake';
 import { FRAME_DATA_CHARS } from '../src/frames';
 
 interface Side {
@@ -131,7 +131,7 @@ describe('what is refused', () => {
 		const honest = side(bob, net);
 		const impostor = side(mallory, net, { claim: { userHash: alice.userHash, card: alice.card } });
 		await run(honest, impostor);
-		expect(honest.outcome).toMatchObject({ kind: 'verified', reason: 'card does not certify the contact key the codes showed' });
+		expect(honest.outcome).toMatchObject({ kind: 'verified', reason: 'the card does not certify the contact key the codes showed' });
 	});
 
 	it('its own code is ignored', async () => {

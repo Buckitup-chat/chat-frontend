@@ -12,7 +12,7 @@ import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { drainPendingWrites, resumePendingWrites, stopDrainLoop, deliverStoredWrite, IngestError, DurabilityError } from '@/lib/data/ingest';
 import {
   storeUserCardIntentUnderLock, storeCardIntentUnderLock, withCardLock, decideCardConstruction, acceptedCardTimestamp,
-  BootstrapCardRejectedError, CardAuthoringBlockedError,
+  BootstrapCardRejectedError, CardAuthoringBlockedError, freshestOwnCard,
 } from '@/lib/data/userCardIntent';
 import { VaultLockedError } from '@/lib/data/keyCustody';
 import {
@@ -42,6 +42,7 @@ import { forgetPeerGalleryReads, fetchGalleryRow } from '@/lib/avatars/peerGalle
 import { readSharedGalleryRow, galleryKeyFromB64 } from '@/lib/avatars/sharedGallery';
 import { publishInitialSharedGallery, publishSharedGalleryRecord, avatarsSlotOf } from '@/lib/avatars/sharedGalleryPublish';
 import { clearSessions } from '@/lib/data/readSession';
+import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
 import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
@@ -755,6 +756,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#cryptSkey = null;
     }
     this.#evmSkey = null;
+    this.#contactSkey = null;
     this.#metaSeed = null;
     this.#currentUserHash = null;
     this.#bootstrapUserHash = null;
@@ -764,6 +766,7 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#slotResolver = null;
     resetUserStorageCollection();
     clearSessions();
+    clearRelayCredentials();
     resetGate();
     forgetPeerGalleryReads();
 
@@ -957,6 +960,31 @@ export class EncryptionManagerPQ extends EventTarget {
     const hash = sha256(msg);
     const signature = await secp.signAsync(hash, this.#contactSkey);
     return bytesToHex(signature.toCompactRawBytes());
+  }
+
+  /**
+   * The optical handshake's post-quantum signature (docs/task-handshake-pq2.md
+   * §4): ML-DSA-87 over M, under the identity key. M carries its own protocol
+   * label, so this signs nothing a challenge or a row could be.
+   */
+  async signHandshakePQ(message) {
+    if (!this.#signSkey) {
+      throw new Error('Not authenticated or secret key not loaded');
+    }
+    if (!(message instanceof Uint8Array)) throw new TypeError('The handshake message is bytes');
+    return ml_dsa87.sign(message, this.#signSkey);
+  }
+
+  /**
+   * This account's freshest self-signed card row (with sign_b64), as the
+   * server holds it — what the handshake sends its peer — or null when none
+   * was ever published from or seen by this device.
+   */
+  async signedOwnCard() {
+    const userHash = this.#currentUserHash;
+    if (!userHash) return null;
+    const card = await freshestOwnCard(userHash);
+    return this.#currentUserHash === userHash ? card : null;
   }
 
   /**

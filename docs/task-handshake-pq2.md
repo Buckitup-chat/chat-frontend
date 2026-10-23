@@ -114,8 +114,11 @@ the camera; "read" means the camera decoded a code. A device's own data is
 rest of the session: a later code naming a different `user_hash` or
 `contact_pkey` is ignored.
 
-1. **Start.** Generate `nonce_me`; create the session's QWBP connection
-   (§5a); show **A**; start the 90 s session timer.
+1. **Start.** Once the camera runs — a permission prompt takes nothing out
+   of the session — generate `nonce_me`; create the session's QWBP connection
+   (§5a); show **A**; start the 90 s session timer. If this side cannot sign
+   its code (three reads in a row), the session ends with that cause and no
+   result.
 2. **Read A** (state 1 only): bind the counterpart; compute `T`, sign it; show
    **B**.
 3. **Read B** (states 1–2): bind the counterpart if not bound (both scanned
@@ -146,16 +149,26 @@ rest of the session: a later code naming a different `user_hash` or
    ```
 
    The card is the freshest self-signed card row (with `sign_b64`), not the
-   unsigned local registry entry. `EncryptionManagerPQ.signedOwnCard()` (new)
-   returns it through the same freshest-of lookup `#pushOwnCard` uses today,
-   taken out into one private helper. If none exists (never published,
-   offline), the handshake ends *optically verified*.
+   unsigned local registry entry: `EncryptionManagerPQ.signedOwnCard()` takes
+   the fresher of the accepted copy and the live shape's card, each verified,
+   through the lookup an ordinary card update dates itself from. A side with
+   no card (never published, offline) or whose signature over `M` fails sends
+   a refusal in its place, so that the other phone names the real cause:
+
+   ```json
+   { "type": "PQ2_REFUSE", "cause": "no-card" | "no-signature" }
+   ```
+
+   It still checks what the peer sends. With no channel at all, it names its
+   own cause rather than the missing channel.
 
    On receipt: the card vouches for the bound counterpart and key —
-   `cardVouchesForContactKey`, extended to check `user_hash` as well — and
+   `contactKeyVouch`: the card is that `user_hash`'s, verifies, is not a
+   deleted account's, and certifies the key — and
    `ML-DSA-87.verify(sig, M, card.sign_pkey)` holds. Both, and the
    counterpart is **confirmed**. Any failure is logged, the
-   handshake ends *optically verified* only, and the card is dropped.
+   handshake ends *optically verified* only with its cause (a refused card, a
+   deleted account, the peer's refusal), and the card is dropped.
    The camera stops decoding once both payloads are known; nothing is left to
    read while the channel opens and the ML-DSA work runs.
 7. **Done.** Stop the camera; keep the last code on screen (the counterpart
@@ -196,13 +209,16 @@ base64 — the proof ingest and read sessions already send. One helper signs it
 for all of them; a test pins the bytes, since a proof over anything else is
 refused and the handshake then runs without a relay, silently.
 
-The client keeps the credentials in memory and asks again when less than
-150 s remain: a session (90 s, then 15 s for the channel and 10 s for the
+The client keeps the credentials in memory and renews them in the background
+once less than 150 s remain (half the lifetime, for a credential that lives
+less than 300 s): a session (90 s, then 15 s for the channel and 10 s for the
 confirmation) must not outlive its credential, or the relay refuses it
-mid-session. At session start it uses what it has, or waits at most 1 s for a
-request in flight. A failure, an offline phone, `503 turn_unavailable` or a
-timeout all mean no relay: the handshake goes on with the phone's own
-addresses, which is all a shared network needs.
+mid-session. At session start it takes what it holds when that lasts the
+session, else waits at most 1 s for the renewal, then takes the freshest
+credential still valid. A failure, an offline phone, `503 turn_unavailable`
+or a timeout all mean no relay, remembered for a minute or a 429's
+`retry_after`: the handshake goes on with the phone's own addresses, which is
+all a shared network needs.
 
 **One connection per session, created at start.** A relay allocation takes up
 to a second or two, so the session creates its QWBP connection in step 1, with
@@ -214,7 +230,8 @@ payload is shown first in
 C or D, never before the optical check. There is no retry with other servers:
 they would mean new codes, so a new session.
 
-**What goes into the code.** UDP addresses only, at most six:
+**What goes into the code.** UDP addresses only, no mDNS names (`….local`:
+19 bytes each, and resolvable only on the same link), at most six:
 - the relay's first, at most two;
 - then one STUN-found address — the relay answers STUN too;
 - then the phone's own (host) addresses;
@@ -250,19 +267,21 @@ the handshake *optically verified*.
 
 `Modal_QrHandshake.vue`, on `completed`:
 
-- `confirmed` and not a contact yet → `confirmContact(user_hash, card, { name, notes: '', hidden: false })`; toast "Contact added and confirmed", SAS shown.
-- `confirmed` and already a contact → `confirmContact(user_hash, card)`; toast "Contact confirmed".
+- `confirmed` and not a contact yet → `confirmContact(user_hash, card, contact_pkey, { name, notes: '', hidden: false })`; toast "Contact added and confirmed", SAS shown.
+- `confirmed` and already a contact → `confirmContact(user_hash, card, contact_pkey)`; toast "Contact confirmed".
 - not `confirmed` → `saveContact(user_hash, { name, notes: '', hidden: false, contact_pkey })` if new; toast "Key verified in person; not yet confirmed" with the reason.
 - The contact page opens by `user_hash`.
 
 `confirmContact` is the only path that sets `confirmed` (`src/store/userPQ.store.js`),
-and it no longer trusts its caller: it takes the verified card and runs
-`cardVouchesForContactKey` itself, refusing when it fails. It sets
+and it trusts no caller: it takes the verified card and the key the handshake
+proved in person, and checks them itself (`contactKeyVouch`) — the card is
+`user_hash`'s, verifies, is not a deleted account's, and certifies that key —
+refusing when they do not hold. It stores that key and sets
 `confirmedAt` (unix seconds) itself; neither field is among those
 `saveContact` callers may write (`STORED_FIELDS`). A `saveContact` that
 changes the `contact_pkey` of a confirmed contact clears `confirmed`: the
-confirmation was of the old key. The modal no longer derives `confirmed` from
-the card alone (`onHandshakeCompleted`); the engine decides.
+confirmation was of the old key. The modal does not derive `confirmed`; the
+engine decides, and the modal words the engine's cause when it is not.
 
 The modal keeps its own-account check: a handshake whose counterpart is the
 signed-in account is refused before anything is saved.
@@ -272,27 +291,38 @@ The card is not written into `allNetworkUsers` (§1).
 ## 7. Code layout
 
 - `src/lib/pq/handshake.ts` — pure functions, no DOM: `encode`/`parse` for A–D
-  (length-checked), `transcript(a, b)`, `pqMessage(T, fpA, fpB)`, `sasOf(T)`,
-  the transport fingerprint via `qwbp`'s own `decode(payload).fingerprint`
-  (no second parser of its format), and the confirm-message check
+  (length-checked), `transcript(a, b)`, `pqMessage(T, fps)`, `sasOf(T, fps)`
+  (`fps`: each party's fingerprint by `user_hash`, ordered as `T` orders
+  them), `sessionTag(T)`, the transport fingerprint via `qwbp`'s own
+  `decode(payload).fingerprint` (no second parser of its format), and the
+  confirm-message check
   (`checkConfirm(msg, bound, T, fps) → { ok, card } | { ok: false, reason }`).
-- `src/components/engines/QRScannerEngine.vue` — camera, QR rendering, the
-  state machine and the QWBP connection, calling the module above. Session
-  state is one object, reset by `start()`.
+- `src/lib/handshake/engine.ts` — the state machine, a plain class over a
+  `ChannelAdapter`, one instance per session; `src/lib/handshake/qwbpChannel.ts`
+  — the adapter over the session's QWBP connection.
+- `src/components/engines/QRScannerEngine.vue` — camera and QR rendering,
+  around one engine per session. A session id is checked after every await,
+  so an old session cannot draw over, stop the camera of, or complete a new
+  one. `completed` carries, beside the fields of §5 step 7, `cause` when not
+  confirmed; the modal shows the result and words the cause.
 - `EncryptionManagerPQ` gains `signHandshakePQ(M)` (ML-DSA-87 under
-  `sign_skey`) beside `signContactChallenge`.
-- `src/store/userPQ.store.js` — `confirmContact(userHash, card)` as in §6.
+  `sign_skey`) beside `signContactChallenge`, and `signedOwnCard()`.
+- `src/store/userPQ.store.js` — `confirmContact(userHash, card, contactPkey, fields?)` as
+  in §6.
 - `src/lib/data/turnCredentials.ts` — fetch, memory cache, expiry and the
-  1 s wait of the relay credentials (§5a), with the challenge proof extracted
-  from `api.ingestWithAuthEach` into one helper.
-- The address list (§5a) — a pure function beside it, ported from the
-  sandbox's `relaysOf` and selection in `channel.ts`.
+  1 s wait of the relay credentials (§5a). The challenge proof is one helper,
+  `src/lib/pq/challengeProof.ts`, for ingest, read sessions and this.
+- `src/lib/data/handshakeAddresses.ts` — the address list (§5a), a pure
+  function, and the `selectCandidates` hook built on it.
 - `qwbp` — patched with the `selectCandidates` hook and the early payload
-  (§5a), versioned with the app (a pinned fork or a committed patch), and
-  offered upstream.
-- Reference implementation: `sandbox/handshake-pq2` (`src/protocol.ts`,
-  `src/engine.ts`, `src/channel.ts`) runs this protocol on two phones; its
-  `frames.ts` is the animated-QR experiment of §10 and stays out of the app.
+  (§5a): `patches/qwbp+0.1.0.patch`, applied by `patch-package` on install,
+  and offered upstream.
+- `scripts/handshake-check/check.mjs` — the engine and the patched QWBP in
+  two Chromium pages over real WebRTC, with no server; with `PQ2_TURN_URL`,
+  `PQ2_TURN_USER` and `PQ2_TURN_PASS`, also through that relay.
+- `sandbox/handshake-pq2` runs this protocol on two phones from its own
+  page, importing `src/lib/pq/handshake.ts`; its `frames.ts` is the
+  animated-QR experiment of §10 and stays out of the app.
 
 ## 8. Tests
 

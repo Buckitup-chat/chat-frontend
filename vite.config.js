@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { nodePolyfills } from 'vite-plugin-node-polyfills';
 import topLevelAwait from 'vite-plugin-top-level-await';
@@ -19,7 +19,17 @@ const isProduction = !isLocalhost
 const apiBase = isLocalhost ? `http://${DOMAIN}` : `https://${DOMAIN || 'buckitup.xyz'}`
 
 // https://vite.dev/config/
-export default defineConfig(({ command }) => {
+// The handshake's static dev relay (src/lib/data/turnCredentials.ts):
+// HANDSHAKE_TURN_URL, _USER and _PASS from the environment or .env.local, on
+// the dev server only. A build gets null: no VITE_ prefix, so Vite never
+// inlines them, and a password set on a build host stays there.
+const devRelay = (mode) => {
+	const env = { ...loadEnv(mode, process.cwd(), 'HANDSHAKE_TURN_'), ...process.env };
+	if (!env.HANDSHAKE_TURN_URL) return null;
+	return { urls: env.HANDSHAKE_TURN_URL, username: env.HANDSHAKE_TURN_USER ?? '', credential: env.HANDSHAKE_TURN_PASS ?? '' };
+};
+
+export default defineConfig(({ command, mode }) => {
 	const isDev = command !== 'build'
 
 	return {
@@ -97,6 +107,7 @@ export default defineConfig(({ command }) => {
 			}),
 		],
 		define: {
+			HANDSHAKE_DEV_TURN: JSON.stringify(isDev ? devRelay(mode) : null),
 			ELECTRIC_API_URL: JSON.stringify(
 				isDev ? '/api'
 				: `${apiBase}/electric/v1`

@@ -4,6 +4,8 @@ import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { preloadWithRetry } from '@/lib/data/attach';
 import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verifiedCards } from '@/lib/data/userCardsLink';
+import { mergeContactEdit } from '@/lib/data/storageIntent';
+import { contactKeyVouch } from '@/lib/pq/verifyCard';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
@@ -348,10 +350,12 @@ export const userPQStore = defineStore('userPQ', () => {
 
   // What a contact keeps in the contacts slot, out of whatever the caller
   // holds: saveContact is handed whole view objects that mix in network card
-  // fields. `confirmed` marks a contact whose key was checked in person,
-  // through the QR handshake: the only kind a recovery share may be issued
-  // to. It is set by confirmContact alone; a save leaves whatever the stored
-  // contact says, and only a delete takes it back.
+  // fields. `confirmed` (with `confirmedAt`) marks a contact whose key was
+  // checked in person, through the QR handshake: the only kind a recovery
+  // share may be issued to. It is set by confirmContact alone; a save leaves
+  // whatever the stored contact says, unless it changes the contact's key —
+  // the confirmation was of the old one (mergeContactEdit) — and a delete
+  // takes it back.
   const STORED_FIELDS = ['name', 'notes', 'hidden', 'contact_pkey'];
   const storedFields = (data) =>
     Object.fromEntries(STORED_FIELDS.filter((key) => data[key] !== undefined).map((key) => [key, data[key]]));
@@ -395,7 +399,7 @@ export const userPQStore = defineStore('userPQ', () => {
     for (const [hash, change] of Object.entries(edits)) {
       edit.before[hash] = shown[hash];
       if (change === null) delete shown[hash];
-      else shown[hash] = { ...shown[hash], ...change };
+      else shown[hash] = mergeContactEdit(shown[hash], change);
     }
     contactsMap.value = shown;
     session.editsOut.push(edit);
@@ -427,9 +431,15 @@ export const userPQStore = defineStore('userPQ', () => {
   };
 
   /**
-   * Marks a contact as met in person, with the key the handshake proved —
-   * adding it if it is not a contact yet. The caller has checked that key
-   * against the contact's certified card (lib/pq/verifyCard).
+   * Marks a contact as met in person — adding it if it is not a contact yet —
+   * after the optical handshake (docs/task-handshake-pq2.md §6). It trusts no
+   * caller, and checks that `card`:
+   * - is `userHash`'s card: user_hash is SHA3-512 of its sign_pkey;
+   * - is signed by that key, and certifies its contact_pkey with it;
+   * - is not a deleted account's;
+   * - certifies `contactPkey`, the key the handshake proved in person.
+   * Anything else is refused, and nothing is written. The stored key is
+   * `contactPkey`; `confirmedAt` is set here.
    *
    * Done once the contact is durable on this device; resolves to
    * `{ status }`, where anything but 'synced' means the server does not have
@@ -438,11 +448,24 @@ export const userPQStore = defineStore('userPQ', () => {
    * its own, which the device takes whatever it holds of this account's
    * contacts.
    */
-  const confirmContact = async (userHash, contactPkey, fields = {}) => {
+  const confirmContact = async (userHash, card, contactPkey, fields = {}) => {
     if (!em.value || !currentUserHash.value) return false;
+    const vouch = typeof contactPkey === 'string' ? contactKeyVouch(card, userHash, contactPkey) : { ok: false, why: 'another-key' };
+    if (!vouch.ok) {
+      throw new Error(vouch.why === 'deleted'
+        ? 'This contact cannot be confirmed: their account is deleted'
+        : 'This contact cannot be confirmed: their card does not certify the key they showed in person');
+    }
     const account = currentUserHash.value;
+    const { contact_pkey: _ignored, ...kept } = storedFields(fields);
     const status = await writeContacts({
-      [userHash]: { ...storedFields(fields), user_hash: userHash, contact_pkey: contactPkey, confirmed: true },
+      [userHash]: {
+        ...kept,
+        user_hash: userHash,
+        contact_pkey: contactPkey,
+        confirmed: true,
+        confirmedAt: Math.floor(Date.now() / 1000),
+      },
     }, { onDevice: true });
     await setDeviceAccess(account, userHash, true);
     return { status };
@@ -529,6 +552,17 @@ export const userPQStore = defineStore('userPQ', () => {
     return await em.value.signContactChallenge(challenge);
   };
 
+  // The optical handshake's post-quantum step (docs/task-handshake-pq2.md §5).
+  const signHandshakePQ = async (message) => {
+    if (!em.value) throw new Error('Not signed in');
+    return await em.value.signHandshakePQ(message);
+  };
+
+  const signedOwnCard = async () => {
+    if (!em.value) return null;
+    return await em.value.signedOwnCard();
+  };
+
   return {
     isInitialized,
     localDataReady,
@@ -569,6 +603,8 @@ export const userPQStore = defineStore('userPQ', () => {
     exportBackup,
     importBackup,
     signContactChallenge,
+    signHandshakePQ,
+    signedOwnCard,
 
     setEncryptionManager: (manager) => {
       em.value = manager;
