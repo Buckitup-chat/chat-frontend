@@ -1,197 +1,220 @@
+// @vitest-environment jsdom
 // The reader side of pq_avatars, outside the page: the peer's gallery from
-// the dialog's verified messages, and the copy of their current photo kept
-// next to the contact (§ What a reader keeps) — written once per change,
-// cleared only once the whole dialog has been read.
+// their shared row, read on each approved trigger and never polled.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ref, reactive, nextTick, effectScope } from 'vue';
 import { setActivePinia, createPinia } from 'pinia';
 
 const ME = 'u_' + 'a'.repeat(128);
 const PEER = 'u_' + 'b'.repeat(128);
+const OTHER_PEER = 'u_' + 'c'.repeat(128);
+const UUID = '0b7e3a52-9c1d-4f6e-8a2b-3c4d5e6f7a8b';
+const KEY = 'K'.repeat(42) + 'w';
+const NEWER_KEY = 'N'.repeat(42) + 'w';
 let user;
-const writes = [];
+const checks = [];
 
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
-const forgotten = [];
-vi.mock('@/store/avatars.store', async () => {
-	const { contactAvatarChange } = await import('@/lib/avatars/display');
-	return {
-		useAvatarsStore: () => ({
-			photoUrl: () => '',
-			contactAvatarSrc: () => '',
-			async followContactAvatar(peer, current) {
-				const value = contactAvatarChange(user.contactsMap[peer]?.avatar, current);
-				if (!user.contactsMap[peer] || value === undefined) return;
-				if (!value) forgotten.push(peer);
-				await user.cacheContactAvatar(peer, value);
-			},
-		}),
-	};
-});
+vi.mock('@/lib/avatars/peerGallery', () => ({
+	isDisplayable: (state) => ['gallery', 'empty', 'deleted'].includes(state.state),
+}));
+vi.mock('@/store/avatars.store', () => ({
+	useAvatarsStore: () => ({
+		photoUrl: (photo) => `url:${photo.fileId}`,
+		peerAvatarSrc: (peer, { fallback } = {}) => (fallback ? `cached:${fallback.id}` : ''),
+		ownGallery: user.ownGallery,
+		checkPeerGallery: (peer, opts) => new Promise((resolve) => { checks.push({ peer, ...opts, resolve }); }),
+	}),
+}));
 
-const { usePeerGallery, isDialogRead } = await import('@/composables/usePeerGallery');
+const { usePeerGallery, INITIAL_CHECK_DELAY_MS } = await import('@/composables/usePeerGallery');
 
 const id = (c) => c.repeat(32);
-const photo = (n) => ({ kind: 'inline_image', widthAspect: 1, heightAspect: 1, thumbHashB64: '', name: `p${n}.jpg`, size: 1, mimeType: 'image/jpeg', createdAt: 0, dataB64: `A${n}` });
-const msg = (n, parts, sender = PEER, over = {}) => ({
-	id: `dmsg_${String(n).padStart(4, '0')}`, parts, _verify: 'verified',
-	_raw: { sender_hash: sender }, ...over,
+const photo = (n) => ({ kind: 'image', widthAspect: 1, heightAspect: 1, thumbHashB64: '', name: `p${n}.jpg`, size: 1, mimeType: 'image/jpeg', createdAt: 0, fileId: `f_${n}`, encSecretB64: 'k' });
+const entry = (c, n) => ({ avatarId: id(c), photo: photo(n) });
+const mid = (n) => `dmsg_0190a3b2-${String(n).padStart(4, '0')}-7e5f-8a6b-7c8d9e0f1a2b`;
+const grantMsg = (n, key = KEY, over = {}) => ({
+	id: mid(n), parts: [{ kind: 'avatar_gallery_access', version: 1, galleryUuid: UUID, galleryKeyB64: key }],
+	_verify: 'verified', _raw: { sender_hash: PEER, message_id: mid(n) }, ...over,
 });
-const avatar = (c, n = 1) => ({ kind: 'avatar', avatarId: id(c), photo: photo(n) });
+const grantOf = (key = KEY) => ({ ownerHash: PEER, galleryUuid: UUID, galleryKeyB64: key });
+const gallery = (...entries) => ({ state: 'gallery', entries });
+const answer = (check, state, grant = grantOf()) => check.resolve({ grant, state });
 
-// The page's rows and their entries, one each; `live` as the collection says.
-const setup = (initial = [], { live: isLive = true, unprocessed = [] } = {}) => {
+const setup = (initial = [], peer = PEER) => {
 	const messages = ref(initial);
-	const rows = ref([...initial.map((m) => ({ message_id: m.id })), ...unprocessed.map((message_id) => ({ message_id }))]);
-	const live = ref(isLive);
+	const peerHash = ref(peer);
 	const scope = effectScope();
-	const g = scope.run(() => usePeerGallery({ peerHash: ref(PEER), messages, rows, live }));
-	const set = (list) => {
-		messages.value = list;
-		rows.value = list.map((m) => ({ message_id: m.id }));
-	};
-	return { messages, rows, live, set, g, stop: () => scope.stop() };
+	const g = scope.run(() => usePeerGallery({ peerHash, messages }));
+	return { messages, peerHash, g, stop: () => scope.stop() };
 };
-const flush = async () => { await nextTick(); await nextTick(); };
+const flush = async () => { for (let i = 0; i < 4; i++) await nextTick(); await new Promise((r) => setTimeout(r, 0)); };
+const opened = async () => { await new Promise((r) => setTimeout(r, INITIAL_CHECK_DELAY_MS + 10)); await flush(); };
+const setVisibility = (state) => Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+const tabReturns = () => { setVisibility('visible'); document.dispatchEvent(new Event('visibilitychange')); };
 
 beforeEach(() => {
 	setActivePinia(createPinia());
-	writes.length = 0;
-	forgotten.length = 0;
+	checks.length = 0;
+	setVisibility('visible');
 	user = reactive({
 		currentUserHash: ME,
 		contactsMap: { [PEER]: { user_hash: PEER } },
-		async cacheContactAvatar(hash, avatar) {
-			writes.push(avatar && { id: avatar.id, photo: avatar.photo });
-			user.contactsMap[hash] = { ...user.contactsMap[hash], avatar };
-			return true;
-		},
+		ownGallery: [entry('m', 9)],
 	});
 });
 
-describe('usePeerGallery: the contact cache writer', () => {
-	it('writes { id, photo } for the current photo, once, and again when it changes', async () => {
-		const t = setup([msg(1, [avatar('a', 1)])]);
-		await flush();
-		expect(writes).toEqual([{ id: id('a'), photo: { inline_image: [1, 1, '', 'p1.jpg', 1, 'image/jpeg', 0, 'A1'] } }]);
-		// a text message ticks the list; the current photo is the same
-		t.set([...t.messages.value, msg(2, [{ kind: 'text', text: 'hi' }])]);
-		await flush();
-		expect(writes).toHaveLength(1);
-		t.set([...t.messages.value, msg(3, [avatar('b', 2)])]);
-		await flush();
-		expect(writes.map((w) => w?.id)).toEqual([id('a'), id('b')]);
+describe('usePeerGallery: when the gallery is read', () => {
+	it('once, shortly after the chat opens, with the grant in the peer\'s verified messages, past any cooldown', async () => {
+		const t = setup([grantMsg(1)]);
+		await opened();
+		expect(checks).toHaveLength(1);
+		expect(checks[0]).toMatchObject({ peer: PEER, force: true, grant: { ...grantOf(), messageId: mid(1) } });
 		t.stop();
 	});
 
-	it('counts only the peer\'s verified messages', async () => {
-		const t = setup([msg(1, [avatar('a')], ME), msg(2, [avatar('b')], PEER, { _verify: 'waiting' })]);
+	it('the tab becoming visible or the connection returning during the delay leaves it to the scheduled read', async () => {
+		const t = setup([grantMsg(1)]);
 		await flush();
-		expect(writes).toEqual([]);
+		tabReturns();
+		window.dispatchEvent(new Event('online'));
+		await flush();
+		expect(checks).toEqual([]);
+		await opened();
+		expect(checks.map((c) => [c.force, c.fresh])).toEqual([[true, false]]);
+		t.stop();
+	});
+
+	it('switching chats quickly reads only the peer left open; a chat closed before the delay reads nothing', async () => {
+		const t = setup([grantMsg(1)]);
+		await flush();
+		t.peerHash.value = OTHER_PEER;
+		await flush();
+		expect(checks).toEqual([]);
+		await opened();
+		expect(checks.map((c) => c.peer)).toEqual([OTHER_PEER]);
+		t.stop();
+		checks.length = 0;
+		const closed = setup([grantMsg(1)]);
+		await flush();
+		closed.stop();
+		await opened();
+		expect(checks).toEqual([]);
+	});
+
+	it('a grant appearing while the chat is open is read at once; the grant already read is not read again', async () => {
+		const t = setup([]);
+		await opened();
+		answer(checks[0], gallery(entry('a', 1)));
+		await flush();
+		t.messages.value = [grantMsg(1)];
+		await flush();
+		expect(checks).toHaveLength(1);
+		t.messages.value = [grantMsg(1), grantMsg(2, NEWER_KEY)];
+		await flush();
+		expect(checks).toHaveLength(2);
+		expect(checks[1]).toMatchObject({ force: true, grant: { galleryKeyB64: NEWER_KEY } });
+		t.stop();
+	});
+
+	it('the tab becoming visible and the connection coming back recheck this peer, under the store\'s cooldown', async () => {
+		const t = setup([grantMsg(1)]);
+		await opened();
+		setVisibility('hidden');
+		document.dispatchEvent(new Event('visibilitychange'));
+		tabReturns();
+		window.dispatchEvent(new Event('online'));
+		await flush();
+		expect(checks.map((c) => [c.peer, c.force])).toEqual([[PEER, true], [PEER, false], [PEER, false]]);
+		t.stop();
+	});
+
+	it('nothing else reads: no timer, and no event once the chat turned to another peer or closed', async () => {
+		vi.useFakeTimers();
+		try {
+			const t = setup([grantMsg(1)]);
+			await vi.advanceTimersByTimeAsync(10 * 60_000);
+			expect(checks).toHaveLength(1);
+			t.peerHash.value = OTHER_PEER;
+			await vi.advanceTimersByTimeAsync(INITIAL_CHECK_DELAY_MS);
+			expect(checks.map((c) => [c.peer, c.force])).toEqual([[PEER, true], [OTHER_PEER, true]]);
+			tabReturns();
+			expect(checks.map((c) => c.peer)).toEqual([PEER, OTHER_PEER, OTHER_PEER]);
+			t.stop();
+			tabReturns();
+			window.dispatchEvent(new Event('online'));
+			expect(checks).toHaveLength(3);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe('usePeerGallery: the picture', () => {
+	it('shows the cached photo until the row answers, then the row\'s current one', async () => {
+		user.contactsMap[PEER].avatar = { id: id('z') };
+		const t = setup([grantMsg(1)]);
+		await flush();
+		expect(t.g.avatarUrl.value).toBe(`cached:${id('z')}`);
+		await opened();
+		expect(t.g.avatarUrl.value).toBe(`cached:${id('z')}`);
+		answer(checks[0], gallery(entry('b', 2), entry('a', 1)));
+		await flush();
+		expect(t.g.avatarUrl.value).toBe('url:f_2');
+		t.stop();
+	});
+
+	it('a read that says nothing verified keeps the gallery shown; a verified empty gallery shows none', async () => {
+		const t = setup([grantMsg(1)]);
+		await opened();
+		answer(checks[0], gallery(entry('a', 1)));
+		await flush();
+		tabReturns();
+		await flush();
+		answer(checks[1], { state: 'unavailable', reason: 'read_failed' });
+		await flush();
+		expect(t.g.avatarUrl.value).toBe('url:f_1');
+		window.dispatchEvent(new Event('online'));
+		await flush();
+		answer(checks[2], { state: 'empty' });
+		await flush();
+		expect(t.g.avatarUrl.value).toBe('');
 		expect(t.g.peerGallery.value).toEqual([]);
 		t.stop();
-	});
-
-	it('writes nothing from a disk copy: neither a clear nor an older photo, until the live set is confirmed', async () => {
-		user.contactsMap[PEER].avatar = { id: id('b'), photo: { inline_image: [1, 1, '', 'p2.jpg', 1, 'image/jpeg', 0, 'A2'] } };
-		const empty = setup([], { live: false });
-		await flush();
-		expect(writes).toEqual([]);
-		empty.stop();
-		// the disk copy has only the older photo
-		const older = setup([msg(1, [avatar('a')])], { live: false });
-		await flush();
-		expect(writes).toEqual([]);
-		older.set([msg(1, [avatar('a')]), msg(2, [avatar('b', 2)])]);
-		older.live.value = true;
-		await flush();
-		expect(writes).toEqual([]);
-		older.stop();
-	});
-
-	it('clears a cached photo, and its thumbnail, once the live dialog has been read and has none', async () => {
-		user.contactsMap[PEER].avatar = { id: id('a'), photo: { inline_image: [1, 1, '', 'p1.jpg', 1, 'image/jpeg', 0, 'A1'] } };
-		const t = setup([], { live: false });
-		await flush();
-		expect(writes).toEqual([]);
-		t.live.value = true;
-		await flush();
-		expect(writes).toEqual([null]);
-		expect(forgotten).toEqual([PEER]);
-		t.stop();
-	});
-
-	it('a row not yet processed holds the writer back', async () => {
-		user.contactsMap[PEER].avatar = { id: id('a'), photo: { inline_image: [1, 1, '', 'p1.jpg', 1, 'image/jpeg', 0, 'A1'] } };
-		const t = setup([], { unprocessed: ['dmsg_9999'] });
-		await flush();
-		expect(writes).toEqual([]);
-		t.stop();
-	});
-
-	it('a row refused for good does not hold back the removal of the last photo', async () => {
-		user.contactsMap[PEER].avatar = { id: id('a'), photo: { inline_image: [1, 1, '', 'p1.jpg', 1, 'image/jpeg', 0, 'A1'] } };
-		const forged = msg(5, [], PEER, { _verify: 'invalid', _verifyTerminal: true, parts: undefined });
-		const t = setup([msg(1, [avatar('a')]), forged]);
-		await flush();
-		expect(writes).toEqual([]);
-		t.set([msg(1, [avatar('a')]), forged, msg(6, [{ kind: 'avatar_removed', avatarId: id('a') }])]);
-		await flush();
-		expect(writes).toEqual([null]);
-		t.stop();
-	});
-
-	it('writes nothing for someone who is not a contact', async () => {
-		delete user.contactsMap[PEER];
-		const t = setup([msg(1, [avatar('a')])]);
-		await flush();
-		expect(writes).toEqual([]);
-		t.stop();
-	});
-
-	it('a gallery removal is followed: the next photo becomes the cached one', async () => {
-		const t = setup([msg(1, [avatar('a')]), msg(2, [avatar('b')])]);
-		await flush();
-		t.set([...t.messages.value, msg(3, [{ kind: 'avatar_removed', avatarId: id('b') }])]);
-		await flush();
-		expect(writes.map((w) => w?.id)).toEqual([id('b'), id('a')]);
-		t.stop();
-	});
-});
-
-describe('isDialogRead', () => {
-	const rows = (n) => Array.from({ length: n }, (_, i) => ({ message_id: `m${i}` }));
-	const ok = { _verify: 'verified', _decrypted: true };
-	it('needs the live set and an entry for every row', () => {
-		expect(isDialogRead(false, rows(1), [ok])).toBe(false);
-		expect(isDialogRead(true, rows(2), [ok])).toBe(false);
-		expect(isDialogRead(true, rows(1), [ok])).toBe(true);
-	});
-	it('a final verdict does not block it; a pending one does', () => {
-		const final = [
-			{ _deleted: true }, { _verify: 'blocked' }, { _verify: 'invalid', _verifyTerminal: true },
-			{ _verify: 'verified', _decrypted: false }, // will not decode
-		];
-		for (const e of final) expect(isDialogRead(true, rows(1), [e])).toBe(true);
-		const pending = [
-			{ _verify: 'waiting' }, { _verify: 'invalid', _verifyTerminal: false },
-			{ _verify: 'verified', _decrypted: false, _awaitingKey: true },
-		];
-		for (const e of pending) expect(isDialogRead(true, rows(1), [e])).toBe(false);
 	});
 });
 
 describe('usePeerGallery: the viewer', () => {
-	it('opens the tapped sender\'s gallery at the tapped photo, newest first', async () => {
-		const t = setup([msg(1, [avatar('a')]), msg(2, [avatar('b')]), msg(3, [avatar('c')], ME)]);
-		t.g.openGallery({ senderHash: PEER, avatarId: id('a') });
+	it('a tap on the peer\'s picture reads their row at once, then opens on the verified gallery at the tapped photo', async () => {
+		const t = setup([grantMsg(1)]);
+		await opened();
+		answer(checks[0], gallery(entry('a', 1)));
 		await flush();
+		const opening = t.g.openGallery({ senderHash: PEER, avatarId: id('a') });
+		expect(checks[1]).toMatchObject({ peer: PEER, force: true, fresh: true });
+		expect(t.g.viewer.index.value).toBeNull();
+		answer(checks[1], gallery(entry('b', 2), entry('a', 1)));
+		await opening;
 		expect(t.g.viewer.frames.value.map((f) => f.key[0])).toEqual(['b', 'a']);
 		expect(t.g.viewer.index.value).toBe(1);
-		t.g.openGallery({ senderHash: ME });
-		await flush();
-		expect(t.g.viewer.frames.value.map((f) => f.key[0])).toEqual(['c']);
-		expect(t.g.viewer.index.value).toBe(0);
+		t.stop();
+	});
+
+	it('a tap whose read ends after the chat turned to another peer, or another account signed in, opens nothing', async () => {
+		const t = setup([grantMsg(1)]);
+		await opened();
+		const opening = t.g.openGallery({ senderHash: PEER });
+		t.peerHash.value = OTHER_PEER;
+		answer(checks[1], gallery(entry('b', 2)));
+		await opening;
+		expect(t.g.viewer.index.value).toBeNull();
+		t.peerHash.value = PEER;
+		await opened();
+		const again = t.g.openGallery({ senderHash: PEER });
+		user.currentUserHash = 'u_' + 'd'.repeat(128);
+		answer(checks.at(-1), gallery(entry('b', 2)));
+		await again;
+		expect(t.g.viewer.index.value).toBeNull();
 		t.stop();
 	});
 });

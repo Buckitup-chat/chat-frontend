@@ -20,5 +20,6 @@ export default defineConfig({
 		// running without a DOM.
 		environment: 'node',
 		include: ['tests/**/*.test.{js,ts}'],
+		testTimeout: 20_000,
 	},
 });

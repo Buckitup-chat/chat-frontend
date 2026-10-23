@@ -112,7 +112,7 @@ const dialogCollections = computed(() => (dialogHash.value ? getDialogCollection
 // fill the gap until the shape catches up — a live row always wins per key,
 // so a working persistence sees no change in behavior. getRowKey mirrors
 // collections.ts's own getKey for this table.
-const { rows: rawMessages, live: messagesLive } = useCollectionRows(
+const { rows: rawMessages } = useCollectionRows(
     computed(() => dialogCollections.value?.messages ?? null),
     { readCache: { table: 'dialog_messages', dialogHash: () => dialogHash.value, getRowKey: (r) => r.message_id } }
 );
@@ -703,9 +703,7 @@ const handleToggleReaction = async (messageId, emoji) => {
 
 // ---------- profile photos (pq_avatars) ----------
 
-const { avatarUrl, viewer, openGallery } = usePeerGallery({
-    peerHash, messages: decryptedMessages, rows: rawMessages, live: messagesLive,
-});
+const { avatarUrl, viewer, openGallery } = usePeerGallery({ peerHash, messages: decryptedMessages });
 
 // ---------- §2.3 downloads ----------
 

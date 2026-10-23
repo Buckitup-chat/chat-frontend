@@ -78,21 +78,16 @@ const currentSrc = computed(() => {
 // Another device may have changed the gallery since this one read it.
 $avatars.loadOwn({ fresh: true }).catch((e) => console.warn('[profile] gallery not loaded:', e?.message ?? e));
 
-const conversations = (n) => `${n} ${n === 1 ? 'conversation' : 'conversations'}`;
-
-/** Runs a gallery change and says what came of it: stored for sending, owed for later, or why not. */
+/** Runs a gallery change and says what came of it: shared, owed for later, or why not. */
 const run = async (change, title) => {
 	busy.value = true;
 	try {
-		const { failed, pending } = await change();
-		const said = [];
-		if (failed.length) said.push(`${conversations(failed.length)} could not be given it yet (${errorMessage(failed[0].error)})`);
-		if (pending.length) said.push(`${conversations(pending.length)} could not be read right now`);
-		if (said.length) {
+		const { shared } = await change();
+		if (shared !== 'published') {
 			$swal.fire({
 				icon: 'info',
 				title,
-				text: `Saved. ${said.join('; ')} — they get it when this device can reach them.`,
+				text: 'Saved. Your contacts see it once this device can reach the server again.',
 			});
 		}
 	} catch (e) {
