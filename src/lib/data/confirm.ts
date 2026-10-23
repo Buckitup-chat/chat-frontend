@@ -7,7 +7,7 @@
 // success only if the server row is byte-identical to ours, which we can
 // verify by comparing signatures — a retry re-sends the same signed object.
 import { getDialogCollections, getUserCardsCollection, getUserStorageCollection } from './collections';
-import { toBytes } from '@/lib/pq/signature';
+import { toBytes } from '@buckitup/pq-client/signature';
 
 export interface MutationLike {
 	type?: string;

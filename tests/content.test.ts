@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError, fileRefsOf } from '@/lib/pq/content';
+import { encodeContent, decodeContent, contentToText, previewText, ContentDecodeError, fileRefsOf } from '@buckitup/pq-client/content';
 
 // Wire-format contract with every other client (07_content_polymorphism.md).
 // The acceptance names follow the review's T-CONTENT set.

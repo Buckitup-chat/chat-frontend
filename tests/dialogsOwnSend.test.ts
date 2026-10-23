@@ -5,7 +5,7 @@ import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
 import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import { _setIntentStorageForTests } from '@/lib/data/intents';
-import { encodeContent } from '@/lib/pq/content';
+import { encodeContent } from '@buckitup/pq-client/content';
 import type * as Ingest from '@/lib/data/ingest';
 import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
 

@@ -7,7 +7,7 @@
 // positive cache global and account-switch-safe. Failures are never cached:
 // an absent or not-yet-replicated card may arrive on the next sync tick.
 
-import { verifyUserCard } from '@/lib/pq/verifyCard';
+import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
 import { getUserCardsCollection } from './collections';
 import { isTouched } from './readCache';
 import { readCachedCard } from './userCardsCache';

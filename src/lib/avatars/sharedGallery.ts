@@ -1,7 +1,7 @@
 import { randomBytes } from '@noble/hashes/utils';
-import { isAvatarId, isGalleryKeyB64, isGalleryUuid, photoFromWire } from '@/lib/pq/content';
-import { fromBase64, toBase64, toBytes } from '@/lib/pq/signature';
-import { wireBool } from '@/lib/pq/schema';
+import { isAvatarId, isGalleryKeyB64, isGalleryUuid, photoFromWire } from '@buckitup/pq-client/content';
+import { fromBase64, toBase64, toBytes } from '@buckitup/pq-client/signature';
+import { wireBool } from '@buckitup/pq-client/schema';
 import { verifyReplicatedRow, type RowInvalidReason, type SignPkeyResolver } from '@/lib/data/rowVerification';
 import type { UserStorageRow } from '@/lib/data/types';
 import { ALLOWED_IMAGE_TYPES, ownGalleryOf, type GalleryEntry } from './gallery';

@@ -6,8 +6,8 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { computeAddress } from 'ethers';
 import { computeStealthKey } from 'backitup-secret-recovery-sdk/lib/keys/stealth';
 import { metaKeysOf } from '@/lib/recovery/guardianInvite';
-import { joinHalves } from '@/lib/pq/vaultEnvelope';
-import { fromBase64 } from '@/lib/pq/signature';
+import { joinHalves } from '@buckitup/pq-client/vaultEnvelope';
+import { fromBase64 } from '@buckitup/pq-client/signature';
 import { shamirCombine } from '@/lib/shamir';
 import { checkShare, combineFriendsHalf, rootFromSlots } from '@/lib/recovery/shareSplit';
 import { defaultSettings } from '@/lib/recovery/backupPlan';
@@ -24,7 +24,7 @@ import {
 	type BackupRun,
 	type RunDeps,
 } from '@/lib/recovery/backupRun';
-import type { RecoverySharePart } from '@/lib/pq/content';
+import type { RecoverySharePart } from '@buckitup/pq-client/content';
 
 const keysOf = (n: number) => metaKeysOf(new Uint8Array(32).fill(n));
 const GUARDIANS = [1, 2, 3, 4].map((n) => ({ userHash: 'u_' + String(n).repeat(128), metaAddress: keysOf(n).metaAddress, keys: keysOf(n) }));

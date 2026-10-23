@@ -5,9 +5,9 @@
 // root on chain before anything is combined: Shamir combines any bytes into
 // some half, and a bad share would only show as a vault that does not open.
 import { hexToBytes } from '@noble/hashes/utils';
-import type { RecoveryShareReturnPart, RecoverySharePart } from '@/lib/pq/content';
-import { fromBase64 } from '@/lib/pq/signature';
-import { joinHalves } from '@/lib/pq/vaultEnvelope';
+import type { RecoveryShareReturnPart, RecoverySharePart } from '@buckitup/pq-client/content';
+import { fromBase64 } from '@buckitup/pq-client/signature';
+import { joinHalves } from '@buckitup/pq-client/vaultEnvelope';
 import { shamirCombine, shamirSplit } from '@/lib/shamir';
 import { checkShare, combineFriendsHalf, ShareCheckError } from './shareSplit';
 import { canonicalCandidate } from './recoveryBinding';

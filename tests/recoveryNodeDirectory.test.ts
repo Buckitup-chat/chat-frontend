@@ -2,7 +2,7 @@
 // § Choosing nodes). The descriptor is the SDK's golden one from recoveryNodeClient.test.
 import { describe, it, expect } from 'vitest';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { toBase64 } from '@/lib/pq/signature';
+import { toBase64 } from '@buckitup/pq-client/signature';
 import { descriptorBytes } from '@/lib/recovery/nodeClient';
 import { checkNode, knownNodes, syncedServerNode } from '@/lib/recovery/nodeDirectory';
 

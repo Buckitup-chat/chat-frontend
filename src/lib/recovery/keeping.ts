@@ -5,7 +5,7 @@
 // told to the owner once, in the dialog it came in. The rules are
 // holdings.ts'; this runs them against the slot, the dialog and the chain,
 // which come in as functions.
-import type { RecoveryHoldingPart } from '@/lib/pq/content';
+import type { RecoveryHoldingPart } from '@buckitup/pq-client/content';
 import {
 	classifyShare, conflictKey, holdingKey, holdsBytes, judgeShare, parseSecretRef, reportFor, shouldDrop, TOMBSTONES, UNREQUESTED,
 	type DyingContext, type Holding, type Holdings, type HoldingState, type KeepingContext, type ReceivedShare, type SecretOnChain,

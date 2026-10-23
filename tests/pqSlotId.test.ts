@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { randomBytes } from '@noble/hashes/utils';
-import { deriveRootSlotUuid, bytesToUuidV8 } from '@/lib/pq/slotId';
-import { hkdfDerive, hkdfExtract, hkdfExpand } from '@/lib/pq/hkdf';
+import { deriveRootSlotUuid, bytesToUuidV8 } from '@buckitup/pq-client/slotId';
+import { hkdfDerive, hkdfExtract, hkdfExpand } from '@buckitup/pq-client/hkdf';
 
 const skey = (seed: number) => ml_kem1024.keygen(new Uint8Array(64).fill(seed)).secretKey;
 

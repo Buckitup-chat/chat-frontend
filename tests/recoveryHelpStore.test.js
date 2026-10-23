@@ -11,7 +11,7 @@ import { nextTick, reactive } from 'vue';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { toBase64 } from '@/lib/pq/signature';
+import { toBase64 } from '@buckitup/pq-client/signature';
 import { mergeJsonPatch, stripPatchDirectives } from '@/lib/data/storageIntent';
 import { recoveryWords } from '@/lib/recovery/recoveryBinding';
 import { bindingFor, candidateOf, findSecretRef } from '@/lib/recovery/restoring';

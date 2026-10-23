@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import {
 	newWrapKey, deriveVaultLocator, sealVault, openVault, VaultEnvelopeError,
-} from '@/lib/pq/vaultEnvelope';
+} from '@buckitup/pq-client/vaultEnvelope';
 
 const VAULT = JSON.stringify({ sign_skey: 'a'.repeat(64), crypt_skey: 'b'.repeat(64), evm_skey: 'c' });
 
@@ -19,7 +19,7 @@ describe('the wrap key and the address it implies', () => {
 		expect(deriveVaultLocator(s)).toBe(deriveVaultLocator(s));
 	});
 
-	// CLAUDE.md, §Review: a root derivation in src/lib/pq is pinned byte for
+	// CLAUDE.md, §Review: a root derivation in packages/pq-client/src is pinned byte for
 	// byte, because changing a salt keeps every behavioural test green while
 	// making every vault already written at the old address unfindable. This
 	// literal is the tripwire that forces a conscious version bump.

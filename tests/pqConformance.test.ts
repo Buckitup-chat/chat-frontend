@@ -5,7 +5,7 @@
 // hashes, HKDF. It has broken twice already on one-byte differences (base64
 // padding, "" vs null), both times caught only against the live server. The
 // vectors pin those bytes as data, so BOTH implementations assert the same
-// file: this test runs them against src/lib/pq, and the copy in the backend
+// file: this test runs them against packages/pq-client/src, and the copy in the backend
 // repo (test/fixtures/pq_conformance_vectors.json +
 // test/chat/data/pq_conformance_test.exs) runs them against Chat.Data.Integrity
 // and EnigmaPq.
@@ -23,9 +23,9 @@ import path from 'node:path';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { hmac } from '@noble/hashes/hmac';
 import { bytesToHex } from '@noble/hashes/utils';
-import { canonicalPayload, deriveSignHash, toBase64 } from '@/lib/pq/signature';
-import { signableFields, SIGNABLE } from '@/lib/pq/schema';
-import { hkdfDerive } from '@/lib/pq/hkdf';
+import { canonicalPayload, deriveSignHash, toBase64 } from '@buckitup/pq-client/signature';
+import { signableFields, SIGNABLE } from '@buckitup/pq-client/schema';
+import { hkdfDerive } from '@buckitup/pq-client/hkdf';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 
 const VECTORS_PATH = path.join(__dirname, 'vectors', 'pq-conformance.json');

@@ -9,7 +9,7 @@ import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
+import { signFields, deriveSignHash, toBase64 } from '@buckitup/pq-client/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 
 const makeCollection = (rows = {}) => ({

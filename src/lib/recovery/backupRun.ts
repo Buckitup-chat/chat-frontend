@@ -25,9 +25,9 @@
 // the owner's account (§ Issuing), and what is not secret.
 import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
 import { generateStealthAddress } from 'backitup-secret-recovery-sdk/lib/keys/stealth';
-import { newWrapKey, splitIntoHalves } from '@/lib/pq/vaultEnvelope';
-import { toBase64Unpadded } from '@/lib/pq/signature';
-import type { RecoverySharePart } from '@/lib/pq/content';
+import { newWrapKey, splitIntoHalves } from '@buckitup/pq-client/vaultEnvelope';
+import { toBase64Unpadded } from '@buckitup/pq-client/signature';
+import type { RecoverySharePart } from '@buckitup/pq-client/content';
 import { shamirSplit } from '@/lib/shamir';
 import type { BackupContents } from '@/lib/backupContents';
 import { deliveryRecord, deliveryTag, splitFriendsHalf } from './shareSplit';
