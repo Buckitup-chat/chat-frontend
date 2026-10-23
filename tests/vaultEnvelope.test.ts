@@ -19,7 +19,7 @@ describe('the wrap key and the address it implies', () => {
 		expect(deriveVaultLocator(s)).toBe(deriveVaultLocator(s));
 	});
 
-	// CLAUDE.md, §Review: a root derivation in src/lib/pq is pinned byte for
+	// CLAUDE.md, §Review: a root derivation in packages/pq-client/src is pinned byte for
 	// byte, because changing a salt keeps every behavioural test green while
 	// making every vault already written at the old address unfindable. This
 	// literal is the tripwire that forces a conscious version bump.

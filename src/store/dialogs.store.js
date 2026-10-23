@@ -739,8 +739,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     // Told of every message this account stores for sending, after it is
     // durable, as (peerHash, parts, ownerHash) — the avatars store sends its
-    // gallery into a dialog from here (pq_avatars § Delivery, rule 2). One
-    // hook; setting it replaces it.
+    // gallery grant into a dialog from here. One hook; setting it replaces it.
     let ownSendHook = null;
     const onOwnSend = (hook) => { ownSendHook = hook; };
 
@@ -1076,71 +1075,79 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return withDialogCollections(dialogHash, (colls) => read(colls, { dialogHash, me }));
     };
 
-    const carriesAvatar = (parts) => (parts || []).some((p) => p.kind === 'avatar');
+    const carriesGrant = (parts, grant) => (parts || []).some((p) => p.kind === 'avatar_gallery_access'
+        && p.galleryUuid === grant.galleryUuid && p.galleryKeyB64 === grant.galleryKeyB64);
 
-    // "carries" once true stays true until this account edits or deletes one
-    // of its messages there, which may have taken the photo out — so every
+    // "carries" once confirmed stays true until this account edits or deletes one
+    // of its messages there, which may have taken the grant out — so every
     // later send into the dialog answers without reading it. By (owner,
     // dialog): another account's answer is never this one's.
-    const carriesMemo = new Set();
+    const carriesMemo = new Map();
     watch(() => $userPQ.currentUserHash, () => carriesMemo.clear());
 
     /**
      * What the dialog with a peer says about this account, in one read:
      * `ownKey` (asked for with requireOwnKey) — it has sent there; `carries` —
-     * its live messages carry an `avatar` part, counting the ones still on
-     * their way: an intent not sent yet, a row in the outbox, a row accepted
-     * but not back through the shape. Stops at the first avatar part; null
+     * its messages carry the gallery grant `grant`, counting the ones still on
+     * their way: an intent not sent yet, a row in the outbox; `confirmed` — one
+     * the server took (accepted, or back through the shape). null
      * where a message could not be read. With requireOwnKey, `carries` is
      * read only when the key is there.
      */
-    const ownDialogCarriesAvatar = (peerHash, { requireOwnKey = false } = {}) => {
-        // A dialog's carrying a photo implies this account has sent there.
+    const ownDialogCarriesGrant = (peerHash, grant, { requireOwnKey = false } = {}) => {
+        // A dialog's carrying a grant implies this account has sent there.
         const known = `${$userPQ.currentUserHash}|${getDialogHash(peerHash)}`;
-        if (carriesMemo.has(known)) return Promise.resolve({ ownKey: requireOwnKey ? true : undefined, carries: true });
+        if (carriesMemo.get(known)?.has(grant.galleryUuid)) {
+            return Promise.resolve({ ownKey: requireOwnKey ? true : undefined, carries: true, confirmed: true });
+        }
         return readLiveDialog(peerHash, async (colls, { dialogHash, me }) => {
             const memoKey = `${me}|${dialogHash}`;
-            const found = (ownKey) => {
-                carriesMemo.add(memoKey);
-                return { ownKey, carries: true };
-            };
             let ownKey;
             if (requireOwnKey) {
                 ownKey = senderMsgKeys.value[`${dialogHash}_${me}`]
                     ? true
                     : (await liveWithinBudget(colls.keys)) ? !!colls.keys.get(`${dialogHash}|${me}`) : null;
-                if (ownKey !== true) return { ownKey, carries: null };
+                if (ownKey !== true) return { ownKey, carries: null, confirmed: false };
             }
-            const { entries } = await intentsOf(me);
-            if (entries.some((e) => e.intent?.kind === 'message' && e.intent.dialogHash === dialogHash && carriesAvatar(e.intent.parts))) {
-                return found(ownKey);
-            }
-            // The newest revision first: the outbox, then what the server
-            // accepted, then the shape.
-            const rows = new Map();
-            const add = (row) => {
-                if (row && row.dialog_hash === dialogHash && row.sender_hash === me && row.sign_hash && !rows.has(row.message_id)) rows.set(row.message_id, row);
-            };
-            for (const entry of await pendingEntries(me)) {
-                if (entry.relation === 'dialog_messages') for (const m of entry.mutations) add(m?.modified ?? m?.changes);
-            }
-            for (const row of await getAllAcceptedForRelation('dialog_messages')) add(row);
+            const own = (row) => row && row.dialog_hash === dialogHash && row.sender_hash === me && row.sign_hash;
+            // What the server accepted, then the shape; the outbox apart.
+            const confirmedRows = new Map();
+            for (const row of await getAllAcceptedForRelation('dialog_messages')) if (own(row) && !confirmedRows.has(row.message_id)) confirmedRows.set(row.message_id, row);
             const live = await liveWithinBudget(colls.messages);
-            if (live) for (const row of colls.messages.toArray) add(row);
+            if (live) for (const row of colls.messages.toArray) if (own(row) && !confirmedRows.has(row.message_id)) confirmedRows.set(row.message_id, row);
+            const pendingRows = [];
+            for (const entry of await pendingEntries(me)) {
+                if (entry.relation !== 'dialog_messages') continue;
+                for (const m of entry.mutations) {
+                    const row = m?.modified ?? m?.changes;
+                    if (own(row)) pendingRows.push(row);
+                }
+            }
             // Own messages decrypt under the key this account derives itself,
             // whether or not its key row has come back yet.
             const key = await ownSenderMsgKey(peerHash);
             let unread = !live;
-            for (const row of rows.values()) {
-                if (row.deleted_flag) continue;
-                try {
-                    const json = await DialogCrypto.decryptContent(key, row.content_b64);
-                    if (json && carriesAvatar(decodeContent(json))) return found(ownKey);
-                } catch {
-                    unread = true;
+            const carrying = async (rows) => {
+                for (const row of rows) {
+                    if (row.deleted_flag) continue;
+                    try {
+                        const json = await DialogCrypto.decryptContent(key, row.content_b64);
+                        if (json && carriesGrant(decodeContent(json), grant)) return true;
+                    } catch {
+                        unread = true;
+                    }
                 }
+                return false;
+            };
+            if (await carrying(confirmedRows.values())) {
+                if (!carriesMemo.has(memoKey)) carriesMemo.set(memoKey, new Set());
+                carriesMemo.get(memoKey).add(grant.galleryUuid);
+                return { ownKey, carries: true, confirmed: true };
             }
-            return { ownKey, carries: unread ? null : false };
+            const { entries } = await intentsOf(me);
+            const intended = entries.some((e) => e.intent?.kind === 'message' && e.intent.dialogHash === dialogHash && carriesGrant(e.intent.parts, grant));
+            if (intended || await carrying(pendingRows)) return { ownKey, carries: true, confirmed: false };
+            return { ownKey, carries: unread ? null : false, confirmed: false };
         });
     };
 
@@ -2085,7 +2092,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         sendMessage,
         captureMessageIntent,
         onOwnSend,
-        ownDialogCarriesAvatar,
+        ownDialogCarriesGrant,
         dispatchMessageIntent,
         editMessage,
         decryptMessageRow,

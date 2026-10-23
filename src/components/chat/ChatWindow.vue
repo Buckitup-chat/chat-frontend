@@ -432,7 +432,7 @@ import { playableAudioType } from '@/composables/useAudioPlayback';
 import Avatar from 'vue-boring-avatars';
 import GalleryViewer from '@/components/GalleryViewer.vue';
 import { thumbDataUrl } from '@/lib/data/imageMeta';
-import { isAvatarPart } from '@buckitup/pq-client/content';
+import { isAvatarPart, isControlPart } from '@buckitup/pq-client/content';
 
 const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
 const $breakpoint = useBreakpoint();
@@ -853,9 +853,10 @@ const isPhotoOnly = (msg) => {
   const parts = msg.parts || [];
   return !msg._deleted && msg._syncStatus !== 'error'
     && (msg._verify === 'verified' || msg._verify === 'waiting' || msg.isMine)
-    && parts.length > 0 && parts.every(isAvatarPart);
+    && parts.length > 0 && parts.every((part) => isAvatarPart(part) || isControlPart(part));
 };
-const visibleMessages = computed(() => props.messages.filter((msg) => !isPhotoOnly(msg)));
+const isControlOnly = (msg) => (msg.parts || []).length > 0 && msg.parts.every(isControlPart);
+const visibleMessages = computed(() => props.messages.filter((msg) => !isPhotoOnly(msg) && !isControlOnly(msg)));
 
 
 const fmtSize = (n) => {

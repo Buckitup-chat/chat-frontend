@@ -188,87 +188,77 @@ describe('decryptMessageRow: a profile photo is its sender\'s file', () => {
 	});
 });
 
-describe('ownDialogCarriesAvatar', () => {
-	const avatarPart = {
-		kind: 'avatar' as const, avatarId: 'a'.repeat(32),
-		photo: { kind: 'inline_image' as const, widthAspect: 1, heightAspect: 1, thumbHashB64: '', name: 'a.jpg', size: 1, mimeType: 'image/jpeg', createdAt: 0, dataB64: 'AA' },
-	};
+const GRANT = {
+	kind: 'avatar_gallery_access' as const, version: 1 as const,
+	galleryUuid: '0b7e3a52-9c1d-4f6e-8a2b-3c4d5e6f7a8b', galleryKeyB64: 'K'.repeat(42) + 'w',
+};
+
+describe('ownDialogCarriesGrant', () => {
 	const ownRow = (messageId: string, content: string, over: Record<string, unknown> = {}) => ({
 		message_id: messageId, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, sign_hash: `dms_${messageId}`,
 		content_b64: content, deleted_flag: false, ...over,
 	});
 
-	it('counts a photo message still waiting in the outbox intents as carrying', async () => {
+	it('counts a grant message still waiting in the outbox intents as carrying, not confirmed — and remembers nothing of it', async () => {
 		const store = useDialogsStore();
 		vaultLocked = true; // stored, not sent: it stays an intent
-		await store.captureMessageIntent(PEER_HASH, [avatarPart]);
+		await store.captureMessageIntent(PEER_HASH, [GRANT]);
 		vaultLocked = false;
 		expect(collections.dialog.messages.toArray).toEqual([]);
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: true, confirmed: false });
+		collections.dialog.messages.rows.set('dmsg_9', ownRow('dmsg_9', `enc(${encodeContent([GRANT])})`));
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: true, confirmed: true });
 	});
 
 	it('is false for a dialog of text only, a waiting text intent included', async () => {
 		const store = useDialogsStore();
 		await store.captureMessageIntent(PEER_HASH, 'hello');
 		collections.dialog.messages.rows.set('dmsg_1', ownRow('dmsg_1', `enc(${encodeContent([{ kind: 'text', text: 'hi' }])})`));
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: false });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: false });
 	});
 
-	it('reads own rows under the key it derives itself, stops at a photo, and skips a deleted one', async () => {
+	it('reads own rows under the key it derives itself, stops at the grant, and skips a deleted one', async () => {
 		const store = useDialogsStore();
-		collections.dialog.messages.rows.set('dmsg_1', ownRow('dmsg_1', `enc(${encodeContent([avatarPart])})`, { deleted_flag: true }));
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: false });
-		collections.dialog.messages.rows.set('dmsg_2', ownRow('dmsg_2', `enc(${encodeContent([avatarPart])})`));
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+		collections.dialog.messages.rows.set('dmsg_1', ownRow('dmsg_1', `enc(${encodeContent([GRANT])})`, { deleted_flag: true }));
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: false });
+		collections.dialog.messages.rows.set('dmsg_2', ownRow('dmsg_2', `enc(${encodeContent([GRANT])})`));
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: true, confirmed: true });
 	});
 
 	it('is null, not false, when one of its messages does not decrypt', async () => {
 		const store = useDialogsStore();
 		collections.dialog.messages.rows.set('dmsg_1', ownRow('dmsg_1', 'garbage'));
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: null });
-	});
-
-	it('with requireOwnKey, a dialog without this account\'s key is not read further', async () => {
-		const store = useDialogsStore();
-		collections.dialog.keys.rows.clear();
-		collections.dialog.messages.rows.set('dmsg_1', ownRow('dmsg_1', `enc(${encodeContent([avatarPart])})`));
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH, { requireOwnKey: true })).toEqual({ ownKey: false, carries: null });
-		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, signedDialogKeyRow(ME, { dialog_hash: DIALOG_HASH, peer_hash: PEER_HASH }));
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH, { requireOwnKey: true })).toEqual({ ownKey: true, carries: true });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: null });
 	});
 });
 
-describe('ownDialogCarriesAvatar: remembered once true', () => {
-	const avatarPart = {
-		kind: 'avatar' as const, avatarId: 'a'.repeat(32),
-		photo: { kind: 'inline_image' as const, widthAspect: 1, heightAspect: 1, thumbHashB64: '', name: 'a.jpg', size: 1, mimeType: 'image/jpeg', createdAt: 0, dataB64: 'AA' },
-	};
+describe('ownDialogCarriesGrant: remembered once confirmed', () => {
 	const carrying = () => ({
 		message_id: 'dmsg_1', dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, sign_hash: 'dms_1',
-		content_b64: `enc(${encodeContent([avatarPart])})`, deleted_flag: false,
+		content_b64: `enc(${encodeContent([GRANT])})`, deleted_flag: false,
 	});
 
 	it('answers later sends without reading the dialog, until this account deletes or edits a message there', async () => {
 		const store = useDialogsStore();
 		collections.dialog.messages.rows.set('dmsg_1', carrying());
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: true, confirmed: true });
 		// gone from the dialog, but not by this account's hand: still remembered
 		collections.dialog.messages.rows.clear();
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: true, confirmed: true });
 		// this account deletes one of its messages there: read again
 		await store.deleteMessage(PEER_HASH, 'dmsg_1').catch(() => {});
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: false });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: false });
 		collections.dialog.messages.rows.set('dmsg_1', carrying());
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: true });
 		collections.dialog.messages.rows.clear();
 		await store.editMessage(PEER_HASH, 'dmsg_1', 'now text').catch(() => {});
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: false });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: false });
 	});
 
 	it('remembers nothing it did not find', async () => {
 		const store = useDialogsStore();
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: false });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: false });
 		collections.dialog.messages.rows.set('dmsg_1', carrying());
-		expect(await store.ownDialogCarriesAvatar(PEER_HASH)).toMatchObject({ carries: true });
+		expect(await store.ownDialogCarriesGrant(PEER_HASH, GRANT)).toMatchObject({ carries: true });
 	});
 });

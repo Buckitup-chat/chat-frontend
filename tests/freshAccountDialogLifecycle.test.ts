@@ -315,7 +315,7 @@ describe('fresh account: dialog open, delivered receipts, remount and reload', (
 		expect(conflictedPosts()).toEqual([]);
 		expectOneSnapshotPerReceipt();
 		expect(await quarantined()).toEqual([]);
-		expect(await app!.outbox.pendingEntries(app!.store.currentUserHash as unknown as string)).toEqual([]);
+		await vi.waitFor(async () => expect(await app!.outbox.pendingEntries(app!.store.currentUserHash as unknown as string)).toEqual([]), { timeout: 15_000 });
 	}, 90_000);
 
 	it('remount and reload + sign-in open the dialog again without a new signed receipt row', async () => {

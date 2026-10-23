@@ -1,9 +1,8 @@
 // What this device keeps about profile photos, per account, sealed under the
 // account's local storage key like the outbox and the intents:
 // - a small thumbnail of each contact's current photo, for the lists;
-// - the dialogs still owed a delivery of the account's gallery
-//   (lib/avatars/delivery): a change or a first message whose dialog could
-//   not be read, or whose send did not get stored.
+// - the dialogs given the account's gallery grant (lib/avatars/galleryGrants);
+// - each contact's grant and current photo, as last verified.
 //
 // Record names carry the account and contact hashes in the clear — local
 // metadata need not be hidden (docs/invariants.md §1) — and let an account's
@@ -24,7 +23,9 @@ export const _setAvatarLocalStoreForTests = (store: StringStore, key?: (owner: s
 const sealed = (owner: string): StringStore => createSecureStore(raw, { getKey: () => keyFor(owner) });
 const prefix = (owner: string) => `${owner}|`;
 const thumbKey = (owner: string, peerHash: string) => `${owner}|thumb|${peerHash}`;
-const owedKey = (owner: string) => `${owner}|owed`;
+const grantedKey = (owner: string) => `${owner}|granted`;
+const peerGrantKey = (owner: string, peerHash: string) => `${owner}|grant|${peerHash}`;
+const peerAvatarKey = (owner: string, peerHash: string) => `${owner}|avatar|${peerHash}`;
 
 export interface StoredThumb {
 	avatarId: string;
@@ -43,31 +44,48 @@ export const putThumb = (owner: string, peerHash: string, thumb: StoredThumb): P
 
 export const forgetThumb = (owner: string, peerHash: string): Promise<void> => raw.delete(thumbKey(owner, peerHash));
 
-/** A dialog owed a delivery: `change` — one or more changes did not reach it; `removed` — ids taken out meanwhile. */
-export interface Owed {
-	change?: boolean;
-	/** Its first message's dialog could not be read: it may need the whole gallery. */
-	first?: boolean;
-	removed?: string[];
+export interface StoredPeerAvatar {
+	id: string;
+	photo: unknown;
 }
-export type OwedMap = Record<string, Owed>;
 
-export const loadOwed = async (owner: string): Promise<OwedMap> => {
-	const value = await sealed(owner).get(owedKey(owner));
-	return value ? (JSON.parse(value) as OwedMap) : {};
+export const getPeerAvatar = async (owner: string, peerHash: string): Promise<StoredPeerAvatar | null | undefined> => {
+	const value = await sealed(owner).get(peerAvatarKey(owner, peerHash));
+	return value ? (JSON.parse(value) as StoredPeerAvatar | null) : undefined;
 };
 
-const owedLocks = new Map<string, Promise<unknown>>();
+export const putPeerAvatar = (owner: string, peerHash: string, avatar: StoredPeerAvatar | null): Promise<void> =>
+	sealed(owner).set(peerAvatarKey(owner, peerHash), JSON.stringify(avatar));
 
-/** Changes the owed set under a per-account lock, so concurrent deliveries do not drop each other's entries. */
-export const updateOwed = (owner: string, change: (owed: OwedMap) => void): Promise<OwedMap> =>
-	serialized(owedLocks, owner, async () => {
-		const owed = await loadOwed(owner);
-		change(owed);
-		for (const [peer, entry] of Object.entries(owed)) if (!entry.change && !entry.first) delete owed[peer];
-		await sealed(owner).set(owedKey(owner), JSON.stringify(owed));
-		return owed;
+export type GrantedMap = Record<string, string>;
+
+export const loadGranted = async (owner: string): Promise<GrantedMap> => {
+	const value = await sealed(owner).get(grantedKey(owner));
+	return value ? (JSON.parse(value) as GrantedMap) : {};
+};
+
+const grantedLocks = new Map<string, Promise<unknown>>();
+
+export const markGranted = (owner: string, peerHash: string, galleryUuid: string): Promise<void> =>
+	serialized(grantedLocks, owner, async () => {
+		const granted = await loadGranted(owner);
+		granted[peerHash] = galleryUuid;
+		await sealed(owner).set(grantedKey(owner), JSON.stringify(granted));
 	});
+
+export interface StoredPeerGrant {
+	galleryUuid: string;
+	galleryKeyB64: string;
+	messageId: string;
+}
+
+export const getPeerGrant = async (owner: string, peerHash: string): Promise<StoredPeerGrant | null> => {
+	const value = await sealed(owner).get(peerGrantKey(owner, peerHash));
+	return value ? (JSON.parse(value) as StoredPeerGrant) : null;
+};
+
+export const putPeerGrant = (owner: string, peerHash: string, grant: StoredPeerGrant): Promise<void> =>
+	sealed(owner).set(peerGrantKey(owner, peerHash), JSON.stringify(grant));
 
 /** Removes everything kept for an account: called when the account leaves this device. */
 export const forgetAccountAvatars = async (owner: string): Promise<void> => {

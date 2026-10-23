@@ -113,6 +113,7 @@ export interface UpsertResult {
 	 * the write is durably queued and recoverable (locked vault / unknown
 	 * base) — see StorageSyncStatus. */
 	sync: Promise<{ status: StorageSyncStatus; error?: unknown }>;
+	outcome?: Promise<EntryOutcome>;
 }
 
 export interface UpsertOptions {
@@ -281,17 +282,17 @@ async function upsertStorageEditLive(
 		console.warn(`[userStorage] ${uuid}: sync failed:`, message);
 		return { row: projected, sync: Promise.resolve({ status: 'failed' as const, error: message }) };
 	};
-	const markQueued = async (error?: unknown): Promise<UpsertResult> => {
+	const markQueued = async (outcome: Promise<EntryOutcome>, error?: unknown): Promise<UpsertResult> => {
 		assertSessionUnchanged(token, 'upsertStorageEditLive:beforeQueuedProjection');
 		const syncError = error === undefined ? undefined : String((error as Error)?.message || error);
 		await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'queued', syncError } satisfies LocalStorageEntry, userHash);
-		return { row: projected, sync: Promise.resolve({ status: 'queued' as const, error }) };
+		return { row: projected, sync: Promise.resolve({ status: 'queued' as const, error }), outcome };
 	};
 
-	const markAwaitingApproval = async (): Promise<UpsertResult> => {
+	const markAwaitingApproval = async (outcome: Promise<EntryOutcome>): Promise<UpsertResult> => {
 		assertSessionUnchanged(token, 'upsertStorageEditLive:beforeAwaitingApprovalProjection');
 		await kvSet(key, { row: projected, hash_b64: hashB64, syncStatus: 'awaiting-approval' } satisfies LocalStorageEntry, userHash);
-		return { row: projected, sync: Promise.resolve({ status: 'awaiting-approval' as const }) };
+		return { row: projected, sync: Promise.resolve({ status: 'awaiting-approval' as const }), outcome };
 	};
 
 	let handle: DeliveryHandle | null = null;
@@ -300,13 +301,13 @@ async function upsertStorageEditLive(
 		if (handle.phase === 'accepted') return await settle({ kind: 'accepted' });
 		if (handle.held?.reason === 'awaiting_approval') {
 			void handle.acceptance.then(settle).catch(() => { /* session changed: the next session reads the server */ });
-			return await markAwaitingApproval();
+			return await markAwaitingApproval(handle.acceptance);
 		}
 		if (opts.untilQueued) {
 			// Done for the caller once durable; the local copy still follows
 			// the server's verdict when it comes.
 			void handle.acceptance.then(settle).catch(() => { /* session changed: the next session reads the server */ });
-			return await markQueued();
+			return await markQueued(handle.acceptance);
 		}
 		return await settle(await handle.acceptance);
 	} catch (e: unknown) {
@@ -320,8 +321,9 @@ async function upsertStorageEditLive(
 			? (await queuedSlotWrites(userHash, uuid)).filter((id) => !queuedBefore.has(id)).at(-1) ?? null
 			: null;
 		if (queuedId) {
-			void awaitEntryOutcome(queuedId, userHash).then(settle).catch(() => { /* session changed: the next session reads the server */ });
-			return markQueued(e);
+			const outcome = awaitEntryOutcome(queuedId, userHash);
+			void outcome.then(settle).catch(() => { /* session changed: the next session reads the server */ });
+			return markQueued(outcome, e);
 		}
 		assertSessionUnchanged(token, 'upsertStorageEditLive:beforeFailedProjectionOnThrow');
 		const message = String((e as Error)?.message || e);
@@ -424,7 +426,7 @@ export async function saveStorageJsonPatch(
  * same way) tells it apart from a write that failed.
  */
 export class StorageNotOnServerError extends Error {
-	constructor(readonly status: StorageSyncStatus, cause?: unknown) {
+	constructor(readonly status: StorageSyncStatus, cause?: unknown, readonly outcome?: Promise<EntryOutcome>) {
 		super('Saved on this device, but the server did not take it', { cause: cause ?? status });
 	}
 }
@@ -436,7 +438,7 @@ export class StorageNotOnServerError extends Error {
 async function settledOnServer(write: UpsertResult): Promise<UserStorageRow> {
 	const sync = await write.sync;
 	if (sync.status === 'queued' || sync.status === 'syncing' || sync.status === 'awaiting-approval') {
-		throw new StorageNotOnServerError(sync.status, sync.error);
+		throw new StorageNotOnServerError(sync.status, sync.error, write.outcome);
 	}
 	if (sync.status !== 'synced') {
 		throw new Error('Saved on this device, but the server did not take it', { cause: sync.error ?? sync.status });

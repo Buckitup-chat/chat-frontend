@@ -22,7 +22,14 @@ import {
 import { recoverIntents, signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import { requestContactAccess, applyContactAccessIntent } from '@/lib/data/contactVouches';
 import { claimDeviceIfUnowned } from '@/lib/data/deviceOwner';
-import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch } from '@/lib/data/userStorage';
+import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch, upsertStorageJsonPatch, upsertStorageRow } from '@/lib/data/userStorage';
+import { getLiveServerState, entityKeyFor } from '@/lib/data/userStorageBase';
+import { getAccepted } from '@/lib/data/acceptedSnapshot';
+import { verifyReplicatedRow } from '@/lib/data/rowVerification';
+import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
+import { SessionFencedError } from '@/lib/data/sessionGuard';
+import { wireBool } from '@buckitup/pq-client/schema';
+import { obtainGalleryMapping, initialGalleryMapping } from '@/lib/avatars/galleryMapping';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
 import { publishVault } from '@/lib/recovery/vault';
@@ -31,6 +38,9 @@ import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
 import { forgetAccountAvatars } from '@/lib/avatars/localStore';
+import { forgetPeerGalleryReads, fetchGalleryRow } from '@/lib/avatars/peerGallery';
+import { readSharedGalleryRow, galleryKeyFromB64 } from '@/lib/avatars/sharedGallery';
+import { publishInitialSharedGallery, publishSharedGalleryRecord, avatarsSlotOf } from '@/lib/avatars/sharedGalleryPublish';
 import { clearSessions } from '@/lib/data/readSession';
 import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
@@ -539,16 +549,19 @@ export class EncryptionManagerPQ extends EventTarget {
       throw new VaultKeyError('Failed to load secret key from vault');
     }
 
+    // The card's vault ID is only a pointer: a stale or swapped one opens a
+    // vault that holds another account's keys. Signing in on those keys would
+    // sign this account's writes with a key its card does not carry, so the
+    // binding is checked on every path, not only when the vault is discovered.
+    if (!this.#signKeyMatchesIdentity(signSkey, identity)) {
+      try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
+      throw new AccountPasskeyMismatchError();
+    }
     if (discoverVault) {
-      const matches = this.#signKeyMatchesIdentity(signSkey, identity);
-      if (!matches) {
-        try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
-        throw new AccountPasskeyMismatchError();
-      }
       identity.vaultId = vault.id;
       await this.#saveLocalUserCards();
       await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
-    } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`)) && this.#signKeyMatchesIdentity(signSkey, identity)) {
+    } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`))) {
       await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
     }
 
@@ -755,6 +768,7 @@ export class EncryptionManagerPQ extends EventTarget {
     clearSessions();
     clearRelayCredentials();
     resetGate();
+    forgetPeerGalleryReads();
 
     if (hadActiveAccount) await this.#clearAccountReadCache();
 
@@ -1553,6 +1567,128 @@ export class EncryptionManagerPQ extends EventTarget {
     // Written for its own account; this session no longer holds that key.
     if (this.#currentUserHash !== userHash) throw new Error('The account changed while this write was out');
     return this.#decryptJson(accepted.value_b64);
+  }
+
+  async obtainSharedGalleryMapping() {
+    const userHash = this.#currentUserHash;
+    const signSkey = this.#signSkey;
+    if (!userHash || !signSkey || !this.#cryptSkey) throw new Error('No user is currently logged in');
+    const assertCurrent = this.#sessionFence('shared gallery mapping');
+    const uuid = this.#rootSlotUuid();
+    const initial = initialGalleryMapping(this.#cryptSkey);
+    return obtainGalleryMapping({
+      assertCurrent,
+      readLive: async () => {
+        const live = await this.#readLiveJson(userHash, uuid, assertCurrent);
+        if (live.state === 'undecryptable') throw new Error('The account record on the server cannot be read; nothing was written', { cause: live.error });
+        return live.state === 'found' ? live : { state: 'unknown' };
+      },
+      writePatch: async (jsonPatch) => {
+        const write = await upsertStorageJsonPatch({ userHash, uuid, jsonPatch, signSkey });
+        const sync = await write.sync;
+        if (sync.status === 'failed') throw new Error('The account record could not be saved', { cause: sync.error });
+        return sync.status;
+      },
+    }, initial);
+  }
+
+  async publishInitialSharedGallery() {
+    const userHash = this.#currentUserHash;
+    if (!userHash || !this.#signSkey || !this.#cryptSkey) throw new Error('No user is currently logged in');
+    const access = this.#sharedGalleryAccess(userHash, 'shared gallery publication');
+    const rootUuid = this.#rootSlotUuid();
+    return publishInitialSharedGallery({
+      ...access,
+      readLegacy: async () => {
+        const root = await this.#readLiveJson(userHash, rootUuid, access.assertCurrent);
+        if (root.state === 'unknown') return { state: 'unknown' };
+        if (root.state === 'undecryptable') return { state: 'malformed', reason: 'the account record does not decrypt' };
+        if (root.state === 'absent') return { state: 'found', record: null };
+        const ref = avatarsSlotOf(root.record);
+        if (ref.state === 'malformed') return ref;
+        if (ref.state === 'none') return { state: 'found', record: null };
+        const slot = await this.#readLiveJson(userHash, ref.uuid, access.assertCurrent);
+        if (slot.state === 'undecryptable') return { state: 'malformed', reason: 'the avatars slot does not decrypt' };
+        return slot.state === 'found' ? slot : { state: 'unknown' };
+      },
+      readSharedRow: async (mapping) => {
+        const address = { ownerHash: userHash, galleryUuid: mapping.galleryUuid };
+        return readSharedGalleryRow(await fetchGalleryRow(address), address, galleryKeyFromB64(mapping.galleryKeyB64), getVerifiedSignPkey);
+      },
+    });
+  }
+
+  async publishSharedGalleryRecord(record) {
+    const userHash = this.#currentUserHash;
+    if (!userHash || !this.#signSkey || !this.#cryptSkey) throw new Error('No user is currently logged in');
+    return publishSharedGalleryRecord(this.#sharedGalleryAccess(userHash, 'shared gallery publication'), record);
+  }
+
+  #sharedGalleryAccess(userHash, step) {
+    const signSkey = this.#signSkey;
+    return {
+      ownerHash: userHash,
+      assertCurrent: this.#sessionFence(step),
+      obtainMapping: () => this.obtainSharedGalleryMapping(),
+      writeRow: async (mapping, valueB64) => {
+        const write = await upsertStorageRow({ userHash, uuid: mapping.galleryUuid, valueB64, hashB64: null, signSkey });
+        return write.sync;
+      },
+    };
+  }
+
+  #sessionFence(step) {
+    const userHash = this.#currentUserHash;
+    const session = currentSessionToken();
+    if (!userHash || !session || session.userHash !== userHash) throw new SessionFencedError(`${step}: no session for this account`);
+    return () => {
+      if (this.#currentUserHash !== userHash || !sameSessionToken(session, currentSessionToken())) {
+        throw new SessionFencedError(`${step}: the account changed; nothing more was written`);
+      }
+    };
+  }
+
+  async #readLiveJson(userHash, uuid, assertCurrent) {
+    const live = await getLiveServerState(userHash, uuid);
+    assertCurrent();
+    if (live.state === 'absent') return { state: 'absent' };
+    if (live.state !== 'found') return { state: 'unknown' };
+    const verdict = await verifyReplicatedRow('user_storage', live.row, getVerifiedSignPkey);
+    assertCurrent();
+    if (verdict.status !== 'verified') return { state: 'unknown' };
+    if (wireBool(live.row.deleted_flag) || !live.row.value_b64) return { state: 'absent' };
+    try {
+      return { state: 'found', record: await this.#decryptJson(live.row.value_b64) };
+    } catch (error) {
+      return { state: 'undecryptable', error };
+    }
+  }
+
+  async loadAcceptedSlotJson(name) {
+    const userHash = this.#currentUserHash;
+    if (!userHash || !this.#cryptSkey) return { state: 'unknown' };
+    const assertCurrent = this.#sessionFence(`accepted ${name} slot`);
+    const uuid = await this.#slotUuid(name);
+    assertCurrent();
+    if (!uuid) return { state: 'unknown' };
+    let accepted = null;
+    try {
+      accepted = await getAccepted('user_storage', entityKeyFor(userHash, uuid), userHash);
+    } catch {
+      accepted = null;
+    }
+    assertCurrent();
+    const live = await getLiveServerState(userHash, uuid);
+    assertCurrent();
+    const verifiedLive = live.state === 'found'
+      && (await verifyReplicatedRow('user_storage', live.row, getVerifiedSignPkey)).status === 'verified'
+      ? live.row : null;
+    assertCurrent();
+    const freshest = [accepted, verifiedLive].filter(Boolean)
+      .reduce((a, b) => (!a || Number(b.owner_timestamp) > Number(a.owner_timestamp) ? b : a), null);
+    if (!freshest) return { state: 'unknown' };
+    if (wireBool(freshest.deleted_flag) || !freshest.value_b64) return { state: 'found', record: null };
+    return { state: 'found', record: await this.#decryptJson(freshest.value_b64) };
   }
 
   /**

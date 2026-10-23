@@ -42,6 +42,8 @@ const ALICE = makeCard(1, 'Alice');
 const BOB = makeCard(2, 'Bob');
 const CAROL = makeCard(3, 'Carol');
 const ME = ALICE.user_hash;
+// The vault must hold the key the card carries: sign-in checks that binding.
+const ALICE_SIGN_SKEY = ml_dsa87.keygen(new Uint8Array(32).fill(1)).secretKey;
 
 const BINARY = ['sign_pkey', 'crypt_pkey', 'crypt_cert', 'contact_pkey', 'contact_cert', 'sign_b64'];
 
@@ -76,10 +78,10 @@ vi.mock('@lo-fi/local-vault', () => ({
 vi.mock('@lo-fi/local-vault/adapter/idb', () => ({}));
 vi.mock('@lo-fi/local-data-lock', () => ({ removeLocalAccount: async () => {} }));
 const freshVaultDisk = () => {
-	const vault = new Map([['sign_skey', new Uint8Array(32).fill(7)], ['crypt_skey', new Uint8Array(32).fill(8)]]);
+	const vault = new Map([['sign_skey', ALICE_SIGN_SKEY], ['crypt_skey', new Uint8Array(32).fill(8)]]);
 	return {
 		raw: new Map<string, unknown>([
-			['pq-vaults-registry', [{ user_hash: ME, vaultId: 'vault-me', name: 'Alice', crypt_pkey: ALICE.crypt_pkey }]],
+			['pq-vaults-registry', [{ user_hash: ME, vaultId: 'vault-me', name: 'Alice', sign_pkey: ALICE.sign_pkey, crypt_pkey: ALICE.crypt_pkey }]],
 			['local-vault-vault-me', { accountID: 'account-vault-me', data: 'sealed' }],
 		]),
 		vaults: new Map([['vault-me', { id: 'vault-me', async get(k: string) { return vault.get(k); }, async set(k: string, v: Uint8Array) { vault.set(k, v); } }]]),

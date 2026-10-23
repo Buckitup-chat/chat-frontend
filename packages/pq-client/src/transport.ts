@@ -133,10 +133,15 @@ export function createTransport(options: TransportOptions): Transport {
 		return `${origin}${u}`;
 	};
 
-	const send = async (path: string, init: NonNullable<Parameters<typeof fetch>[1]>, opts: RequestOptions = {}): Promise<Response> => {
+	const send = async (
+		path: string,
+		init: NonNullable<Parameters<typeof fetch>[1]>,
+		opts: RequestOptions = {},
+		target = `${base}${path}`,
+	): Promise<Response> => {
 		const signal = opts.signal ?? AbortSignal.timeout(opts.timeoutMs ?? options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 		try {
-			return await doFetch(`${base}${path}`, { ...init, signal });
+			return await doFetch(target, { ...init, signal });
 		} catch (e) {
 			if (isNoAnswer(e)) throw new TransportError(`${path}: no answer (${(e as Error)?.message ?? e})`, { network: true });
 			throw e;
@@ -210,9 +215,11 @@ export function createTransport(options: TransportOptions): Transport {
 		},
 
 		async readShapeOnce<T>(table: string, where: string, opts: RequestOptions & { authorization?: string } = {}) {
-			const resp = await send(`/shapes?table=${table}&where=${encodeURIComponent(freshWhere(where))}&offset=-1`, {
+			// Shape reads go to the absolute URL, as Electric's own client sends them.
+			const path = `/shapes?table=${table}&where=${encodeURIComponent(freshWhere(where))}&offset=-1`;
+			const resp = await send(path, {
 				headers: opts.authorization ? { Authorization: opts.authorization } : undefined,
-			}, opts);
+			}, opts, url(path));
 			if (resp.status === 401) {
 				const body = (await resp.json().catch(() => null)) as { error?: string; shape?: string } | null;
 				if (body?.error === 'read_session_required' && body.shape) return { kind: 'read_session_required', shape: body.shape };
