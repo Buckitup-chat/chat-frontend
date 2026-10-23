@@ -13,8 +13,8 @@
 // controller change re-sends whatever is active, so playback survives both
 // worker restarts and worker updates.
 
-import { fromBase64 } from '@/lib/pq/signature';
-import { CHUNK_SIZE } from '@/lib/pq/fileCrypto';
+import { fromBase64 } from '@buckitup/pq-client/signature';
+import { CHUNK_SIZE } from '@buckitup/pq-client/fileCrypto';
 import { downloadFile, type DownloadProgress } from './fileTransfer';
 import { FileVerificationError, readVerifiedFile, type ChunkHashes } from './fileIntegrity';
 import { fileKey } from './fileKey';

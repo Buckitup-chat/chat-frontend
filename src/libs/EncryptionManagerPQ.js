@@ -34,7 +34,7 @@ import { forgetAccountAvatars } from '@/lib/avatars/localStore';
 import { clearSessions } from '@/lib/data/readSession';
 import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
-import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
+import { deriveRootSlotUuid, randomSlotUuid } from '@buckitup/pq-client/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
 
 const CONTACT_ACCESS_RETRY_MS = 5_000;

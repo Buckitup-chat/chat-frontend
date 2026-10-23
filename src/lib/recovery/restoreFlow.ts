@@ -6,7 +6,7 @@
 // the node half. The dialogs, the chain and the nodes come in as functions,
 // so a test drives a whole recovery with fakes that keep their contract.
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
-import type { ContentPart, RecoveryShareReturnPart } from '@/lib/pq/content';
+import type { ContentPart, RecoveryShareReturnPart } from '@buckitup/pq-client/content';
 import { guardianChainReads, type SecretState } from './chain';
 import { parseSecretRef } from './holdings';
 import { NodeError, type NodeRef } from './nodeClient';

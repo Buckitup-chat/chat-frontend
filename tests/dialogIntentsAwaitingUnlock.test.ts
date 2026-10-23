@@ -123,7 +123,7 @@ let myKey: Uint8Array;
 let tip: Row;
 
 const DialogCrypto = async () => (await import('@/libs/DialogCrypto')).DialogCrypto;
-const encodeContent = async () => (await import('@/lib/pq/content')).encodeContent;
+const encodeContent = async () => (await import('@buckitup/pq-client/content')).encodeContent;
 const decrypt = async (b64: unknown) => (await DialogCrypto()).decryptContent(myKey, b64 as string);
 const messageRevision = async (text: string, ts: number, parent: string | null) => signRow(me, {
 	message_id: MESSAGE_ID, dialog_hash: dialogHash, sender_hash: me.userHash,

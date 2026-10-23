@@ -421,7 +421,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { fileKey } from '@/lib/data/fileKey';
-import { contentToText, quoteSnapshot } from '@/lib/pq/content';
+import { contentToText, quoteSnapshot } from '@buckitup/pq-client/content';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import RecoveryInviteCard from './RecoveryInviteCard.vue';
 import RecoveryShareCard from './RecoveryShareCard.vue';
@@ -432,7 +432,7 @@ import { playableAudioType } from '@/composables/useAudioPlayback';
 import Avatar from 'vue-boring-avatars';
 import GalleryViewer from '@/components/GalleryViewer.vue';
 import { thumbDataUrl } from '@/lib/data/imageMeta';
-import { isAvatarPart } from '@/lib/pq/content';
+import { isAvatarPart } from '@buckitup/pq-client/content';
 
 const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
 const $breakpoint = useBreakpoint();

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import type { SignableFields } from '@/lib/pq/signature';
+import type { SignableFields } from '@buckitup/pq-client/signature';
 import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import {

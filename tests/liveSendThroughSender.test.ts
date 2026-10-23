@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { makeFakeLockManager } from './helpers/fakeWebLocks';
 
-vi.mock('@/lib/pq/signature', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('@/lib/pq/signature')>();
+vi.mock('@buckitup/pq-client/signature', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('@buckitup/pq-client/signature')>();
 	return { ...actual, signFields: () => 'AAAA' };
 });
 

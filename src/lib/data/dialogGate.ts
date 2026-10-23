@@ -15,9 +15,9 @@
 // that can never be admitted — terminal, they are not left waiting forever;
 // `invalid` rows are kept with their reason so the UI can surface rather than
 // silently drop them.
-import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
+import { presentedRowFingerprint } from '@buckitup/pq-client/verifyDialogRow';
 import { verifyRowWithKey } from '@/lib/data/rowVerification';
-import { validateRefs, revisionKey, type RevisionRef } from '@/lib/pq/dialogDag';
+import { validateRefs, revisionKey, type RevisionRef } from '@buckitup/pq-client/dialogDag';
 import type { DialogMessageRow, DialogMessageVersionRow } from '@/lib/data/types';
 
 export type MessageLike = DialogMessageRow | DialogMessageVersionRow;

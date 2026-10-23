@@ -9,7 +9,7 @@ import { bytesToHex, randomBytes } from '@noble/hashes/utils';
 import {
 	isAvatarId, photoFromWire, photoToWire,
 	type AvatarPart, type AvatarPhoto, type ContentPart,
-} from '@/lib/pq/content';
+} from '@buckitup/pq-client/content';
 
 /** A photo's longer side, at most (pq_avatars § The photo): the client resizes before sending. */
 export const AVATAR_MAX_SIDE = 640;

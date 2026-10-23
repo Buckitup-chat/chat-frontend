@@ -1,4 +1,4 @@
-// Generates src/lib/pq/schema.generated.ts from the backend Ecto schemas.
+// Generates packages/pq-client/src/schema.generated.ts from the backend Ecto schemas.
 //
 // The backend source is the contract (CLAUDE.md): the signable field set per
 // relation lives in chat/lib/chat/data/schemas/*.ex, and hand-copying it here
@@ -15,7 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const OUTPUT_PATH = path.join(HERE, '..', 'src', 'lib', 'pq', 'schema.generated.ts');
+export const OUTPUT_PATH = path.join(HERE, '..', 'packages', 'pq-client', 'src', 'schema.generated.ts');
 
 export const findChatRepo = () => {
 	const candidates = [
@@ -122,7 +122,7 @@ const main = () => {
 	if (process.argv.includes('--check')) {
 		const current = fs.existsSync(OUTPUT_PATH) ? fs.readFileSync(OUTPUT_PATH, 'utf8') : '';
 		if (current !== generated) {
-			console.error('src/lib/pq/schema.generated.ts is stale — run node scripts/gen-pq-schema.mjs');
+			console.error('packages/pq-client/src/schema.generated.ts is stale — run node scripts/gen-pq-schema.mjs');
 			process.exit(1);
 		}
 		console.log('schema.generated.ts matches the backend schemas');

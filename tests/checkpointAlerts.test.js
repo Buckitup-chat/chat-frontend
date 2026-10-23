@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash } from '@/lib/pq/signature';
+import { signFields, deriveSignHash } from '@buckitup/pq-client/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
 import { _setStoreForTests } from '@/lib/data/localStore';
@@ -13,7 +13,7 @@ import { savePointer, loadPointer } from '@/lib/data/checkpointAlerts';
 import {
 	deriveFrontierRoot, buildViewTree,
 	CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
-} from '@/lib/pq/checkpoint';
+} from '@buckitup/pq-client/checkpoint';
 
 let messagePreloads = 0;
 const makeCollection = (rows = {}, counted = false) => ({
@@ -48,7 +48,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
 const { DialogCrypto } = await import('@/libs/DialogCrypto');
-const { encodeContent } = await import('@/lib/pq/content');
+const { encodeContent } = await import('@buckitup/pq-client/content');
 
 const M1 = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
 const M2 = 'dmsg_0192aadd-0000-7000-8000-000000000002';

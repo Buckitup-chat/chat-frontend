@@ -5,7 +5,7 @@ import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { HandshakeEngine, type EngineOptions, type Outcome, type Stage } from '../src/engine';
 import { FakeNetwork } from '../src/channel';
 import { createIdentity, type Identity } from '../src/identity';
-import { encode, parse, signOptical, transcript } from '@/lib/pq/handshake';
+import { encode, parse, signOptical, transcript } from '@buckitup/pq-client/handshake';
 import { FRAME_DATA_CHARS } from '../src/frames';
 
 interface Side {

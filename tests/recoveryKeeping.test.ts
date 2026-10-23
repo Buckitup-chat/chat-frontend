@@ -14,7 +14,7 @@ import { mergeJsonPatch, stripPatchDirectives } from '@/lib/data/storageIntent';
 import {
 	anyUnhandled, giveBack, GiveBackError, holdingsPatch, receiveShares, secretsToCheck, sweepDue, sweepHoldings, type KeepingDeps,
 } from '@/lib/recovery/keeping';
-import type { RecoveryHoldingPart } from '@/lib/pq/content';
+import type { RecoveryHoldingPart } from '@buckitup/pq-client/content';
 import type { GuardianAnswer } from '@/lib/recovery/inviteThread';
 
 const NS = 'eip155:11155111:0xd9ffd20f2db9c774b9f0237c4837f52dcbd937a7';

@@ -5,7 +5,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { defineComponent, h } from 'vue';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { bytesToHex } from '@noble/hashes/utils';
-import { canonicalPayload, fromBase64 } from '@/lib/pq/signature';
+import { canonicalPayload, fromBase64 } from '@buckitup/pq-client/signature';
 import * as harness from './helpers/twoClients';
 import { makeTestIdentity, signRow } from './helpers/signedFixtures';
 import type { ApplyResult, Client, Relation, Row, ServerPost } from './helpers/twoClients';
@@ -979,7 +979,7 @@ describe('transitive access from an account whose own writes still wait for appr
 	beforeEach(() => { Ann = newClient('Ann'); });
 
 	it('A, holding read only, confirms B through the QR modal: the contact waits on the device, A → B goes out at once, and the contact syncs once A may write', async () => {
-		const { cardVouchesForContactKey } = await import('@/lib/pq/verifyCard');
+		const { cardVouchesForContactKey } = await import('@buckitup/pq-client/verifyCard');
 		await register(Bob);
 		await register(Ann);
 		const owner = makeTestIdentity(21);

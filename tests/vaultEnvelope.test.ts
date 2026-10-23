@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import {
 	newWrapKey, deriveVaultLocator, sealVault, openVault, VaultEnvelopeError,
-} from '@/lib/pq/vaultEnvelope';
+} from '@buckitup/pq-client/vaultEnvelope';
 
 const VAULT = JSON.stringify({ sign_skey: 'a'.repeat(64), crypt_skey: 'b'.repeat(64), evm_skey: 'c' });
 

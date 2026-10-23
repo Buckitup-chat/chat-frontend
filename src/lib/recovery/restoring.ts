@@ -6,7 +6,7 @@
 import * as secp from '@noble/secp256k1';
 import { bytesToHex } from '@noble/hashes/utils';
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
-import type { RecoveryBindingPart, RecoveryShareReturnPart } from '@/lib/pq/content';
+import type { RecoveryBindingPart, RecoveryShareReturnPart } from '@buckitup/pq-client/content';
 import { canonicalCandidate, signBinding } from './recoveryBinding';
 import { addressOf } from './evmSign';
 import { checkReturn, type CheckedReturn, type ExpectedReturn } from './recovering';

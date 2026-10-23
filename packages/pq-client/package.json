@@ -1,0 +1,34 @@
+{
+  "name": "@buckitup/pq-client",
+  "version": "0.1.0",
+  "description": "BuckitUp post-quantum protocol: canonical rows, signatures, card and dialog verification, content encoding, key derivations",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Buckitup-chat/chat-frontend.git",
+    "directory": "packages/pq-client"
+  },
+  "exports": {
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/smoke.mjs",
+    "prepack": "cp ../../LICENSE LICENSE && npm run build"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "@noble/post-quantum": "^0.5.4",
+    "@noble/secp256k1": "^2.2.3",
+    "qwbp": "0.1.0"
+  }
+}
