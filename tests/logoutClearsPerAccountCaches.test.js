@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
+import { toBase64 } from '@/lib/pq/signature';
 import { _resetTouchedForTests, markTouched, isTouched } from '@/lib/data/readCache';
 import { _setDialogCacheStoreForTests, readDialogRows } from '@/lib/data/dialogCache';
 import { memoryDialogCacheStore } from './helpers/mainDialogCache';
@@ -63,13 +65,15 @@ const freshManager = () => {
 
 const ACCOUNT = 'u_' + 'a'.repeat(128);
 const DIALOG = 'di_' + '1'.repeat(128);
+// The vault must hold the key the card carries: sign-in checks that binding.
+const SIGN = ml_dsa87.keygen(new Uint8Array(32).fill(1));
 const signedInManager = async () => {
 	const vault = makeVault('vault-a');
-	await vault.set('sign_skey', new Uint8Array(32).fill(1));
+	await vault.set('sign_skey', SIGN.secretKey);
 	await vault.set('crypt_skey', new Uint8Array(32).fill(2));
 	vaults.set('vault-a', vault);
 	await rawStore.set('local-vault-vault-a', { accountID: 'account-vault-a', data: 'sealed' });
-	await rawStore.set('pq-vaults-registry', [{ user_hash: ACCOUNT, vaultId: 'vault-a', name: 'A' }]);
+	await rawStore.set('pq-vaults-registry', [{ user_hash: ACCOUNT, vaultId: 'vault-a', name: 'A', sign_pkey: toBase64(SIGN.publicKey) }]);
 	await recordAccepted('user_cards', ACCOUNT, {
 		user_hash: ACCOUNT, sign_pkey: 'c2lnbg==', contact_pkey: 'Y29udGFjdA==', contact_cert: 'Y2VydA==',
 		crypt_pkey: 'Y3J5cHQ=', crypt_cert: 'Y2VydA==', name: 'A', deleted_flag: false, owner_timestamp: 1, sign_b64: 'c2ln',

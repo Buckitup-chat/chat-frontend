@@ -980,6 +980,22 @@ describe('import reports whether the card write is durable', () => {
 		expect((await target.getLocalUserCards())[0].vaultId).toBe('old-vault-id');
 	});
 
+	it('rejects a card whose vault ID points to another valid account vault', async () => {
+		const source = freshManager();
+		await source.createUserVault({ name: 'First' });
+		const first = { ...(await source.getLocalUserCards())[0] };
+		await source.createUserVault({ name: 'Second' });
+		const second = (await source.getLocalUserCards()).find((card) => card.user_hash !== first.user_hash)!;
+		await source.logout();
+		await rawStore.set('pq-vaults-registry', [{ ...first, vaultId: second.vaultId }, second]);
+
+		const target = freshManager();
+		await expect(target.login(first.user_hash)).rejects.toThrow('different account');
+		expect(target.isAuth).toBe(false);
+		expect((await target.getLocalUserCards())[0].vaultId).toBe(second.vaultId);
+		expect(await rawStore.get(`pq-vault-owner-${second.vaultId}`)).toBe(second.user_hash);
+	});
+
 	it('an intent store failure fails the import honestly: no HTTP, no card intent, no session, no promise of later recovery — and a retry reuses the restored account', async () => {
 		const { keys, identity } = await exported();
 		const intentsBefore = cardIntents().length;
