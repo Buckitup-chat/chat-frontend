@@ -6,7 +6,8 @@
 			</div>
 		</div>
 		<!-- The code on top, the camera under it, one square each: the PQ1 layout, which read well on phones. -->
-		<div class="_qrh_scanner" :class="{ _hidden: !scanning }">
+		<!-- Hidden once the camera stops: after reading the other phone, while the channel opens. -->
+		<div class="_qrh_scanner" :class="{ _hidden: !scanning || cameraStopped }">
 			<video ref="qrScannerRef" muted playsinline></video>
 		</div>
 
@@ -67,6 +68,8 @@ const scanning = ref(false);
 const stage = ref('idle');
 const outcome = ref(null);
 const cameraError = ref(null);
+/** The camera is off for this session: nothing is left to read. */
+const cameraStopped = ref(false);
 const shown = computed(() => scanning.value || !!outcome.value);
 
 const STAGE_HINTS = {
@@ -145,6 +148,7 @@ const clearCode = () => {
 
 const stopCamera = () => {
 	qrScanner?.stop();
+	cameraStopped.value = true;
 };
 
 const setScanning = (value) => {
@@ -210,6 +214,7 @@ const startSession = async () => {
 	engine = null;
 	outcome.value = null;
 	cameraError.value = null;
+	cameraStopped.value = false;
 	stage.value = 'idle';
 	lastScan = { text: '', at: 0 };
 	clearCode();

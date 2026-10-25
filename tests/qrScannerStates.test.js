@@ -147,6 +147,28 @@ describe('the scanner, two phones face to face', () => {
 		expect(a.code()).toMatch(/^PQ2:D:/); // still there for the other camera
 	});
 
+	it('hides the camera once both codes are read, and keeps showing its own code while the channel opens', async () => {
+		net.reachable = false;
+		vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
+		const a = await phone(alice);
+		const b = await phone(bob);
+		await a.wrapper.vm.toggleScanner();
+		await b.wrapper.vm.toggleScanner();
+		for (const p of [a, b]) expect(p.wrapper.find('._qrh_scanner').classes()).not.toContain('_hidden');
+		await faceToFace(a, b, () => !!(a.scanner.running === false && b.scanner.running === false));
+		await flushPromises();
+		for (const p of [a, b]) {
+			expect(p.outcome()).toBeFalsy(); // still waiting for the channel
+			expect(p.wrapper.find('._qrh_scanner').classes()).toContain('_hidden');
+			expect(p.wrapper.find('._qrh_wrapper').classes()).not.toContain('_hidden');
+		}
+		// A new session shows the camera again.
+		await a.wrapper.vm.toggleScanner(); // stop
+		await a.wrapper.vm.toggleScanner(); // start
+		await flushPromises();
+		expect(a.wrapper.find('._qrh_scanner').classes()).not.toContain('_hidden');
+	});
+
 	it('ends verified in person, not confirmed, when the channel does not open in 15 s — with the six digits and the cause', async () => {
 		net.reachable = false;
 		// The engine's timers are fake from the start, so 15 s can pass at once; the crypto runs as it does.
