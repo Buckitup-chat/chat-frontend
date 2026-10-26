@@ -29,6 +29,9 @@ export type CardVerdict =
 	| { status: 'verified'; card: VerifiedCard }
 	| { status: 'invalid'; reason: 'missing_fields' | 'hash_mismatch' | 'bad_signature' | 'bad_cert' };
 
+/** `u_` + hex(SHA3-512(sign_pkey)): an identity's hash is its signing key's digest. */
+export const userHashOf = (signPkey: Uint8Array): string => 'u_' + bytesToHex(sha3_512(signPkey));
+
 const toB64 = (b: Uint8Array) => {
 	let s = '';
 	b.forEach((x) => (s += String.fromCharCode(x)));
@@ -48,7 +51,7 @@ export const verifyUserCard = (row: UserCardRow): CardVerdict => {
 	}
 
 	// user_hash is derived, never asserted: recompute and compare.
-	if (row.user_hash !== 'u_' + bytesToHex(sha3_512(signPkey))) {
+	if (row.user_hash !== userHashOf(signPkey)) {
 		return { status: 'invalid', reason: 'hash_mismatch' };
 	}
 

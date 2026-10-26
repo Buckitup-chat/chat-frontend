@@ -6,8 +6,7 @@
 // use (pq_notes_to_self.proposed.md § Identities). The derivation of each key
 // is HKDF-SHA3-256 over the parent's keys with a family salt; `info` is a
 // per-identity prefix (empty, or a note id) followed by the key's label.
-import { sha3_256, sha3_512 } from '@noble/hashes/sha3';
-import { bytesToHex, concatBytes } from '@noble/hashes/utils';
+import { concatBytes } from '@noble/hashes/utils';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
@@ -15,6 +14,7 @@ import { hkdfExpand, hkdfExtract } from './hkdf.js';
 import { signableFields } from './schema.js';
 import { signFields, toBase64, type SignableFields } from './signature.js';
 import type { UserCardRow } from './types.js';
+import { userHashOf } from './verifyCard.js';
 
 export interface DerivedIdentity {
 	userHash: string;
@@ -25,6 +25,8 @@ export interface DerivedIdentity {
 	contactSkey: Uint8Array;
 	/** compressed secp256k1, 33 bytes */
 	contactPkey: Uint8Array;
+	/** The public name its card carries; see cardName below. */
+	cardName: string;
 }
 
 /** The parent's keys a derivation starts from. */
@@ -44,44 +46,12 @@ export interface IdentityFamily {
 const utf8 = (s: string) => new TextEncoder().encode(s);
 const NO_PREFIX = new Uint8Array(0);
 
-export const userHashOf = (signPkey: Uint8Array): string => 'u_' + bytesToHex(sha3_512(signPkey));
-
-/**
- * The identities of family `salt` under `parent`. For each prefix:
- * - ML-DSA-87 from a 32-byte seed (info prefix || "sign"),
- * - ML-KEM-1024 from a 64-byte seed (prefix || "crypt"),
- * - secp256k1 from 48 bytes reduced to a scalar in [1, n − 1] (prefix || "contact").
- */
-export const identityFamily = (parent: ParentKeys, salt: string): IdentityFamily => {
-	const prk = hkdfExtract(concatBytes(parent.signSkey, parent.cryptSkey), salt);
-	const seed = (prefix: Uint8Array, label: string, length: number) => hkdfExpand(prk, concatBytes(prefix, utf8(label)), length);
-	return {
-		identity(prefix = NO_PREFIX) {
-			const sign = ml_dsa87.keygen(seed(prefix, 'sign', 32));
-			const crypt = ml_kem1024.keygen(seed(prefix, 'crypt', 64));
-			const contactSkey = secp.etc.hashToPrivateKey(seed(prefix, 'contact', 48));
-			return {
-				userHash: userHashOf(sign.publicKey),
-				signSkey: sign.secretKey,
-				signPkey: sign.publicKey,
-				cryptSkey: crypt.secretKey,
-				cryptPkey: crypt.publicKey,
-				contactSkey,
-				contactPkey: secp.getPublicKey(contactSkey, true),
-			};
-		},
-		userHash: (prefix = NO_PREFIX) => userHashOf(ml_dsa87.keygen(seed(prefix, 'sign', 32)).publicKey),
-	};
-};
-
-export const deriveIdentity = (parent: ParentKeys, salt: string, prefix: Uint8Array = NO_PREFIX): DerivedIdentity =>
-	identityFamily(parent, salt).identity(prefix);
-
 // Card names must be non-empty and are public. A derived identity takes a
-// common given name, chosen by its own key so that every device publishes the
-// same card, rather than anything that marks what the identity is for. One
-// list for every family, so names do not tell families apart either.
-const NAMES = [
+// common given name, picked by a byte derived from the parent's secret keys:
+// one picked by anything public (the user_hash) would let anyone recompute it
+// and spot derived cards. One list for every family, so names do not tell
+// families apart either.
+export const DERIVED_CARD_NAMES: readonly string[] = [
 	'Alex', 'Anna', 'Ari', 'Ben', 'Cami', 'Chris', 'Dana', 'Dani',
 	'Eli', 'Ella', 'Emil', 'Eva', 'Felix', 'Finn', 'Gabi', 'Hana',
 	'Ian', 'Ida', 'Ilya', 'Ivan', 'Jade', 'Jan', 'Jona', 'Kai',
@@ -92,14 +62,62 @@ const NAMES = [
 	'Tom', 'Uma', 'Vera', 'Viktor', 'Yara', 'Yuri', 'Zoe', 'Zora',
 ];
 
-/** The public card name of a derived identity: a given name picked by its user_hash. */
-export const derivedCardName = (userHash: string): string => NAMES[sha3_256(utf8(userHash))[0] % NAMES.length];
+/**
+ * The identities of family `salt` under `parent`. For each prefix, from
+ * HKDF-Expand with info prefix || label:
+ * - ML-DSA-87 from a 32-byte seed ("sign"),
+ * - ML-KEM-1024 from a 64-byte seed ("crypt"),
+ * - secp256k1 from 48 bytes reduced to a scalar in [1, n − 1] ("contact"),
+ * - the card name from one byte ("name"), an index into a 64-name list.
+ */
+export const identityFamily = (parent: ParentKeys, salt: string): IdentityFamily => {
+	const ikm = concatBytes(parent.signSkey, parent.cryptSkey);
+	const prk = hkdfExtract(ikm, salt);
+	ikm.fill(0);
+	// Seeds are secret: each is wiped once its key is made.
+	const withSeed = <T>(prefix: Uint8Array, label: string, length: number, use: (seed: Uint8Array) => T): T => {
+		const seed = hkdfExpand(prk, concatBytes(prefix, utf8(label)), length);
+		try {
+			return use(seed);
+		} finally {
+			seed.fill(0);
+		}
+	};
+	const signKeys = (prefix: Uint8Array) => withSeed(prefix, 'sign', 32, (seed) => ml_dsa87.keygen(seed));
+	return {
+		identity(prefix = NO_PREFIX) {
+			const sign = signKeys(prefix);
+			const crypt = withSeed(prefix, 'crypt', 64, (seed) => ml_kem1024.keygen(seed));
+			const contactSkey = withSeed(prefix, 'contact', 48, (seed) => secp.etc.hashToPrivateKey(seed));
+			return {
+				userHash: userHashOf(sign.publicKey),
+				signSkey: sign.secretKey,
+				signPkey: sign.publicKey,
+				cryptSkey: crypt.secretKey,
+				cryptPkey: crypt.publicKey,
+				contactSkey,
+				contactPkey: secp.getPublicKey(contactSkey, true),
+				cardName: withSeed(prefix, 'name', 1, (seed) => DERIVED_CARD_NAMES[seed[0] % DERIVED_CARD_NAMES.length]),
+			};
+		},
+		userHash: (prefix = NO_PREFIX) => userHashOf(signKeys(prefix).publicKey),
+	};
+};
+
+export const deriveIdentity = (parent: ParentKeys, salt: string, prefix: Uint8Array = NO_PREFIX): DerivedIdentity =>
+	identityFamily(parent, salt).identity(prefix);
 
 /**
  * The identity's `user_cards` row, certified and signed by its own key, as an
  * account's card is made at registration. Padded base64 binary columns.
+ *
+ * Every device derives the same keys and name, but not the same row: the
+ * signatures are randomized and the timestamp is the caller's. A device that
+ * finds a valid card for the identity does not publish another.
  */
-export const signedUserCard = (id: DerivedIdentity, ownerTimestamp: number, name = derivedCardName(id.userHash)): UserCardRow => {
+export const signedUserCard = (id: DerivedIdentity, ownerTimestamp: number, name = id.cardName): UserCardRow => {
+	if (!Number.isSafeInteger(ownerTimestamp) || ownerTimestamp <= 0) throw new Error('user card: owner_timestamp must be a positive integer');
+	if (!name) throw new Error('user card: the name must not be empty');
 	const row: UserCardRow = {
 		user_hash: id.userHash,
 		sign_pkey: toBase64(id.signPkey),

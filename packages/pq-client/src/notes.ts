@@ -12,31 +12,42 @@ export const NOTE_PEER_SALT = 'buckitup/notes-peer/v1';
 
 const NOTE_ID = /^[0-9a-f]{32}$/;
 
-/** 16 random bytes, hex: random rather than counted, so two offline devices never mint the same note. */
+/** 16 random bytes in lowercase hex: random rather than counted, so two offline devices never mint the same note. */
 export const newNoteId = (): string => bytesToHex(randomBytes(16));
 
 export const isNoteId = (v: unknown): v is string => typeof v === 'string' && NOTE_ID.test(v);
 
-/** The account's notes identity: the same on every device that holds the account's keys. */
-export const deriveNotesIdentity = (account: ParentKeys): DerivedIdentity =>
-	deriveIdentity(account, NOTES_IDENTITY_SALT);
-
-export interface NotePeers {
-	/** What reading and writing a note need: its dialog_hash and message key come from it. */
-	userHash(noteId: string): string;
-	/** Every key; only creating a note (its card, the first key wrap) needs them. */
-	identity(noteId: string): DerivedIdentity;
+export interface AccountNotes {
+	/** The notes identity: the author of every note. */
+	identity: DerivedIdentity;
+	/** A note peer's user_hash: what reading and writing the note need (its dialog_hash, its message key). */
+	peerHash(noteId: string): string;
+	/** Every key of a note peer; only creating the note (its card, the key wrap) needs them. */
+	peer(noteId: string): DerivedIdentity;
 }
 
-/** The peers of the notes under one notes identity; hold one for many notes. */
-export const notePeers = (notes: ParentKeys): NotePeers => {
-	const family = identityFamily(notes, NOTE_PEER_SALT);
+/**
+ * The notes of an account, from the account's own keys: the same on every
+ * device that holds them. Hold one per session; peer hashes are cached.
+ */
+export const accountNotes = (account: ParentKeys): AccountNotes => {
+	const identity = deriveIdentity(account, NOTES_IDENTITY_SALT);
+	const peers = identityFamily(identity, NOTE_PEER_SALT);
+	const hashes = new Map<string, string>();
 	const prefix = (noteId: string) => {
 		if (!isNoteId(noteId)) throw new Error('note id: 32 lowercase hex characters');
 		return hexToBytes(noteId);
 	};
 	return {
-		userHash: (noteId) => family.userHash(prefix(noteId)),
-		identity: (noteId) => family.identity(prefix(noteId)),
+		identity,
+		peerHash(noteId) {
+			let hash = hashes.get(noteId);
+			if (!hash) {
+				hash = peers.userHash(prefix(noteId));
+				hashes.set(noteId, hash);
+			}
+			return hash;
+		},
+		peer: (noteId) => peers.identity(prefix(noteId)),
 	};
 };
