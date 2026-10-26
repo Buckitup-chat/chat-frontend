@@ -1324,10 +1324,6 @@ watch(() => props.messages, () => {
   &:hover {
     background: rgba(0, 0, 0, 0.06);
   }
-
-  i {
-    font-size: 1rem;
-  }
 }
 
 .chat-footer {

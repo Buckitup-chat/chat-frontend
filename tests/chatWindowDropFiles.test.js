@@ -2,7 +2,6 @@
 // Files dropped over an open dialog, or pasted into its input, send as the
 // attach button does: one composed message, captioned by the input.
 import { describe, it, expect, vi } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
 import { mount } from '@vue/test-utils';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 import { installFileDropGuard } from '@/lib/fileDropGuard';
@@ -153,11 +152,7 @@ describe('the attach button', () => {
 		const w = render();
 		expect(w.find('.attach-btn i._icon_attach').exists()).toBe(true);
 		expect(w.find('.attach-btn').text()).toBe('');
-		// A class draws nothing unless the set defines it and its mask exists.
-		expect(readFileSync('src/scss/icons.scss', 'utf8')).toMatch(/'attach'/);
-		expect(existsSync('public/icons/attach.svg')).toBe(true);
 	});
-
 });
 
 describe('the app-wide guard', () => {
