@@ -6,11 +6,6 @@ import { installFileDropGuard } from '@/lib/fileDropGuard';
 import App from './App.vue';
 import { listenForInstallPrompt } from './composables/useInstallPrompt';
 
-//
-import '@fontsource/inter/400.css';
-import '@fontsource/inter/500.css';
-import '@fontsource/inter/600.css';
-import '@fontsource/inter/700.css';
 import 'bootstrap';
 import './scss/app.scss';
 
