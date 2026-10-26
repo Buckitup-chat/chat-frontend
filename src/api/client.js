@@ -4,15 +4,11 @@ import {
   deriveSignHash,
   toBase64,
 } from "@/lib/pq/signature";
+import { proveChallenge } from "@/lib/pq/challengeProof";
 
-// Challenge signatures travel unpadded; row columns are padded base64. The
-// canonical payload builder and the padded encoder both live in the protocol
-// module — see src/lib/pq/signature.ts.
-const encodeBase64 = (bytes, padded = false) => {
-  if (!bytes) return "";
-  const result = toBase64(bytes);
-  return padded ? result : result.replace(/=+$/, "");
-};
+// Row columns are padded base64 (toBase64); the canonical payload builder
+// lives in the protocol module — see src/lib/pq/signature.ts. The challenge
+// proof is src/lib/pq/challengeProof.ts.
 
 const SIGN_HASH_RELATIONS = new Set(['dialog_messages', 'dialog_messages_versions']);
 
@@ -27,8 +23,7 @@ const timedFetch = (url, init = {}) =>
 export const api = {
   ingestWithAuthEach: async (mutations, signSkey) => {
     const challengeResp = await api.getChallenge();
-    const challengeSig = ml_dsa87.sign(new TextEncoder().encode(challengeResp.challenge), signSkey);
-    const signature = encodeBase64(challengeSig);
+    const signature = await proveChallenge(challengeResp.challenge, (message) => ml_dsa87.sign(message, signSkey));
 
     return timedFetch(`${ELECTRIC_API_URL}/ingest_each`, {
       method: "POST",
@@ -93,11 +88,11 @@ export const api = {
 
     const modified = {
       user_hash: userData.user_hash,
-      sign_pkey: encodeBase64(userData.sign_pkey, true),
-      contact_pkey: encodeBase64(userData.contact_pkey, true),
-      contact_cert: encodeBase64(userData.contact_cert, true),
-      crypt_pkey: encodeBase64(userData.crypt_pkey, true),
-      crypt_cert: encodeBase64(userData.crypt_cert, true),
+      sign_pkey: toBase64(userData.sign_pkey),
+      contact_pkey: toBase64(userData.contact_pkey),
+      contact_cert: toBase64(userData.contact_cert),
+      crypt_pkey: toBase64(userData.crypt_pkey),
+      crypt_cert: toBase64(userData.crypt_cert),
       name,
       deleted_flag: deletedFlag,
       owner_timestamp: ownerTimestamp,

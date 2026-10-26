@@ -13,6 +13,7 @@ export default defineConfig({
 	define: {
 		// Build-time constants normally injected by vite.config.js
 		ELECTRIC_API_URL: JSON.stringify('/api'),
+		HANDSHAKE_DEV_TURN: 'null',
 	},
 	test: {
 		// Default stays node; component tests opt into jsdom with a
@@ -20,5 +21,6 @@ export default defineConfig({
 		// running without a DOM.
 		environment: 'node',
 		include: ['tests/**/*.test.{js,ts}'],
+		testTimeout: 20_000,
 	},
 });

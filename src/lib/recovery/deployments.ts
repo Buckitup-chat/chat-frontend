@@ -52,12 +52,20 @@ export const DEPLOYMENTS: Readonly<Record<number, Deployment>> = {
 
 const DEFAULT_CHAIN_ID = 11155111;
 
+// Named one by one: `import.meta.env` taken whole is inlined into the bundle
+// with every VITE_* variable set at build time, a dev-only secret included.
+const BUILD_ENV: Record<string, string | undefined> = {
+	VITE_RECOVERY_CHAIN_ID: import.meta.env.VITE_RECOVERY_CHAIN_ID,
+	VITE_RECOVERY_RPC_URL: import.meta.env.VITE_RECOVERY_RPC_URL,
+	VITE_RECOVERY_RELAYER_URL: import.meta.env.VITE_RECOVERY_RELAYER_URL,
+};
+
 /**
  * The deployment this build talks to: Sepolia unless `VITE_RECOVERY_CHAIN_ID`
  * names another known one; `VITE_RECOVERY_RPC_URL` and
  * `VITE_RECOVERY_RELAYER_URL` replace its endpoints.
  */
-export const recoveryDeployment = (env: Record<string, string | undefined> = import.meta.env): Deployment => {
+export const recoveryDeployment = (env: Record<string, string | undefined> = BUILD_ENV): Deployment => {
 	const chainId = env.VITE_RECOVERY_CHAIN_ID ? Number(env.VITE_RECOVERY_CHAIN_ID) : DEFAULT_CHAIN_ID;
 	const known = DEPLOYMENTS[chainId];
 	if (!known) throw new Error(`no recovery deployment is known on chain ${env.VITE_RECOVERY_CHAIN_ID}`);
@@ -69,7 +77,7 @@ export const recoveryDeployment = (env: Record<string, string | undefined> = imp
 };
 
 /** recoveryDeployment, or null — with a warning — when the build names none this client knows: chats keep working without it. */
-export const maybeRecoveryDeployment = (env: Record<string, string | undefined> = import.meta.env): Deployment | null => {
+export const maybeRecoveryDeployment = (env: Record<string, string | undefined> = BUILD_ENV): Deployment | null => {
 	try {
 		return recoveryDeployment(env);
 	} catch (e) {

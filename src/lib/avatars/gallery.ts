@@ -1,15 +1,10 @@
 // Profile-photo galleries (chat repo docs/pq/reqs/pq_avatars.proposed.md).
 //
-// A reader's gallery of a sender is computed per dialog from that dialog's
-// messages; nothing is merged across dialogs. The owner's own gallery lives
-// in a user_storage slot shared by the owner's devices, and is the source of
-// what every dialog is sent.
+// The owner's own gallery lives in a user_storage slot shared by the owner's
+// devices, and is the source of the shared gallery row its contacts read.
 
 import { bytesToHex, randomBytes } from '@noble/hashes/utils';
-import {
-	isAvatarId, photoFromWire, photoToWire,
-	type AvatarPart, type AvatarPhoto, type ContentPart,
-} from '@/lib/pq/content';
+import { isAvatarId, photoFromWire, photoToWire, type AvatarPhoto } from '@/lib/pq/content';
 
 /** A photo's longer side, at most (pq_avatars § The photo): the client resizes before sending. */
 export const AVATAR_MAX_SIDE = 640;
@@ -22,52 +17,13 @@ export interface GalleryEntry {
 	photo: AvatarPhoto;
 }
 
-/** A dialog message as the reducer needs it: identity, author, liveness, content at its current revision. */
-export interface GalleryMessage {
-	messageId: string;
-	senderHash: string;
-	deleted?: boolean;
-	parts: ContentPart[];
-}
-
-const byMessageId = (a: GalleryMessage, b: GalleryMessage) =>
-	a.messageId < b.messageId ? -1 : a.messageId > b.messageId ? 1 : 0;
-
-/**
- * The sender's gallery in one dialog, newest first; its first entry is the
- * current avatar. Walks the sender's live messages in message_id order (a
- * UUIDv7, signed with the row) and their parts in order: `avatar` puts its
- * id at the newest position with that photo, `avatar_removed` takes it out.
- * Messages of anyone else change nothing — a photo of someone else is a
- * picture, not their avatar — and a deleted message contributes nothing.
- */
-export const galleryOf = (messages: GalleryMessage[], senderHash: string): GalleryEntry[] => {
-	const order = new Map<string, AvatarPhoto>(); // insertion order: oldest → newest
-	const own = messages.filter((m) => m.senderHash === senderHash && !m.deleted).sort(byMessageId);
-	for (const message of own) {
-		for (const part of message.parts) {
-			if (part.kind === 'avatar') {
-				order.delete(part.avatarId);
-				order.set(part.avatarId, part.photo);
-			} else if (part.kind === 'avatar_removed') {
-				order.delete(part.avatarId);
-			}
-		}
-	}
-	return [...order].reverse().map(([avatarId, photo]) => ({ avatarId, photo }));
-};
-
-/** The whole gallery as one message, oldest first, so a reader applying it reproduces the order. */
-export const snapshotParts = (gallery: GalleryEntry[]): AvatarPart[] =>
-	[...gallery].reverse().map(({ avatarId, photo }) => ({ kind: 'avatar', avatarId, photo }));
-
 /** A fresh photo id: 16 random bytes, lowercase hex. */
 export const newAvatarId = (): string => bytesToHex(randomBytes(16));
 
 // ---------- the owner's gallery slot ----------
 //
 // { avatars: { [avatar_id]: { photo, at } } }: `photo` is the wire element
-// the dialogs are sent, `at` orders the gallery (newest = current). A patch
+// the shared row carries, `at` orders the gallery (newest = current). A patch
 // edits entries by id — storageIntent's mergeJsonPatch merges an entry's
 // fields and deletes one patched to null — so two devices changing the
 // gallery at once keep both changes instead of the last list winning.

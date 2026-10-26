@@ -81,6 +81,7 @@ import { onMounted, inject, computed } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import { useAvatarsStore } from '@/store/avatars.store';
+import { usePeerGalleryRefresh } from '@/composables/usePeerGallery';
 
 const $userPQ = userPQStore();
 const $avatars = useAvatarsStore();
@@ -108,7 +109,8 @@ const contact = computed(() => {
 	return c;
 });
 
-const contactAvatar = computed(() => $avatars.contactAvatarSrc(contact.value?.avatar, contact.value?.user_hash));
+usePeerGalleryRefresh(computed(() => contact.value?.user_hash ?? null));
+const contactAvatar = computed(() => $avatars.peerAvatarSrc(contact.value?.user_hash, { fallback: contact.value?.avatar }));
 
 const isContact = computed(() => {
 	return !!$userPQ.contacts.find((e) => e.user_hash === $route.params.address);

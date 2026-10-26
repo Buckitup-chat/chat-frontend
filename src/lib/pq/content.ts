@@ -120,6 +120,15 @@ export interface AvatarPart extends Extensible {
 	photo: AvatarPhoto;
 }
 
+export const AVATAR_GALLERY_ACCESS_VERSION = 1;
+
+export interface AvatarGalleryAccessPart extends Extensible {
+	kind: 'avatar_gallery_access';
+	version: typeof AVATAR_GALLERY_ACCESS_VERSION;
+	galleryUuid: string;
+	galleryKeyB64: string;
+}
+
 /** A photo the sender took out of their gallery (07 §"avatar_removed"). */
 export interface AvatarRemovedPart extends Extensible {
 	kind: 'avatar_removed';
@@ -282,6 +291,7 @@ export type ContentPart =
 	| VideoPart
 	| AvatarPart
 	| AvatarRemovedPart
+	| AvatarGalleryAccessPart
 	| CheckpointPart
 	| RecoverySharePart
 	| RecoveryShareReturnPart
@@ -302,6 +312,12 @@ const FRONTIER_SIGN_HASH = /^dms_[0-9a-f]{128}$/;
 /** 07 §"avatar": avatar_id is 16 bytes as lowercase hex. */
 export const isAvatarId = (s: unknown): s is string => typeof s === 'string' && /^[0-9a-f]{32}$/.test(s);
 
+export const isGalleryUuid = (s: unknown): s is string =>
+	typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
+
+export const isGalleryKeyB64 = (s: unknown): s is string =>
+	typeof s === 'string' && /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$/.test(s);
+
 const encodePart = (part: ContentPart): unknown => {
 	switch (part.kind) {
 		case 'text':
@@ -309,7 +325,7 @@ const encodePart = (part: ContentPart): unknown => {
 		case 'quote':
 			return {
 				quote: [
-					part.authorHash, part.messageId, part.signHash, encodeValue(part.snapshot.map(quotable)),
+					part.authorHash, part.messageId, part.signHash, encodeValue(quoteSnapshot(part.snapshot)),
 					...(part.rest ?? []),
 				],
 			};
@@ -335,6 +351,11 @@ const encodePart = (part: ContentPart): unknown => {
 			return { avatar: [part.avatarId, encodePart(part.photo), ...(part.rest ?? [])] };
 		case 'avatar_removed':
 			return { avatar_removed: [part.avatarId, ...(part.rest ?? [])] };
+		case 'avatar_gallery_access':
+			if (part.version !== AVATAR_GALLERY_ACCESS_VERSION || !isGalleryUuid(part.galleryUuid) || !isGalleryKeyB64(part.galleryKeyB64)) {
+				throw new TypeError('malformed avatar_gallery_access part');
+			}
+			return { avatar_gallery_access: [part.version, part.galleryUuid, part.galleryKeyB64, ...(part.rest ?? [])] };
 		case 'video':
 			return {
 				video: [
@@ -414,6 +435,9 @@ type AvatarMessagePart = Extract<ContentPart, { kind: keyof typeof AVATAR_LABELS
 /** A part that changes the sender's photo gallery: `avatar` or `avatar_removed`. */
 export const isAvatarPart = (part: ContentPart): part is AvatarMessagePart => Object.hasOwn(AVATAR_LABELS, part.kind);
 
+export const isControlPart = (part: ContentPart): boolean =>
+	part.kind === 'avatar_gallery_access' || (part.kind === 'unknown' && part.type === 'avatar_gallery_access');
+
 /** What a quote copies as it is; every other part is named by a label. */
 const COPIED_IN_QUOTES = new Set<ContentPart['kind']>(['text', 'quote', 'file', 'image', 'video', 'checkpoint']);
 
@@ -435,7 +459,8 @@ const quotable = (part: ContentPart): ContentPart => {
 };
 
 /** A reply's snapshot of the message it cites, made safe to keep: see quotable. */
-export const quoteSnapshot = (parts: ContentPart[]): ContentPart[] => parts.map(quotable);
+export const quoteSnapshot = (parts: ContentPart[]): ContentPart[] =>
+	parts.filter((part) => !isControlPart(part)).map(quotable);
 
 const encodeValue = (parts: ContentPart[]): unknown => {
 	if (parts.length === 1) return encodePart(parts[0]);
@@ -486,6 +511,7 @@ const decodeValue = (value: unknown): ContentPart[] => {
 				}];
 			}
 			if (type === 'avatar') return [decodeAvatar(obj.avatar)];
+			if (type === 'avatar_gallery_access') return [decodeGalleryAccess(obj.avatar_gallery_access)];
 			if (type === 'avatar_removed') {
 				const r = obj.avatar_removed;
 				if (!Array.isArray(r) || !isAvatarId(r[0])) return [{ kind: 'unknown', type, value: r }];
@@ -630,6 +656,13 @@ const decodeAvatar = (r: unknown): AvatarPart | UnknownPart => {
 	return { kind: 'avatar', avatarId: r[0] as string, photo, ...tailOf(r, 2) };
 };
 
+const decodeGalleryAccess = (r: unknown): AvatarGalleryAccessPart | UnknownPart => {
+	if (!Array.isArray(r) || r[0] !== AVATAR_GALLERY_ACCESS_VERSION || !isGalleryUuid(r[1]) || !isGalleryKeyB64(r[2])) {
+		return { kind: 'unknown', type: 'avatar_gallery_access', value: r };
+	}
+	return { kind: 'avatar_gallery_access', version: AVATAR_GALLERY_ACCESS_VERSION, galleryUuid: r[1], galleryKeyB64: r[2], ...tailOf(r, 3) };
+};
+
 const tailOf = (arr: unknown[], known: number): Extensible =>
 	arr.length > known ? { rest: arr.slice(known) } : {};
 
@@ -746,6 +779,7 @@ export const contentToText = (parts: ContentPart[]): string =>
 	parts
 		.map((p) => {
 			if (p.kind === 'text') return p.text;
+			if (p.kind === 'avatar_gallery_access' || isControlPart(p)) return '';
 			if (p.kind === 'quote') return ''; // the quote is context, not the author's words
 			// Attachments render as their own element in the bubble; naming them
 			// here too would print the filename twice under the picture.

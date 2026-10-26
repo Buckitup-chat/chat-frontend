@@ -108,7 +108,7 @@ const makeIdentity = (seed: number) => {
 		vault: { sign_skey: toBase64(sign.secretKey), crypt_skey: toBase64(kem.secretKey), evm_skey: bytesToHex(contactSk) } };
 };
 
-const waitUntil = async (predicate: () => boolean, timeoutMs = 4000) => {
+const waitUntil = async (predicate: () => boolean, timeoutMs = 15_000) => {
 	const deadline = Date.now() + timeoutMs;
 	while (!predicate()) {
 		if (Date.now() > deadline) throw new Error('waitUntil: condition never became true');

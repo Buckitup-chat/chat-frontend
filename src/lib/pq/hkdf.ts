@@ -38,6 +38,17 @@ export const hkdfExpand = (prk: Uint8Array, info: string | Uint8Array, length = 
 };
 
 /**
+ * A six-digit short authentication string out of (at least) four derived
+ * bytes: big-endian u32 mod 10^6, zero-padded. Device link and the optical
+ * handshake show it on both screens.
+ */
+export const sixDigits = (out: Uint8Array): string => {
+	if (out.length < 4) throw new Error('six digits need four bytes');
+	const n = new DataView(out.buffer, out.byteOffset, 4).getUint32(0);
+	return String(n % 1_000_000).padStart(6, '0');
+};
+
+/**
  * Extract-then-expand. `salt` separates key families ("buckitup/dialog-mk/v1",
  * "buckitup/user-storage-root/v1", …); `info` separates uses within a family.
  */

@@ -1,29 +1,50 @@
 <template>
-  <div class="_qrh">
-    <div class="_qrh_wrapper" v-show="scanning || state.completed" :class="{ _hidden: !scanning && !state.completed }">
-      <div class="_qrh_container">
-        <canvas ref="qrCodeRef"></canvas>
-      </div>
-    </div>
-    <div class="_qrh_scanner" :class="{ _hidden: !scanning }" id="qrScannerWrap">
-      <video ref="qrScannerRef"></video>
-    </div>
-  </div>
+	<div class="_qrh">
+		<div class="_qrh_wrapper" v-show="shown" :class="{ _hidden: !shown }" :data-stage="stage" :data-outcome="outcome?.kind">
+			<div class="_qrh_container">
+				<canvas ref="qrCodeRef"></canvas>
+			</div>
+		</div>
+		<!-- The code on top, the camera under it, one square each: the PQ1 layout, which read well on phones. -->
+		<div class="_qrh_scanner" :class="{ _hidden: !scanning }">
+			<video ref="qrScannerRef" muted playsinline></video>
+		</div>
+
+		<div class="_qrh_status text-center" v-if="shown">
+			<div class="text-secondary small mb-1" v-if="scanning && hint">{{ hint }}</div>
+			<div class="small" v-if="scanning">
+				Hold the phones face to face, 25–40 cm apart: closer, the front cameras do not focus.
+			</div>
+			<div class="text-secondary small" v-if="outcome?.kind === 'expired'">
+				Session expired. Start again to make new codes.
+			</div>
+			<div class="text-danger small" v-if="outcome?.kind === 'failed'">
+				This phone could not sign its code. Sign in again, then start again.
+			</div>
+		</div>
+		<div class="text-danger small text-center" v-if="cameraError">{{ cameraError }}</div>
+	</div>
 </template>
 
 <script setup>
-import { userPQStore } from '@/store/userPQ.store';
-import { verifiedCards } from '@/lib/data/userCardsLink';
-
-
-import { ref, reactive, onMounted, onBeforeUnmount } from 'vue';
+// The optical handshake v2 (docs/task-handshake-pq2.md): the camera and the
+// QR code on screen; the result goes to the modal, which shows it. The
+// protocol is the engine's
+// (src/lib/handshake/engine.ts) and the module's (src/lib/pq/handshake.ts);
+// this component runs one engine per session.
+//
+// A session id is checked after every await: a session restarted while the
+// old one was still waiting (on the camera, on a signature, on QWBP) must not
+// be drawn over, have its camera stopped, or be completed by the old one.
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import QRCode from 'qrcode';
 import QrScanner from 'qr-scanner';
-import { randomBytes } from '@noble/post-quantum/utils.js';
-import * as secp from '@noble/secp256k1';
-import { sha256 } from '@noble/hashes/sha256';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
-import { QWBPConnection, base64urlEncode, base64urlDecode } from 'qwbp';
+import { hexToBytes } from '@noble/hashes/utils';
+import { userPQStore } from '@/store/userPQ.store';
+import { HandshakeEngine } from '@/lib/handshake/engine';
+import { QwbpChannel } from '@/lib/handshake/qwbpChannel';
+import { relayIceServers } from '@/lib/data/turnCredentials';
+import { toBase64, toBytes } from '@/lib/pq/signature';
 
 const $userPQ = userPQStore();
 
@@ -42,371 +63,228 @@ const emit = defineEmits(['scanning', 'completed']);
 
 const qrCodeRef = ref(null);
 const qrScannerRef = ref(null);
-let qrScanner = null;
-let qwbpConnection = null;
-
 const scanning = ref(false);
+const stage = ref('idle');
+const outcome = ref(null);
+const cameraError = ref(null);
+const shown = computed(() => scanning.value || !!outcome.value);
 
-const getInitialState = () => ({
-	step: 1, // 1: QR1(A), 2: QR2(B), 3: QR3(C), 4: QR4(D), 5: Done
-	myNonce: null,
-	mySigPeerNonce: null,
-	mySigHashNonce: null,
-	myNeedCard: 0,
-	myWebrtcPayload: '',
-	
-	peerHash: null,
-	peerEccPub: null,
-	peerNonce: null,
-	peerNeedCard: 0,
-	
-	completed: false,
-	status: 'scanning' // scanning, detected, verified, exchanging
-});
+const STAGE_HINTS = {
+	A: 'Showing my identity',
+	B: 'Read their identity. Showing my signature',
+	C: 'Their key is proved in person. Showing my channel offer',
+	D: 'Showing my channel answer',
+};
+const hint = computed(() => STAGE_HINTS[stage.value] ?? '');
 
-const state = reactive(getInitialState());
+/** Size the code is drawn at; CSS scales it to the width of the screen. */
+const QR_PIXELS = 720;
+/** The same code read again within this time is the camera repeating itself. */
+const REPEAT_MS = 400;
+
+let qrScanner = null;
+let engine = null;
+let session = 0;
+let lastScan = { text: '', at: 0 };
+
+const log = (line) => console.debug('[handshake]', line);
 
 onMounted(() => {
-	if (qrScannerRef.value) {
-		qrScanner = new QrScanner(qrScannerRef.value, (result) => readQr(result.data), {
-			returnDetailedScanResult: true,
-			preferredCamera: 'user',
-			highlightScanRegion: true,
-			highlightCodeOutline: true,
-			calculateScanRegion: (video) => {
-				const width = video.videoWidth;
-				const height = video.videoHeight;
-				const size = Math.min(width, height) * 0.95;
-				return {
-					x: (width - size) / 2,
-					y: (height - size) / 2,
-					width: size,
-					height: size,
-				};
-			},
-		});
-	}
+	if (!qrScannerRef.value) return;
+	// The scanner the PQ1 handshake used, which read these codes well on phones:
+	// the browser's BarcodeDetector where there is one (Chrome on Android),
+	// qr-scanner's default scan rate, and a square region of 95% of the frame
+	// read at full resolution. qr-scanner's bundled decoder at 1080 px, 12 scans
+	// a second, read worse on the phones it was tried on. The region is whole
+	// pixels: qr-scanner reuses its canvas only while the size is unchanged.
+	qrScanner = new QrScanner(qrScannerRef.value, (result) => onScan(result.data), {
+		returnDetailedScanResult: true,
+		preferredCamera: 'user',
+		highlightScanRegion: true,
+		highlightCodeOutline: true,
+		calculateScanRegion: (video) => {
+			const size = Math.round(Math.min(video.videoWidth, video.videoHeight) * 0.95);
+			return { x: Math.round((video.videoWidth - size) / 2), y: Math.round((video.videoHeight - size) / 2), width: size, height: size };
+		},
+	});
 });
 
 onBeforeUnmount(() => {
 	stopScan();
-	if (qrScanner) {
-		qrScanner.destroy();
-	}
+	qrScanner?.destroy();
+	qrScanner = null;
 });
 
-const updateQr = () => {
-	if (qrCodeRef.value && state.myNonce) {
-		const myHash = $userPQ.currentUserHash;
-		const myEccPubBytes = atob($userPQ.currentUser.contact_pkey);
-		const myEccPub = bytesToHex(Uint8Array.from(myEccPubBytes, c => c.charCodeAt(0)));
-		
-		let msg = '';
-		let color = props.options.scanningColor;
-
-		if (state.step === 1) {
-			msg = `PQ1:A:${myHash}:${myEccPub}:${state.myNonce}`;
-		} else if (state.step === 2) {
-			msg = `PQ1:B:${myHash}:${myEccPub}:${state.myNonce}:${state.mySigPeerNonce}:${state.mySigHashNonce}:${state.myNeedCard}`;
-			color = props.options.detectedColor;
-		} else if (state.step === 3) {
-			msg = `PQ1:C:${state.mySigPeerNonce}:${state.mySigHashNonce}:${state.myNeedCard}:${state.myWebrtcPayload}`;
-			color = props.options.verifiedColor;
-		} else if (state.step >= 4) {
-			msg = `PQ1:D:${state.myWebrtcPayload}`;
-			color = props.options.verifiedColor;
-		}
-
-		QRCode.toCanvas(qrCodeRef.value, msg, {
-			errorCorrectionLevel: 'L',
-			height: 360,
-			width: 360,
-			quality: 1,
-			margin: 0,
-			color: { dark: color },
-		});
-	}
+const onScan = (text) => {
+	const now = Date.now();
+	if (text === lastScan.text && now - lastScan.at < REPEAT_MS) return;
+	lastScan = { text, at: now };
+	void engine?.read(text);
 };
 
+const colorOf = (s) => {
+	if (s === 'B') return props.options.detectedColor;
+	if (s === 'C' || s === 'D') return props.options.verifiedColor;
+	return props.options.scanningColor;
+};
+
+const draw = (code, s) => {
+	if (!qrCodeRef.value) return;
+	QRCode.toCanvas(qrCodeRef.value, code, {
+		errorCorrectionLevel: 'L',
+		width: QR_PIXELS,
+		margin: 0,
+		color: { dark: colorOf(s) },
+	}).catch((e) => log(`the code could not be drawn: ${e?.message ?? e}`));
+};
+
+const clearCode = () => {
+	const canvas = qrCodeRef.value;
+	canvas?.getContext?.('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+};
+
+const stopCamera = () => {
+	qrScanner?.stop();
+};
+
+const setScanning = (value) => {
+	if (scanning.value === value) return;
+	scanning.value = value;
+	emit('scanning', value);
+};
+
+/** This account, as the engine needs it. */
+const identity = () => {
+	const userHash = $userPQ.currentUserHash;
+	const contactPkey = $userPQ.currentUser?.contact_pkey;
+	if (!userHash || !contactPkey) throw new Error('Sign in to add a contact in person');
+	return {
+		userHash,
+		contactPkey: toBytes(contactPkey),
+		signOptical: async (T) => {
+			const hex = await $userPQ.signContactChallenge(T);
+			if (!hex) throw new Error('Not signed in');
+			return hexToBytes(hex);
+		},
+		signPq: (M) => $userPQ.signHandshakePQ(M),
+		signedCard: () => $userPQ.signedOwnCard(),
+	};
+};
+
+const nameOf = (result) => {
+	if (result.card?.name) return result.card.name;
+	const known = $userPQ.allNetworkUsers.find((u) => u.user_hash === result.peerHash);
+	return known?.name || 'Unknown user';
+};
+
+const finished = (id, result) => {
+	if (id !== session) return;
+	engine = null;
+	stopCamera();
+	setScanning(false);
+	outcome.value = result;
+	if (result.kind === 'expired' || result.kind === 'failed') {
+		clearCode();
+		stage.value = 'idle';
+		return;
+	}
+	// The last code stays on screen: the counterpart may still be reading it.
+	stage.value = 'done';
+	if ('vibrate' in navigator) navigator.vibrate(result.kind === 'confirmed' ? [200, 80, 200] : [500]);
+	emit('completed', {
+		user_hash: result.peerHash,
+		contact_pkey: toBase64(result.peerContactPkey),
+		confirmed: result.kind === 'confirmed',
+		card: result.kind === 'confirmed' ? result.card : null,
+		sas: result.sas,
+		name: nameOf(result),
+		cause: result.kind === 'confirmed' ? null : result.cause,
+	});
+};
+
+// The camera starts first: the 90 s session, its nonce and its connection
+// begin once it runs, so a permission prompt takes nothing out of them.
+const startSession = async () => {
+	const id = ++session;
+	engine?.stop();
+	engine = null;
+	outcome.value = null;
+	cameraError.value = null;
+	stage.value = 'idle';
+	lastScan = { text: '', at: 0 };
+	clearCode();
+
+	let me;
+	try {
+		me = identity();
+	} catch (e) {
+		cameraError.value = e.message;
+		return;
+	}
+	setScanning(true);
+	await nextTick();
+	if (id !== session) return;
+	try {
+		await qrScanner?.start();
+	} catch (e) {
+		if (id !== session) return;
+		log(`camera did not start: ${e?.message ?? e}`);
+		cameraError.value = 'The camera did not start. Allow it, or check that no other app uses it.';
+		setScanning(false);
+		return;
+	}
+	if (id !== session) {
+		// Stopped while the camera was starting: nothing scans now, so the camera
+		// this start turned on goes off. Replaced by a newer session instead: the
+		// camera is that session's, and stays.
+		if (!scanning.value) stopCamera();
+		return;
+	}
+	const current = new HandshakeEngine({
+		identity: me,
+		// One connection per session, created now: the relay credentials are
+		// what is cached, or what arrives within 1 s; none is a session too.
+		channel: () => new QwbpChannel({ iceServers: relayIceServers(), log }),
+		onShow: (code, s) => {
+			if (id !== session) return;
+			stage.value = s;
+			draw(code, s);
+		},
+		onLog: log,
+		onVerified: () => {
+			if (id === session && 'vibrate' in navigator) navigator.vibrate([50]);
+		},
+		onReadingDone: () => {
+			// Nothing is left to read while the channel opens and the ML-DSA work runs.
+			if (id === session) stopCamera();
+		},
+		onDone: (result) => finished(id, result),
+	});
+	engine = current;
+	current.start();
+};
+
+/** Ends the session: its codes verify against nothing from now on. */
 const stopScan = () => {
-	if (qrScanner) {
-		qrScanner.stop();
-		scanning.value = false;
-		state.completed = false;
-		emit('scanning', scanning.value);
-	}
-	if (qwbpConnection) {
-		qwbpConnection.close();
-		qwbpConnection = null;
-	}
+	session++;
+	engine?.stop();
+	engine = null;
+	stopCamera();
+	stage.value = 'idle';
+	outcome.value = null;
+	clearCode();
+	setScanning(false);
 };
-
-const wait = (delay = 500) => new Promise((resolve) => setTimeout(resolve, delay));
 
 const toggleScanner = async () => {
-	try {
-		if (scanning.value && qrScanner) {
-			stopScan();
-			return;
-		}
-		
-		Object.assign(state, getInitialState());
-		if (qrCodeRef.value) {
-			const ctx = qrCodeRef.value.getContext('2d');
-			ctx.clearRect(0, 0, qrCodeRef.value.width, qrCodeRef.value.height);
-		}
-		
-		if (qwbpConnection) {
-			qwbpConnection.close();
-			qwbpConnection = null;
-		}
-
-		scanning.value = true;
-
-		emit('scanning', scanning.value);
-		await wait(100);
-		await qrScanner.start();
-
-		state.myNonce = bytesToHex(randomBytes(16));
-		updateQr();
-	} catch (error) {
-		console.error('Init Scanning error:', error);
+	if (scanning.value) {
+		stopScan();
+		return;
 	}
-};
-
-const initWebrtcAndGetOffer = async () => {
-	qwbpConnection = new QWBPConnection({
-		iceServers: [
-			{ urls: 'stun:stun.l.google.com:19302' },
-			{ urls: 'stun:stun1.l.google.com:19302' }
-		]
-	});
-	setupDataChannelListener();
-	await qwbpConnection.initialize();
-	const payloadBytes = qwbpConnection.getQRPayload();
-	return base64urlEncode(payloadBytes);
-};
-
-const initWebrtcAndGetAnswer = async (peerPayloadBase64) => {
-	qwbpConnection = new QWBPConnection({
-		iceServers: [
-			{ urls: 'stun:stun.l.google.com:19302' },
-			{ urls: 'stun:stun1.l.google.com:19302' }
-		]
-	});
-	setupDataChannelListener();
-	await qwbpConnection.initialize();
-	const peerPayloadBytes = base64urlDecode(peerPayloadBase64);
-	await qwbpConnection.processScannedPayload(peerPayloadBytes);
-	const myPayloadBytes = qwbpConnection.getQRPayload();
-	return base64urlEncode(myPayloadBytes);
-};
-
-const setupDataChannelListener = () => {
-	qwbpConnection.onDataChannel((channel) => {
-		state.status = 'exchanging';
-		
-		if (qrScanner) {
-			qrScanner.stop();
-		}
-		
-		channel.onmessage = async (event) => {
-			try {
-				const msg = JSON.parse(event.data);
-				if (msg.type === 'USER_CARD' && msg.card) {
-					// We received the card. Add to allNetworkUsers
-					const card = msg.card;
-					const exists = $userPQ.allNetworkUsers.some(u => u.user_hash === card.user_hash);
-					if (!exists && verifiedCards([card]).length) {
-						$userPQ.allNetworkUsers.push(card);
-					}
-					finishHandshake();
-				}
-			} catch (e) {
-				console.error('Error handling data channel message', e);
-			}
-		};
-
-		// Send my card as soon as channel is open
-		channel.send(JSON.stringify({
-			type: 'USER_CARD',
-			card: $userPQ.currentUser
-		}));
-	});
-};
-
-const readQr = async (msg) => {
-	try {
-		if (!msg.startsWith('PQ1:')) return;
-		const parts = msg.split(':');
-		const type = parts[1];
-
-		const myHash = $userPQ.currentUserHash;
-
-		if (type === 'A') {
-			if (state.step >= 2) return;
-			state.peerHash = parts[2];
-			state.peerEccPub = parts[3];
-			state.peerNonce = parts[4];
-			
-			// Check if we need their card
-			const knownUser = $userPQ.allNetworkUsers.find(u => u.user_hash === state.peerHash);
-			state.myNeedCard = knownUser ? 0 : 1;
-			
-			// Generate signatures over raw bytes
-			const peerNonceBytes = hexToBytes(state.peerNonce);
-			state.mySigPeerNonce = await $userPQ.signContactChallenge(peerNonceBytes);
-			
-			const hashBytes = new TextEncoder().encode(myHash);
-			const hashPlusNonce = new Uint8Array(hashBytes.length + peerNonceBytes.length);
-			hashPlusNonce.set(hashBytes);
-			hashPlusNonce.set(peerNonceBytes, hashBytes.length);
-			
-			state.mySigHashNonce = await $userPQ.signContactChallenge(hashPlusNonce);
-			
-			state.step = 2;
-			state.status = 'detected';
-			if ('vibrate' in navigator) navigator.vibrate([50]);
-			updateQr();
-
-		} else if (type === 'B') {
-			if (state.step >= 3) return;
-			const peerHash = parts[2];
-			const peerEccPub = parts[3];
-			const peerNonce = parts[4];
-			const peerSigNonce = parts[5];
-			const peerSigHashNonce = parts[6];
-			state.peerNeedCard = parseInt(parts[7], 10) || 0;
-
-			state.peerHash = peerHash;
-			state.peerEccPub = peerEccPub;
-			state.peerNonce = peerNonce;
-			
-			// Check if we need their card
-			const knownUser = $userPQ.allNetworkUsers.find(u => u.user_hash === state.peerHash);
-			state.myNeedCard = knownUser ? 0 : 1;
-			
-			// Verify Sig(myNonce)
-			const myNonceBytes = hexToBytes(state.myNonce);
-			const isValid1 = secp.verify(hexToBytes(peerSigNonce), sha256(myNonceBytes), hexToBytes(peerEccPub));
-			
-			// Verify Sig(peerHash + myNonce)
-			const peerHashBytes = new TextEncoder().encode(peerHash);
-			const expectedHashPlusNonce = new Uint8Array(peerHashBytes.length + myNonceBytes.length);
-			expectedHashPlusNonce.set(peerHashBytes);
-			expectedHashPlusNonce.set(myNonceBytes, peerHashBytes.length);
-			const isValid2 = secp.verify(hexToBytes(peerSigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(peerEccPub));
-			
-			if (isValid1 && isValid2) {
-				// Generate signatures over raw bytes
-				const peerNonceBytes = hexToBytes(peerNonce);
-				state.mySigPeerNonce = await $userPQ.signContactChallenge(peerNonceBytes);
-				
-				const myHashBytes = new TextEncoder().encode(myHash);
-				const hashPlusNonce = new Uint8Array(myHashBytes.length + peerNonceBytes.length);
-				hashPlusNonce.set(myHashBytes);
-				hashPlusNonce.set(peerNonceBytes, myHashBytes.length);
-				
-				state.mySigHashNonce = await $userPQ.signContactChallenge(hashPlusNonce);
-				
-				// Init WebRTC Offer if needed
-				if (state.myNeedCard || state.peerNeedCard) {
-					state.myWebrtcPayload = await initWebrtcAndGetOffer();
-				}
-				
-				state.step = 3;
-				state.status = 'verified';
-				updateQr();
-				
-				// If we don't need WebRTC, we can finish early but still show C for the peer
-				if (!state.myNeedCard && !state.peerNeedCard) {
-					finishHandshake();
-				}
-			} else {
-				console.warn("Invalid signature from peer (B)");
-			}
-
-		} else if (type === 'C') {
-			if (state.step !== 2) return;
-			const peerSigNonce = parts[2];
-			const peerSigHashNonce = parts[3];
-			state.peerNeedCard = parseInt(parts[4], 10) || 0;
-			const peerWebrtcPayload = parts[5] || '';
-			
-			// Verify Sig(myNonce)
-			const myNonceBytes = hexToBytes(state.myNonce);
-			const isValid1 = secp.verify(hexToBytes(peerSigNonce), sha256(myNonceBytes), hexToBytes(state.peerEccPub));
-			
-			// Verify Sig(peerHash + myNonce)
-			const peerHashBytes = new TextEncoder().encode(state.peerHash);
-			const expectedHashPlusNonce = new Uint8Array(peerHashBytes.length + myNonceBytes.length);
-			expectedHashPlusNonce.set(peerHashBytes);
-			expectedHashPlusNonce.set(myNonceBytes, peerHashBytes.length);
-			
-			const isValid2 = secp.verify(hexToBytes(peerSigHashNonce), sha256(expectedHashPlusNonce), hexToBytes(state.peerEccPub));
-			
-			if (isValid1 && isValid2) {
-				state.status = 'verified';
-				
-				if (peerWebrtcPayload) {
-					// Peer sent an offer, we generate answer
-					state.myWebrtcPayload = await initWebrtcAndGetAnswer(peerWebrtcPayload);
-					state.step = 4;
-					updateQr();
-					// We wait for WebRTC channel to open, which calls finishHandshake
-				} else {
-					// No WebRTC needed
-					state.step = 5;
-					updateQr();
-					finishHandshake();
-				}
-			} else {
-				console.warn("Invalid signature from peer (C)");
-			}
-		} else if (type === 'D') {
-			if (state.step !== 3) return;
-			const peerWebrtcPayload = parts[2];
-			if (peerWebrtcPayload && qwbpConnection) {
-				// Peer sent the Answer, process it
-				const peerPayloadBytes = base64urlDecode(peerWebrtcPayload);
-				await qwbpConnection.processScannedPayload(peerPayloadBytes);
-				state.step = 5;
-				updateQr();
-				// We wait for WebRTC channel to open, which calls finishHandshake
-			}
-		}
-	} catch (error) {
-		console.error('readQr error:', error);
-	}
-};
-
-const finishHandshake = () => {
-	if (state.completed) return; // Prevent double trigger
-	state.completed = true;
-	
-	if ('vibrate' in navigator) navigator.vibrate([500, 100, 500, 100, 500]);
-	
-	if (qrScanner) {
-		qrScanner.stop();
-	}
-	
-	// Lookup user in network to get name if available
-	const networkUser = $userPQ.allNetworkUsers.find(u => u.user_hash === state.peerHash);
-	const name = networkUser ? networkUser.name : 'Unknown User';
-
-	// Emit candidate details for UI to show
-	emit('completed', {
-		user_hash: state.peerHash,
-		contact_pkey: btoa(String.fromCharCode(...hexToBytes(state.peerEccPub))), // Re-encode to base64
-		name: name
-	});
-	
-	scanning.value = false;
-	emit('scanning', scanning.value);
+	await startSession();
 };
 
 defineExpose({ toggleScanner, stopScan });
-
 </script>
 
 <style lang="scss">
@@ -416,37 +294,13 @@ defineExpose({ toggleScanner, stopScan });
 	align-items: center;
 	max-height: 100dvh;
 
-	._qrh_scanner {
-		width: min(100%, 360px);
-		aspect-ratio: 1;
-		border-radius: 1rem;
-		overflow: hidden;
-		position: relative;
-
-		&._hidden {
-			position: absolute;
-			top: -9999px;
-			height: 1px;
-			opacity: 0 !important;
-		}
-
-		video {
-			width: 100%;
-			height: 100%;
-			object-fit: cover;
-		}
-	}
-
 	._qrh_wrapper {
 		width: min(100%, 360px);
 		aspect-ratio: 1;
-		display: flex;
-		justify-content: center;
-		align-items: center;
 		margin-bottom: 0.75rem;
+		background: #fff;
 
 		&._hidden {
-			height: 0px;
 			display: none;
 		}
 
@@ -457,6 +311,27 @@ defineExpose({ toggleScanner, stopScan });
 				width: 100% !important;
 				height: 100% !important;
 			}
+		}
+	}
+
+	._qrh_scanner {
+		width: min(100%, 360px);
+		aspect-ratio: 1;
+		border-radius: 1rem;
+		overflow: hidden;
+		position: relative;
+		margin-bottom: 0.5rem;
+
+		&._hidden {
+			position: absolute;
+			top: -9999px;
+			opacity: 0;
+		}
+
+		video {
+			width: 100%;
+			height: 100%;
+			object-fit: cover;
 		}
 	}
 }

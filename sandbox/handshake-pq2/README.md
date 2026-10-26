@@ -37,7 +37,7 @@ blue D), and turns green, amber or red at the end.
 | 2 | Both on mobile data, STUN off | Both: 🟡 "Key verified in person, not confirmed — no channel within 15 s", and the same six digits |
 | 3 | Both on mobile data, ⚙︎ → Channel: STUN on | Often ✅ (depends on the carriers' NAT); otherwise as in 2 |
 | 4 | One phone in airplane mode | That phone: 🟡 "no channel: …" (it has no address to offer). The other: ⌛ Session expired after 90 s |
-| 5 | After test 1, reload phone B: it gets a new identity. On phone A: ⚙︎ → Mode: Impostor. A now shows B's old identity with A's own key, and sends B's old card | B: 🟡 "card does not certify the contact key the codes showed". Never ✅ |
+| 5 | After test 1, reload phone B: it gets a new identity. On phone A: ⚙︎ → Mode: Impostor. A now shows B's old identity with A's own key, and sends B's old card | B: 🟡 "the card does not certify the contact key the codes showed". Never ✅ |
 | 6 | Point a phone at a mirror | Nothing happens: its own code is ignored (see the log) |
 | 7 | Start a session and wait 90 s without scanning | ⌛ Session expired |
 | 8 | Laptop and phone. A laptop webcam reads the phone's B — the densest code — only from about 20 cm, if at all: hold the phone's screen to the webcam, then turn the phone to read the laptop's screen (⚙︎ → Camera: Back reads better), or pass a code by hand with "Copy my code" / "Paste a code" | Same as 1, slower |
@@ -127,7 +127,7 @@ From the repository root (the page imports `src/lib/pq`, so it builds here):
 
 ```bash
 npx vite --config sandbox/handshake-pq2/vite.config.ts --host      # dev server
-npx vitest run --config sandbox/handshake-pq2/vite.config.ts       # protocol and engine tests
+npx vitest run --config sandbox/handshake-pq2/vite.config.ts       # engine, channel and frame tests
 npx vite build --config sandbox/handshake-pq2/vite.config.ts       # → dist/, committed for the link above
 node sandbox/handshake-pq2/scripts/check.mjs                        # two Chromium pages, real WebRTC, no STUN
 ```
@@ -144,7 +144,7 @@ PQ2_CERT=/tmp/pq2-cert.pem PQ2_KEY=/tmp/pq2-key.pem npx vite --config sandbox/ha
 
 Then open `https://<the computer's address>:5173` on each phone.
 
-Code: `src/protocol.ts` (messages, transcript, signatures, comparison code,
-confirmation check), `src/engine.ts` (the state machine, no DOM),
+Code: the protocol (messages, transcript, signatures, the six digits, the
+confirmation check) is the app's own `src/lib/pq/handshake.ts`; `src/engine.ts` (the state machine, no DOM),
 `src/channel.ts` (QWBP adapter, and the fake network the tests use),
 `src/identity.ts`, `src/main.ts` (camera, QR, settings).

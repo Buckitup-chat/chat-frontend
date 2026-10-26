@@ -27,8 +27,8 @@ vi.mock('@/store/dialogs.store', () => ({
 }));
 // Contacts' photos are not what this file tests; their store pulls in the
 // vault library, which only loads in a browser.
-const refreshPeerAvatars = vi.fn(async () => {});
-vi.mock('@/store/avatars.store', () => ({ useAvatarsStore: () => ({ contactAvatarSrc: () => '', peerAvatarSrc: () => '', refreshPeerAvatars }) }));
+const checkPeerGallery = vi.fn(async () => null);
+vi.mock('@/store/avatars.store', () => ({ useAvatarsStore: () => ({ contactAvatarSrc: () => '', peerAvatarSrc: () => '', checkPeerGallery }) }));
 vi.mock('@/store/transfers.store', () => ({
 	useTransfersStore: () => ({ transferPeers }),
 }));
@@ -50,10 +50,10 @@ describe('checkpoint alerts in the dialogs list', () => {
 		expect(scanCheckpointAlerts).toHaveBeenCalledWith([PEER_A, PEER_B]);
 	});
 
-	it('asks for the listed contacts\' photos when the list opens', () => {
-		refreshPeerAvatars.mockClear();
+	it('reads no contact\'s photo when the list opens: it draws what is cached', () => {
+		checkPeerGallery.mockClear();
 		mountList();
-		expect(refreshPeerAvatars).toHaveBeenCalledWith([PEER_A, PEER_B]);
+		expect(checkPeerGallery).not.toHaveBeenCalled();
 	});
 
 	it('marks only the dialogs that moved', () => {

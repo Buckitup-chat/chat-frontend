@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
+import { toBase64 } from '@/lib/pq/signature';
 import { _resetTouchedForTests, markTouched, isTouched } from '@/lib/data/readCache';
 import { _setDialogCacheStoreForTests, readDialogRows } from '@/lib/data/dialogCache';
 import { memoryDialogCacheStore } from './helpers/mainDialogCache';
@@ -63,13 +65,15 @@ const freshManager = () => {
 
 const ACCOUNT = 'u_' + 'a'.repeat(128);
 const DIALOG = 'di_' + '1'.repeat(128);
+// The vault must hold the key the card carries: sign-in checks that binding.
+const SIGN = ml_dsa87.keygen(new Uint8Array(32).fill(1));
 const signedInManager = async () => {
 	const vault = makeVault('vault-a');
-	await vault.set('sign_skey', new Uint8Array(32).fill(1));
+	await vault.set('sign_skey', SIGN.secretKey);
 	await vault.set('crypt_skey', new Uint8Array(32).fill(2));
 	vaults.set('vault-a', vault);
 	await rawStore.set('local-vault-vault-a', { accountID: 'account-vault-a', data: 'sealed' });
-	await rawStore.set('pq-vaults-registry', [{ user_hash: ACCOUNT, vaultId: 'vault-a', name: 'A' }]);
+	await rawStore.set('pq-vaults-registry', [{ user_hash: ACCOUNT, vaultId: 'vault-a', name: 'A', sign_pkey: toBase64(SIGN.publicKey) }]);
 	await recordAccepted('user_cards', ACCOUNT, {
 		user_hash: ACCOUNT, sign_pkey: 'c2lnbg==', contact_pkey: 'Y29udGFjdA==', contact_cert: 'Y2VydA==',
 		crypt_pkey: 'Y3J5cHQ=', crypt_cert: 'Y2VydA==', name: 'A', deleted_flag: false, owner_timestamp: 1, sign_b64: 'c2ln',
@@ -129,21 +133,21 @@ describe('EncryptionManagerPQ.logout(): per-account disk caches (§8.4)', () => 
 });
 
 describe('EncryptionManagerPQ.deleteUserVault(): the account\'s photo records', () => {
-	it('removes the contacts\' thumbnails and the owed deliveries it kept, and no other account\'s', async () => {
+	it('removes the contacts\' thumbnails and the grant record it kept, and no other account\'s', async () => {
 		const { useMemoryAvatarStore } = await import('./helpers/avatarLocalStore');
-		const { putThumb, getThumb, updateOwed, loadOwed } = await import('@/lib/avatars/localStore');
+		const { putThumb, getThumb, markGranted, loadGranted } = await import('@/lib/avatars/localStore');
 		useMemoryAvatarStore();
 		const OTHER = 'u_' + 'e'.repeat(128);
 		const PEER = 'u_' + 'c'.repeat(128);
 		await putThumb(ACCOUNT, PEER, { avatarId: '1'.repeat(32), thumb: 'a' });
-		await updateOwed(ACCOUNT, (o) => { o[PEER] = { change: true }; });
+		await markGranted(ACCOUNT, PEER, '0b7e3a52-9c1d-4f6e-8a2b-3c4d5e6f7a8b');
 		await putThumb(OTHER, PEER, { avatarId: '1'.repeat(32), thumb: 'b' });
 
 		const em = await signedInManager();
 		await em.deleteUserVault(ACCOUNT);
 
 		expect(await getThumb(ACCOUNT, PEER)).toBeNull();
-		expect(await loadOwed(ACCOUNT)).toEqual({});
+		expect(await loadGranted(ACCOUNT)).toEqual({});
 		expect((await getThumb(OTHER, PEER))?.thumb).toBe('b');
 	});
 });

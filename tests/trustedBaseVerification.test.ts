@@ -338,6 +338,8 @@ describe('user_cards: only verified cards are identities', () => {
 	it('identity consumers read only verified cards', () => {
 		const source = (path: string) => readFileSync(join(process.cwd(), path), 'utf8');
 		expect(source('src/store/userPQ.store.js')).toMatch(/const readCards = \(rows\) => verifiedCards\(rows\)/);
-		expect(source('src/components/engines/QRScannerEngine.vue')).toMatch(/if \(!exists && verifiedCards\(\[card\]\)\.length\)/);
+		// A card a handshake peer sends is checked against the identity and key the codes showed, and never enters the store.
+		expect(source('src/lib/pq/handshake.ts')).toMatch(/contactKeyVouch\(card, bound\.userHash, toBase64\(bound\.contactPkey\)\)/);
+		expect(source('src/components/engines/QRScannerEngine.vue')).not.toMatch(/allNetworkUsers\.(value\.)?push|allNetworkUsers(\.value)? =/);
 	});
 });

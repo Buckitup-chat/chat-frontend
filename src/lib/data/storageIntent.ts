@@ -105,7 +105,27 @@ function mergeKeyed(base: unknown, patch: unknown): KeyedEdits {
 		const prev = merged[hash];
 		if (edit === null) merged[hash] = null;
 		else if (prev === null || edit[REPLACES]) merged[hash] = { ...edit, [REPLACES]: true };
-		else merged[hash] = { ...(prev ?? {}), ...edit };
+		else merged[hash] = mergeContactEdit(prev, edit);
+	}
+	return merged;
+}
+
+/**
+ * One contact edit onto the contact it lands on. A confirmation (`confirmed`,
+ * `confirmedAt`) is of a key: an edit that changes `contact_pkey` without
+ * confirming the new one takes it away. It runs against the actual base when
+ * the patch is merged, so a confirmation another tab made of the new key is
+ * not lost to this tab's stale copy.
+ */
+export function mergeContactEdit(
+	prev: Record<string, unknown> | null | undefined,
+	edit: Record<string, unknown>,
+): Record<string, unknown> {
+	const merged = { ...(prev ?? {}), ...edit };
+	const keyChanged = edit.contact_pkey !== undefined && prev?.contact_pkey !== undefined && edit.contact_pkey !== prev.contact_pkey;
+	if (keyChanged && edit.confirmed !== true) {
+		delete merged.confirmed;
+		delete merged.confirmedAt;
 	}
 	return merged;
 }
