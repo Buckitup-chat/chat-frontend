@@ -6,6 +6,7 @@ import { IngestError, DurabilityError } from '@/lib/data/ingest';
 import { enqueueIntent, updateIntent, getIntent, intentsOf, resolveIntent, onIntentChange, markIntentAwaitingUnlock } from '@/lib/data/intents';
 import { saveProjection, updateProjection, removeProjection, projectionsOf } from '@/lib/data/messageProjections';
 import { signAndDispatchIntent, isUnsignedDialogIntent, IntentChangedError, withIntentSigningLock } from '@/lib/data/intentRecovery';
+import { noteIntentWaiting } from '@/lib/data/intentRetry';
 import {
     materializeMessageIntent, ensureOwnDialogKeyPublished, ownSenderMsgKey, trustedRowBase,
     pinActiveSession, assertSessionUnchanged, SessionFencedError,
@@ -807,6 +808,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             const permanent = e?.permanent === true || e instanceof DurabilityError;
             if (!durableOutboxId && !permanent && await intentAwaitsRecovery(intentId, payload.ownerHash)) {
                 console.warn('[dialogs] dispatchMessageIntent left for recovery:', e);
+                noteIntentWaiting(payload.ownerHash);
                 onStatus?.('awaiting_recovery', e);
                 return;
             }

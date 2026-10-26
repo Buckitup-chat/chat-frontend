@@ -21,6 +21,7 @@ import {
 } from './outbox';
 import { setWriteProber, syncBlockedWrites } from './accessGate';
 import type { IngestRowResult } from './types';
+import { notifyServerAnswered } from './intentRetry';
 
 export class IngestError extends Error {
 	/** true when retrying can never succeed (server-side validation) */
@@ -132,6 +133,9 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 		const network = e instanceof TypeError || (e as Error)?.name === 'TimeoutError' || (e as Error)?.name === 'AbortError';
 		throw new IngestError(`ingest network error: ${e}`, { permanent: false, network });
 	}
+
+	// Any answer below 500 proves the connection, whatever it says about the write.
+	if (resp.status < 500) notifyServerAnswered();
 
 	// The server reports per-row outcomes in the body even on 4xx.
 	let body: { results?: IngestRowResult[] } | null = null;

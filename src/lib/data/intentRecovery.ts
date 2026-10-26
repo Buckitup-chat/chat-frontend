@@ -1,3 +1,4 @@
+import { noteIntentWaiting, type RecoveryPassResult } from './intentRetry';
 import { api } from '@/api/client';
 import { decodeHexOrBase64 } from '@/libs/enigma';
 import { sendMutationsAndAwaitShape, DurabilityError, type DeliveryHandle } from './ingest';
@@ -301,6 +302,7 @@ async function signAndDispatchIntentUnguarded(
 				await resolveIntent(intentId, { outcome: 'durably-dispatched', ref: (currentStored.outboxId as string | null) ?? null });
 			} else {
 				console.warn('[intents] leaving intent for the next recovery attempt — no durable dispatch-confirmed proof yet:', intentId, e);
+				noteIntentWaiting(userHash);
 			}
 		}
 		throw e;
@@ -400,12 +402,15 @@ export async function recoverIntents(
 		materializeStorage?: (payload: StorageIntentPayload, token: SessionToken) => Promise<ReadyRowIntent>;
 		applyContactAccess?: (entry: IntentEntry) => Promise<unknown>;
 	} = {}
-): Promise<void> {
+): Promise<RecoveryPassResult> {
 	const token = currentSessionToken();
 	if (!token || token.userHash !== userHash) {
 		console.warn('[intents] recovery refused — no active session bound to', userHash);
-		return;
+		return { waiting: 0 };
 	}
+	// Intents this pass leaves stored for a later one; an intent waiting for the
+	// vault to unlock is not counted: unlocking, not time, brings it back.
+	let waiting = 0;
 
 	let entries: IntentEntry[];
 	try {
@@ -418,7 +423,7 @@ export async function recoverIntents(
 		}
 	} catch (e) {
 		console.warn('[intents] recovery scan failed — storage itself is unreadable, nothing was recovered this pass:', e);
-		return;
+		return { waiting: 1 };
 	}
 	const awaitUnlock = async (entry: IntentEntry, e: unknown) => {
 		if (!(await withIntentLock(entry.id, () => markIntentAwaitingUnlock(entry.id, userHash)))) {
@@ -428,7 +433,7 @@ export async function recoverIntents(
 	for (const entry of entries) {
 		if (!sameSessionToken(token, currentSessionToken())) {
 			console.warn('[intents] recovery aborted mid-scan — active session changed');
-			return;
+			return { waiting: 0 };
 		}
 		try {
 			let signSkey: Uint8Array;
@@ -443,7 +448,7 @@ export async function recoverIntents(
 			}
 			if (!sameSessionToken(token, currentSessionToken())) {
 				console.warn('[intents] recovery aborted — active session changed', entry.id);
-				return;
+				return { waiting: 0 };
 			}
 			if (!(await withIntentLock(entry.id, () => resumeIntentAfterUnlock(entry.id, userHash)))) continue;
 
@@ -451,12 +456,14 @@ export async function recoverIntents(
 			if ((stored as { kind?: unknown }).kind === 'contact-access') {
 				if (!opts.applyContactAccess) {
 					console.warn('[intents] no contact-access handler registered, will retry later:', entry.id);
+					waiting++;
 					continue;
 				}
 				await opts.applyContactAccess(entry);
 			} else if (DIALOG_INTENT_KINDS.has(String(stored.kind))) {
 				if (!opts.materializeMessage) {
 					console.warn('[intents] no message materializer registered, will retry later:', entry.id);
+					waiting++;
 					continue;
 				}
 				let readyRow: ReadyRowIntent | null;
@@ -471,7 +478,7 @@ export async function recoverIntents(
 				}
 				if (!sameSessionToken(token, currentSessionToken())) {
 					console.warn('[intents] recovery aborted after materialization — active session changed', entry.id);
-					return;
+					return { waiting: 0 };
 				}
 				if (readyRow === null) {
 					await resolveIntent(entry.id, { outcome: 'noop' });
@@ -481,6 +488,7 @@ export async function recoverIntents(
 			} else if (stored.kind === 'storage') {
 				if (!opts.materializeStorage) {
 					console.warn('[intents] no storage materializer registered, will retry later:', entry.id);
+					waiting++;
 					continue;
 				}
 				const result = await materializeSignEnqueueStorageIntent(
@@ -490,12 +498,15 @@ export async function recoverIntents(
 				else if (result.kind === 'awaiting-unlock') await awaitUnlock(entry, result.message);
 				else if (result.kind === 'base-unavailable') {
 					console.warn('[intents] storage base unavailable during recovery, will retry later:', entry.id, result.message);
+					waiting++;
 				}
 			} else {
 				await handOverDurably(entry.id, stored as ReadyRowIntent, signSkey, token);
 			}
 		} catch (e) {
 			console.warn('[intents] recovery failed for one intent, will retry later:', entry.id, e);
+			waiting++;
 		}
 	}
+	return { waiting };
 }

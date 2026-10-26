@@ -10,6 +10,7 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { drainPendingWrites, resumePendingWrites, stopDrainLoop, deliverStoredWrite, IngestError, DurabilityError } from '@/lib/data/ingest';
+import { createRecoveryScheduler, onIntentWaiting, onServerAnswered } from '@/lib/data/intentRetry';
 import {
   storeUserCardIntentUnderLock, storeCardIntentUnderLock, withCardLock, decideCardConstruction, acceptedCardTimestamp,
   BootstrapCardRejectedError, CardAuthoringBlockedError, freshestOwnCard,
@@ -652,6 +653,11 @@ export class EncryptionManagerPQ extends EventTarget {
   #deviceClaimSettled = null;
   #outboxWakeUnsubscribe = null;
   #outboxChangeUnsubscribe = null;
+  /** Paces intent recovery for the account whose outbox drains (lib/data/intentRetry). */
+  #intentRecovery = null;
+  #intentRecoveryUser = null;
+  #serverAnsweredUnsubscribe = null;
+  #intentWaitingUnsubscribe = null;
 
   #signingKeyOf(userHash) {
     return async () => {
@@ -663,19 +669,27 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   #recoverIntents(userHash) {
-    const signingKey = this.#signingKeyOf(userHash);
-    Promise.all([
-      import('@/lib/data/messageIntent'),
-      import('@/lib/data/storageIntent'),
-    ]).then(([{ materializeMessageIntent }, { materializeStorageIntent }]) =>
-      recoverIntents(userHash, signingKey, {
-        materializeMessage: materializeMessageIntent,
-        materializeStorage: materializeStorageIntent,
-        applyContactAccess: async (entry) => this.#afterContactAccess(userHash, await applyContactAccessIntent(entry, this.#contactAccessSession(userHash))),
-      })
-    ).catch((e) =>
+    if (this.#intentRecovery && this.#intentRecoveryUser === userHash) {
+      this.#intentRecovery.trigger();
+      return;
+    }
+    this.#runRecoveryPass(userHash).catch((e) =>
       console.warn('[EncryptionManagerPQ] intent recovery failed:', e)
     );
+  }
+
+  /** One recovery pass for the account; resolves to what it left waiting. */
+  async #runRecoveryPass(userHash) {
+    const signingKey = this.#signingKeyOf(userHash);
+    const [{ materializeMessageIntent }, { materializeStorageIntent }] = await Promise.all([
+      import('@/lib/data/messageIntent'),
+      import('@/lib/data/storageIntent'),
+    ]);
+    return recoverIntents(userHash, signingKey, {
+      materializeMessage: materializeMessageIntent,
+      materializeStorage: materializeStorageIntent,
+      applyContactAccess: async (entry) => this.#afterContactAccess(userHash, await applyContactAccessIntent(entry, this.#contactAccessSession(userHash))),
+    });
   }
 
   #startOutboxDrain() {
@@ -685,6 +699,15 @@ export class EncryptionManagerPQ extends EventTarget {
 
     this.#stopOutboxDrain();
     startLeaderElection(userHash, () => drainPendingWrites(userHash, signSkey));
+
+    // An intent left waiting is retried on a timer and whenever the server
+    // answers, not only on 'online' or a visible tab (lib/data/intentRetry).
+    this.#intentRecovery = createRecoveryScheduler(() => this.#runRecoveryPass(userHash));
+    this.#intentRecoveryUser = userHash;
+    this.#serverAnsweredUnsubscribe = onServerAnswered(() => this.#intentRecovery?.serverAnswered());
+    this.#intentWaitingUnsubscribe = onIntentWaiting((waitingUserHash) => {
+      if (waitingUserHash === userHash) this.#intentRecovery?.intentWaiting();
+    });
 
     this.#recoverIntents(userHash);
     drainPendingWrites(userHash, signSkey);
@@ -732,6 +755,13 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#outboxWakeUnsubscribe = null;
     this.#outboxChangeUnsubscribe?.();
     this.#outboxChangeUnsubscribe = null;
+    this.#serverAnsweredUnsubscribe?.();
+    this.#serverAnsweredUnsubscribe = null;
+    this.#intentWaitingUnsubscribe?.();
+    this.#intentWaitingUnsubscribe = null;
+    this.#intentRecovery?.stop();
+    this.#intentRecovery = null;
+    this.#intentRecoveryUser = null;
     clearTimeout(this.#contactAccessRetry);
     this.#contactAccessRetry = null;
   }
