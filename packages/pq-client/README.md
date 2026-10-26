@@ -3,7 +3,8 @@
 The BuckitUp post-quantum protocol as a library, without a UI framework:
 canonical row payloads and their ML-DSA-87 signatures, user card and dialog row
 verification, message content encoding, key derivations, the vault envelope,
-device link, the optical handshake (PQ2), and the HTTP transport to a server.
+device link, the optical handshake (PQ2), derived identities (notes to self),
+and the HTTP transport to a server.
 
 The BuckitUp web app is built on it, and so is a partner's client for a
 BuckitUp server. The wire protocol it speaks is described in the backend
