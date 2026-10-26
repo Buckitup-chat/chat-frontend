@@ -52,26 +52,35 @@ describe('intent recovery pacing', () => {
 		s.stop();
 	});
 
-	it('runs ahead of the timer when the server answers and intents wait — at most once per base pause — and not when none waits', async () => {
+	it('runs ahead of the timer on the first server answer after an intent was left waiting, and only then', async () => {
 		const { run, calls } = pass([1, 1, 0]);
-		const s = createRecoveryScheduler(run, { baseMs: 1_000 });
-		s.serverAnswered(); // nothing known to wait yet
+		const s = createRecoveryScheduler(run, { baseMs: 10_000 });
+		s.serverAnswered(); // nothing was left waiting
 		await vi.advanceTimersByTimeAsync(0);
 		expect(calls.n).toBe(0);
-		s.trigger();
+		s.intentWaiting(); // the send path left one, offline
+		s.serverAnswered(); // the server is back
 		await vi.advanceTimersByTimeAsync(0);
 		expect(calls.n).toBe(1);
-		s.serverAnswered(); // a pass ran just now: the answer waits for the timer
-		await vi.advanceTimersByTimeAsync(0);
+		s.serverAnswered(); // more answers: the pass kept it waiting, so it is the timer's now
+		s.serverAnswered();
+		await vi.advanceTimersByTimeAsync(5_000);
 		expect(calls.n).toBe(1);
-		await vi.advanceTimersByTimeAsync(1_000); // the timer: still waiting, next one 2 s away
+		await vi.advanceTimersByTimeAsync(5_000);
 		expect(calls.n).toBe(2);
-		await vi.advanceTimersByTimeAsync(1_000);
-		s.serverAnswered(); // 1 s since the last pass: runs now, ahead of the timer
-		await vi.advanceTimersByTimeAsync(0);
-		expect(calls.n).toBe(3);
-		await vi.advanceTimersByTimeAsync(60_000); // nothing waits now
-		expect(calls.n).toBe(3);
+	});
+
+	it('keeps growing the pause for an intent the server answers cannot help', async () => {
+		const { run, calls } = pass(Array(10).fill(1));
+		const s = createRecoveryScheduler(run, { baseMs: 1_000, maxMs: 8_000 });
+		s.trigger();
+		for (let t = 0; t < 15_000; t += 500) {
+			s.serverAnswered(); // a busy chat: an answer every half second
+			await vi.advanceTimersByTimeAsync(500);
+		}
+		// passes at 0, 1 s, 3 s, 7 s, 15 s: the answers added none
+		expect(calls.n).toBe(5);
+		s.stop();
 	});
 
 	it('folds triggers during a pass into one more pass after it', async () => {
@@ -115,7 +124,6 @@ describe('intent recovery pacing', () => {
 		expect(calls.n).toBe(0);
 		await vi.advanceTimersByTimeAsync(1_600);
 		expect(calls.n).toBe(1);
-		await vi.advanceTimersByTimeAsync(1_000);
 		s.intentWaiting();
 		s.serverAnswered();
 		await vi.advanceTimersByTimeAsync(0);

@@ -7,7 +7,8 @@
 // fire while DNS or the server still fail, and a tab that stays in front never
 // becomes visible again. So, as the outbox does for its writes (ADR §5), a
 // pass that leaves intents waiting schedules the next one itself, with growing
-// pauses; and any answer from the server starts one at once.
+// pauses; and after an intent was left waiting outside a pass (the send path
+// failed), the first answer from the server starts one at once.
 
 export interface RecoveryPassResult {
 	/** Intents the pass left stored for a later attempt. */
@@ -19,7 +20,7 @@ export interface RecoveryScheduler {
 	trigger(): void;
 	/** An intent was just left for recovery outside a pass: retry it after a pause. */
 	intentWaiting(): void;
-	/** The server answered a request: if intents are waiting, run a pass now. */
+	/** The server answered a request: if an intent was left waiting since, run a pass now. */
 	serverAnswered(): void;
 	/** The account signed out: no more passes. */
 	stop(): void;
@@ -94,7 +95,10 @@ export function createRecoveryScheduler(
 	let waiting = false;
 	let notedDuringPass = false;
 	let stopped = false;
-	let lastPassAt = -Infinity;
+	// Set when an intent is left waiting outside a pass: the next server answer
+	// then runs a pass at once, once. An intent a pass keeps leaving waits for
+	// something an answer does not bring; the timer and its growing pause have it.
+	let answerArmed = false;
 
 	const clearTimer = () => {
 		if (timer) clearTimeout(timer);
@@ -118,7 +122,6 @@ export function createRecoveryScheduler(
 			return;
 		}
 		running = true;
-		lastPassAt = Date.now();
 		notedDuringPass = false;
 		clearTimer();
 		let result: RecoveryPassResult | void;
@@ -146,13 +149,13 @@ export function createRecoveryScheduler(
 		intentWaiting: () => {
 			if (stopped) return;
 			waiting = true;
+			answerArmed = true;
 			if (running) notedDuringPass = true;
 			else if (!timer) schedule();
 		},
 		serverAnswered: () => {
-			// At most one pass per base pause: once connected, every write answers,
-			// and an intent that waits for something else is the timer's.
-			if (!waiting || stopped || Date.now() - lastPassAt < baseMs) return;
+			if (!answerArmed || stopped) return;
+			answerArmed = false;
 			failures = 0;
 			void pass();
 		},
