@@ -4,15 +4,11 @@
 // own keys, so the server cannot tie the notes to it. Each note is a dialog
 // between the notes identity and a note peer derived from the notes identity
 // and the note's id: one identity has only one dialog with itself.
-import { sha3_256 } from '@noble/hashes/sha3';
 import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
-import { deriveIdentity, type DerivedIdentity, type ParentKeys } from './derivedIdentity.js';
+import { deriveIdentity, identityFamily, type DerivedIdentity, type ParentKeys } from './derivedIdentity.js';
 
 export const NOTES_IDENTITY_SALT = 'buckitup/notes-identity/v1';
 export const NOTE_PEER_SALT = 'buckitup/notes-peer/v1';
-
-/** The User Storage slot of the account that lists its notes by id. */
-export const NOTES_SLOT = 'notes';
 
 const NOTE_ID = /^[0-9a-f]{32}$/;
 
@@ -25,26 +21,22 @@ export const isNoteId = (v: unknown): v is string => typeof v === 'string' && NO
 export const deriveNotesIdentity = (account: ParentKeys): DerivedIdentity =>
 	deriveIdentity(account, NOTES_IDENTITY_SALT);
 
-/** The peer of note `noteId`. Its keys only ever sign its card. */
-export const deriveNotePeer = (notes: ParentKeys, noteId: string): DerivedIdentity => {
-	if (!isNoteId(noteId)) throw new Error('note id: 32 lowercase hex characters');
-	return deriveIdentity(notes, NOTE_PEER_SALT, hexToBytes(noteId));
+export interface NotePeers {
+	/** What reading and writing a note need: its dialog_hash and message key come from it. */
+	userHash(noteId: string): string;
+	/** Every key; only creating a note (its card, the first key wrap) needs them. */
+	identity(noteId: string): DerivedIdentity;
+}
+
+/** The peers of the notes under one notes identity; hold one for many notes. */
+export const notePeers = (notes: ParentKeys): NotePeers => {
+	const family = identityFamily(notes, NOTE_PEER_SALT);
+	const prefix = (noteId: string) => {
+		if (!isNoteId(noteId)) throw new Error('note id: 32 lowercase hex characters');
+		return hexToBytes(noteId);
+	};
+	return {
+		userHash: (noteId) => family.userHash(prefix(noteId)),
+		identity: (noteId) => family.identity(prefix(noteId)),
+	};
 };
-
-// Card names must be non-empty and are public. A derived identity takes a
-// common given name, chosen by its own key so that every device publishes the
-// same card, rather than anything that marks it as a notes identity.
-const NAMES = [
-	'Alex', 'Anna', 'Ari', 'Ben', 'Cami', 'Chris', 'Dana', 'Dani',
-	'Eli', 'Ella', 'Emil', 'Eva', 'Felix', 'Finn', 'Gabi', 'Hana',
-	'Ian', 'Ida', 'Ilya', 'Ivan', 'Jade', 'Jan', 'Jona', 'Kai',
-	'Kim', 'Lara', 'Lea', 'Leo', 'Lina', 'Luca', 'Maja', 'Max',
-	'Maya', 'Mia', 'Mila', 'Nadia', 'Nico', 'Nina', 'Noa', 'Ola',
-	'Oleg', 'Omar', 'Pau', 'Petra', 'Rafa', 'Remi', 'Rita', 'Robin',
-	'Rosa', 'Sam', 'Sara', 'Sasha', 'Simon', 'Sofia', 'Tara', 'Teo',
-	'Tom', 'Uma', 'Vera', 'Viktor', 'Yara', 'Yuri', 'Zoe', 'Zora',
-];
-
-/** The public card name of a derived identity: a given name picked by its user_hash. */
-export const derivedCardName = (userHash: string): string =>
-	NAMES[sha3_256(new TextEncoder().encode(userHash))[0] % NAMES.length];
