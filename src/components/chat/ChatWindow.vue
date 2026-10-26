@@ -1154,7 +1154,7 @@ watch(() => props.messages, () => {
   pointer-events: none;
 }
 .drop-notice { margin: 0 4px 6px; font-size: 12px; color: #a15c00; }
-.attach-btn ._icon_attach { width: 1.5rem; height: 1.5rem; }
+.attach-btn ._icon_attach { width: 1.5rem; height: 1.5rem; background-color: #5a5a5a; }
 
 .chat-header {
   background-color: #ffffff;
