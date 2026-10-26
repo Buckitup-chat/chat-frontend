@@ -345,7 +345,10 @@ export async function materializeSignEnqueueStorageIntent(
 		try {
 			readyRow = await materialize(payload, token, excludeFromDependencies);
 		} catch (e) {
-			if (e instanceof BaseUnavailableError) return { kind: 'base-unavailable', message: e.message };
+			if (e instanceof BaseUnavailableError) {
+				noteIntentWaiting(userHash);
+				return { kind: 'base-unavailable', message: e.message };
+			}
 			if (e instanceof VaultLockedError) return { kind: 'awaiting-unlock', message: e.message };
 			throw e;
 		}

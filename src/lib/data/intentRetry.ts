@@ -27,8 +27,12 @@ export interface RecoveryScheduler {
 
 const waitingListeners = new Set<(userHash: string) => void>();
 
-/** Report that an intent of this account was left stored for recovery. */
-export function noteIntentWaiting(userHash: string): void {
+// Every tab of the account runs its own scheduler, so a tab that left an
+// intent tells the others too (intents are shared storage).
+const waitingChannel: BroadcastChannel | null =
+	typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('buckitup-intent-waiting') : null;
+
+const deliverWaiting = (userHash: string) => {
 	for (const handler of waitingListeners) {
 		try {
 			handler(userHash);
@@ -36,6 +40,16 @@ export function noteIntentWaiting(userHash: string): void {
 			console.warn('[intents] onIntentWaiting subscriber threw:', e);
 		}
 	}
+};
+
+waitingChannel?.addEventListener('message', (ev: MessageEvent<{ userHash?: string }>) => {
+	if (typeof ev.data?.userHash === 'string') deliverWaiting(ev.data.userHash);
+});
+
+/** Report that an intent of this account was left stored for recovery. */
+export function noteIntentWaiting(userHash: string): void {
+	deliverWaiting(userHash);
+	waitingChannel?.postMessage({ userHash });
 }
 
 export function onIntentWaiting(handler: (userHash: string) => void): () => void {
@@ -61,8 +75,11 @@ export function onServerAnswered(handler: () => void): () => void {
 	return () => answeredListeners.delete(handler);
 }
 
-export const RETRY_BASE_MS = 3_000;
-export const RETRY_MAX_MS = 60_000;
+// The outbox's pacing for writes that wait on the connection (outbox.ts
+// RETRY_BASE_MS, RETRY_NETWORK_MAX_MS): what an intent waits for is mostly the
+// connection too.
+export const RETRY_BASE_MS = 5_000;
+export const RETRY_MAX_MS = 30_000;
 
 export function createRecoveryScheduler(
 	run: () => Promise<RecoveryPassResult | void>,
@@ -77,6 +94,7 @@ export function createRecoveryScheduler(
 	let waiting = false;
 	let notedDuringPass = false;
 	let stopped = false;
+	let lastPassAt = -Infinity;
 
 	const clearTimer = () => {
 		if (timer) clearTimeout(timer);
@@ -85,7 +103,7 @@ export function createRecoveryScheduler(
 
 	const schedule = () => {
 		clearTimer();
-		const delay = Math.min(baseMs * 2 ** failures, maxMs) + Math.floor(Math.random() * 500);
+		const delay = Math.min(baseMs * 2 ** failures, maxMs) + Math.floor(Math.random() * 1_000);
 		failures++;
 		timer = setTimeout(() => {
 			timer = null;
@@ -100,6 +118,7 @@ export function createRecoveryScheduler(
 			return;
 		}
 		running = true;
+		lastPassAt = Date.now();
 		notedDuringPass = false;
 		clearTimer();
 		let result: RecoveryPassResult | void;
@@ -131,7 +150,9 @@ export function createRecoveryScheduler(
 			else if (!timer) schedule();
 		},
 		serverAnswered: () => {
-			if (!waiting || stopped) return;
+			// At most one pass per base pause: once connected, every write answers,
+			// and an intent that waits for something else is the timer's.
+			if (!waiting || stopped || Date.now() - lastPassAt < baseMs) return;
 			failures = 0;
 			void pass();
 		},

@@ -2,7 +2,7 @@
 // leaves intents waiting brings the next one itself, a server answer brings
 // it at once, and nothing runs after sign-out.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createRecoveryScheduler, type RecoveryPassResult } from '@/lib/data/intentRetry';
+import { createRecoveryScheduler, onIntentWaiting, type RecoveryPassResult } from '@/lib/data/intentRetry';
 
 // No jitter: the pauses are then exact.
 beforeEach(() => {
@@ -52,21 +52,26 @@ describe('intent recovery pacing', () => {
 		s.stop();
 	});
 
-	it('runs at once when the server answers and intents wait, and not when none does', async () => {
-		const { run, calls } = pass([1, 0]);
-		const s = createRecoveryScheduler(run, { baseMs: 30_000 });
+	it('runs ahead of the timer when the server answers and intents wait — at most once per base pause — and not when none waits', async () => {
+		const { run, calls } = pass([1, 1, 0]);
+		const s = createRecoveryScheduler(run, { baseMs: 1_000 });
 		s.serverAnswered(); // nothing known to wait yet
 		await vi.advanceTimersByTimeAsync(0);
 		expect(calls.n).toBe(0);
 		s.trigger();
 		await vi.advanceTimersByTimeAsync(0);
-		expect(calls.n).toBe(1); // left one waiting; the next timed pass is 30 s away
-		s.serverAnswered();
+		expect(calls.n).toBe(1);
+		s.serverAnswered(); // a pass ran just now: the answer waits for the timer
 		await vi.advanceTimersByTimeAsync(0);
+		expect(calls.n).toBe(1);
+		await vi.advanceTimersByTimeAsync(1_000); // the timer: still waiting, next one 2 s away
 		expect(calls.n).toBe(2);
-		s.serverAnswered(); // nothing waits now
-		await vi.advanceTimersByTimeAsync(60_000);
-		expect(calls.n).toBe(2);
+		await vi.advanceTimersByTimeAsync(1_000);
+		s.serverAnswered(); // 1 s since the last pass: runs now, ahead of the timer
+		await vi.advanceTimersByTimeAsync(0);
+		expect(calls.n).toBe(3);
+		await vi.advanceTimersByTimeAsync(60_000); // nothing waits now
+		expect(calls.n).toBe(3);
 	});
 
 	it('folds triggers during a pass into one more pass after it', async () => {
@@ -110,6 +115,7 @@ describe('intent recovery pacing', () => {
 		expect(calls.n).toBe(0);
 		await vi.advanceTimersByTimeAsync(1_600);
 		expect(calls.n).toBe(1);
+		await vi.advanceTimersByTimeAsync(1_000);
 		s.intentWaiting();
 		s.serverAnswered();
 		await vi.advanceTimersByTimeAsync(0);
@@ -145,5 +151,16 @@ describe('intent recovery pacing', () => {
 		s.serverAnswered();
 		await vi.advanceTimersByTimeAsync(60_000);
 		expect(calls.n).toBe(1);
+	});
+
+	it('hears an intent left waiting in another tab', async () => {
+		vi.useRealTimers();
+		const heard: string[] = [];
+		const off = onIntentWaiting((userHash) => heard.push(userHash));
+		const otherTab = new BroadcastChannel('buckitup-intent-waiting');
+		otherTab.postMessage({ userHash: 'u_other_tab' });
+		await vi.waitFor(() => expect(heard).toEqual(['u_other_tab']));
+		otherTab.close();
+		off();
 	});
 });

@@ -668,14 +668,9 @@ export class EncryptionManagerPQ extends EventTarget {
     };
   }
 
+  /** Recovery runs through the account's scheduler, created by #startOutboxDrain. */
   #recoverIntents(userHash) {
-    if (this.#intentRecovery && this.#intentRecoveryUser === userHash) {
-      this.#intentRecovery.trigger();
-      return;
-    }
-    this.#runRecoveryPass(userHash).catch((e) =>
-      console.warn('[EncryptionManagerPQ] intent recovery failed:', e)
-    );
+    if (this.#intentRecoveryUser === userHash) this.#intentRecovery?.trigger();
   }
 
   /** One recovery pass for the account; resolves to what it left waiting. */
