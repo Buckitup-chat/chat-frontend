@@ -53,13 +53,6 @@ export const api = {
     return resp.json();
   },
 
-  claimOwner: (userHash, challengeId, signature) =>
-    timedFetch(`${ELECTRIC_API_URL}/owner_claim`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_hash: userHash, challenge_id: challengeId, signature }),
-    }),
-
   createUserCard: (
     name,
     userData,

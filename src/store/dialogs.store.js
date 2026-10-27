@@ -958,10 +958,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     // ---------- file transport (§1.5, §2.1–2.3) ----------
 
-    // §4.1: file_id + enc_secret persist BEFORE the first PUT — file_id alone
-    // cannot resume, since a fresh secret would make re-sent chunks
-    // undecryptable next to the ones already stored.
-    const pendingUploadKey = (fileId) => `bkp:pending-upload:${fileId}`;
+    // §4.1: file_id + enc_secret are minted before the first PUT and reused by
+    // every retry of the same upload (the transfer queue keeps them for the
+    // row's life) — a fresh secret would make re-sent chunks undecryptable next
+    // to the ones already stored.
 
     /**
      * Uploads a file and sends the message referencing it. Progress is in
@@ -984,11 +984,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // The queue mints the pair up front so pause/resume re-enter with the
         // same file_id + enc_secret; a direct call mints its own.
         const prepared = preparedIn ?? prepareUpload((await import('uuid')).v7());
-        try {
-            localStorage.setItem(pendingUploadKey(prepared.fileId), JSON.stringify({
-                encSecretB64: prepared.encSecretB64, name, size: bytes.length,
-            }));
-        } catch { /* private mode: resume across reloads degrades, upload still works */ }
 
         const up = await uploadFile({
             bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,

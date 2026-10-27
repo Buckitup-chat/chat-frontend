@@ -1,8 +1,7 @@
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { signFields, type SignableFields } from '@/lib/pq/signature';
 import { signableFields, wireBool } from '@/lib/pq/schema';
 import { getVerifiedSignPkey } from './cardRegistry';
-import { claimDeviceIfUnowned } from './deviceOwner';
+import { readDeviceIdentity } from './deviceOwner';
 import { IngestError, sendMutationsAndAwaitShape } from './ingest';
 import { enqueueIntent, intentsOf, resolveIntent, updateIntent, type IntentEntry } from './intents';
 import { resolveSigningKey, type SigningKeySource } from './keyCustody';
@@ -182,8 +181,7 @@ async function setContactVouches(request: ContactVouchRequest, granted: boolean,
 	const { issuerHash, subjectHash, signingKey, stillCurrent } = request;
 	const fenced = () => new SessionFencedError('contact vouches: the account changed before the rows were sent');
 
-	// An ownerless device is claimed first: whoever acts here has signed in here (deviceOwner.ts).
-	const { identity } = await claimDeviceIfUnowned(issuerHash, async (challenge) => ml_dsa87.sign(challenge, await resolveSigningKey(signingKey)));
+	const identity = await readDeviceIdentity();
 	if (!stillCurrent()) throw fenced();
 	if (!identity) return { kind: 'skipped', reason: 'identity-unavailable' };
 	if (identity.adminHash === null) return { kind: 'skipped', reason: 'no-owner' };
