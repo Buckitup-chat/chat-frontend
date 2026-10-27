@@ -5,7 +5,7 @@
 // between the notes identity and a note peer derived from the notes identity
 // and the note's id: one identity has only one dialog with itself.
 import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
-import { deriveIdentity, identityFamily, type DerivedIdentity, type ParentKeys } from './derivedIdentity.js';
+import { deriveIdentity, identityFamily, wipeIdentity, type DerivedIdentity, type ParentKeys } from './derivedIdentity.js';
 
 export const NOTES_IDENTITY_SALT = 'buckitup/notes-identity/v1';
 export const NOTE_PEER_SALT = 'buckitup/notes-peer/v1';
@@ -56,7 +56,7 @@ export const accountNotes = (account: ParentKeys): AccountNotes => {
 		peerSignSkey: (noteId) => peers.signSkey(prefix(noteId)),
 		wipe() {
 			peers.wipe();
-			for (const key of [identity.signSkey, identity.cryptSkey, identity.contactSkey]) key.fill(0);
+			wipeIdentity(identity);
 			hashes.clear();
 		},
 	};
