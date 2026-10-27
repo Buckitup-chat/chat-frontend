@@ -42,8 +42,13 @@ export const accountNotes = (account: ParentKeys): AccountNotes => {
 		if (!isNoteId(noteId)) throw new Error('note id: 32 lowercase hex characters');
 		return hexToBytes(noteId);
 	};
+	let wiped = false;
 	return {
-		identity,
+		// Its keys are zeroed by wipe(): reading it after that is an error, not a zero key.
+		get identity() {
+			if (wiped) throw new Error('notes: the account\'s notes have been wiped');
+			return identity;
+		},
 		peerHash(noteId) {
 			let hash = hashes.get(noteId);
 			if (!hash) {
@@ -55,6 +60,7 @@ export const accountNotes = (account: ParentKeys): AccountNotes => {
 		peer: (noteId) => peers.identity(prefix(noteId)),
 		peerSignSkey: (noteId) => peers.signSkey(prefix(noteId)),
 		wipe() {
+			wiped = true;
 			peers.wipe();
 			wipeIdentity(identity);
 			hashes.clear();
