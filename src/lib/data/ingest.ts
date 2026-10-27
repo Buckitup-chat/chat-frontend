@@ -9,10 +9,11 @@
 // conflict as applied only after proving the server row carries our exact
 // signature (see confirm.ts).
 import { api } from '@/api/client';
-import { mutationAppliedOnServer, type MutationLike } from './confirm';
+import { mutationAppliedOnServer, derivedRowAppliedOnServer, type MutationLike } from './confirm';
 import { discoverDependencies, reconcileAccepted } from './coordinator';
 import { OWNER_FIELD } from './writeContracts';
 import { VaultLockedError, AccountMismatchError, resolveSigningKey, type SigningKeySource } from './keyCustody';
+import { derivedSigner, sessionAccount, type DerivedSigner } from './sessionIdentities';
 import {
 	enqueue, stopDrainLoop as stopOutboxLoop, awaitEntryOutcome, dependencyBlockFor, wakeAccountSender, releaseNetworkBackoffs,
 	approvalHeldShapes, approvalProbeCandidate, sendApprovalProbe, onApprovalHeldChange, AWAITING_APPROVAL_MESSAGE,
@@ -285,6 +286,8 @@ export interface LiveSendOptions {
 	excludeFromDependencies?: string[];
 	targeted?: boolean;
 	fileIds?: string[];
+	/** The write is signed by this identity derived from the open account, not by the account. */
+	signer?: DerivedSigner;
 }
 
 export async function sendMutationsAndAwaitShape(
@@ -292,22 +295,27 @@ export async function sendMutationsAndAwaitShape(
 	signSkey: SigningKeySource,
 	opts: LiveSendOptions = {}
 ): Promise<DeliveryHandle> {
-	const owner = ownerOf(mutations);
+	// A derived identity's write is the account's record: it queues, seals and
+	// replays in the account's outbox, which keeps who signs it (sessionIdentities.ts).
+	const owner = opts.signer ? sessionAccount() : ownerOf(mutations);
+	if (opts.signer && derivedSigner(owner, opts.signer).userHash !== ownerOf(mutations)) {
+		throw new Error('sendMutationsAndAwaitShape: the rows are not the derived signer\'s');
+	}
 	let discovery: DiscoveryOutcome;
 	try {
 		discovery = await discoverDependencies(mutations, owner, opts.excludeFromDependencies, opts.fileIds ? { fileIds: opts.fileIds } : {});
 	} catch (e) {
 		discovery = { kind: 'blocked', block: dependencyBlockFor(e, { kind: 'discovery', observedKeys: null }) };
 	}
-	const fileIds = opts.fileIds?.length ? { fileIds: opts.fileIds } : {};
+	const extra = { ...(opts.fileIds?.length ? { fileIds: opts.fileIds } : {}), ...(opts.signer ? { signer: opts.signer } : {}) };
 	const outboxId = await enqueue(mutations, owner, discovery.kind === 'blocked'
-		? { discoveryBlocked: discovery.block, sourceIntentId: opts.sourceIntentId, observeAttempt: true, ...fileIds }
-		: { dependsOn: discovery.dependsOn, sourceIntentId: opts.sourceIntentId, observeAttempt: true, ...fileIds });
+		? { discoveryBlocked: discovery.block, sourceIntentId: opts.sourceIntentId, observeAttempt: true, ...extra }
+		: { dependsOn: discovery.dependsOn, sourceIntentId: opts.sourceIntentId, observeAttempt: true, ...extra });
 	// ADR §11: a write that cannot be stored fails visibly; nothing is sent.
 	if (outboxId === null) throw new DurabilityError();
 	await opts.onDurable?.(outboxId);
 
-	const submission = await submitEntryToSender(owner, outboxId, replaySend(signSkey), senderHooks, { targeted: opts.targeted });
+	const submission = await submitEntryToSender(owner, outboxId, replaySend(owner, signSkey), senderHooks, { targeted: opts.targeted });
 	const queued = (acceptance: Promise<EntryOutcome> = awaitEntryOutcome(outboxId, owner)): DeliveryHandle => ({
 		outboxId,
 		phase: 'queued',
@@ -347,17 +355,38 @@ export async function sendMutationsAndAwaitShape(
 }
 
 /**
- * How the sender sends an entry: one HTTP request per attempt. A failure is
- * recorded on the entry with its next attempt time, and the outbox schedule
- * is the only retry. A unique-key conflict is still checked against the
- * server's row (our exact signature is success).
+ * How the sender sends an entry of `account`'s queue: one HTTP request per
+ * attempt. A failure is recorded on the entry with its next attempt time, and
+ * the outbox schedule is the only retry. A unique-key conflict is still
+ * checked against the server's row (our exact signature is success).
+ *
+ * The request is proven by the rows' author: the account with its own key, or
+ * the derived identity the entry names, its key derived from the account's
+ * here. Never the account for another author: the server would refuse it, and
+ * it would tie the two. The key is taken when the request is made, so a
+ * locked account throws VaultLockedError before anything is sent.
  */
-const replaySend = (signingKey: SigningKeySource) => async (mutations: unknown[]) =>
-	// The key is taken when the request is made: a locked account throws
-	// VaultLockedError here, before anything is sent.
-	sendMutationsWithRetry(mutations, await resolveSigningKey(signingKey), { retries: 0, networkRetries: 0 });
+const replaySend = (account: string, signingKey: SigningKeySource) => async (mutations: unknown[], entry?: OutboxEntry) => {
+	const author = ownerOf(mutations) || account;
+	const signer = entry?.signer ? derivedSigner(account, entry.signer) : null;
+	if (author !== (signer?.userHash ?? account)) {
+		throw new IngestError('outbox: the rows were not written by the account or the identity of it the entry names', { permanent: true });
+	}
+	const key = signer ? await signer.signingKey() : await resolveSigningKey(signingKey);
+	return sendMutationsWithRetry(mutations, key, {
+		retries: 0,
+		networkRetries: 0,
+		...(signer ? { confirmApplied: derivedRowAppliedOnServer } : {}),
+	});
+};
 
-const senderHooks = { reconcile: (mutations: unknown[], result?: unknown) => reconcileAccepted(mutations, result), rediscover: (entry: OutboxEntry) => rediscoverDependencies(entry) };
+// A derived identity's rows are not the account's own base rows: no accepted
+// snapshot is kept for them (they are never edited on top of one).
+const senderHooks = {
+	reconcile: (mutations: unknown[], result?: unknown, entry?: OutboxEntry) =>
+		reconcileAccepted(mutations, result, entry?.signer ? { recordAcceptedSnapshot: false } : {}),
+	rediscover: (entry: OutboxEntry) => rediscoverDependencies(entry),
+};
 
 let approvalSession: { userHash: string; signSkey: SigningKeySource } | null = null;
 
@@ -377,7 +406,7 @@ async function probeHeldWrite(userHash: string, shape: string): Promise<boolean>
 	if (session?.userHash !== userHash) return false;
 	const candidate = await approvalProbeCandidate(userHash, shape);
 	if (!candidate || approvalSession !== session) return false;
-	const attempt = await sendApprovalProbe(userHash, candidate.id, replaySend(session.signSkey), senderHooks);
+	const attempt = await sendApprovalProbe(userHash, candidate.id, replaySend(userHash, session.signSkey), senderHooks);
 	if (attempt?.kind !== 'accepted') return false;
 	if (approvalSession === session) wakeSender(userHash, session.signSkey);
 	return true;
@@ -404,7 +433,7 @@ function wakeSender(owner: string, signSkey: SigningKeySource, opts: { releaseNe
 	void syncApprovalHeld(owner);
 	void (async () => {
 		if (opts.releaseNetworkBackoffs) await releaseNetworkBackoffs(owner);
-		wakeAccountSender(owner, replaySend(signSkey), senderHooks);
+		wakeAccountSender(owner, replaySend(owner, signSkey), senderHooks);
 	})();
 }
 
@@ -426,7 +455,7 @@ export function resumePendingWrites(userHash: string, signSkey: SigningKeySource
 export async function deliverStoredWrite(outboxId: string, userHash: string, signSkey: SigningKeySource): Promise<DeliveryVerdict> {
 	let submission: Awaited<ReturnType<typeof submitEntryToSender>>;
 	try {
-		submission = await submitEntryToSender(userHash, outboxId, replaySend(signSkey), senderHooks, { targeted: true });
+		submission = await submitEntryToSender(userHash, outboxId, replaySend(userHash, signSkey), senderHooks, { targeted: true });
 	} catch {
 		return awaitDeliveryVerdict(outboxId, userHash); // not readable as this account's entry now: its stored verdict decides
 	}

@@ -482,7 +482,7 @@ async function runE2E() {
 		const drainResult = await drainOutbox(
 			alice.userHash,
 			(queued) => sendMutationsWithRetry(queued, alice.sign.secretKey, { retries: 1 }),
-			reconcileAccepted
+			(mutations, result) => reconcileAccepted(mutations, result)
 		);
 		expect(drainResult.dropped).toBe(0);
 		expect(drainResult.sent).toBe(1);

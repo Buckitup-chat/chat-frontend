@@ -8,6 +8,8 @@
 // verify by comparing signatures — a retry re-sends the same signed object.
 import { getDialogCollections, getUserCardsCollection, getUserStorageCollection } from './collections';
 import { toBytes } from '@buckitup/pq-client/signature';
+import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
+import type { UserCardRow } from './types';
 
 export interface MutationLike {
 	type?: string;
@@ -89,6 +91,25 @@ const sameSignature = (a: string | Uint8Array | null | undefined, b: string | Ui
  * arrives through the shape stream, which may lag the 422 by a moment.
  */
 export async function mutationAppliedOnServer(mutation: MutationLike, opts: { attempts?: number; delayMs?: number } = {}): Promise<boolean> {
+	return rowStandsOnServer(mutation, (remote, row) => sameSignature(remote.sign_b64 as string | Uint8Array | null | undefined, row.sign_b64 as string | Uint8Array | null | undefined), opts);
+}
+
+/**
+ * As mutationAppliedOnServer, for a row signed by an identity derived from the
+ * account (sessionIdentities.ts). Every device derives the same identity but
+ * signs its own card, so for a card any valid one under the same user_hash —
+ * the same key, the hash being its digest — is the one this device meant.
+ */
+export async function derivedRowAppliedOnServer(mutation: MutationLike): Promise<boolean> {
+	if (mutation.syncMetadata?.relation !== 'user_cards') return mutationAppliedOnServer(mutation);
+	return rowStandsOnServer(mutation, (remote) => verifyUserCard(remote as UserCardRow).status === 'verified');
+}
+
+async function rowStandsOnServer(
+	mutation: MutationLike,
+	matches: (remote: Record<string, unknown>, row: Record<string, unknown>) => boolean,
+	opts: { attempts?: number; delayMs?: number } = {},
+): Promise<boolean> {
 	const { attempts = 4, delayMs = 500 } = opts;
 	const relation = mutation.syncMetadata?.relation;
 	const row = rowOf(mutation);
@@ -97,9 +118,7 @@ export async function mutationAppliedOnServer(mutation: MutationLike, opts: { at
 	for (let i = 0; i < attempts; i++) {
 		try {
 			const remote = await lookup(relation, row);
-			if (remote) {
-				return sameSignature(remote.sign_b64 as string | Uint8Array | null | undefined, row.sign_b64 as string | Uint8Array | null | undefined);
-			}
+			if (remote) return matches(remote, row);
 		} catch (e) {
 			console.warn('[data] confirm lookup failed:', e);
 		}
