@@ -153,7 +153,11 @@ describe('wiping', () => {
 		const own = accountNotes(account);
 		expect(own.peerSignSkey(NOTE_ID)).toEqual(peer.signSkey);
 		own.wipe();
-		expect(own.identity.signSkey.every((b) => b === 0)).toBe(true);
+		const keptKey = accountNotes(account);
+		const key = keptKey.identity.signSkey;
+		keptKey.wipe();
+		expect(key.every((b) => b === 0)).toBe(true);
+		expect(() => keptKey.identity).toThrow(/wiped/);
 		expect(() => own.peerHash(NOTE_ID)).toThrow(/wiped/);
 		expect(() => own.peer(NOTE_ID)).toThrow(/wiped/);
 		expect(() => own.peerSignSkey(NOTE_ID)).toThrow(/wiped/);
