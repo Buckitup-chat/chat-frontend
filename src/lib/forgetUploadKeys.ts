@@ -3,10 +3,10 @@
 // profile's storage could decrypt those files, so what is left is removed.
 const PREFIX = 'bkp:pending-upload:';
 
-export function forgetPlaintextUploadKeys(storage: Storage = localStorage): void {
+export function forgetPlaintextUploadKeys(): void {
 	try {
-		for (const key of Object.keys(storage)) if (key.startsWith(PREFIX)) storage.removeItem(key);
+		for (const key of Object.keys(localStorage)) if (key.startsWith(PREFIX)) localStorage.removeItem(key);
 	} catch {
-		/* storage unavailable (private mode): nothing was kept there either */
+		/* storage unavailable or blocked: nothing to clear */
 	}
 }

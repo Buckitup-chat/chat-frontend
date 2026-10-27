@@ -6,6 +6,7 @@ import { preloadWithRetry } from '@/lib/data/attach';
 import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verifiedCards } from '@/lib/data/userCardsLink';
 import { mergeContactEdit } from '@/lib/data/storageIntent';
 import { contactKeyVouch } from '@/lib/pq/verifyCard';
+import { forgetPlaintextUploadKeys } from '@/lib/forgetUploadKeys';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
@@ -78,6 +79,7 @@ export const userPQStore = defineStore('userPQ', () => {
   const initialize = async () => {
     if (isInitialized.value) return;
     reapTestbedKeys();
+    forgetPlaintextUploadKeys();
 
     // Phase 1: local vault registry (fast, offline)
     em.value = EncryptionManagerPQ.getInstance();
@@ -226,8 +228,8 @@ export const userPQStore = defineStore('userPQ', () => {
    * A one-time reaper, not testbed code. Builds up to this one registered the
    * teststand route unconditionally, so a profile that opened it holds guardian
    * EOA and spending private keys in localStorage as plaintext, alongside a
-   * payload carrying the owner key and the master secret. Nothing else in the
-   * app clears localStorage.
+   * payload carrying the owner key and the master secret. Plaintext upload
+   * keys left by earlier builds go at the same time (forgetPlaintextUploadKeys).
    *
    * It runs on boot rather than on sign-out because most profiles never sign
    * out — they close the tab — and the keys have to go from those too. Each key
