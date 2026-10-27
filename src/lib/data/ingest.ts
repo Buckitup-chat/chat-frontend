@@ -14,7 +14,8 @@ import { discoverDependencies, reconcileAccepted } from './coordinator';
 import { OWNER_FIELD } from './writeContracts';
 import { VaultLockedError, AccountMismatchError, resolveSigningKey, type SigningKeySource } from './keyCustody';
 import { derivedSigner, sessionAccount, type DerivedSigner } from './sessionIdentities';
-import { readDeviceIdentity } from './deviceOwner';
+import { parseDeviceIdentity } from './deviceOwner';
+import { getVerifiedSignPkey } from './cardRegistry';
 import {
 	enqueue, stopDrainLoop as stopOutboxLoop, awaitEntryOutcome, dependencyBlockFor, wakeAccountSender, releaseNetworkBackoffs,
 	approvalHeldShapes, approvalProbeCandidate, sendApprovalProbe, onApprovalHeldChange, AWAITING_APPROVAL_MESSAGE,
@@ -373,7 +374,9 @@ const replaySend = (account: string, signingKey: SigningKeySource) => async (mut
 	if (author !== (signer?.userHash ?? account)) {
 		throw new IngestError('outbox: the rows were not written by the account or the identity of it the entry names', { permanent: true });
 	}
-	if (signer && entry?.relation === 'user_cards') await requireDeviceOwner();
+	// A card the server already holds cannot make anyone its owner: the insert
+	// only meets it, and derivedRowAppliedOnServer settles that.
+	if (signer && entry?.relation === 'user_cards' && !(await getVerifiedSignPkey(author))) await requireDeviceOwner();
 	const key = signer ? await signer.signingKey() : await resolveSigningKey(signingKey);
 	try {
 		return await sendMutationsWithRetry(mutations, key, {
@@ -394,9 +397,16 @@ const replaySend = (account: string, signingKey: SigningKeySource) => async (mut
 let deviceOwnerSeen = false;
 async function requireDeviceOwner(): Promise<void> {
 	if (deviceOwnerSeen) return;
-	const device = await readDeviceIdentity();
-	// Unreadable is treated as no answer: the wait ends when the connection is back.
-	if (!device) throw new IngestError('the device\'s owner could not be read: a derived card waits for it', { permanent: false, network: true });
+	let body: unknown;
+	try {
+		body = await api.getDeviceIdentity();
+	} catch (e) {
+		// No answer is a fact about the connection; a server's answer is the server's.
+		const network = (e instanceof TransportError && e.network) || isNoAnswer(e);
+		throw new IngestError(`the device's owner could not be read: a derived card waits for it (${e})`, { permanent: false, network });
+	}
+	const device = parseDeviceIdentity(body);
+	if (!device) throw new IngestError('the device identity is unreadable: a derived card waits for it', { permanent: false });
 	if (!device.adminHash) throw new IngestError('the device has no owner yet: a derived card waits for one', { permanent: false });
 	deviceOwnerSeen = true;
 }

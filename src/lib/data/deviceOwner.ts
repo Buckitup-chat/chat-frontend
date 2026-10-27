@@ -23,6 +23,11 @@ export async function readDeviceIdentity(): Promise<DeviceIdentity | null> {
 	} catch {
 		return null;
 	}
+	return parseDeviceIdentity(body);
+}
+
+/** The device identity in a /device_identity answer, or null for one that is not. */
+export function parseDeviceIdentity(body: unknown): DeviceIdentity | null {
 	if (!body || typeof body !== 'object') return null;
 	const { device_id: deviceId, admin } = body as { device_id?: unknown; admin?: { user_hash?: unknown } | null };
 	if (typeof deviceId !== 'string' || !DEVICE_ID.test(deviceId)) return null;

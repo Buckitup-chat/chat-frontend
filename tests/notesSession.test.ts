@@ -78,6 +78,12 @@ describe('the notes identity in the session', () => {
 		expect(em.notesUserHash).toBe((await notes()).identity.userHash);
 		expect(ids.derivedSigner(A.hash, NOTES).userHash).toBe(em.notesUserHash);
 
+		// each signing key is a copy: the sender wipes it after a request, and the next is whole
+		const first = await ids.derivedSigner(A.hash, NOTES).signingKey();
+		first.fill(0);
+		const second = await ids.derivedSigner(A.hash, NOTES).signingKey();
+		expect(second.some((b) => b !== 0)).toBe(true);
+
 		await A.app.store.logout();
 		expect(em.notesUserHash).toBeNull();
 		expect(() => ids.derivedSigner(A.hash, NOTES)).toThrow(/not open/);
@@ -137,6 +143,15 @@ describe('a derived card', () => {
 		expect(server.table('user_cards').has(em.notesUserHash)).toBe(false);
 		expect(proofsBy(em.notesUserHash)).toEqual([]);
 		expect(await A.app.outbox.pendingEntries(A.hash)).toHaveLength(1);
+	});
+
+	it('that the server already holds settles even while the device has no owner: meeting it makes no one the owner', async () => {
+		await register(A);
+		const { em, publish, notes } = await session();
+		deviceAdmin = null;
+		server.table('user_cards').set(em.notesUserHash, signedUserCard((await notes()).identity, 1_700_000_000));
+		await accepted(await publish(NOTES, async () => null));
+		expect(await A.app.outbox.pendingEntries(A.hash)).toEqual([]);
 	});
 
 	it('is queued once, however often it is asked for while it waits, and is not the account\'s own card write', async () => {

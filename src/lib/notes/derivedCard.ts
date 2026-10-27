@@ -24,7 +24,9 @@ export interface DerivedCard {
 /**
  * Makes sure `signer`'s card (EncryptionManagerPQ.derivedCard) is published:
  * - 'present': a valid one is already there;
- * - 'queued': one is already in the account's outbox;
+ * - 'queued': one is already in the account's outbox (two calls at once may
+ *   both queue one; the second meets the first on the server and settles as
+ *   applied, derivedRowAppliedOnServer);
  * - otherwise the delivery of a fresh one.
  * `accountKey` is the account's signing key source, which the outbox needs to
  * run; the request itself is proven by the derived identity.

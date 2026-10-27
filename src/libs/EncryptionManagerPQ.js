@@ -642,8 +642,9 @@ export class EncryptionManagerPQ extends EventTarget {
   get notesUserHash() {
     try {
       return this.#openNotes().identity.userHash;
-    } catch {
-      return null;
+    } catch (e) {
+      if (e instanceof VaultLockedError) return null;
+      throw e;
     }
   }
 
