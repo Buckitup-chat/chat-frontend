@@ -115,8 +115,19 @@ export const identityFamily = (parent: ParentKeys, salt: string): IdentityFamily
 	};
 };
 
-export const deriveIdentity = (parent: ParentKeys, salt: string, prefix: Uint8Array = NO_PREFIX): DerivedIdentity =>
-	identityFamily(parent, salt).identity(prefix);
+export const deriveIdentity = (parent: ParentKeys, salt: string, prefix: Uint8Array = NO_PREFIX): DerivedIdentity => {
+	const family = identityFamily(parent, salt);
+	try {
+		return family.identity(prefix);
+	} finally {
+		family.wipe();
+	}
+};
+
+/** Zeroes an identity's secret keys. */
+export const wipeIdentity = (id: DerivedIdentity): void => {
+	for (const key of [id.signSkey, id.cryptSkey, id.contactSkey]) key.fill(0);
+};
 
 /**
  * The identity's `user_cards` row, certified and signed by its own key, as an
