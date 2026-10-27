@@ -152,8 +152,8 @@ export class EncryptionManagerPQ extends EventTarget {
   #signSkey = null;
   #cryptSkey = null;
   // The account's notes (pq_notes_to_self.proposed.md): its notes identity
-  // and the peers of its notes, derived from the keys above. Held for the
-  // session only; never exported, never stored.
+  // and the peers of its notes, derived from the keys above on first use.
+  // Held for the session only; never exported, never stored.
   #notes = null;
   #slotResolver = null;
   #contactSkey = null;
@@ -599,7 +599,8 @@ export class EncryptionManagerPQ extends EventTarget {
     console.log(`Logged in: ${identity.name} (${userHash})`);
 
     // Before the auth event: a listener may write as a derived identity at once.
-    this.#holdNotes(userHash);
+    this.#dropNotes();
+    holdSessionIdentities(userHash, (signer) => this.#derivedSigner(userHash, signer));
     this.#dispatchAuthChange();
 
     // Writes queued before a reload/crash can replay now that the signing key
@@ -608,41 +609,42 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#claimDevice(userHash);
   }
 
-  // The session signs as the account's notes identity and the peers of its
-  // notes too (sessionIdentities.ts): derived from the account's keys here,
-  // and by any tab of the account that sends their writes.
-  #holdNotes(userHash) {
-    this.#dropNotes();
-    if (!(this.#signSkey instanceof Uint8Array) || !(this.#cryptSkey instanceof Uint8Array)) return;
-    this.#notes = accountNotes({ signSkey: this.#signSkey, cryptSkey: this.#cryptSkey });
-    holdSessionIdentities(userHash, (signer) => this.#derivedSigner(userHash, signer));
-  }
-
   #dropNotes() {
     releaseSessionIdentities();
-    const identity = this.#notes?.identity;
-    for (const key of [identity?.signSkey, identity?.cryptSkey, identity?.contactSkey]) key?.fill?.(0);
+    this.#notes?.wipe();
     this.#notes = null;
   }
 
+  // The account's notes, derived on first use. VaultLockedError unless
+  // `userHash`'s session is open; a plain error on a device whose vault holds
+  // no crypt key, which a write waits out like any failed attempt.
   #openNotes(userHash = this.#currentUserHash) {
-    if (!userHash || this.#currentUserHash !== userHash || !this.#notes) {
+    if (!userHash || this.#currentUserHash !== userHash || !(this.#signSkey instanceof Uint8Array)) {
       throw new VaultLockedError('notes need the account open on this device');
     }
+    if (!(this.#cryptSkey instanceof Uint8Array)) {
+      throw new Error('this device holds no crypt key of the account: its notes are not available here');
+    }
+    this.#notes ??= accountNotes({ signSkey: this.#signSkey, cryptSkey: this.#cryptSkey });
     return this.#notes;
   }
 
+  // Each key is a fresh copy the sender wipes after the request.
   #derivedSigner(userHash, signer) {
     const notes = this.#openNotes(userHash);
     if (signer.kind === 'notes') {
-      return { userHash: notes.identity.userHash, signingKey: async () => this.#openNotes(userHash).identity.signSkey };
+      return { userHash: notes.identity.userHash, signingKey: async () => this.#openNotes(userHash).identity.signSkey.slice() };
     }
-    return { userHash: notes.peerHash(signer.noteId), signingKey: async () => this.#openNotes(userHash).peer(signer.noteId).signSkey };
+    return { userHash: notes.peerHash(signer.noteId), signingKey: async () => this.#openNotes(userHash).peerSignSkey(signer.noteId) };
   }
 
   /** The account's notes identity, or null while no account is open. */
   get notesUserHash() {
-    return this.#notes?.identity.userHash ?? null;
+    try {
+      return this.#currentUserHash ? this.#openNotes().identity.userHash : null;
+    } catch {
+      return null;
+    }
   }
 
   /** The peer of note `noteId`: the other side of the note's dialog. */
@@ -652,11 +654,21 @@ export class EncryptionManagerPQ extends EventTarget {
 
   /** The card of a derived identity of the open account (sessionIdentities.ts): its user_hash, and the row signed for a timestamp. */
   derivedCard(signer) {
-    const notes = this.#openNotes();
-    const identity = () => (signer.kind === 'notes' ? notes.identity : notes.peer(signer.noteId));
+    const userHash = this.#currentUserHash;
+    const notes = this.#openNotes(userHash);
     return {
       userHash: signer.kind === 'notes' ? notes.identity.userHash : notes.peerHash(signer.noteId),
-      row: (ownerTimestamp) => signedUserCard(identity(), ownerTimestamp),
+      // Signed when asked, and only while the session that made it lasts.
+      row: (ownerTimestamp) => {
+        const open = this.#openNotes(userHash);
+        if (signer.kind === 'notes') return signedUserCard(open.identity, ownerTimestamp);
+        const peer = open.peer(signer.noteId);
+        try {
+          return signedUserCard(peer, ownerTimestamp);
+        } finally {
+          for (const key of [peer.signSkey, peer.cryptSkey, peer.contactSkey]) key.fill(0);
+        }
+      },
     };
   }
 

@@ -27,6 +27,9 @@ vi.mock('vue-router', async () => {
 
 const NOTE_ID = '00112233445566778899aabbccddeeff';
 const NOTES = { kind: 'notes' } as const;
+// The server's owner: some account, never a derived identity (derivedCard.ts).
+const OWNER = 'u_' + 'e'.repeat(128);
+let deviceAdmin: string | null = OWNER;
 const PEER = { kind: 'note-peer', noteId: NOTE_ID } as const;
 
 /** What every module of the running app sees: the client's session after startApp. */
@@ -52,14 +55,18 @@ const session = async () => {
 
 const proofsBy = (author: string) => server.proofs.filter((p) => p.author === author).map((p) => ({ author: p.author, valid: proofIsValid(p) }));
 const accepted = async (handle: Awaited<ReturnType<Awaited<ReturnType<typeof session>>['publish']>>) => {
-	expect(handle).not.toBe('present');
-	if (handle !== 'present') expect((await handle.acceptance).kind).toBe('accepted');
+	if (typeof handle === 'string') throw new Error(`expected a delivery, got ${handle}`);
+	expect((await handle.acceptance).kind).toBe('accepted');
 };
 
 let A: Client;
 beforeEach(() => {
 	server.reset();
 	net.mode = 'online';
+	deviceAdmin = OWNER;
+	server.route = (url) => url.endsWith('/device_identity')
+		? Response.json({ device_id: 'BK-001', admin: deviceAdmin ? { user_hash: deviceAdmin } : null })
+		: undefined;
 	A = newClient('Alice');
 });
 afterEach(() => stopAll());
@@ -118,6 +125,39 @@ describe('the notes identity in the session', () => {
 		// it raced: the card was not seen when this device decided to publish
 		await accepted(await publish(NOTES, async () => null));
 		expect(await A.app.outbox.quarantinedEntries(A.hash)).toEqual([]);
+	});
+});
+
+describe('a derived card', () => {
+	it('waits, unsent, while the device has no owner: the first card taken there would own it', async () => {
+		await register(A);
+		const { em, publish } = await session();
+		deviceAdmin = null;
+		await expect(publish(NOTES)).rejects.toThrow(/no owner/);
+		expect(server.table('user_cards').has(em.notesUserHash)).toBe(false);
+		expect(proofsBy(em.notesUserHash)).toEqual([]);
+		expect(await A.app.outbox.pendingEntries(A.hash)).toHaveLength(1);
+	});
+
+	it('is queued once, however often it is asked for while it waits, and is not the account\'s own card write', async () => {
+		await register(A);
+		const { publish } = await session();
+		net.mode = 'offline';
+		await publish(NOTES).catch(() => {});
+		expect(await publish(NOTES)).toBe('queued');
+		expect(await publish(NOTES)).toBe('queued');
+		expect(await A.app.outbox.pendingEntries(A.hash)).toHaveLength(1);
+		// the account's card logic does not count it as one of the account's card writes
+		expect(await A.app.outbox.pendingCardWrites(A.hash)).toEqual([]);
+	});
+
+	it('of a session that ended cannot be signed any more', async () => {
+		await register(A);
+		const { em } = await session();
+		const card = em.derivedCard(PEER);
+		expect(verifyUserCard(card.row(1_700_000_000)).status).toBe('verified');
+		await A.app.store.logout();
+		expect(() => card.row(1_700_000_001)).toThrow(/open on this device/);
 	});
 });
 

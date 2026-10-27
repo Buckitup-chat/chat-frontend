@@ -23,8 +23,12 @@ export const isDerivedSigner = (v: unknown): v is DerivedSigner => {
 	return s.kind === 'note-peer' && isNoteId(s.noteId) && Object.keys(s).length === 2;
 };
 
+export const sameSigner = (a: DerivedSigner, b: DerivedSigner): boolean =>
+	a.kind === 'notes' ? b.kind === 'notes' : b.kind === 'note-peer' && a.noteId === b.noteId;
+
 export interface ResolvedSigner {
 	userHash: string;
+	/** A fresh copy of the identity's signing key, which the caller wipes after use. */
 	signingKey: () => Promise<Uint8Array>;
 }
 

@@ -14,6 +14,7 @@ import { discoverDependencies, reconcileAccepted } from './coordinator';
 import { OWNER_FIELD } from './writeContracts';
 import { VaultLockedError, AccountMismatchError, resolveSigningKey, type SigningKeySource } from './keyCustody';
 import { derivedSigner, sessionAccount, type DerivedSigner } from './sessionIdentities';
+import { readDeviceIdentity } from './deviceOwner';
 import {
 	enqueue, stopDrainLoop as stopOutboxLoop, awaitEntryOutcome, dependencyBlockFor, wakeAccountSender, releaseNetworkBackoffs,
 	approvalHeldShapes, approvalProbeCandidate, sendApprovalProbe, onApprovalHeldChange, AWAITING_APPROVAL_MESSAGE,
@@ -372,13 +373,28 @@ const replaySend = (account: string, signingKey: SigningKeySource) => async (mut
 	if (author !== (signer?.userHash ?? account)) {
 		throw new IngestError('outbox: the rows were not written by the account or the identity of it the entry names', { permanent: true });
 	}
+	if (signer && (mutations[0] as MutationShape | undefined)?.syncMetadata?.relation === 'user_cards') await requireDeviceOwner();
 	const key = signer ? await signer.signingKey() : await resolveSigningKey(signingKey);
-	return sendMutationsWithRetry(mutations, key, {
-		retries: 0,
-		networkRetries: 0,
-		...(signer ? { confirmApplied: derivedRowAppliedOnServer } : {}),
-	});
+	try {
+		return await sendMutationsWithRetry(mutations, key, {
+			retries: 0,
+			networkRetries: 0,
+			...(signer ? { confirmApplied: derivedRowAppliedOnServer } : {}),
+		});
+	} finally {
+		// A derived key is a copy made for this request (sessionIdentities.ts).
+		if (signer) key.fill(0);
+	}
 };
+
+// The backend makes the first card it takes over HTTP the device's owner
+// (OwnerBootstrap): a derived identity's card waits until the device has one,
+// so that no identity derived from an account ends up owning a server.
+async function requireDeviceOwner(): Promise<void> {
+	const device = await readDeviceIdentity();
+	if (!device) throw new IngestError('the device\'s owner could not be read: a derived card waits for it', { permanent: false });
+	if (!device.adminHash) throw new IngestError('the device has no owner yet: a derived card waits for one', { permanent: false });
+}
 
 // A derived identity's rows are not the account's own base rows: no accepted
 // snapshot is kept for them (they are never edited on top of one).
