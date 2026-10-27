@@ -45,6 +45,14 @@ describe('the teststand key reaper', () => {
 		expect(localStorage.getItem('testbed.backups')).toBe(null);
 	});
 
+	it('removes the plaintext file keys of earlier uploads on boot too', async () => {
+		localStorage.setItem('bkp:pending-upload:f_1', JSON.stringify({ encSecretB64: 'AAAA', name: 'a.png', size: 1 }));
+
+		await userPQStore().initialize();
+
+		expect(localStorage.getItem('bkp:pending-upload:f_1')).toBe(null);
+	});
+
 	it('leaves everything else alone', async () => {
 		localStorage.setItem('something.else', 'keep me');
 

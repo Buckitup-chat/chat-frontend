@@ -1,6 +1,7 @@
 // The device's identity and its owner (chat repo, pq_access_gating § Bootstrap
 // and Owner). The owner is whoever first ingests their card here over HTTP
-// (OwnerBootstrap); a card that arrives by peer sync makes no one the owner.
+// (OwnerBootstrap; the user sandbox, a development tool, can register one
+// too); a card that arrives by peer sync makes no one the owner.
 // A device's peer sync waits for an owner (PeerSyncDecider); a host server's
 // starts without one, and stays ownerless until someone's card is ingested
 // over HTTP there.
