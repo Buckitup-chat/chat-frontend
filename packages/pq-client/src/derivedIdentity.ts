@@ -41,6 +41,10 @@ export interface IdentityFamily {
 	identity(prefix?: Uint8Array): DerivedIdentity;
 	/** Only its user_hash: the signing key alone, without the KEM and contact keys. */
 	userHash(prefix?: Uint8Array): string;
+	/** Only its signing secret key, a fresh copy the caller wipes after use. */
+	signSkey(prefix?: Uint8Array): Uint8Array;
+	/** Wipes the family's extract: nothing more can be derived from it. */
+	wipe(): void;
 }
 
 const utf8 = (s: string) => new TextEncoder().encode(s);
@@ -74,8 +78,10 @@ export const identityFamily = (parent: ParentKeys, salt: string): IdentityFamily
 	const ikm = concatBytes(parent.signSkey, parent.cryptSkey);
 	const prk = hkdfExtract(ikm, salt);
 	ikm.fill(0);
+	let wiped = false;
 	// Seeds are secret: each is wiped once its key is made.
 	const withSeed = <T>(prefix: Uint8Array, label: string, length: number, use: (seed: Uint8Array) => T): T => {
+		if (wiped) throw new Error('derived identities: the family has been wiped');
 		const seed = hkdfExpand(prk, concatBytes(prefix, utf8(label)), length);
 		try {
 			return use(seed);
@@ -101,6 +107,11 @@ export const identityFamily = (parent: ParentKeys, salt: string): IdentityFamily
 			};
 		},
 		userHash: (prefix = NO_PREFIX) => userHashOf(signKeys(prefix).publicKey),
+		signSkey: (prefix = NO_PREFIX) => signKeys(prefix).secretKey,
+		wipe() {
+			wiped = true;
+			prk.fill(0);
+		},
 	};
 };
 

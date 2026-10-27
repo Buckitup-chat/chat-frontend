@@ -147,3 +147,15 @@ describe('a note', () => {
 			.not.toEqual(deriveSenderMsgKey(signSkey, cryptSkey, notes.peerHash(newNoteId())));
 	});
 });
+
+describe('wiping', () => {
+	it('derives a peer\'s signing key alone, and nothing once wiped', () => {
+		const own = accountNotes(account);
+		expect(own.peerSignSkey(NOTE_ID)).toEqual(peer.signSkey);
+		own.wipe();
+		expect(own.identity.signSkey.every((b) => b === 0)).toBe(true);
+		expect(() => own.peerHash(NOTE_ID)).toThrow(/wiped/);
+		expect(() => own.peer(NOTE_ID)).toThrow(/wiped/);
+		expect(() => own.peerSignSkey(NOTE_ID)).toThrow(/wiped/);
+	});
+});

@@ -24,6 +24,10 @@ export interface AccountNotes {
 	peerHash(noteId: string): string;
 	/** Every key of a note peer; only creating the note (its card, the key wrap) needs them. */
 	peer(noteId: string): DerivedIdentity;
+	/** A note peer's signing secret key alone, a fresh copy the caller wipes after use. */
+	peerSignSkey(noteId: string): Uint8Array;
+	/** Wipes the notes identity's secret keys and what derives the peers: nothing more is derived. */
+	wipe(): void;
 }
 
 /**
@@ -49,5 +53,11 @@ export const accountNotes = (account: ParentKeys): AccountNotes => {
 			return hash;
 		},
 		peer: (noteId) => peers.identity(prefix(noteId)),
+		peerSignSkey: (noteId) => peers.signSkey(prefix(noteId)),
+		wipe() {
+			peers.wipe();
+			for (const key of [identity.signSkey, identity.cryptSkey, identity.contactSkey]) key.fill(0);
+			hashes.clear();
+		},
 	};
 };
