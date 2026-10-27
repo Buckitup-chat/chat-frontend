@@ -1,8 +1,9 @@
 // The device's identity and its owner (chat repo, pq_access_gating § Bootstrap
-// and Owner). The owner is whoever first ingests their card here over HTTP;
-// peer sync starts only once the device has an owner (OwnerBootstrap,
-// PeerSyncDecider), so no card reaches an ownerless device by sync and there
-// is nothing for a client to claim.
+// and Owner). The owner is whoever first ingests their card here over HTTP
+// (OwnerBootstrap); a card that arrives by peer sync makes no one the owner.
+// A device's peer sync waits for an owner (PeerSyncDecider); a host server's
+// starts without one, and stays ownerless until someone's card is ingested
+// over HTTP there.
 import { api } from '@/api/client';
 
 const USER_HASH = /^u_[0-9a-f]{128}$/;

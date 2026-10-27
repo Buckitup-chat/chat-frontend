@@ -473,6 +473,7 @@ describe('FRON-23: what the server already holds', () => {
 describe('FRON-23: no owner vouch without a proven owner and device', () => {
 	const cases: [name: string, answer: () => Response][] = [
 		['admin is another account', () => identityFor(stranger(9), accountOf(Owner))()],
+		['the device has no owner', () => identityFor(null, accountOf(Owner))()],
 		['the endpoint is unavailable', () => new Response('unavailable', { status: 503 })],
 		['device_id is missing', () => Response.json({ admin: accountOf(Owner) })],
 		['device_id is empty', () => Response.json({ device_id: '', admin: accountOf(Owner) })],
@@ -488,22 +489,6 @@ describe('FRON-23: no owner vouch without a proven owner and device', () => {
 		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		expect(confirmedOf(store, Bob)).toBe(true);
 		await vi.waitFor(() => expect(deviceIdentityRequests).toBeGreaterThan(0), { timeout: 10_000 });
-		await settle();
-		expect(vouches.posts).toEqual([]);
-	}, 120_000);
-});
-
-describe('FRON-23: an ownerless device', () => {
-	it('gets no vouch from a confirmed contact: there is no owner whose chain it would extend', async () => {
-		await register(Bob);
-		await register(Owner);
-		deviceIdentity = identityFor(null, accountOf(Owner));
-		const { store } = Owner.app;
-		const before = deviceIdentityRequests;
-
-		await store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
-
-		await vi.waitFor(() => expect(deviceIdentityRequests).toBeGreaterThan(before), { timeout: 10_000 });
 		await settle();
 		expect(vouches.posts).toEqual([]);
 	}, 120_000);
