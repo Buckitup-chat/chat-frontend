@@ -17,7 +17,7 @@ import {
 import { VaultLockedError } from '@/lib/data/keyCustody';
 import { holdSessionIdentities, releaseSessionIdentities } from '@/lib/data/sessionIdentities';
 import { accountNotes } from '@buckitup/pq-client/notes';
-import { signedUserCard } from '@buckitup/pq-client/derivedIdentity';
+import { signedUserCard, wipeIdentity } from '@buckitup/pq-client/derivedIdentity';
 import {
   startLeaderElection, stopLeaderElection, currentSessionUserHash, onOutboxWake, onOutboxChange, awaitServerAccepted, awaitDeliveryVerdict,
   currentSessionToken, sameSessionToken,
@@ -641,7 +641,7 @@ export class EncryptionManagerPQ extends EventTarget {
   /** The account's notes identity, or null while no account is open. */
   get notesUserHash() {
     try {
-      return this.#currentUserHash ? this.#openNotes().identity.userHash : null;
+      return this.#openNotes().identity.userHash;
     } catch {
       return null;
     }
@@ -654,19 +654,18 @@ export class EncryptionManagerPQ extends EventTarget {
 
   /** The card of a derived identity of the open account (sessionIdentities.ts): its user_hash, and the row signed for a timestamp. */
   derivedCard(signer) {
-    const userHash = this.#currentUserHash;
-    const notes = this.#openNotes(userHash);
+    const account = this.#currentUserHash;
     return {
-      userHash: signer.kind === 'notes' ? notes.identity.userHash : notes.peerHash(signer.noteId),
+      userHash: this.#derivedSigner(account, signer).userHash,
       // Signed when asked, and only while the session that made it lasts.
       row: (ownerTimestamp) => {
-        const open = this.#openNotes(userHash);
+        const open = this.#openNotes(account);
         if (signer.kind === 'notes') return signedUserCard(open.identity, ownerTimestamp);
         const peer = open.peer(signer.noteId);
         try {
           return signedUserCard(peer, ownerTimestamp);
         } finally {
-          for (const key of [peer.signSkey, peer.cryptSkey, peer.contactSkey]) key.fill(0);
+          wipeIdentity(peer);
         }
       },
     };

@@ -11,8 +11,8 @@
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { sendMutationsAndAwaitShape, type DeliveryHandle } from '@/lib/data/ingest';
 import type { SigningKeySource } from '@/lib/data/keyCustody';
-import { pendingEntries } from '@/lib/data/outbox';
-import { sameSigner, sessionAccount, type DerivedSigner } from '@/lib/data/sessionIdentities';
+import { cardOf, pendingEntries } from '@/lib/data/outbox';
+import { sessionAccount, type DerivedSigner } from '@/lib/data/sessionIdentities';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import type { UserCardRow } from '@/lib/data/types';
 
@@ -36,8 +36,7 @@ export async function ensureDerivedCard(
 	verifiedCard: (userHash: string) => Promise<string | null> = getVerifiedSignPkey,
 ): Promise<'present' | 'queued' | DeliveryHandle> {
 	if (await verifiedCard(card.userHash)) return 'present';
-	const queued = (await pendingEntries(sessionAccount())).some((e) => e.relation === 'user_cards' && !!e.signer && sameSigner(e.signer, signer));
-	if (queued) return 'queued';
+	if ((await pendingEntries(sessionAccount())).some((e) => cardOf(e) === card.userHash)) return 'queued';
 	const modified = card.row(nextOwnerTimestamp());
 	return sendMutationsAndAwaitShape([{ type: 'insert', syncMetadata: { relation: 'user_cards' }, modified }], accountKey, { signer });
 }

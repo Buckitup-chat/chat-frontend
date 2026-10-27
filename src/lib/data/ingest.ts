@@ -373,7 +373,7 @@ const replaySend = (account: string, signingKey: SigningKeySource) => async (mut
 	if (author !== (signer?.userHash ?? account)) {
 		throw new IngestError('outbox: the rows were not written by the account or the identity of it the entry names', { permanent: true });
 	}
-	if (signer && (mutations[0] as MutationShape | undefined)?.syncMetadata?.relation === 'user_cards') await requireDeviceOwner();
+	if (signer && entry?.relation === 'user_cards') await requireDeviceOwner();
 	const key = signer ? await signer.signingKey() : await resolveSigningKey(signingKey);
 	try {
 		return await sendMutationsWithRetry(mutations, key, {
@@ -390,10 +390,15 @@ const replaySend = (account: string, signingKey: SigningKeySource) => async (mut
 // The backend makes the first card it takes over HTTP the device's owner
 // (OwnerBootstrap): a derived identity's card waits until the device has one,
 // so that no identity derived from an account ends up owning a server.
+// An owner, once there, stays: it is read until it is seen, then no more.
+let deviceOwnerSeen = false;
 async function requireDeviceOwner(): Promise<void> {
+	if (deviceOwnerSeen) return;
 	const device = await readDeviceIdentity();
-	if (!device) throw new IngestError('the device\'s owner could not be read: a derived card waits for it', { permanent: false });
+	// Unreadable is treated as no answer: the wait ends when the connection is back.
+	if (!device) throw new IngestError('the device\'s owner could not be read: a derived card waits for it', { permanent: false, network: true });
 	if (!device.adminHash) throw new IngestError('the device has no owner yet: a derived card waits for one', { permanent: false });
+	deviceOwnerSeen = true;
 }
 
 // A derived identity's rows are not the account's own base rows: no accepted

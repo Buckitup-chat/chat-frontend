@@ -1773,8 +1773,15 @@ export async function pendingCardWrites(userHash: string): Promise<OutboxEntry[]
 	if (scan.unavailable.size || scan.missing.size || ownedCorrupt(scan, userHash).length) {
 		throw new Error('pendingCardWrites: a record of this account cannot be read — refusing to assume it holds no card write');
 	}
-	// The account's own card: a derived identity's card (signer) is another identity's.
-	return scan.entries.filter((e) => e.relation === 'user_cards' && !e.signer && e.status !== 'accepted' && e.status !== 'discarded');
+	return scan.entries.filter((e) => cardOf(e) === userHash && e.status !== 'accepted' && e.status !== 'discarded');
+}
+
+/** Whose card a user_cards entry writes: an account's queue may hold the cards of identities derived from it too. */
+export function cardOf(entry: OutboxEntry): string | null {
+	if (entry.relation !== 'user_cards') return null;
+	const m = entry.mutations[0] as { modified?: { user_hash?: unknown }; changes?: { user_hash?: unknown }; original?: { user_hash?: unknown } } | undefined;
+	const hash = m?.modified?.user_hash ?? m?.changes?.user_hash ?? m?.original?.user_hash;
+	return typeof hash === 'string' ? hash : null;
 }
 
 export async function readableOwnEntries(userHash: string): Promise<OutboxEntry[]> {
