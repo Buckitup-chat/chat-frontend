@@ -31,6 +31,8 @@ import {
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
 } from '@/lib/pq/checkpoint';
 import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
+import { chunkCountOf } from '@/lib/pq/fileCrypto';
+import { uploadDigest, reusableUpload, rememberUpload } from '@/lib/data/uploadReuse';
 import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
 import { openVideo } from '@/lib/data/videoStream';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
@@ -981,18 +983,36 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
 
+        const digest = await uploadDigest(bytes);
+        const existing = await reusableUpload(uploaderHash, digest, fileAvailability).catch((e) => {
+            console.warn('[dialogs] upload reuse unavailable:', e);
+            return null;
+        });
+        if ($userPQ.currentUserHash !== uploaderHash) throw new Error('The account changed while preparing the file');
+
         // The queue mints the pair up front so pause/resume re-enter with the
         // same file_id + enc_secret; a direct call mints its own.
         const prepared = preparedIn ?? prepareUpload((await import('uuid')).v7());
-        try {
-            localStorage.setItem(pendingUploadKey(prepared.fileId), JSON.stringify({
-                encSecretB64: prepared.encSecretB64, name, size: bytes.length,
-            }));
-        } catch { /* private mode: resume across reloads degrades, upload still works */ }
+        let up = existing;
+        if (up) {
+            signal?.throwIfAborted();
+            const total = chunkCountOf(bytes.length);
+            onProgress?.({ fileId: up.fileId, done: total, total });
+        } else {
+            try {
+                localStorage.setItem(pendingUploadKey(prepared.fileId), JSON.stringify({
+                    encSecretB64: prepared.encSecretB64, name, size: bytes.length,
+                }));
+            } catch { /* private mode: resume across reloads degrades, upload still works */ }
 
-        const up = await uploadFile({
-            bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,
-        });
+            up = await uploadFile({
+                bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,
+            });
+            const save = () => rememberUpload(uploaderHash, digest, up).catch((e) =>
+                console.warn('[dialogs] uploaded file reference not saved for reuse:', e));
+            if (up.manifestAwaitingApproval) void up.manifestAwaitingApproval.then(save, () => {});
+            else await save();
+        }
 
         const common = {
             name,

@@ -41,6 +41,7 @@ import { forgetAccountAvatars } from '@/lib/avatars/localStore';
 import { forgetPeerGalleryReads, fetchGalleryRow } from '@/lib/avatars/peerGallery';
 import { readSharedGalleryRow, galleryKeyFromB64 } from '@/lib/avatars/sharedGallery';
 import { publishInitialSharedGallery, publishSharedGalleryRecord, avatarsSlotOf } from '@/lib/avatars/sharedGalleryPublish';
+import { forgetAccountUploads } from '@/lib/data/uploadReuse';
 import { clearSessions } from '@/lib/data/readSession';
 import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
@@ -805,6 +806,7 @@ export class EncryptionManagerPQ extends EventTarget {
     }
     // Contacts' thumbnails and the dialogs owed a photo leave with the account.
     await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
+    await forgetAccountUploads(userHash).catch((e) => console.warn('Could not delete the account\'s upload references', e));
 
     this.#localUserCards.splice(identityIndex, 1);
     await this.#saveLocalUserCards();
@@ -846,6 +848,7 @@ export class EncryptionManagerPQ extends EventTarget {
       this.#localUserCards = this.#localUserCards.filter((i) => i.user_hash !== userHash);
       await this.#saveLocalUserCards();
     }
+    await forgetAccountUploads(userHash).catch((e) => console.warn('Could not delete the account\'s upload references', e));
   }
 
   #normalizeKey(key) {
