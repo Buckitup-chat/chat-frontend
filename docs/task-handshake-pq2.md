@@ -40,13 +40,13 @@ The QR carries `contact_pkey` because neither the ML-DSA key nor its
 signature fits one code (2,953 bytes at most; sizes above). The certificate is what ties the small key to the identity:
 **a contact is confirmed only when the key proved optically is the one the
 identity's verified card certifies** (`cardVouchesForContactKey`,
-`src/lib/pq/verifyCard.ts`) — without that, anyone can show a friend's
+`packages/pq-client/src/verifyCard.ts`) — without that, anyone can show a friend's
 `user_hash` with their own key.
 
 ## 3. Messages
 
 Text in QR byte mode. Fields are separated by `:`; binary fields are
-base64url without padding (`toBase64Url`, `src/lib/pq/signature.ts`), which
+base64url without padding (`toBase64Url`, `packages/pq-client/src/signature.ts`), which
 contains no `:`. `user_hash` travels as is (`u_` + 128 hex). A reader ignores
 any code that does not start with `PQ2:`, and any message whose fixed-length
 fields do not decode to their length.
@@ -99,7 +99,7 @@ between fields).
   the counterpart's verified card.
 - **Short authentication string**:
   `sas = u32be(hkdfDerive(T || fp_lo || fp_hi, "buckitup/handshake/v2", "sas", 4)) mod 10^6`,
-  six digits, zero-padded, with `hkdfDerive` from `src/lib/pq/hkdf.ts` (the
+  six digits, zero-padded, with `hkdfDerive` from `packages/pq-client/src/hkdf.ts` (the
   derivation device-link uses). It covers the fingerprints on purpose: `T`
   holds only values shown in plain codes, and the `qwbp` fields are not under
   the optical signatures, so a relay that swaps the bootstrap payloads would
@@ -290,7 +290,7 @@ The card is not written into `allNetworkUsers` (§1).
 
 ## 7. Code layout
 
-- `src/lib/pq/handshake.ts` — pure functions, no DOM: `encode`/`parse` for A–D
+- `packages/pq-client/src/handshake.ts` — pure functions, no DOM: `encode`/`parse` for A–D
   (length-checked), `transcript(a, b)`, `pqMessage(T, fps)`, `sasOf(T, fps)`
   (`fps`: each party's fingerprint by `user_hash`, ordered as `T` orders
   them), `sessionTag(T)`, the transport fingerprint via `qwbp`'s own
@@ -311,7 +311,7 @@ The card is not written into `allNetworkUsers` (§1).
   in §6.
 - `src/lib/data/turnCredentials.ts` — fetch, memory cache, expiry and the
   1 s wait of the relay credentials (§5a). The challenge proof is one helper,
-  `src/lib/pq/challengeProof.ts`, for ingest, read sessions and this.
+  `packages/pq-client/src/challengeProof.ts`, for ingest, read sessions and this.
 - `src/lib/data/handshakeAddresses.ts` — the address list (§5a), a pure
   function, and the `selectCandidates` hook built on it.
 - `qwbp` — patched with the `selectCandidates` hook and the early payload
@@ -321,7 +321,7 @@ The card is not written into `allNetworkUsers` (§1).
   two Chromium pages over real WebRTC, with no server; with `PQ2_TURN_URL`,
   `PQ2_TURN_USER` and `PQ2_TURN_PASS`, also through that relay.
 - `sandbox/handshake-pq2` runs this protocol on two phones from its own
-  page, importing `src/lib/pq/handshake.ts`; its `frames.ts` is the
+  page, importing `packages/pq-client/src/handshake.ts`; its `frames.ts` is the
   animated-QR experiment of §10 and stays out of the app.
 
 ## 8. Tests

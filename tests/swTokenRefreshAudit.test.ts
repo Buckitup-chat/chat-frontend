@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { webcrypto } from 'node:crypto';
-import { chunkDataHash } from '@/lib/pq/fileCrypto';
+import { chunkDataHash } from '@buckitup/pq-client/fileCrypto';
 import { loadWorker } from './helpers/swHarness';
 
 vi.mock('workbox-precaching', () => ({

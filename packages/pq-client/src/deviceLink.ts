@@ -4,9 +4,9 @@ import { sha256 } from '@noble/hashes/sha256';
 import { randomBytes } from '@noble/hashes/utils';
 import { hmac } from '@noble/hashes/hmac';
 import { sha3_256 } from '@noble/hashes/sha3';
-import { hkdfDerive, sixDigits } from './hkdf';
-import { sealWithKey, assertSealed, openSealed, VaultEnvelopeError } from './vaultEnvelope';
-import { toBase64, fromBase64, toBase64Url } from './signature';
+import { hkdfDerive, sixDigits } from './hkdf.js';
+import { sealWithKey, assertSealed, openSealed, VaultEnvelopeError } from './vaultEnvelope.js';
+import { toBase64, fromBase64, toBase64Url } from './signature.js';
 
 export const DEVICE_LINK_SALT = 'buckitup/device-link/v1';
 

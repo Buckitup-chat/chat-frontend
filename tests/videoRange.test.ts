@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseRange, planChunks, chunkPlainSize, contentRange } from '@/lib/pq/videoRange';
+import { parseRange, planChunks, chunkPlainSize, contentRange } from '@buckitup/pq-client/videoRange';
 
 const MB = 4 * 1024 * 1024;
 const TOTAL = 10 * MB + 1000; // 3 chunks: two full, one short

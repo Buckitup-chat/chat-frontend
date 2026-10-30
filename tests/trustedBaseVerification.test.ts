@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { toBase64 } from '@/lib/pq/signature';
-import { deriveFrontierRoot, buildViewTree, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@/lib/pq/checkpoint';
+import { toBase64 } from '@buckitup/pq-client/signature';
+import { deriveFrontierRoot, buildViewTree, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@buckitup/pq-client/checkpoint';
 import { makeFakeLockManager } from './helpers/fakeWebLocks';
 import { makeTestIdentity, resignedCard, signRow, signedDialogKeyRow, signedStorageRow, type TestIdentity } from './helpers/signedFixtures';
 
@@ -60,7 +60,7 @@ const { decideCardConstruction } = await import('@/lib/data/userCardIntent');
 const { verifiedCards } = await import('@/lib/data/userCardsLink');
 const { useDialogsStore } = await import('@/store/dialogs.store');
 const { DialogCrypto } = await import('@/libs/DialogCrypto');
-const { encodeContent } = await import('@/lib/pq/content');
+const { encodeContent } = await import('@buckitup/pq-client/content');
 
 const memStore = () => {
 	const map = new Map<string, string>();
@@ -339,7 +339,7 @@ describe('user_cards: only verified cards are identities', () => {
 		const source = (path: string) => readFileSync(join(process.cwd(), path), 'utf8');
 		expect(source('src/store/userPQ.store.js')).toMatch(/const readCards = \(rows\) => verifiedCards\(rows\)/);
 		// A card a handshake peer sends is checked against the identity and key the codes showed, and never enters the store.
-		expect(source('src/lib/pq/handshake.ts')).toMatch(/contactKeyVouch\(card, bound\.userHash, toBase64\(bound\.contactPkey\)\)/);
+		expect(source('packages/pq-client/src/handshake.ts')).toMatch(/contactKeyVouch\(card, bound\.userHash, toBase64\(bound\.contactPkey\)\)/);
 		expect(source('src/components/engines/QRScannerEngine.vue')).not.toMatch(/allNetworkUsers\.(value\.)?push|allNetworkUsers(\.value)? =/);
 	});
 });

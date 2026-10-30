@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
 	grantPartOf, grantFromMessages, createGrantDelivery, type GrantDeliveryDeps,
 } from '@/lib/avatars/galleryGrants';
-import type { AvatarGalleryAccessPart, ContentPart } from '@/lib/pq/content';
+import type { AvatarGalleryAccessPart, ContentPart } from '@buckitup/pq-client/content';
 import type { GalleryMapping } from '@/lib/avatars/galleryMapping';
 import type { GrantedMap } from '@/lib/avatars/localStore';
 

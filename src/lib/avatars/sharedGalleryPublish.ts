@@ -1,4 +1,4 @@
-import { isAvatarId, isGalleryUuid, photoFromWire, photoToWire } from '@/lib/pq/content';
+import { isAvatarId, isGalleryUuid, photoFromWire, photoToWire } from '@buckitup/pq-client/content';
 import { AVATARS_SLOT } from './gallery';
 import type { GalleryMapping, MappingResult } from './galleryMapping';
 import {

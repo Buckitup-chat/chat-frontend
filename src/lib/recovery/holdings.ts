@@ -4,8 +4,8 @@
 // share stands against the chain and against what is already kept, when a
 // kept one dies, and what the owner is told. Pure: the chain and the
 // guardian's records come in as functions and values.
-import { fromBase64 } from '@/lib/pq/signature';
-import type { RecoveryHoldingPart, RecoverySharePart } from '@/lib/pq/content';
+import { fromBase64 } from '@buckitup/pq-client/signature';
+import type { RecoveryHoldingPart, RecoverySharePart } from '@buckitup/pq-client/content';
 import { checkShare, rootFromSlots, ShareCheckError } from './shareSplit';
 
 /** A `recovery_share` envelope, whole: a return reproduces what was issued. */

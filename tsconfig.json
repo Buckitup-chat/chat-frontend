@@ -11,7 +11,8 @@
     "module": "ESNext",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@buckitup/pq-client/*": ["packages/pq-client/src/*"]
     },
     "types": ["vite/client", "vitest/globals"]
   },

@@ -140,7 +140,7 @@ export interface AvatarRemovedPart extends Extensible {
  * history (frontier) and the materialized view of a dialog at a moment this
  * device confirmed. Rides an ordinary message, so the commitments stay
  * inside the ciphertext and the signature/transport come for free — the
- * server sees a normal row. Semantics and derivations: src/lib/pq/checkpoint.ts.
+ * server sees a normal row. Semantics and derivations: packages/pq-client/src/checkpoint.ts.
  */
 export interface CheckpointPart extends Extensible {
 	kind: 'checkpoint';

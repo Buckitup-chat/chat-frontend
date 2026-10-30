@@ -6,7 +6,7 @@
 // of each party (tests/helpers/recoveryWorld).
 import { describe, it, expect, beforeEach } from 'vitest';
 import { bytesToHex } from '@noble/hashes/utils';
-import type { RecoveryBindingPart } from '@/lib/pq/content';
+import type { RecoveryBindingPart } from '@buckitup/pq-client/content';
 import { requestRelease } from '@/lib/recovery/nodeClient';
 import { returnOf } from '@/lib/recovery/recovering';
 import { checkBinding, recoveryWords } from '@/lib/recovery/recoveryBinding';

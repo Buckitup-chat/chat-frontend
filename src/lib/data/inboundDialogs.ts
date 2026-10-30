@@ -5,7 +5,7 @@
 // unverified, only as a list of whom to ask: every message read from those
 // dialogs goes through the gate.
 import { getInboundDialogKeysCollection } from './collections';
-import { wireBool } from '@/lib/pq/schema';
+import { wireBool } from '@buckitup/pq-client/schema';
 
 const USER_HASH = /^u_[0-9a-f]{128}$/;
 
