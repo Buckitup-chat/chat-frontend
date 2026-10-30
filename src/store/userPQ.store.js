@@ -6,6 +6,7 @@ import { preloadWithRetry } from '@/lib/data/attach';
 import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verifiedCards } from '@/lib/data/userCardsLink';
 import { mergeContactEdit } from '@/lib/data/storageIntent';
 import { contactKeyVouch } from '@/lib/pq/verifyCard';
+import { PrfUnsupportedError, forgetUnusablePasskey } from '@/lib/pq/vaultLock';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
@@ -140,12 +141,26 @@ export const userPQStore = defineStore('userPQ', () => {
     showingCachedCards.value = false;
   };
 
+  let legacyLockConsent = null;
+  const setLegacyLockConsent = (ask) => { legacyLockConsent = ask; };
+
+  const withVaultLock = async (lock, run) => {
+    try {
+      return await run(lock);
+    } catch (e) {
+      if (lock !== 'prf' || !(e instanceof PrfUnsupportedError)) throw e;
+      forgetUnusablePasskey(e.credentialId);
+      if (!(await legacyLockConsent?.(e))) throw e;
+      return run('legacy');
+    }
+  };
+
   // A photo chosen at creation is the gallery's first (avatars.store
   // addPhoto), added by the caller once the account exists.
-  const registerNewUser = async ({ name = "Anonymous", notes }) => {
+  const registerNewUser = async ({ name = "Anonymous", notes, lock = 'prf' }) => {
     await initialize();
 
-    const newIdentity = await em.value.createUserVault({ name, notes });
+    const newIdentity = await withVaultLock(lock, (mode) => em.value.createUserVault({ name, notes, lock: mode }));
 
     currentUser.value = newIdentity;
 
@@ -516,7 +531,7 @@ export const userPQStore = defineStore('userPQ', () => {
     };
   };
 
-  const importBackup = async (backupData) => {
+  const importBackup = async (backupData, { lock = 'prf' } = {}) => {
     if (isAuthenticated.value) {
       await logout();
     }
@@ -525,7 +540,7 @@ export const userPQStore = defineStore('userPQ', () => {
     }
     const { identity, keys } = backupData;
     if (!identity?.name) identity.name = 'Imported Account';
-    const result = await em.value.importVaultKeys(keys, identity);
+    const result = await withVaultLock(lock, (mode) => em.value.importVaultKeys(keys, identity, { lock: mode }));
     // importVaultKeys signs in at the manager level only; the store's side of
     // a session is the same as after login, or the import lands on the login
     // page with no contacts.
@@ -602,6 +617,7 @@ export const userPQStore = defineStore('userPQ', () => {
 
     exportBackup,
     importBackup,
+    setLegacyLockConsent,
     signContactChallenge,
     signHandshakePQ,
     signedOwnCard,

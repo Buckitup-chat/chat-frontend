@@ -178,7 +178,7 @@ describe('registration publishes the user card before the profile', () => {
 			return result;
 		};
 
-		await em.createUserVault({ name: MY_NAME });
+		await em.createUserVault({ name: MY_NAME, lock: 'legacy' });
 
 		expect(order).toEqual(['user_cards', 'user_storage']);
 		expect(cardResolved).toBe(true);
@@ -190,7 +190,7 @@ describe('registration publishes the user card before the profile', () => {
 			throw new Error('card rejected');
 		};
 
-		await expect(em.createUserVault({ name: MY_NAME })).rejects.toThrow('card rejected');
+		await expect(em.createUserVault({ name: MY_NAME, lock: 'legacy' })).rejects.toThrow('card rejected');
 		expect(order).not.toContain('user_storage');
 	});
 });
@@ -217,7 +217,7 @@ describe('user card owner_timestamp is monotonic', () => {
 
 	it('increases across two renames in the same second', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: MY_NAME });
+		await em.createUserVault({ name: MY_NAME, lock: 'legacy' });
 
 		await em.updateOwnUserCardName('Second');
 		await em.updateOwnUserCardName('Third');
@@ -230,7 +230,7 @@ describe('user card owner_timestamp is monotonic', () => {
 
 	it('increases when two renames are issued concurrently', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: MY_NAME });
+		await em.createUserVault({ name: MY_NAME, lock: 'legacy' });
 
 		await Promise.all([
 			em.updateOwnUserCardName('A'),
@@ -246,7 +246,7 @@ describe('user card owner_timestamp is monotonic', () => {
 
 	it('keeps the local registry and the published card in step', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: MY_NAME });
+		await em.createUserVault({ name: MY_NAME, lock: 'legacy' });
 
 		await em.updateOwnUserCardName('Renamed');
 
@@ -259,7 +259,7 @@ describe('user card owner_timestamp is monotonic', () => {
 describe('user_cards base does not go stale under shape lag (L17-01/backend-report R4)', () => {
 	it('a second rapid update does not start signing until the first write\'s real acceptance is known (follower/queued path)', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: MY_NAME });
+		await em.createUserVault({ name: MY_NAME, lock: 'legacy' });
 		realTransport = true;
 		setLeaderForTests(true);
 
@@ -308,7 +308,7 @@ describe('user_cards base does not go stale under shape lag (L17-01/backend-repo
 
 	it('a second update computes its base from the locally-accepted card, not a stale shape read', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: MY_NAME });
+		await em.createUserVault({ name: MY_NAME, lock: 'legacy' });
 		const userHash = [...cardRows.keys()][0];
 		const staleShapeRow = cardRows.get(userHash);
 
@@ -369,7 +369,7 @@ describe('#pushOwnCard survives a failed local accepted-snapshot write without e
 			return { txids: [] };
 		};
 
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		expect(httpCallCount).toBe(1); // A's own HTTP call
 		expect(cardRows.size).toBe(0); // shape confirmed stale
 
@@ -402,7 +402,7 @@ describe('#pushOwnCard survives a failed local accepted-snapshot write without e
 			async clear() { map.clear(); },
 		});
 
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const userHash = (await em.getLocalUserCards())[0].user_hash;
 		expect(await getAcceptedUserCard(userHash)).toBeNull(); // still down after A
 
@@ -426,13 +426,13 @@ describe('#pushOwnCard survives a failed local accepted-snapshot write without e
 			async clear() { map.clear(); },
 		});
 
-		await emA.createUserVault({ name: 'Alice' });
+		await emA.createUserVault({ name: 'Alice', lock: 'legacy' });
 		const hashA = (await emA.getLocalUserCards()).find((c) => c.name === 'Alice').user_hash;
 		expect(await getAcceptedUserCard(hashA)).toBeNull();
 
 		broken = false;
 		const emB = freshManager();
-		await emB.createUserVault({ name: 'Bob' });
+		await emB.createUserVault({ name: 'Bob', lock: 'legacy' });
 		const hashB = (await emB.getLocalUserCards()).find((c) => c.name === 'Bob').user_hash;
 
 		const acceptedB = await getAcceptedUserCard(hashB);
@@ -458,7 +458,7 @@ describe('#pushOwnCard survives a failed local accepted-snapshot write without e
 			aTimestamp = (mutations[0].modified ?? mutations[0].changes).owner_timestamp;
 			return { txids: [] }; // cardRows deliberately untouched — shape stays stale
 		};
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const userHash = (await em.getLocalUserCards())[0].user_hash;
 		expect(await getAcceptedUserCard(userHash)).toBeNull(); // durable write never landed
 

@@ -199,7 +199,7 @@ describe('reload at every durable boundary', () => {
 
 		net.mode = 'online';
 		await startApp(B);
-		await B.app.store.registerNewUser({ name: 'Carol' } as never);
+		await B.app.store.registerNewUser({ name: 'Carol', lock: 'legacy' } as never);
 		const carol = B.app.store.currentUserHash;
 		expect(carol).not.toBe(B.hash);
 		await new Promise((r) => setTimeout(r, 300));

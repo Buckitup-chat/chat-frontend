@@ -81,7 +81,7 @@ vi.mock('@/api/client', async () => {
 const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
 
 interface TestManager {
-	createUserVault(opts: { name: string }): Promise<unknown>;
+	createUserVault(opts: { name: string; lock?: 'prf' | 'legacy' }): Promise<unknown>;
 	updateOwnUserCardName(name: string): Promise<unknown>;
 	getLocalUserCards(): Promise<Array<{ name: string; user_hash: string }>>;
 	login(userHash: string): Promise<unknown>;
@@ -117,7 +117,7 @@ afterEach(() => {
 
 const createAccount = async () => {
 	const em = freshManager();
-	await em.createUserVault({ name: 'Tester' });
+	await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 	const userHash = (await em.getLocalUserCards())[0].user_hash;
 	return { em, userHash };
 };

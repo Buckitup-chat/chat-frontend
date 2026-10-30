@@ -10,6 +10,8 @@ import {
 	CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
 } from '@/lib/pq/checkpoint';
 import { encodeContent, decodeContent, previewText, ContentDecodeError } from '@/lib/pq/content';
+import { lockSeedFromPrf, VAULT_LOCK_VERSION } from '@/lib/pq/vaultLock';
+import { bytesToHex } from '@noble/hashes/utils';
 
 const mid = (n: number) => `dmsg_${String(n).padStart(4, '0')}e8f0-aaaa-7bbb-8ccc-ddddeeee${String(n).padStart(4, '0')}`;
 const sh = (n: number) => 'dms_' + String(n % 10).repeat(128);
@@ -202,5 +204,13 @@ describe('checkpoint envelope (07 §"checkpoint")', () => {
 		expect(() => decodeContent(encodeContent([evil]))).toThrow(ContentDecodeError);
 		const badValue = { ...part, frontier: { [mid(1)]: 'dms_short' } };
 		expect(() => decodeContent(encodeContent([badValue]))).toThrow(ContentDecodeError);
+	});
+});
+
+describe('golden vault lock seed (vault-lock v1)', () => {
+	it('reproduces byte for byte', () => {
+		expect(VAULT_LOCK_VERSION).toBe(1);
+		const prf = Uint8Array.from({ length: 32 }, (_, i) => i);
+		expect(bytesToHex(lockSeedFromPrf(prf))).toBe('e00e60c6ca3bfc15ad465abf799d9318b8ae6956af3dc4e7d3a944915ed2fe85');
 	});
 });

@@ -105,7 +105,7 @@ beforeEach(() => {
 
 const login = async () => {
 	const em = new EncryptionManagerPQ();
-	await em.createUserVault({ name: 'Tester' });
+	await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 	return em;
 };
 

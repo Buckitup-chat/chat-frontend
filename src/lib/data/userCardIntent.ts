@@ -10,6 +10,8 @@ import type { ReadyRowIntent } from './intentRecovery';
 import type { UserCardRow } from './types';
 import { verifyReplicatedRow } from './rowVerification';
 import { nextOwnerTimestamp } from './time';
+import { readShapeOnce } from './shapeRead';
+import { wireBool } from '@/lib/pq/schema';
 
 export interface UserCardFields {
 	user_hash: string;
@@ -258,6 +260,24 @@ async function liveShapeCard(userHash: string): Promise<ShapeCard> {
 	return shapeCardOf(isLiveNow(cards) ? cards.get(userHash) as UserCardRow | undefined : undefined);
 }
 
+const SERVER_CARD_READ_TIMEOUT_MS = 20_000;
+
+async function serverCard(userHash: string): Promise<ShapeCard | null> {
+	let rows: UserCardRow[];
+	try {
+		rows = await readShapeOnce<UserCardRow>('user_cards', `user_hash='${userHash}'`, AbortSignal.timeout(SERVER_CARD_READ_TIMEOUT_MS));
+	} catch (e) {
+		console.warn('[userCardIntent] the server\'s card could not be read:', e);
+		return null;
+	}
+	const row = rows.find((r) => r.user_hash === userHash && !wireBool(r.deleted_flag));
+	return shapeCardOf(row && {
+		...row,
+		deleted_flag: false,
+		owner_timestamp: row.owner_timestamp === null || row.owner_timestamp === undefined ? null : Number(row.owner_timestamp),
+	});
+}
+
 export async function acceptedCardTimestamp(userHash: string): Promise<number | null> {
 	const accepted = await readAcceptedBase('user_cards', userHash, userHash);
 	return accepted.kind === 'present' ? timestampOf(accepted.row.owner_timestamp) : null;
@@ -334,6 +354,12 @@ export async function decideCardConstruction(
 	const pending = await readPendingCardWrites(userHash);
 	if ('kind' in pending) return pending;
 	if (mode === 'sign-in' && pending.inFlight) return blocked('card_unproven');
+	if (mode !== 'register') {
+		const onServer = await serverCard(userHash);
+		if (!onServer) return blocked('shape_unavailable');
+		if (onServer.kind === 'card') return { kind: 'proven' };
+		if (onServer.kind === 'unverified') return blocked('card_unverified');
+	}
 	const ownerTimestamp = await nextCardTimestamp(userHash, pending.highest ?? 0);
 	return typeof ownerTimestamp === 'number' ? { kind: 'author-bootstrap', ownerTimestamp } : ownerTimestamp;
 }

@@ -206,6 +206,12 @@ provide('$modal', $modal);
 const $swalModal = ref();
 provide('$swalModal', $swalModal);
 
+$userPQ.setLegacyLockConsent(() => $swalModal.value?.open({
+	id: 'confirm',
+	title: 'This passkey cannot lock the account the new way',
+	content: 'Your browser or passkey provider does not support the PRF extension. The account can still be locked with the older method, which keeps the key to this device\'s account data in the passkey\'s account details, where password managers do not guard it as a secret. Continue with the older lock?',
+}) ?? false);
+
 watch(
 	() => $breakpoint.current,
 	() => {

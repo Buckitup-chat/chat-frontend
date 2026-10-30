@@ -102,7 +102,7 @@ afterEach(() => {
 describe('read_session PoP signs the exact challenge bytes the backend verifies', () => {
 	it('signature verifies against TextEncoder().encode(challenge), not atob(challenge)', async () => {
 		const em = EncryptionManagerPQ.getInstance();
-		const identity = await em.createUserVault({ name: 'Reader' });
+		const identity = await em.createUserVault({ name: 'Reader', lock: 'legacy' });
 		expect(em.isAuth).toBe(true);
 		const signPkey = b64ToBytes(identity.sign_pkey);
 
@@ -144,7 +144,7 @@ describe('read_session PoP signs the exact challenge bytes the backend verifies'
 describe('logout clears read-session tokens', () => {
 	it('EncryptionManagerPQ.logout() drops every token the session opened', async () => {
 		const em = EncryptionManagerPQ.getInstance();
-		await em.createUserVault({ name: 'Reader' });
+		await em.createUserVault({ name: 'Reader', lock: 'legacy' });
 		let n = 0;
 		vi.stubGlobal('fetch', async (input, init) => {
 			const url = String(input);

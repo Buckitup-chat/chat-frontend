@@ -97,7 +97,7 @@ const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
 const { drainPendingWrites, resumePendingWrites } = await import('@/lib/data/ingest');
 
 interface TestManager {
-	createUserVault(opts: { name: string }): Promise<unknown>;
+	createUserVault(opts: { name: string; lock?: 'prf' | 'legacy' }): Promise<unknown>;
 	getLocalUserCards(): Promise<Array<{ name: string; user_hash: string }>>;
 	updateUserStorage(p: { name?: string; notes?: string; avatarUuid?: string | null }): Promise<{ pending: boolean }>;
 	pushCurrentUserCard(): Promise<string>;
@@ -132,7 +132,7 @@ afterEach(() => {
 const createAccount = async () => {
 	EncryptionManagerPQ.instance = null;
 	const em = EncryptionManagerPQ.getInstance() as unknown as TestManager;
-	await em.createUserVault({ name: 'Tester' });
+	await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 	await settle();
 	const userHash = (await em.getLocalUserCards())[0].user_hash;
 	sent = [];

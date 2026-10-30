@@ -95,6 +95,18 @@ vi.mock('@/lib/data/collections', () => ({
 	}),
 }));
 
+vi.mock('@/lib/data/shapeRead', async () => {
+	const actual = await vi.importActual<typeof import('@/lib/data/shapeRead')>('@/lib/data/shapeRead');
+	return {
+		...actual,
+		readShapeOnce: async (table: string, where: string) => {
+			if (table !== 'user_cards') throw new Error(`unexpected one-shot read of ${table}`);
+			const userHash = /user_hash='([^']+)'/.exec(where)?.[1];
+			return [...cardRows.values()].filter((r) => r.user_hash === userHash);
+		},
+	};
+});
+
 vi.mock('@/lib/data/userStorage', () => ({
 	getStorageRow: async () => null,
 	putStorageRow: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
@@ -168,7 +180,7 @@ const { getAccepted, _setAcceptedSnapshotStorageForTests } = await import('@/lib
 const { createShapeLink, registerShapeLink, whenLive } = await import('@/lib/data/shapeLink');
 
 interface Manager {
-	createUserVault(opts: { name: string }): Promise<{ user_hash: string }>;
+	createUserVault(opts: { name: string; lock?: 'prf' | 'legacy' }): Promise<{ user_hash: string }>;
 	updateOwnUserCardName(name: string): Promise<unknown>;
 	pushCurrentUserCard(): Promise<unknown>;
 	updateUserStorage(opts: { name?: string }): Promise<unknown>;
@@ -176,7 +188,7 @@ interface Manager {
 	login(userHash: string): Promise<unknown>;
 	logout(): Promise<void>;
 	exportVaultKeys(): Promise<{ sign_skey: string }>;
-	importVaultKeys(keys: unknown, identity: Row): Promise<{ status: string; userHash: string }>;
+	importVaultKeys(keys: unknown, identity: Row, opts?: { lock?: 'prf' | 'legacy' }): Promise<{ status: string; userHash: string }>;
 	isAuth: boolean;
 	currentUserHash: string | null;
 	localStorageOwnerHash: string | null;
@@ -272,7 +284,7 @@ const at = (prefix: string) => events.findIndex((e) => e.startsWith(prefix));
 describe('one durable intent and one exact signed snapshot before any HTTP', () => {
 	it('insert (registration): intent, signature, stored snapshot, then HTTP — in that order', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 
 		const [intent] = cardIntents();
 		const [entry] = cardEntries();
@@ -288,7 +300,7 @@ describe('one durable intent and one exact signed snapshot before any HTTP', () 
 
 	it('update: the same order, as its own intent and snapshot', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		events.length = 0;
 		snapshotsAtHttp.length = 0;
 
@@ -305,7 +317,7 @@ describe('one durable intent and one exact signed snapshot before any HTTP', () 
 
 	it('the production callers — pushCurrentUserCard, rename and profile update — all go through the durable path', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		snapshotsAtHttp.length = 0;
 
 		await em.pushCurrentUserCard();
@@ -325,7 +337,7 @@ describe('one durable intent and one exact signed snapshot before any HTTP', () 
 
 	it('importing an account publishes its card through the durable path too, inside the imported account\'s session', async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'Imported' });
+		await source.createUserVault({ name: 'Imported', lock: 'legacy' });
 		const keys = await source.exportVaultKeys();
 		const identity = { ...(await source.getLocalUserCards())[0] };
 		await source.logout();
@@ -333,7 +345,7 @@ describe('one durable intent and one exact signed snapshot before any HTTP', () 
 		snapshotsAtHttp.length = 0;
 
 		const target = freshManager();
-		const result = await target.importVaultKeys(keys, identity);
+		const result = await target.importVaultKeys(keys, identity, { lock: 'legacy' });
 
 		expect(result).toEqual({ status: 'active', userHash: identity.user_hash });
 		expect(target.isAuth).toBe(true);
@@ -343,7 +355,7 @@ describe('one durable intent and one exact signed snapshot before any HTTP', () 
 
 	it('registration: the card is accepted by the server before the dependent user_storage write starts', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 
 		expect(at('http:user_cards')).toBeGreaterThanOrEqual(0);
 		expect(at('http:user_cards')).toBeLessThan(at('user_storage'));
@@ -357,7 +369,7 @@ describe('profile edits publish the card through the one durable path, with the 
 
 	it('offline, a profile edit stores one card write, reports pending, and the outbox later sends that exact snapshot', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const before = counts();
 		const attempted: Mutation[] = [];
 		onHttp = (m) => { checkSnapshotAtHttp(m); attempted.push(...m.filter((x) => x.syncMetadata.relation === 'user_cards')); };
@@ -384,7 +396,7 @@ describe('profile edits publish the card through the one durable path, with the 
 
 	it('offline, a rename completes on this device with its one card write queued instead of waiting for the server', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const before = counts();
 		networkDown = () => true;
 
@@ -397,7 +409,7 @@ describe('profile edits publish the card through the one durable path, with the 
 
 	it('pushCurrentUserCard: accepted is synced, one intent, one snapshot, one request', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const before = counts();
 
 		await expect(em.pushCurrentUserCard()).resolves.toBe('synced');
@@ -409,7 +421,7 @@ describe('profile edits publish the card through the one durable path, with the 
 
 	it('pushCurrentUserCard: a card write that cannot be delivered now is queued, stored once', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const before = counts();
 		networkDown = () => true;
 
@@ -421,7 +433,7 @@ describe('profile edits publish the card through the one durable path, with the 
 
 	it('pushCurrentUserCard: a rejection is an error, never reported as queued', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		rejects = (m) => m[0].syncMetadata.relation === 'user_cards' && m[0].type === 'update';
 
 		await expect(em.pushCurrentUserCard()).rejects.toMatchObject({ permanent: true });
@@ -430,7 +442,7 @@ describe('profile edits publish the card through the one durable path, with the 
 
 	it('two card writes started together go out in the order of their timestamps: the next is authored only once the first is in the outbox', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const intentsBefore = new Set(intentStore.map.keys());
 		let widened = false;
 		const realIntentGet = intentStore.get.bind(intentStore);
@@ -452,7 +464,7 @@ describe('profile edits publish the card through the one durable path, with the 
 
 	it('a sign-in after the bootstrap card was accepted publishes no card again', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		await em.logout();
 		const before = counts();
 
@@ -466,7 +478,7 @@ describe('profile edits publish the card through the one durable path, with the 
 describe('no HTTP without durability', () => {
 	it('an intent that cannot be stored: DurabilityError, no signature, no HTTP, nothing recorded as accepted', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const acceptedBefore = await getAccepted('user_cards', userHash);
 		const httpBefore = httpSent.length;
 		intentStore.failSet = () => true;
@@ -480,7 +492,7 @@ describe('no HTTP without durability', () => {
 
 	it('a signed snapshot the outbox cannot store: DurabilityError, no HTTP — and the signed intent is replayed exactly by recovery', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const httpBefore = httpSent.length;
 		outboxStore.failSet = (k, v) => !k.includes('|') && v.includes('user_cards');
 
@@ -501,7 +513,7 @@ describe('no HTTP without durability', () => {
 describe('crash and reload', () => {
 	it('after the snapshot is stored but before HTTP completes, a reload replays the exact snapshot: one signature, one snapshot', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		hangs = (m) => m[0].type === 'update';
 
 		void em.updateOwnUserCardName('Renamed').catch(() => {});
@@ -527,7 +539,7 @@ describe('crash and reload', () => {
 
 	it('after HTTP acceptance but before the intent was resolved, recovery sends nothing again and stores no second snapshot', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const userHash = (await em.getLocalUserCards())[0].user_hash;
 		await em.updateOwnUserCardName('Renamed');
 		const update = cardEntries().find((e) => e.status === 'accepted' && e.id !== cardEntries()[0].id) ?? cardEntries()[1];
@@ -546,7 +558,7 @@ describe('crash and reload', () => {
 
 	it('two sequential updates are separate intents and snapshots with strictly increasing timestamps — across a reload with the first still unsent', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		networkDown = (m) => m[0].syncMetadata.relation === 'user_cards';
 		const first = em.updateOwnUserCardName('First');
 		await vi.waitFor(() => expect(cardEntries().filter((e) => e.mutations[0]?.type === 'update')).toHaveLength(1));
@@ -573,7 +585,7 @@ describe('crash and reload', () => {
 describe('bootstrap without a key, account isolation, concurrent recovery', () => {
 	it('an unsigned card intent with no key available stays durable and is not a network retry; recovery signs it once', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const card = (await em.getLocalUserCards())[0] as unknown as Parameters<typeof publishUserCard>[0];
 		const httpBefore = httpSent.length;
 
@@ -592,14 +604,14 @@ describe('bootstrap without a key, account isolation, concurrent recovery', () =
 
 	it('an account switch never replays the other account\'s card snapshot', async () => {
 		const emA = freshManager();
-		const { user_hash: hashA } = await emA.createUserVault({ name: 'Alice' });
+		const { user_hash: hashA } = await emA.createUserVault({ name: 'Alice', lock: 'legacy' });
 		networkDown = (m) => rowOf(m[0]).user_hash === hashA;
 		const renaming = emA.updateOwnUserCardName('Alice 2');
 		await vi.waitFor(() => expect(cardEntries().some((e) => e.mutations[0]?.type === 'update')).toBe(true));
 		void renaming.catch(() => {});
 
 		const emB = freshManager();
-		await emB.createUserVault({ name: 'Bob' });
+		await emB.createUserVault({ name: 'Bob', lock: 'legacy' });
 		outbox.stopDrainLoop();
 		await outbox._drainLoopSettledForTests();
 
@@ -610,7 +622,7 @@ describe('bootstrap without a key, account isolation, concurrent recovery', () =
 
 	it('two tabs recovering the same card intent produce one signature, one snapshot and one HTTP send', { timeout: 20_000 }, async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const card = (await em.getLocalUserCards())[0] as unknown as Parameters<typeof publishUserCard>[0];
 		await publishUserCard(card, undefined as unknown as Uint8Array).catch(() => {});
 		const signKey = await signKeyOf(em);
@@ -676,7 +688,7 @@ describe('card timestamps are reserved one at a time per account, in every tab',
 
 	it('two tabs authoring card updates at once get different, strictly increasing timestamps (Web Lock)', { timeout: 20_000 }, async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const card = (await em.getLocalUserCards())[0] as unknown as Parameters<typeof storeUserCardIntent>[0];
 		vi.spyOn(Date, 'now').mockReturnValue(NOW);
 
@@ -719,7 +731,7 @@ describe('card timestamps are reserved one at a time per account, in every tab',
 
 	it('concurrent card updates in one tab without Web Locks get different, strictly increasing timestamps (in-context queue)', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const card = (await em.getLocalUserCards())[0] as unknown as Parameters<typeof storeUserCardIntent>[0];
 		vi.spyOn(Date, 'now').mockReturnValue(NOW);
 		try {
@@ -734,7 +746,7 @@ describe('card timestamps are reserved one at a time per account, in every tab',
 
 	it('a timestamp reserved for an intent that could not be stored is never handed out again (a gap, not a reuse)', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		vi.spyOn(Date, 'now').mockReturnValue(NOW);
 		try {
 			intentStore.failSet = () => true;
@@ -752,7 +764,7 @@ describe('card timestamps are reserved one at a time per account, in every tab',
 
 	it('a reservation that cannot be stored stops the write: no intent, no signature, no HTTP', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const intentsBefore = cardIntents().length;
 		const httpBefore = httpSent.length;
 		outboxStore.failSet = (k) => k.startsWith('clock|');
@@ -768,7 +780,7 @@ describe('card timestamps are reserved one at a time per account, in every tab',
 describe('an unreadable card write of this account blocks new card authoring; others\' records do not', () => {
 	const blocked = async (setup: (ids: { intentKeys: string[]; entryKeys: string[] }) => void) => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		setup({
 			intentKeys: [...intentStore.map.keys()].filter((k) => !k.startsWith('owner|')),
 			entryKeys: [...outboxStore.map.keys()].filter((k) => !k.includes('|')),
@@ -802,7 +814,7 @@ describe('an unreadable card write of this account blocks new card authoring; ot
 
 	it('another account\'s sealed intent, its outbox entries, and device-level records do not block', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		intentStore.map.set('intent-foreign', 'opaque');
 		const realGet = intentStore.get.bind(intentStore);
 		intentStore.get = async (k: string) => { if (k === 'intent-foreign') throw new DecryptFailedError('another account'); return realGet(k); };
@@ -827,7 +839,7 @@ describe('an unreadable card write of this account blocks new card authoring; ot
 describe('import reports whether the card write is durable', () => {
 	const exported = async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'Imported' });
+		await source.createUserVault({ name: 'Imported', lock: 'legacy' });
 		const keys = await source.exportVaultKeys();
 		const identity = { ...(await source.getLocalUserCards())[0] };
 		await source.logout();
@@ -843,7 +855,7 @@ describe('import reports whether the card write is durable', () => {
 		await rawStore.set(`local-vault-${identity.vaultId}`, { data: '' });
 		const target = freshManager();
 
-		const result = await target.importVaultKeys(keys, { ...identity });
+		const result = await target.importVaultKeys(keys, { ...identity }, { lock: 'legacy' });
 
 		expect(result).toEqual({ status: 'active', userHash: identity.user_hash });
 		const restored = (await target.getLocalUserCards()).find((card) => card.user_hash === identity.user_hash);
@@ -853,7 +865,7 @@ describe('import reports whether the card write is durable', () => {
 
 	it('reports a missing local vault before passkey use even when a local passkey identity remains', async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'Missing keys' });
+		await source.createUserVault({ name: 'Missing keys', lock: 'legacy' });
 		const identity = (await source.getLocalUserCards())[0];
 		await source.logout();
 		const empty = { data: '' };
@@ -870,9 +882,9 @@ describe('import reports whether the card write is durable', () => {
 
 	it('does not offer another listed account passkey when this account vault is missing', async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'Missing keys' });
+		await source.createUserVault({ name: 'Missing keys', lock: 'legacy' });
 		const first = (await source.getLocalUserCards())[0];
-		await source.createUserVault({ name: 'Other account' });
+		await source.createUserVault({ name: 'Other account', lock: 'legacy' });
 		await source.logout();
 		await rawStore.remove(`local-vault-${first.vaultId}`);
 		const target = freshManager();
@@ -883,7 +895,7 @@ describe('import reports whether the card write is durable', () => {
 
 	it('does not treat an unrelated legacy vault without account keys as a recovery candidate', async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'Missing keys' });
+		await source.createUserVault({ name: 'Missing keys', lock: 'legacy' });
 		const identity = (await source.getLocalUserCards())[0];
 		await source.logout();
 		await rawStore.remove(`local-vault-${identity.vaultId}`);
@@ -898,7 +910,7 @@ describe('import reports whether the card write is durable', () => {
 	it('does not offer the same legacy passkey for four missing PQ account vaults', async () => {
 		const source = freshManager();
 		for (const name of ['First', 'Second', 'Third', 'Test-4']) {
-			await source.createUserVault({ name });
+			await source.createUserVault({ name, lock: 'legacy' });
 		}
 		const cards = await source.getLocalUserCards();
 		await source.logout();
@@ -917,7 +929,7 @@ describe('import reports whether the card write is durable', () => {
 
 	it('finds an existing vault through its passkey when the account card has a stale vault ID', async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'Stale vault ID' });
+		await source.createUserVault({ name: 'Stale vault ID', lock: 'legacy' });
 		const identity = (await source.getLocalUserCards())[0];
 		const actualVaultId = identity.vaultId;
 		await source.logout();
@@ -933,7 +945,7 @@ describe('import reports whether the card write is durable', () => {
 
 	it('recovers an ownerless legacy vault only when its signing key matches the selected card', async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'Legacy vault' });
+		await source.createUserVault({ name: 'Legacy vault', lock: 'legacy' });
 		const identity = (await source.getLocalUserCards())[0];
 		const actualVaultId = identity.vaultId;
 		await source.logout();
@@ -948,9 +960,9 @@ describe('import reports whether the card write is durable', () => {
 
 	it('leaves an ownerless vault untouched when its signing key belongs to another account', async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'Selected' });
+		await source.createUserVault({ name: 'Selected', lock: 'legacy' });
 		const selected = { ...(await source.getLocalUserCards())[0] };
-		await source.createUserVault({ name: 'Other' });
+		await source.createUserVault({ name: 'Other', lock: 'legacy' });
 		const other = (await source.getLocalUserCards()).find(card => card.user_hash !== selected.user_hash)!;
 		await source.logout();
 		await rawStore.remove(`local-vault-${selected.vaultId}`);
@@ -965,9 +977,9 @@ describe('import reports whether the card write is durable', () => {
 
 	it('does not bind an account card to a different account selected in the passkey prompt', async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'First' });
+		await source.createUserVault({ name: 'First', lock: 'legacy' });
 		const first = { ...(await source.getLocalUserCards())[0] };
-		await source.createUserVault({ name: 'Second' });
+		await source.createUserVault({ name: 'Second', lock: 'legacy' });
 		const second = (await source.getLocalUserCards()).find((card) => card.user_hash !== first.user_hash)!;
 		await source.logout();
 		await rawStore.remove(`local-vault-${first.vaultId}`);
@@ -982,9 +994,9 @@ describe('import reports whether the card write is durable', () => {
 
 	it('rejects a card whose vault ID points to another valid account vault', async () => {
 		const source = freshManager();
-		await source.createUserVault({ name: 'First' });
+		await source.createUserVault({ name: 'First', lock: 'legacy' });
 		const first = { ...(await source.getLocalUserCards())[0] };
-		await source.createUserVault({ name: 'Second' });
+		await source.createUserVault({ name: 'Second', lock: 'legacy' });
 		const second = (await source.getLocalUserCards()).find((card) => card.user_hash !== first.user_hash)!;
 		await source.logout();
 		await rawStore.set('pq-vaults-registry', [{ ...first, vaultId: second.vaultId }, second]);
@@ -1005,7 +1017,7 @@ describe('import reports whether the card write is durable', () => {
 		events.length = 0;
 
 		const target = watchAuth(freshManager());
-		const failure = await target.importVaultKeys(keys, identity).then(() => null, (e) => e);
+		const failure = await target.importVaultKeys(keys, identity, { lock: 'legacy' }).then(() => null, (e) => e);
 
 		expect(failure).toBeInstanceOf(AccountImportIncompleteError);
 		expect(httpSent).toHaveLength(httpBefore);
@@ -1018,7 +1030,7 @@ describe('import reports whether the card write is durable', () => {
 		const vaultsAfterFailure = vaults.size;
 
 		intentStore.failSet = null;
-		const retry = await target.importVaultKeys(keys, identity);
+		const retry = await target.importVaultKeys(keys, identity, { lock: 'legacy' });
 		expect(retry).toEqual({ status: 'active', userHash: identity.user_hash });
 		expect(vaults.size).toBe(vaultsAfterFailure);
 		expect((await target.getLocalUserCards()).filter((c) => c.user_hash === identity.user_hash)).toHaveLength(1);
@@ -1033,7 +1045,7 @@ describe('import reports whether the card write is durable', () => {
 		vi.useFakeTimers({ toFake: ['setTimeout'] });
 		let result: { status: string } | undefined;
 		try {
-			const importing = target.importVaultKeys(keys, identity).then((r) => { result = r; });
+			const importing = target.importVaultKeys(keys, identity, { lock: 'legacy' }).then((r) => { result = r; });
 			while (result === undefined) await vi.advanceTimersByTimeAsync(5_000);
 			await importing;
 		} finally {
@@ -1055,7 +1067,7 @@ describe('import reports whether the card write is durable', () => {
 describe('no active session before the card boundary', () => {
 	it('registration: no authChange, recovery or HTTP before the card intent; the session activates exactly once, after acceptance, before user_storage', async () => {
 		const em = watchAuth(freshManager());
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		await vi.waitFor(() => expect(events).toContain('recoverIntents'));
 
 		const [intent] = cardIntents();
@@ -1077,7 +1089,7 @@ describe('no active session before the card boundary', () => {
 		setup();
 		const em = watchAuth(freshManager());
 
-		await expect(em.createUserVault({ name: 'Tester' })).rejects.toThrow();
+		await expect(em.createUserVault({ name: 'Tester', lock: 'legacy' })).rejects.toThrow();
 
 		expect(em.isAuth).toBe(false);
 		expect(em.currentUserHash).toBeNull();
@@ -1100,7 +1112,7 @@ const newDevice = async () => {
 
 const exportAccount = async () => {
 	const source = freshManager();
-	await source.createUserVault({ name: 'Imported' });
+	await source.createUserVault({ name: 'Imported', lock: 'legacy' });
 	const keys = await source.exportVaultKeys();
 	const identity = { ...(await source.getLocalUserCards())[0] };
 	await source.logout();
@@ -1121,7 +1133,7 @@ const importFast = async (em: Manager, keys: unknown, identity: Row) => {
 	vi.useFakeTimers({ toFake: ['setTimeout'] });
 	let settled: { value?: { status: string; userHash: string }; error?: unknown } | undefined;
 	try {
-		const importing = em.importVaultKeys(keys, identity).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
+		const importing = em.importVaultKeys(keys, identity, { lock: 'legacy' }).then((value) => { settled = { value }; }, (error) => { settled = { error }; });
 		while (settled === undefined) await vi.advanceTimersByTimeAsync(5_000);
 		await importing;
 	} finally {
@@ -1196,7 +1208,7 @@ describe('an account whose card is still unaccepted signs in only through the ca
 		await newDevice();
 		signingFails = true;
 		const target = watchAuth(freshManager());
-		const result = await target.importVaultKeys(keys, identity);
+		const result = await target.importVaultKeys(keys, identity, { lock: 'legacy' });
 		expect(result.status).toBe('card-deferred');
 		const [unsigned] = cardIntents();
 		expect(unsigned.intent.signedMutation).toBeUndefined();
@@ -1214,7 +1226,7 @@ describe('an account whose card is still unaccepted signs in only through the ca
 
 	it('an account whose card is known accepted signs in even while the intent store cannot be listed', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		await em.logout();
 		intentStore.keys = async () => { throw new Error('disk read error'); };
 
@@ -1226,7 +1238,7 @@ describe('an account whose card is still unaccepted signs in only through the ca
 
 	it('an ordinary card update still pending does not hold up a sign-in', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		networkDown = (m) => m[0].type === 'update';
 		void em.updateOwnUserCardName('Renamed').catch(() => {});
 		await vi.waitFor(() => expect(cardEntries().some((e) => e.mutations[0]?.type === 'update')).toBe(true));
@@ -1276,7 +1288,7 @@ describe('import: before the durable milestone every failure is an incomplete im
 		events.length = 0;
 		arrange();
 
-		const failure = await target.importVaultKeys(keys, identity).then(() => null, (e) => e);
+		const failure = await target.importVaultKeys(keys, identity, { lock: 'legacy' }).then(() => null, (e) => e);
 		disarm();
 
 		expect(failure).toBeInstanceOf(AccountImportIncompleteError);
@@ -1286,7 +1298,7 @@ describe('import: before the durable milestone every failure is an incomplete im
 		expect(httpSent).toHaveLength(httpBefore);
 		const vaultsAfterFailure = vaults.size;
 
-		const retry = await target.importVaultKeys(keys, identity);
+		const retry = await target.importVaultKeys(keys, identity, { lock: 'legacy' });
 		expect(retry.status).toBe('active');
 		expect(vaults.size).toBe(vaultsAfterFailure);
 		expect((await target.getLocalUserCards()).filter((c) => c.user_hash === identity.user_hash)).toHaveLength(1);
@@ -1328,7 +1340,7 @@ describe('a bootstrap retry reuses the one stored bootstrap operation', () => {
 	it('card-deferred → import again once the network is back: the same intent, timestamp, signature, snapshot and outbox entry, sent once', async () => {
 		const d = await deferred();
 
-		const retry = await whenRetryIsDue(() => freshManager().importVaultKeys(d.keys, d.identity));
+		const retry = await whenRetryIsDue(() => freshManager().importVaultKeys(d.keys, d.identity, { lock: 'legacy' }));
 
 		expect(retry).toEqual({ status: 'active', userHash: d.userHash });
 		expectSameOperation(d);
@@ -1339,7 +1351,7 @@ describe('a bootstrap retry reuses the one stored bootstrap operation', () => {
 
 		const app = await reloadApp({ afterSession: false });
 		try {
-			const retry = await whenRetryIsDue(() => app.manager.importVaultKeys(d.keys, d.identity));
+			const retry = await whenRetryIsDue(() => app.manager.importVaultKeys(d.keys, d.identity, { lock: 'legacy' }));
 			expect(retry.status).toBe('active');
 			expectSameOperation(d);
 		} finally {
@@ -1369,7 +1381,7 @@ describe('a bootstrap retry reuses the one stored bootstrap operation', () => {
 		const tabs: Array<Awaited<ReturnType<typeof reloadApp>>> = [];
 		try {
 			for (let i = 0; i < 2; i++) tabs.push(await reloadApp({ afterSession: false }));
-			const results = await whenRetryIsDue(() => Promise.all(tabs.map((t) => t.manager.importVaultKeys(d.keys, { ...d.identity }))));
+			const results = await whenRetryIsDue(() => Promise.all(tabs.map((t) => t.manager.importVaultKeys(d.keys, { ...d.identity }, { lock: 'legacy' }))));
 
 			expect(results.map((r) => r.status)).toEqual(['active', 'active']);
 			expectSameOperation(d);
@@ -1388,7 +1400,7 @@ describe('a bootstrap retry reuses the one stored bootstrap operation', () => {
 		const httpBefore = httpSent.length;
 		const intentsBefore = cardIntents().length;
 
-		const result = await freshManager().importVaultKeys(keys, identity);
+		const result = await freshManager().importVaultKeys(keys, identity, { lock: 'legacy' });
 
 		expect(result.status).toBe('active');
 		expect(httpSent).toHaveLength(httpBefore);
@@ -1399,7 +1411,7 @@ describe('a bootstrap retry reuses the one stored bootstrap operation', () => {
 describe('sign-in needs positive proof of the card, or the exact bootstrap replay', () => {
 	const signedOut = async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		await em.logout();
 		return userHash;
 	};
@@ -1518,7 +1530,7 @@ describe('the card decision gates sign-in and import before anything irreversibl
 
 	it('sign-in republishes the local card when the live backend has none', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		await em.logout();
 		const bootstrap = cardIntents().find((i) => i.intent.purpose === 'bootstrap-prerequisite');
 		intentStore.map.delete(bootstrap.id);
@@ -1545,7 +1557,7 @@ describe('the card decision gates sign-in and import before anything irreversibl
 		const target = watchAuth(freshManager());
 		events.length = 0;
 
-		const failure = await target.importVaultKeys(keys, identity).then(() => null, (e) => e);
+		const failure = await target.importVaultKeys(keys, identity, { lock: 'legacy' }).then(() => null, (e) => e);
 
 		expect(failure).toBeInstanceOf(AccountImportIncompleteError);
 		expect(failure.cause).toMatchObject({ reason: 'shape_unavailable' });
@@ -1557,7 +1569,7 @@ describe('the card decision gates sign-in and import before anything irreversibl
 		expect(events).not.toContain('authChange:true');
 
 		await cards.goLive();
-		const retry = await target.importVaultKeys(keys, identity);
+		const retry = await target.importVaultKeys(keys, identity, { lock: 'legacy' });
 
 		expect(retry).toEqual({ status: 'active', userHash: identity.user_hash });
 		expect(cardIntents()).toHaveLength(1);

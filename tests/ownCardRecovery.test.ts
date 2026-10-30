@@ -124,7 +124,7 @@ const installServer = () => {
 const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
 
 interface TestManager {
-	createUserVault(opts: { name: string }): Promise<{ user_hash: string }>;
+	createUserVault(opts: { name: string; lock?: 'prf' | 'legacy' }): Promise<{ user_hash: string }>;
 	login(userHash: string): Promise<unknown>;
 	logout(): Promise<void>;
 	readonly currentUserHash: string | null;
@@ -173,7 +173,7 @@ afterEach(() => {
 
 const signedInAfterWipe = async () => {
 	const em = freshManager();
-	const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+	const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 	await em.login(userHash);
 	await withCardLock(userHash, async () => {});
 	serverCards.clear();
@@ -185,7 +185,7 @@ const signedInAfterWipe = async () => {
 describe('the own card goes first, alone', () => {
 	it('registration sends the card as a single-mutation request before anything else', async () => {
 		const em = freshManager();
-		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester' });
+		const { user_hash: userHash } = await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 
 		expect(ingestBatches[0]).toHaveLength(1);
 		expect(ingestBatches[0][0]).toMatchObject({ type: 'insert', syncMetadata: { relation: 'user_cards' } });
@@ -264,8 +264,8 @@ describe('401 unknown_user re-ingests the own card, then opens once more', () =>
 
 	it('switching account while the recovery waits sends nothing for the former account', async () => {
 		const em = freshManager();
-		({ user_hash: userB } = await em.createUserVault({ name: 'B' }));
-		({ user_hash: userA } = await em.createUserVault({ name: 'A' }));
+		({ user_hash: userB } = await em.createUserVault({ name: 'B', lock: 'legacy' }));
+		({ user_hash: userA } = await em.createUserVault({ name: 'A', lock: 'legacy' }));
 		await em.login(userA);
 		await withCardLock(userA, async () => {});
 		serverCards.delete(userA);
@@ -343,8 +343,8 @@ describe('a card waiting for delivery when the session ends', () => {
 describe('a direct login(B) after A, without logout, ends A\'s read sessions', () => {
 	const twoAccountsSignedInAsA = async () => {
 		const em = freshManager();
-		({ user_hash: userB } = await em.createUserVault({ name: 'B' }));
-		({ user_hash: userA } = await em.createUserVault({ name: 'A' }));
+		({ user_hash: userB } = await em.createUserVault({ name: 'B', lock: 'legacy' }));
+		({ user_hash: userA } = await em.createUserVault({ name: 'A', lock: 'legacy' }));
 		await em.login(userA);
 		log = [];
 		return em;

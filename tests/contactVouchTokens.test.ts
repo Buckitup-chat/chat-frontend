@@ -541,7 +541,7 @@ describe('FRON-23: the account that starts a grant is the one that signs it', ()
 		const confirming = store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
 		await vi.waitFor(() => expect(deviceIdentityRequests).toBe(before + 1), { timeout: 10_000 });
 		await store.logout();
-		await store.registerNewUser({ name: 'Second' } as never);
+		await store.registerNewUser({ name: 'Second', lock: 'legacy' } as never);
 		for (const answer of held) answer();
 		await confirming;
 
@@ -617,7 +617,7 @@ describe('FRON-23: failures between the two rows and across sessions', () => {
 		await vi.waitFor(() => expect(attempts).toBeGreaterThan(0), { timeout: 10_000 });
 
 		await store.logout();
-		await store.registerNewUser({ name: 'Second' } as never);
+		await store.registerNewUser({ name: 'Second', lock: 'legacy' } as never);
 		expect(store.currentUserHash).not.toBe(Owner.hash);
 		const attemptsBeforeSwitch = attempts;
 		vouchesFail = false;
