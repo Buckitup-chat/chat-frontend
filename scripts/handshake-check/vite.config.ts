@@ -11,7 +11,10 @@ export default defineConfig({
 	root: fileURLToPath(new URL('.', import.meta.url)),
 	base: './',
 	resolve: {
-		alias: { '@': fileURLToPath(new URL('../../src', import.meta.url)) },
+		alias: {
+			'@': fileURLToPath(new URL('../../src', import.meta.url)),
+			'@buckitup/pq-client': fileURLToPath(new URL('../../packages/pq-client/src', import.meta.url)),
+		},
 	},
 	define: {
 		// The harness talks to no backend.

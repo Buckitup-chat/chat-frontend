@@ -16,10 +16,10 @@
 // A side effect worth having: the server cannot tell a vault row from any
 // other user_storage row, nor tell which accounts hold a backup at all.
 import { randomBytes } from '@noble/hashes/utils';
-import { hkdfDerive } from './hkdf';
-import { bytesToUuidV8 } from './slotId';
-import { encryptChunk, decryptChunk } from './fileCrypto';
-import { toBase64, toBytes } from './signature';
+import { hkdfDerive } from './hkdf.js';
+import { bytesToUuidV8 } from './slotId.js';
+import { encryptChunk, decryptChunk } from './fileCrypto.js';
+import { toBase64, toBytes } from './signature.js';
 
 export const VAULT_LOCATOR_SALT = 'buckitup/vault-locator/v1';
 export const VAULT_SEAL_SALT = 'buckitup/vault-seal/v1';

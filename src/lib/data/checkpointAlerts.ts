@@ -13,8 +13,8 @@
 // account key and its key name is derived — another account sharing the
 // browser profile learns neither the pointer nor which dialog it belongs to.
 import { kvGet, kvSet } from './localStore';
-import { buildViewTree, CHECKPOINT_SEMANTICS } from '@/lib/pq/checkpoint';
-import { isWireMessageId } from '@/lib/pq/content';
+import { buildViewTree, CHECKPOINT_SEMANTICS } from '@buckitup/pq-client/checkpoint';
+import { isWireMessageId } from '@buckitup/pq-client/content';
 
 export interface CheckpointPointer {
 	/** Newest checkpoint this user signed in the dialog; null = none found. */

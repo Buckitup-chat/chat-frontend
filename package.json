@@ -6,14 +6,17 @@
   "engines": {
     "node": ">=20"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "config": {
     "node_options": "--max-old-space-size=4096"
   },
   "scripts": {
     "dev": "vite",
-    "build": "node --max-old-space-size=4096 node_modules/.bin/vite build",
+    "build": "node --max-old-space-size=4096 node_modules/.bin/vite build && npm run build -w @buckitup/pq-client",
     "preview": "vite preview",
-    "lint": "eslint src",
+    "lint": "eslint src packages/pq-client/src",
     "format": "prettier --write src",
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
@@ -25,6 +28,7 @@
     "postinstall": "patch-package"
   },
   "dependencies": {
+    "@buckitup/pq-client": "*",
     "@electric-sql/client": "^1.4.1",
     "@fontsource/inter": "^5.2.8",
     "@journeyapps/wa-sqlite": "^1.7.2",

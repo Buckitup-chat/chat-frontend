@@ -11,7 +11,7 @@ import type { UserCardRow } from './types';
 import { verifyReplicatedRow } from './rowVerification';
 import { nextOwnerTimestamp } from './time';
 import { readShapeOnce } from './shapeRead';
-import { wireBool } from '@/lib/pq/schema';
+import { wireBool } from '@buckitup/pq-client/schema';
 
 export interface UserCardFields {
 	user_hash: string;

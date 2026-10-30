@@ -1,7 +1,7 @@
 import { mergeLiveWithCached } from './readCache';
 import { readCachedCards } from './userCardsCache';
 import { createShapeLink, whenLive } from './shapeLink';
-import { verifyUserCard } from '@/lib/pq/verifyCard';
+import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
 import type { UserCardRow } from './types';
 
 export const userCardsShapeLink = createShapeLink();

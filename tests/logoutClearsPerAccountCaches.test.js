@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { toBase64 } from '@/lib/pq/signature';
+import { toBase64 } from '@buckitup/pq-client/signature';
 import { _resetTouchedForTests, markTouched, isTouched } from '@/lib/data/readCache';
 import { _setDialogCacheStoreForTests, readDialogRows } from '@/lib/data/dialogCache';
 import { memoryDialogCacheStore } from './helpers/mainDialogCache';

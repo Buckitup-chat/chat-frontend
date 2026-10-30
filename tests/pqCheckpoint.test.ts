@@ -8,9 +8,9 @@ import {
 	deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
 	proveViewKey, verifyViewProof,
 	CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
-} from '@/lib/pq/checkpoint';
-import { encodeContent, decodeContent, previewText, ContentDecodeError } from '@/lib/pq/content';
-import { lockSeedFromPrf, VAULT_LOCK_VERSION } from '@/lib/pq/vaultLock';
+} from '@buckitup/pq-client/checkpoint';
+import { encodeContent, decodeContent, previewText, ContentDecodeError } from '@buckitup/pq-client/content';
+import { lockSeedFromPrf, VAULT_LOCK_VERSION } from '@buckitup/pq-client/vaultLock';
 import { bytesToHex } from '@noble/hashes/utils';
 
 const mid = (n: number) => `dmsg_${String(n).padStart(4, '0')}e8f0-aaaa-7bbb-8ccc-ddddeeee${String(n).padStart(4, '0')}`;

@@ -20,8 +20,8 @@ import { createGrantDelivery, grantPartOf, isGrantPart } from '@/lib/avatars/gal
 import { legacyToSharedGallery } from '@/lib/avatars/sharedGalleryPublish';
 import { readPeerGallery, isDisplayable } from '@/lib/avatars/peerGallery';
 import { StorageNotOnServerError } from '@/lib/data/userStorage';
-import { photoFromWire } from '@/lib/pq/content';
-import { fromBase64 } from '@/lib/pq/signature';
+import { photoFromWire } from '@buckitup/pq-client/content';
+import { fromBase64 } from '@buckitup/pq-client/signature';
 import { peersWeWrote } from '@/lib/data/outboundDialogs';
 import { cachedPhotoOf, contactAvatarChange, imageMime, inlineDataUrl } from '@/lib/avatars/display';
 import { thumbDataUrl } from '@/lib/data/imageMeta';

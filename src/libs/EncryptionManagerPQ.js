@@ -29,7 +29,7 @@ import { getAccepted } from '@/lib/data/acceptedSnapshot';
 import { verifyReplicatedRow } from '@/lib/data/rowVerification';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { SessionFencedError } from '@/lib/data/sessionGuard';
-import { wireBool } from '@/lib/pq/schema';
+import { wireBool } from '@buckitup/pq-client/schema';
 import { obtainGalleryMapping, initialGalleryMapping } from '@/lib/avatars/galleryMapping';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
@@ -46,7 +46,7 @@ import { forgetAccountUploads } from '@/lib/data/uploadReuse';
 import { clearSessions } from '@/lib/data/readSession';
 import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
-import { deriveRootSlotUuid, randomSlotUuid } from '@/lib/pq/slotId';
+import { deriveRootSlotUuid, randomSlotUuid } from '@buckitup/pq-client/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
 
 const CONTACT_ACCESS_RETRY_MS = 5_000;

@@ -1,21 +1,26 @@
-import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import { sha3_256, sha3_512 } from '@noble/hashes/sha3';
+import { sha3_256 } from '@noble/hashes/sha3';
 import { hmac } from '@noble/hashes/hmac';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
+import { hexToBytes } from '@noble/hashes/utils';
+import {
+    dialogHash,
+    wrapSenderMsgKey,
+    unwrapSenderMsgKey,
+    encryptContent,
+    decryptContent,
+    reactionHash,
+    receiptHash,
+} from '@buckitup/pq-client/dialogs';
 
-import { arrayToBase64, decodeHexOrBase64 } from './enigma';
-
+// The app's entry to the dialog cryptography of @buckitup/pq-client/dialogs.
 export class DialogCrypto {
     /**
      * Compute dialog_hash from two user hashes
-     * @param {string} userA 
-     * @param {string} userB 
+     * @param {string} userA
+     * @param {string} userB
      * @returns {string} dialog_hash
      */
     static computeDialogHash(userA, userB) {
-        const sorted = [userA, userB].sort();
-        const hash = sha3_512(this.strToBytes(sorted[0] + sorted[1]));
-        return "di_" + bytesToHex(hash);
+        return dialogHash(userA, userB);
     }
 
     /**
@@ -58,160 +63,59 @@ export class DialogCrypto {
 
     /**
      * Encap and wrap the sender_msg_key for the peer
-     * @param {Uint8Array} senderMsgKey 
-     * @param {Uint8Array} peerCryptPkey 
+     * @param {Uint8Array} senderMsgKey
+     * @param {Uint8Array} peerCryptPkey
      * @returns {Promise<{ peerKemWrapKeyB64: string, peerWrappedMsgKeyB64: string }>}
      */
     static async wrapSenderMsgKey(senderMsgKey, peerCryptPkey) {
-        // ML-KEM-1024 Encap
-        const { cipherText: peerKemWrapKey, sharedSecret } = ml_kem1024.encapsulate(peerCryptPkey);
-
-        // Derive wrap_key via HKDF-SHA3-256
-        const salt = this.strToBytes("buckitup/dialog-wrap/v1");
-        const PRK = hmac(sha3_256, salt, sharedSecret);
-        const info = new Uint8Array([...this.strToBytes("wrap"), 0x01]);
-        const wrapKey = hmac(sha3_256, PRK, info);
-
-        // AES-256-GCM Encrypt
-        const nonce = crypto.getRandomValues(new Uint8Array(12));
-        const cryptoKey = await crypto.subtle.importKey(
-            'raw', wrapKey, 'AES-GCM', false, ['encrypt']
-        );
-        
-        const ciphertextBuf = await crypto.subtle.encrypt(
-            { name: 'AES-GCM', iv: nonce },
-            cryptoKey,
-            senderMsgKey
-        );
-        
-        const peerWrappedMsgKey = new Uint8Array(nonce.length + ciphertextBuf.byteLength);
-        peerWrappedMsgKey.set(nonce, 0);
-        peerWrappedMsgKey.set(new Uint8Array(ciphertextBuf), nonce.length);
-
-        return { 
-            peerKemWrapKeyB64: arrayToBase64(peerKemWrapKey), 
-            peerWrappedMsgKeyB64: arrayToBase64(peerWrappedMsgKey) 
-        };
+        const row = await wrapSenderMsgKey(senderMsgKey, peerCryptPkey);
+        return { peerKemWrapKeyB64: row.peer_kem_wrap_key_b64, peerWrappedMsgKeyB64: row.peer_wrapped_msg_key_b64 };
     }
 
     /**
      * Decap and unwrap the sender_msg_key sent by peer
-     * @param {Uint8Array} ownCryptSkey 
-     * @param {string} peerKemWrapKeyB64 
-     * @param {string} peerWrappedMsgKeyB64 
+     * @param {Uint8Array} ownCryptSkey
+     * @param {string} peerKemWrapKeyB64
+     * @param {string} peerWrappedMsgKeyB64
      * @returns {Promise<Uint8Array>}
      */
-    static async unwrapSenderMsgKey(ownCryptSkey, peerKemWrapKeyB64, peerWrappedMsgKeyB64) {
-        const peerKemWrapKey = decodeHexOrBase64(peerKemWrapKeyB64);
-        const peerWrappedMsgKey = decodeHexOrBase64(peerWrappedMsgKeyB64);
-
-        // ML-KEM-1024 Decap
-        const sharedSecret = ml_kem1024.decapsulate(peerKemWrapKey, ownCryptSkey);
-
-        // Derive wrap_key via HKDF-SHA3-256
-        const salt = this.strToBytes("buckitup/dialog-wrap/v1");
-        const PRK = hmac(sha3_256, salt, sharedSecret);
-        const info = new Uint8Array([...this.strToBytes("wrap"), 0x01]);
-        const wrapKey = hmac(sha3_256, PRK, info);
-
-        // AES-256-GCM Decrypt
-        const nonce = peerWrappedMsgKey.slice(0, 12);
-        const ciphertext = peerWrappedMsgKey.slice(12);
-
-        const cryptoKey = await crypto.subtle.importKey(
-            'raw', wrapKey, 'AES-GCM', false, ['decrypt']
-        );
-
-        const plaintextBuf = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: nonce },
-            cryptoKey,
-            ciphertext
-        );
-
-        return new Uint8Array(plaintextBuf);
+    static unwrapSenderMsgKey(ownCryptSkey, peerKemWrapKeyB64, peerWrappedMsgKeyB64) {
+        return unwrapSenderMsgKey(ownCryptSkey, peerKemWrapKeyB64, peerWrappedMsgKeyB64);
     }
 
     /**
      * Encrypt message content (AES-256-GCM)
-     * @param {Uint8Array} senderMsgKey 
-     * @param {string} plaintextJson 
-     * @returns {Promise<Uint8Array>} content_b64 (nonce || ciphertext)
+     * @param {Uint8Array} senderMsgKey
+     * @param {string} plaintextJson
+     * @returns {Promise<string>} content_b64 (nonce || ciphertext)
      */
-    static async encryptContent(senderMsgKey, plaintextJson) {
-        const nonce = crypto.getRandomValues(new Uint8Array(12));
-        const cryptoKey = await crypto.subtle.importKey(
-            'raw', senderMsgKey, 'AES-GCM', false, ['encrypt']
-        );
-        const ciphertextBuf = await crypto.subtle.encrypt(
-            { name: 'AES-GCM', iv: nonce },
-            cryptoKey,
-            this.strToBytes(plaintextJson)
-        );
-        const contentB64 = new Uint8Array(nonce.length + ciphertextBuf.byteLength);
-        contentB64.set(nonce, 0);
-        contentB64.set(new Uint8Array(ciphertextBuf), nonce.length);
-        return arrayToBase64(contentB64);
+    static encryptContent(senderMsgKey, plaintextJson) {
+        return encryptContent(senderMsgKey, plaintextJson);
     }
 
     /**
-     * Decrypt message content (AES-256-GCM)
-     * @param {Uint8Array} senderMsgKey 
-     * @param {Uint8Array} contentB64 
+     * Decrypt message content (AES-256-GCM); "" for a deleted message
+     * @param {Uint8Array} senderMsgKey
+     * @param {string | null | undefined} contentB64Str
      * @returns {Promise<string>}
      */
-    static async decryptContent(senderMsgKey, contentB64Str) {
-        if (!contentB64Str || contentB64Str.length === 0) return ""; // Deleted flag handling
-        
-        const contentB64 = decodeHexOrBase64(contentB64Str);
-        if (!contentB64) return "";
-
-        const nonce = contentB64.slice(0, 12);
-        const ciphertext = contentB64.slice(12);
-        const cryptoKey = await crypto.subtle.importKey(
-            'raw', senderMsgKey, 'AES-GCM', false, ['decrypt']
-        );
-        const plaintextBuf = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: nonce },
-            cryptoKey,
-            ciphertext
-        );
-        return new TextDecoder().decode(plaintextBuf);
+    static decryptContent(senderMsgKey, contentB64Str) {
+        return decryptContent(senderMsgKey, contentB64Str);
     }
 
     /**
      * Compute Reaction Hash (Keyed MAC)
-     * @param {Uint8Array} senderMsgKey 
-     * @param {string} messageId 
-     * @param {string} reactorHash 
-     * @param {string} typePlaintext 
      * @returns {string} reaction_hash
      */
     static computeReactionHash(senderMsgKey, messageId, reactorHash, typePlaintext) {
-        const msgIdBytes = this.strToBytes(messageId);
-        const reactorHashBytes = this.strToBytes(reactorHash);
-        const typePlaintextBytes = this.strToBytes(typePlaintext);
-
-        const data = new Uint8Array(msgIdBytes.length + reactorHashBytes.length + typePlaintextBytes.length);
-        data.set(msgIdBytes, 0);
-        data.set(reactorHashBytes, msgIdBytes.length);
-        data.set(typePlaintextBytes, msgIdBytes.length + reactorHashBytes.length);
-
-        // HMAC-SHA3-512
-        const mac = hmac(sha3_512, senderMsgKey, data);
-        return "dmr_" + bytesToHex(mac);
+        return reactionHash(senderMsgKey, messageId, reactorHash, typePlaintext);
     }
 
     /**
      * Compute Receipt Hash
-     * @param {string} messageId 
-     * @param {string} messageSignHash 
-     * @param {string} peerHash 
-     * @param {string} type 
      * @returns {string} receipt_hash
      */
     static computeReceiptHash(messageId, messageSignHash, peerHash, type) {
-        const dataStr = `${messageId}${messageSignHash}${peerHash}${type}`;
-        const hash = sha3_512(this.strToBytes(dataStr));
-        return "dmrc_" + bytesToHex(hash);
+        return receiptHash(messageId, messageSignHash, peerHash, type);
     }
 }

@@ -8,8 +8,8 @@ import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
-import { encodeContent } from '@/lib/pq/content';
+import { signFields, deriveSignHash, toBase64 } from '@buckitup/pq-client/signature';
+import { encodeContent } from '@buckitup/pq-client/content';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { _setStoreForTests } from '@/lib/data/localStore';
 import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
@@ -19,7 +19,7 @@ import { _setAcceptedSnapshotStorageForTests, recordAccepted } from '@/lib/data/
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
 import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import type { MockInstance } from 'vitest';
-import type { SignableValue } from '@/lib/pq/signature';
+import type { SignableValue } from '@buckitup/pq-client/signature';
 import type { UserCardRow } from '@/lib/data/types';
 
 type ShapeRow = Record<string, SignableValue> & { message_id: string; sign_hash: string };

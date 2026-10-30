@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	createPrfPasskey, readLockSeed, lockSeedFromPrf, PrfUnsupportedError, PrfMissingError, PasskeyMismatchError, VAULT_LOCK_VERSION,
 	assertPrf, lockRecordFor, lockSaltOf, backupFlagsOf,
-} from '@/lib/pq/vaultLock';
+} from '@buckitup/pq-client/vaultLock';
 import { prfAuthenticator } from './helpers/prfAuthenticator';
 
 const who = { rpId: 'localhost', vaultId: 'vault1', name: 'Alice' };

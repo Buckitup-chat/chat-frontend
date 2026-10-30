@@ -4,7 +4,7 @@
 // devices, and is the source of the shared gallery row its contacts read.
 
 import { bytesToHex, randomBytes } from '@noble/hashes/utils';
-import { isAvatarId, photoFromWire, photoToWire, type AvatarPhoto } from '@/lib/pq/content';
+import { isAvatarId, photoFromWire, photoToWire, type AvatarPhoto } from '@buckitup/pq-client/content';
 
 /** A photo's longer side, at most (pq_avatars § The photo): the client resizes before sending. */
 export const AVATAR_MAX_SIDE = 640;

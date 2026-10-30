@@ -15,7 +15,7 @@
 // Every other slot gets a random uuid at creation and is reachable only
 // through the map inside the root record.
 
-import { hkdfDerive } from './hkdf';
+import { hkdfDerive } from './hkdf.js';
 
 export const ROOT_SLOT_SALT = 'buckitup/user-storage-root/v1';
 export const ROOT_SLOT_INFO = 'slot';

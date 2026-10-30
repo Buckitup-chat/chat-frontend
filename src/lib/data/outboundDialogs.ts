@@ -1,5 +1,5 @@
 import { getOutboundDialogKeysCollection } from './collections';
-import { wireBool } from '@/lib/pq/schema';
+import { wireBool } from '@buckitup/pq-client/schema';
 
 const USER_HASH = /^u_[0-9a-f]{128}$/;
 type KeyRow = { sender_hash?: unknown; peer_hash?: unknown; deleted_flag?: unknown };

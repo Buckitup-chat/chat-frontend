@@ -1,6 +1,6 @@
 import { readAcceptedRecord } from './acceptedSnapshot';
 import { assertNever, type StoredRead } from './storedRead';
-import { toBytes } from '@/lib/pq/signature';
+import { toBytes } from '@buckitup/pq-client/signature';
 import { SIGN_HASH_PREFIX, authorOf, verifyReplicatedRow, type RowVerification, type SignPkeyResolver } from './rowVerification';
 import { entityKeyOf } from './writeContracts';
 

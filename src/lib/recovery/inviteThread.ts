@@ -2,7 +2,7 @@
 // pq_recovery_shares § Inviting). Pure: the page hands in the dialog's
 // messages — a reply as its first revision — and the account's records, and
 // gets back what each invitation and reply bubble says.
-import type { ContentPart, RecoveryInvitePart, RecoveryInviteReplyPart } from '@/lib/pq/content';
+import type { ContentPart, RecoveryInvitePart, RecoveryInviteReplyPart } from '@buckitup/pq-client/content';
 import { checkInviteReply, inviteStateOf, type CheckedReply, type InviteState } from './guardianInvite';
 
 /** What the owner's roster records of one invitation, before it is sent. */

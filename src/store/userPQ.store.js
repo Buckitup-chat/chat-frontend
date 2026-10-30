@@ -5,8 +5,8 @@ import { getUserCardsCollection } from '@/lib/data/collections';
 import { preloadWithRetry } from '@/lib/data/attach';
 import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verifiedCards } from '@/lib/data/userCardsLink';
 import { mergeContactEdit } from '@/lib/data/storageIntent';
-import { contactKeyVouch } from '@/lib/pq/verifyCard';
-import { PrfUnsupportedError, forgetUnusablePasskey } from '@/lib/pq/vaultLock';
+import { contactKeyVouch } from '@buckitup/pq-client/verifyCard';
+import { PrfUnsupportedError, forgetUnusablePasskey } from '@buckitup/pq-client/vaultLock';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);

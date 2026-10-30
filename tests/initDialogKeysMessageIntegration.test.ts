@@ -5,7 +5,7 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
-import { signFields, toBase64 } from '@/lib/pq/signature';
+import { signFields, toBase64 } from '@buckitup/pq-client/signature';
 import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
 import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';

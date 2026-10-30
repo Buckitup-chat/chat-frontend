@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { mergeJsonPatch, stripPatchDirectives } from '@/lib/data/storageIntent';
 import { SessionFencedError } from '@/lib/data/sessionGuard';
-import { toBase64Unpadded } from '@/lib/pq/signature';
+import { toBase64Unpadded } from '@buckitup/pq-client/signature';
 import {
 	obtainGalleryMapping, initialGalleryMapping, parseGalleryMapping, GalleryMappingError, SHARED_GALLERY_FIELD,
 	type GalleryMapping, type MappingRootAccess, type RootWriteStatus,

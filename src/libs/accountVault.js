@@ -1,7 +1,7 @@
 import { connect, rawStorage } from '@lo-fi/local-vault';
 import '@lo-fi/local-vault/adapter/idb';
 import { removeLocalAccount, deriveLockKey } from '@lo-fi/local-data-lock';
-import { createPrfPasskey, readLockSeed } from '@/lib/pq/vaultLock';
+import { createPrfPasskey, readLockSeed } from '@buckitup/pq-client/vaultLock';
 import { VaultLockedError } from '@/lib/data/keyCustody';
 
 const VAULT_KEY_OPTIONS = {}

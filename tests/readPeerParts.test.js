@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, fromBase64 } from '@/lib/pq/signature';
+import { signFields, deriveSignHash, fromBase64 } from '@buckitup/pq-client/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { makeTestIdentity, signRow } from './helpers/signedFixtures';
 
@@ -37,7 +37,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
 const { DialogCrypto } = await import('@/libs/DialogCrypto');
-const { encodeContent } = await import('@/lib/pq/content');
+const { encodeContent } = await import('@buckitup/pq-client/content');
 
 const me = makeTestIdentity(21);
 const peer = makeTestIdentity(22);

@@ -1,7 +1,7 @@
 // Slot addressing end to end through EncryptionManagerPQ: which uuid does a
 // profile or contacts write actually land on?
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { deriveVaultLocator } from '@/lib/pq/vaultEnvelope';
+import { deriveVaultLocator } from '@buckitup/pq-client/vaultEnvelope';
 import { fetchVault, VaultLookupError } from '@/lib/recovery/vault';
 
 let rows;          // uuid -> value_b64, null once tombstoned  (stand-in for the server + local KV)

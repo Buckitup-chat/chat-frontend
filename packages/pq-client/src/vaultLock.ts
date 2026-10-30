@@ -1,5 +1,5 @@
-import { hkdfDerive } from './hkdf';
-import { toBase64, fromBase64 } from './signature';
+import { hkdfDerive } from './hkdf.js';
+import { toBase64, fromBase64 } from './signature.js';
 
 export const VAULT_LOCK_VERSION = 1;
 export const VAULT_LOCK_SALT = 'buckitup/vault-lock/v1';

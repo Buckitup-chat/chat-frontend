@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { PrfUnsupportedError } from '@/lib/pq/vaultLock';
+import { PrfUnsupportedError } from '@buckitup/pq-client/vaultLock';
 
 class FakeEM extends EventTarget {
 	locks = [];

@@ -113,7 +113,7 @@ describe('PRF-locked vault on lo-fi', () => {
 
 	it('a vault for an existing passkey makes no passkey, and that passkey opens it later', async () => {
 		const { auth, lock: first } = await newVault();
-		const { lockRecordFor, readLockSeed } = await import('@/lib/pq/vaultLock');
+		const { lockRecordFor, readLockSeed } = await import('@buckitup/pq-client/vaultLock');
 		const lock = lockRecordFor({ credentialId: first.credentialId, rpId: 'localhost' });
 		expect(lock.salt).not.toBe(first.salt);
 		const seed = await readLockSeed(auth.credentials, lock);
