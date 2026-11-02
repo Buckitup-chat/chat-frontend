@@ -36,7 +36,7 @@ import { openVideo } from '@/lib/data/videoStream';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { mergeLiveWithCached } from '@/lib/data/readCache';
 import { readDialogRow, readDialogRows } from '@/lib/data/dialogCache';
-import { settled } from '@/lib/data/shapeLink';
+import { isLiveNow, settled } from '@/lib/data/shapeLink';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
@@ -1398,12 +1398,15 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // Every await below may outlive the session: nothing is written for
         // `me` once another account is open.
         const stillMine = () => $userPQ.currentUserHash === me;
-        const { rows, pointer } = await withDialogCollections(dialogHash, async (colls) => {
+        const { rows, loaded, live, pointer } = await withDialogCollections(dialogHash, async (colls) => {
             const read = await admittedRowsOf(dialogHash, colls, stillMine);
-            if (!read) return { rows: [], pointer: stored };
+            if (!read) return { rows: [], loaded: [], live: false, pointer: stored };
             const { rows: loaded, admitted } = read;
             const isAdmitted = (r) => isRowAdmitted(dialogHash, r);
-            return { rows: admitted, pointer: await findLatestCheckpoint(dialogHash, loaded, stored, colls, isAdmitted, me) };
+            return {
+                rows: admitted, loaded, live: isLiveNow(colls.messages),
+                pointer: await findLatestCheckpoint(dialogHash, loaded, stored, colls, isAdmitted, me),
+            };
         });
         if (!stillMine()) return null;
         if (pointer.scannedTo !== stored.scannedTo || pointer.checkpoint !== stored.checkpoint) {
@@ -1418,6 +1421,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
         if (!pointer.checkpoint) {
             checkpointAlerts.value.delete(peerHash);
             return null;
+        }
+        // A dialog that did not load reads as empty, and an empty dialog
+        // differs from every checkpoint. Without the checkpoint's own message
+        // in sight and the shape not live, there is nothing to compare with.
+        if (!live && !loaded.some((r) => r.message_id === pointer.checkpoint.messageId)) {
+            throw new Error('the dialog could not be read');
         }
 
         const alert = {

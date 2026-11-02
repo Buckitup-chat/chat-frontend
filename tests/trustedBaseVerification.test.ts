@@ -61,6 +61,7 @@ const { verifiedCards } = await import('@/lib/data/userCardsLink');
 const { useDialogsStore } = await import('@/store/dialogs.store');
 const { DialogCrypto } = await import('@/libs/DialogCrypto');
 const { encodeContent } = await import('@buckitup/pq-client/content');
+const { rawViewState } = await import('@/lib/data/checkpointAlerts');
 
 const memStore = () => {
 	const map = new Map<string, string>();
@@ -307,6 +308,18 @@ describe('checkpoints: read only from admitted revisions', () => {
 		deliver(parent);
 		expect(await store.refreshCheckpointAlert(peer.userHash)).toMatchObject({ messageId: carrier.message_id });
 		expect(await store.refreshCheckpointAlert(peer.userHash)).toMatchObject({ messageId: carrier.message_id });
+	});
+
+	it('a dialog that did not load is not read as a changed one', async () => {
+		const earlier = await message([{ kind: 'text', text: 'earlier' }], {}, 1_700_000_100);
+		const carrier = await message([{ ...checkpointPart(), viewRoot: buildViewTree(rawViewState([earlier] as never)).root }]);
+		deliver(earlier);
+		deliver(carrier);
+		expect(await store.refreshCheckpointAlert(peer.userHash)).toMatchObject({ changed: false });
+		await store.refreshCheckpointAlert(peer.userHash);
+		collections.dialog.messages.rows.clear();
+		await expect(store.refreshCheckpointAlert(peer.userHash)).rejects.toThrow(/could not be read/);
+		expect(store.alertingPeers.size).toBe(0);
 	});
 
 	it('a blocked row is not admitted and does not move the alert', async () => {
