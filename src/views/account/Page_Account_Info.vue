@@ -39,7 +39,7 @@
 					</div>
 					<div class="_edit_actions">
 						<button type="button" class="ui-btn _text" @click="editing = false">Cancel</button>
-						<button type="submit" class="ui-btn" :class="{ _disabled: !hasChanges || saving }">Save</button>
+						<button type="submit" class="ui-btn" :disabled="!hasChanges || saving">Save</button>
 					</div>
 				</form>
 
