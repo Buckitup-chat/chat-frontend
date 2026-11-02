@@ -7,6 +7,7 @@
     <!-- Header -->
     <div class="chat-header d-flex align-items-center justify-content-between px-3 py-2 border-bottom">
       <div class="d-flex align-items-center text-dark">
+        <UiBackToList />
         <!-- Avatar -->
         <!-- Tapping the peer's picture opens their photo gallery. -->
         <div
@@ -28,9 +29,6 @@
         <!-- Only a contact confirmed in person can be asked (pq_recovery_shares § Inviting). -->
         <button v-if="peerHash && canInvite" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Ask to be your guardian"
           :disabled="inviting" @click="emit('inviteGuardian')">🛡</button>
-        <div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')">
-          <div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>
-        </div>
       </div>
     </div>
 
@@ -422,11 +420,10 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { fileKey } from '@/lib/data/fileKey';
 import { contentToText, quoteSnapshot } from '@buckitup/pq-client/content';
-import { useBreakpoint } from '@/composables/useBreakpoint';
+import UiBackToList from '@/components/ui/UiBackToList.vue';
 import RecoveryInviteCard from './RecoveryInviteCard.vue';
 import RecoveryShareCard from './RecoveryShareCard.vue';
 import RecoveryHoldingLine from './RecoveryHoldingLine.vue';
-import { useMenu } from '@/composables/useMenu';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
 import { playableAudioType } from '@/composables/useAudioPlayback';
 import Avatar from 'vue-boring-avatars';
@@ -434,8 +431,6 @@ import GalleryViewer from '@/components/GalleryViewer.vue';
 import { thumbDataUrl } from '@/lib/data/imageMeta';
 import { isAvatarPart, isControlPart } from '@buckitup/pq-client/content';
 
-const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
-const $breakpoint = useBreakpoint();
 const defaultAvatar = '/img/profile.webp';
 
 const EMOJI_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '💯', '👀', '🎉', '👏', '🤔', '😎', '🚀', '✨', '💪'];
@@ -1344,70 +1339,6 @@ watch(() => props.messages, () => {
   border-radius: 3px;
 }
 
-._toggler {
-  border: none;
-  padding: 0.75rem 1rem;
-  cursor: pointer;
-
-  div {
-    width: 22px;
-    height: 20px;
-    position: relative;
-    transform: rotate(0deg);
-    transition: 0.5s ease-in-out;
-    cursor: pointer;
-
-    span {
-      display: block;
-      position: absolute;
-      height: 3px;
-      width: 100%;
-      background: $dark;
-      border-radius: 2px;
-      opacity: 1;
-      left: 0;
-      transform: rotate(0deg);
-      transition: 0.25s ease-in-out;
-
-      &:nth-child(1) {
-        top: 0px;
-      }
-
-      &:nth-child(2),
-      &:nth-child(3) {
-        top: 8px;
-      }
-
-      &:nth-child(4) {
-        top: 16px;
-      }
-    }
-
-    &._open {
-      span {
-        &:nth-child(1) {
-          top: 8px;
-          width: 0%;
-          left: 50%;
-        }
-
-        &:nth-child(2) {
-          transform: rotate(45deg);
-        }
-
-        &:nth-child(3) {
-          transform: rotate(-45deg);
-        }
-
-        &:nth-child(4) {
-          top: 16px;
-          width: 0%;
-          left: 50%;
-        }
-      }
-    }
-  }
-}
 
 /* ---------- design board: quotes (§1.2) ---------- */
 .msg-quote {

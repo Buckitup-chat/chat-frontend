@@ -62,7 +62,7 @@ const clickable = computed(() => !!props.to || props.button);
 		background: var(--color-accent-tint);
 		color: var(--color-accent-dark);
 		._sub { color: var(--color-accent-dark); }
-		._lead { background: var(--color-bg); }
+		&:not(._bare) ._lead { background: var(--color-bg); }
 		._lead i { background-color: var(--color-accent); }
 	}
 }

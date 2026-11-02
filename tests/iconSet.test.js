@@ -24,4 +24,12 @@ describe('the icon set', () => {
 		expect(used.size).toBeGreaterThan(0);
 		expect(missing).toEqual([]);
 	});
+
+	it('registers every icon file it ships, and ships every icon it registers', () => {
+		const set = readFileSync('src/scss/icons.scss', 'utf8');
+		const registered = [...set.matchAll(/^\t'([a-z0-9_]+)',?$/gm)].map((m) => m[1]).sort();
+		const files = readdirSync('public/icons').filter((f) => f.endsWith('.svg')).map((f) => f.slice(0, -4)).sort();
+		expect(registered.length).toBeGreaterThan(40);
+		expect(registered).toEqual(files);
+	});
 });

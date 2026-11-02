@@ -1,83 +1,26 @@
 <template>
 	<div class="_menu">
-		<div class="_main">
-			<div class="_menu_container">
-				<div class="_logo_block">
-					<div class="_icon_logo"></div>
-				</div>
+		<!-- The sections: a dark rail on a desktop, tabs at the bottom on a phone. -->
+		<nav class="_rail" aria-label="Sections">
+			<div class="_logo" v-if="!$breakpoint.lt('md')"><i class="_icon_logo"></i></div>
 
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'rooms' }" @click="$router.push('/rooms')">
-					<i class="_icon_rooms" :class="{ _active: menu === 'rooms' }"></i>
-					<div>Rooms</div>
-				</div>
+			<router-link v-for="tab in tabs" :key="tab.key" :to="tab.to" class="_tab" :class="[`_${tab.key}`, { _active: menu === tab.key }]"
+				:aria-label="tab.label" :aria-current="menu === tab.key ? 'page' : undefined" :title="tab.label">
+				<i :class="menu === tab.key ? `_icon_${tab.icon}_filled` : `_icon_${tab.icon}`"></i>
+				<span>{{ tab.label }}</span>
+			</router-link>
 
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'chats' }" @click="$router.push('/chats')">
-					<i class="_icon_chats" :class="{ _active: menu === 'chats' }"></i>
-					<div>Chats</div>
-				</div>
-
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'contacts' }" @click="$router.push('/contacts')">
-					<i class="_icon_contacts" :class="{ _active: menu === 'contacts' }"></i>
-					<div>Contacts</div>
-				</div>
-
-				<!-- <div class="_menu_btn order-1" :class="{ _active: menu === 'users' }" @click="$router.push('/users')">
-					<i class="_icon_contacts" :class="{ _active: menu === 'users' }"></i>
-					<div>Users</div>
-				</div> -->
-
-				<div class="_menu_btn order-1" :class="{ _active: menu === 'account' }" @click="$router.push('/account')">
-					<i class="_icon_profile" :class="{ _active: menu === 'account' }"></i>
-					<div>Account</div>
-				</div>
-
-				<div class="_menu_btn order-1" @click="navigateToTrusted">
-					<div class="fs-4">BE</div>
-				</div>
-
-				<div class="_menu_btn order-1" @click="navigateToElectric">
-					<div class="fs-4">EL</div>
-				</div>
-
-				<!-- <div class="_menu_btn order-1" :class="{ _active: $route.path === '/storage-api-client' }"
-					@click="$router.push('/storage-api-client')">
-					<i class="_icon_share" :class="{ _active: $route.path === '/storage-api-client' }"></i>
-					<div>storage</div>
-				</div> -->
-
-				<!--div class="_menu_btn order-1" :class="{ _active: menu === 'backup' }" @click="menu = 'backup'">
-					<i class="_icon_share" :class="{ _active: menu === 'backup' }"></i>
-					<div>Share</div>
-				</div-->
+			<!-- The team's links to the server's own pages, desktop only. -->
+			<div class="_legacy" v-if="!$breakpoint.lt('md')">
+				<a href="/trusted" title="Trusted (previous version)">BE</a>
+				<a href="/electric" title="Electric">EL</a>
+				<div class="_bp" v-if="!$isProd">{{ $breakpoint.current }}</div>
 			</div>
-			<div class="opacity-25" v-if="!$isProd">{{ $breakpoint.current }}</div>
-
-			<div class="_bottom_container">
-				<div class="_menu_btn mb-3" @click="$mitt.emit('modal::open', { id: 'logout' })">
-					<i class="_icon_logout"></i>
-				</div>
-			</div>
-		</div>
+		</nav>
 
 		<div class="_sub">
-			<div class="d-flex justify-content-between align-items-center p-2" v-if="menu">
-				<div class="fw-bold fs-5 ms-2">{{ menuRegistry[menu].subName }}</div>
-
-				<div class="d-flex align-items-center">
-					<!--button class="btn btn-dark rounded-pill p-2 me-2" v-if="['chats', 'rooms', 'contacts', 'backup'].includes(menu)" @click="addAction()">
-						<i class="_icon_plus bg-white opacity-75"></i>
-					</button>
-
-					<button class="btn btn-dark rounded-pill p-2 me-2" v-if="['account'].includes(menu)" @click="$mitt.emit('modal::open', { id: 'logout' })">
-						<i class="_icon_logout bg-white opacity-75"></i>
-					</button-->
-
-					<div class="_btn_back" @click="closeMenu()" v-if="$router.options.history.state.back && $breakpoint.lt('md')">
-						<i class="_icon_times"></i>
-					</div>
-				</div>
-			</div>
-			<div class="px-2" v-if="component">
+			<h1 class="_title" v-if="menu">{{ menuRegistry[menu].title }}</h1>
+			<div class="_list" v-if="component">
 				<component :is="component"></component>
 			</div>
 			<!-- Screen 11: the queue follows the user out of the dialog. -->
@@ -90,276 +33,163 @@
 @import '@/scss/variables.scss';
 @import '@/scss/breakpoints.scss';
 
-._account {
+._menu {
 	display: flex;
-	flex-direction: column;
-	align-items: center;
-	width: $sideBarWidth;
-	padding-bottom: 0.5rem;
-	padding-left: 0.5rem;
-	padding-right: 0.5rem;
-	cursor: pointer;
+	flex-direction: column-reverse;
+	width: 100%;
+	height: 100%;
+	background: var(--color-surface);
 
-	._avatar {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		height: 3rem;
-		width: 3rem;
-		border-radius: 50%;
-		overflow: hidden;
-		flex-shrink: 0; // Prevents shrinking when text overflows
-		margin-bottom: 0.2rem;
-
-		img,
-		svg {
-			height: 100%;
-			width: 100%;
-			border-radius: 30rem;
-			object-fit: cover;
-		}
-	}
-
-	._name {
-		font-weight: 500;
-		font-size: 0.9rem;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		max-width: 100%; // Ensures truncation works properly
-		display: block; // Ensures proper alignment
-	}
-
-	&:hover {
-		._name {
-			color: $primary;
-		}
+	@include media-breakpoint-up(md) {
+		flex-direction: row;
+		width: unset;
 	}
 }
 
-._menu {
+._rail {
 	display: flex;
-	width: 100%;
+	flex-shrink: 0;
+	background: var(--color-bg);
+	border-top: 1px solid var(--color-border);
+	padding-bottom: env(safe-area-inset-bottom);
 
-	@include media-breakpoint-up(sm) {
-		width: unset;
-	}
-
-	._main {
-		display: flex;
+	@include media-breakpoint-up(md) {
 		flex-direction: column;
 		align-items: center;
-		background-color: $white;
-		justify-content: space-between;
-		width: 4.4rem;
-		max-width: 4.4rem;
+		gap: var(--space-2);
+		width: 72px;
+		padding: var(--space-4) 0;
+		border-top: 0;
+		background: var(--color-ink);
+	}
+}
 
-		._logo_block {
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			padding: 0.8rem 0rem;
+._logo {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 40px;
+	height: 40px;
+	margin-bottom: var(--space-4);
+	border-radius: var(--radius-input);
+	background: var(--gradient-brand);
 
-			._icon_logo {
-				width: 3rem;
-				height: 3rem;
-			}
-		}
+	i { width: 28px; height: 28px; background-color: var(--color-text-on-dark); }
+}
 
-		._menu_btn {
-			display: flex;
-			flex-direction: column;
-			align-items: center;
-			justify-content: center;
-			display: flex;
-			align-items: center;
-			cursor: pointer;
-			transition: $transition;
-			font-size: 0.9rem;
-			padding: 0.6rem 0.5rem;
-			margin-bottom: 0.5rem;
-			font-weight: 500;
+._tab {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 2px;
+	padding: var(--space-2) 0 var(--space-1);
+	color: var(--color-text-secondary);
+	font-size: var(--text-xs);
+	line-height: var(--leading-xs);
+	text-decoration: none;
 
-			span {
-				display: none;
+	i { width: 24px; height: 24px; background-color: currentColor; }
 
-				@include media-breakpoint-up(lg) {
-					display: block;
-				}
-			}
+	&._active { color: var(--color-accent); }
+	&:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
 
-			i {
-				height: 1.6rem;
-				width: 1.6rem;
-				background-color: $black;
-				transition: $transition;
-			}
+	@include media-breakpoint-up(md) {
+		flex: 0 0 auto;
+		justify-content: center;
+		width: 48px;
+		height: 48px;
+		padding: 0;
+		border-radius: var(--radius-input);
+		color: rgba(255, 255, 255, 0.72);
 
-			&:hover {
-				color: $primary;
+		span { display: none; }
 
-				i {
-					background-color: $primary;
-				}
-			}
+		&:hover { background: rgba(255, 255, 255, 0.08); color: var(--color-text-on-dark); }
+		&._active { background: rgba(255, 255, 255, 0.14); color: var(--color-text-on-dark); }
 
-			&._active {
-				color: $primary;
+		// Account sits at the bottom of the rail
+		&._account { order: 2; }
+	}
+}
 
-				i {
-					background-color: $primary;
-				}
-			}
-		}
+._legacy {
+	order: 1;
+	margin-top: auto;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: var(--space-2);
+	padding-bottom: var(--space-2);
 
-		._menu_container {
-			display: block;
-		}
-
-		._bottom_container {
-			text-align: center;
-		}
+	a {
+		color: rgba(255, 255, 255, 0.5);
+		font-size: var(--text-xs);
+		font-weight: var(--weight-medium);
+		text-decoration: none;
+		&:hover { color: var(--color-text-on-dark); }
 	}
 
-	._sub {
-		background-color: darken($white, 5%);
-		flex-grow: 1;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
+	._bp { color: rgba(255, 255, 255, 0.3); font-size: var(--text-xs); }
+}
 
-		._menu {
-			height: 100%;
-			width: 100%;
-		}
+._sub {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	overflow-y: auto;
+	padding: var(--space-4) var(--space-4) 0;
 
-		._logo_block {
-			display: none;
-			align-items: center;
-			justify-content: center;
-			height: $headerHeighSm;
-
-			@include media-breakpoint-up(md) {
-				display: flex;
-			}
-
-			@include media-breakpoint-up(lg) {
-				justify-content: start;
-				padding: 1rem;
-			}
-
-			._icon_logo {
-				width: 100%;
-				height: 100%;
-			}
-		}
-
-		._menu_btn {
-			display: flex;
-			flex-direction: column;
-			align-items: center;
-			justify-content: center;
-			display: flex;
-			align-items: center;
-			font-weight: 400;
-			cursor: pointer;
-			transition: $transition;
-			width: 5rem;
-
-			@include media-breakpoint-up(sm) {
-				padding: 0.8rem 0;
-				margin-bottom: 0.5rem;
-				width: unset;
-			}
-
-			span {
-				display: none;
-
-				@include media-breakpoint-up(lg) {
-					display: block;
-				}
-			}
-
-			i {
-				height: 1.6rem;
-				width: 1.6rem;
-				background-color: $black;
-				transition: $transition;
-			}
-
-			&:hover {
-				color: $primary;
-
-				i {
-					background-color: $primary;
-				}
-			}
-
-			&._active {
-				font-weight: 700;
-			}
-		}
-
-		._bottom_container {
-			position: absolute;
-			bottom: 0;
-			width: 100%;
-			display: none;
-			text-align: center;
-
-			@include media-breakpoint-up(sm) {
-				display: block;
-			}
-		}
-
-		._logout_btn {
-			i {
-				background-color: $dark;
-			}
-		}
+	@include media-breakpoint-up(md) {
+		width: 320px;
+		flex: 0 0 320px;
+		background: var(--color-bg);
+		border-right: 1px solid var(--color-border);
+		padding: var(--space-6) var(--space-3) 0;
 	}
+}
+
+._title {
+	margin: 0 0 var(--space-4);
+	padding: 0 var(--space-1);
+	font-size: var(--text-xl);
+	line-height: var(--leading-xl);
+	font-weight: var(--weight-semibold);
+	color: var(--color-text);
+
+	@include media-breakpoint-up(md) {
+		padding: 0 var(--space-3);
+	}
+}
+
+._list {
+	flex: 1;
 }
 </style>
 
 <script setup>
 import TransferDock from '@/components/chat/TransferDock.vue';
 import { useBreakpoint } from '@/composables/useBreakpoint';
-
-
-import { useMenu } from '@/composables/useMenu';
-
 import { shallowRef, defineAsyncComponent, inject, watch, computed } from 'vue';
-
-const $router = inject('$router');
 const $route = inject('$route');
-
-const $mitt = inject('$mitt');
+const $isProd = inject('$isProd');
 const $breakpoint = useBreakpoint();
-const { close: closeMenu } = useMenu();
+
+const tabs = [
+	{ key: 'chats', label: 'Chats', icon: 'chats', to: '/chats' },
+	{ key: 'contacts', label: 'Contacts', icon: 'contacts', to: '/contacts' },
+	{ key: 'rooms', label: 'Rooms', icon: 'rooms', to: '/rooms' },
+	{ key: 'account', label: 'Account', icon: 'profile', to: '/account' },
+];
 
 const menuRegistry = {
-	contacts: {
-		component: 'Menu_Contacts',
-		subName: 'My Contacts',
-	},
-	users: {
-		component: 'Menu_Users',
-		subName: 'Network Users',
-	},
-	rooms: {
-		component: 'Menu_Rooms',
-		subName: 'Rooms',
-	},
-	chats: {
-		component: 'Menu_Chats',
-		subName: 'Chats',
-	},
-	account: {
-		component: 'Menu_Account',
-		subName: 'My account',
-	},
+	contacts: { component: 'Menu_Contacts', title: 'Contacts' },
+	users: { component: 'Menu_Users', title: 'Network Users' },
+	rooms: { component: 'Menu_Rooms', title: 'Rooms' },
+	chats: { component: 'Menu_Chats', title: 'Chats' },
+	account: { component: 'Menu_Account', title: 'Account' },
 };
-
 const menu = computed(() => {
 	const routeName = $route.name;
 	if (!routeName) return null;
@@ -370,22 +200,10 @@ const menu = computed(() => {
 	if (routeName.includes('account') || routeName.includes('backup')) return 'account';
 	return null;
 });
-
 const component = shallowRef(null);
-
 watch(menu, (val) => {
 	const registry = val && menuRegistry[val];
 	if (!registry) { component.value = null; return; }
 	component.value = defineAsyncComponent(() => import(`./views/${registry.component}.vue`));
 }, { immediate: true });
-
-// TODO: REFACTOR - These hardcoded URLs should use $router.push() for SPA navigation
-// External URLs break the SPA experience and re-initialize the app
-const navigateToTrusted = () => {
-	window.location.href = '/trusted';
-};
-
-const navigateToElectric = () => {
-	window.location.href = '/electric';
-};
 </script>

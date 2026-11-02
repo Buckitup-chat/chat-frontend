@@ -27,7 +27,6 @@ $_icons: (
 	'reload',
 	'info',
 	'signin',
-	'signout',
 	'eye',
 	'eye_cross',
 	//
@@ -41,7 +40,26 @@ $_icons: (
 	'unlock',
 	'attach',
 	'reply',
-	'arrow_down'
+	'arrow_down',
+	// the 2026-10 set: account, devices, backups, notes, the handshake, message states
+	'backup_file',
+	'checkpoint',
+	'device_link',
+	'devices',
+	'guardians',
+	'msg_failed',
+	'msg_pending',
+	'notes',
+	'passkey',
+	'qr_handshake',
+	'venue',
+	'verified',
+	// filled: the selected tab
+	'chats_filled',
+	'contacts_filled',
+	'notes_filled',
+	'profile_filled',
+	'rooms_filled'
 );
 
 @each $name in $_icons {
