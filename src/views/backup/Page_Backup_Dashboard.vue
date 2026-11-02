@@ -34,7 +34,7 @@
 								+ Create Backup
 							</button>
 							<button class="btn btn-dark flex-fill" @click="openModal('account_restore_local')">
-								<i class="bi bi-arrow-clockwise"></i> Restore
+								<i class="_icon_reload icon-inline"></i>Restore
 							</button>
 						</div>
 					</div>
