@@ -12,19 +12,12 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { loadCheckpointComparison } from '@/lib/data/checkpointComparison';
 import { checkpointSummaryText, countCheckpointChanges, groupCheckpointDialogs } from '@/lib/data/checkpointSummary';
+import { withBudget } from '@/lib/withBudget';
 
 /** A dialog's check, like the store's sweep: one stuck shape must not hold up the rest. */
 export const CHECK_BUDGET_MS = 15_000;
 /** The comparison reads the whole dialog three times over; it gets longer. */
 export const COMPARE_BUDGET_MS = 30_000;
-
-const withBudget = (promise, ms) => {
-	let timer;
-	return Promise.race([
-		promise,
-		new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('budget exceeded')), ms); }),
-	]).finally(() => clearTimeout(timer));
-};
 
 /**
  * @param {object} dialogs the dialogs store

@@ -191,8 +191,6 @@
 	margin-top: var(--space-2);
 }
 
-.ui-btn i { width: 20px; height: 20px; background-color: currentColor; }
-
 ._edit {
 	display: flex;
 	flex-direction: column;

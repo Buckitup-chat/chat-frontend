@@ -314,16 +314,12 @@ async function toggleScanner() {
 	}
 }
 
-const isInContacts = computed(() => {
-	if (!contact.value || !contact.value.user_hash) return false;
-	return !!$userPQ.contactsMap[contact.value.user_hash];
-});
-
 const stored = computed(() => (contact.value?.user_hash ? $userPQ.contactsMap[contact.value.user_hash] : null));
+const isInContacts = computed(() => !!stored.value);
 // Confirmed before, with the key the handshake proved again: there is nothing to save.
 const alreadyConfirmed = computed(() => !!contact.value?.confirmed && !!stored.value?.confirmed
 	&& stored.value.contact_pkey === contact.value.contact_pkey);
-const shownConfirmed = computed(() => !mismatch.value && (alreadyConfirmed.value || !!contact.value?.confirmed));
+const shownConfirmed = computed(() => !mismatch.value && !!contact.value?.confirmed);
 const initials = computed(() => (contact.value?.name || '?').trim().slice(0, 2).toUpperCase());
 
 const openContact = () => {

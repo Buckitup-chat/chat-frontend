@@ -37,6 +37,7 @@ import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { mergeLiveWithCached } from '@/lib/data/readCache';
 import { readDialogRow, readDialogRows } from '@/lib/data/dialogCache';
 import { isLiveNow, settled } from '@/lib/data/shapeLink';
+import { withBudget } from '@/lib/withBudget';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
@@ -45,15 +46,6 @@ const safeBase64Decode = (str, fieldName) => {
     const result = decodeHexOrBase64(str);
     if (!result) throw new Error(`${fieldName} is empty`);
     return result;
-};
-
-/** `promise`, or a rejection once `ms` pass first: one slow dialog read must not wedge what waits on it. */
-const withBudget = (promise, ms, label) => {
-    let timer;
-    return Promise.race([
-        promise,
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} budget exceeded`)), ms); }),
-    ]).finally(() => clearTimeout(timer));
 };
 
 export const useDialogsStore = defineStore('dialogs', () => {
@@ -1461,15 +1453,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
             // that is hundreds of strangers. An alert is only possible where
             // this account has a checkpoint pointer, and those dialogs are
             // indexed; everything else is skipped without opening a shape.
-            const indexed = await pointerDialogs($userPQ.currentUserHash);
+            const peers = await checkpointPeers(peerHashes);
             // null = the index could not be read (locked storage, transient
             // failure). Skipping the tick keeps the 30s retry alive; treating
             // it as "empty" would silently disable every alert for the session.
-            if (indexed === null) return;
-            for (const peerHash of peerHashes) {
-                if (!peerHash || peerHash === $userPQ.currentUserHash) continue;
-                const dialogHash = getDialogHash(peerHash);
-                if (!dialogHash || !indexed.has(dialogHash)) continue;
+            if (peers === null) return;
+            for (const peerHash of peers) {
                 try {
                     await withBudget(refreshCheckpointAlert(peerHash), REFRESH_BUDGET_MS, 'refresh');
                 } catch (e) {

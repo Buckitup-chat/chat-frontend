@@ -17,9 +17,9 @@
 					</button>
 				</section>
 
-				<div v-if="installing" class="ui-card _state" data-test="installing">
-					<span class="_spinner"></span>
-					<div>Installing… Confirm in the browser window.</div>
+				<div v-if="installing" class="ui-card _text_card" data-test="installing">
+					<div>Installing…</div>
+					<div class="ui-small ui-secondary">Confirm in the browser window.</div>
 				</div>
 
 				<div v-else-if="mode === 'installed'" class="ui-card _state" data-test="installed">
@@ -53,7 +53,7 @@
 				<div v-else-if="mode === 'unsupported'" class="ui-card _text_card" data-test="install-unsupported">
 					<div>{{ device.browser }} can't install apps</div>
 					<div class="ui-small ui-secondary">
-						Open this page in {{ device.name === 'iPhone' || device.name === 'iPad' ? 'Safari' : 'Chrome, Edge or Safari' }}.
+						Open this page in {{ device.ios ? 'Safari' : 'Chrome, Edge or Safari' }}.
 						You can keep using BuckitUp here as it is.
 					</div>
 				</div>
@@ -141,18 +141,6 @@
 	&._success { background: var(--color-success-bg); i { background-color: var(--color-success); } }
 	i { width: 18px; height: 18px; }
 }
-
-._spinner {
-	flex-shrink: 0;
-	width: 20px;
-	height: 20px;
-	border: 2px solid var(--color-border);
-	border-top-color: var(--color-accent);
-	border-radius: 50%;
-	animation: _spin 0.9s linear infinite;
-}
-
-@keyframes _spin { to { transform: rotate(360deg); } }
 
 ._steps {
 	display: flex;
@@ -242,7 +230,7 @@
 </style>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import QRCode from 'qrcode';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import { useInstallPrompt } from '@/composables/useInstallPrompt';
@@ -250,29 +238,22 @@ import { describeThisDevice } from '@/lib/thisDevice';
 
 const { inApp, mode, installing, install } = useInstallPrompt();
 const device = describeThisDevice();
-const ios = device.name === 'iPhone' || device.name === 'iPad';
-// An iPad reports itself a computer, but installs like an iPhone.
-const onComputer = device.kind === 'computer' && !ios;
+const onComputer = device.kind === 'computer';
 
 const appUrl = new URL(import.meta.env.BASE_URL, location.origin).href;
 const appIcon = `${import.meta.env.BASE_URL}img/pwa/pwa-192.png`;
 
-const heading = computed(() => {
-	if (ios) return `BuckitUp on ${device.name}`;
-	return onComputer ? 'BuckitUp for this computer' : 'BuckitUp on this phone';
-});
-const pitch = computed(() => {
-	if (!onComputer) return 'Opens from the Home Screen, without the browser bar.';
-	const icon = device.name === 'Mac' ? 'Dock icon' : 'icon';
-	return `Its own window and ${icon}. Works offline with chats already on this device.`;
-});
+const heading = device.ios ? `BuckitUp on ${device.name}`
+	: onComputer ? 'BuckitUp for this computer'
+	: 'BuckitUp on this phone';
+const pitch = onComputer
+	? `Its own window and ${device.name === 'Mac' ? 'Dock icon' : 'icon'}. Works offline with chats already on this device.`
+	: 'Opens from the Home Screen, without the browser bar.';
 // Safari on an iPhone has its toolbar at the bottom, on an iPad at the top.
 const shareWhere = device.name === 'iPad' ? 'at the top of Safari' : 'at the bottom of Safari';
-const menuHint = computed(() => {
-	if (device.browser === 'Safari') return 'In the menu bar, choose File → Add to Dock.';
-	if (!onComputer) return 'Open the browser menu and choose Install app or Add to Home screen.';
-	return 'Open the browser menu and choose Install BuckitUp. If there is no such item, BuckitUp is installed on this device already.';
-});
+const menuHint = device.browser === 'Safari' ? 'In the menu bar, choose File → Add to Dock.'
+	: onComputer ? 'Open the browser menu and choose Install BuckitUp. If there is no such item, BuckitUp is installed on this device already.'
+	: 'Open the browser menu and choose Install app or Add to Home screen.';
 
 const qrCanvas = ref(null);
 onMounted(() => {

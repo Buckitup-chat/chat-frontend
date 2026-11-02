@@ -23,7 +23,7 @@
 								:sub="summaryOf(e.peerHash) || 'Changed since the checkpoint'" tone="accent" dot="accent" button
 								:selected="panelPeer === e.peerHash" :data-peer="e.peerHash" @select="openChanged(e)">
 								<template #lead><ContactAvatar :hash="e.peerHash" class="_avatar" /></template>
-								<template #meta>checkpoint {{ checkpointTime(e.createdAt) }}</template>
+								<template #meta>checkpoint {{ shortDayTime(e.createdAt) }}</template>
 							</UiRow>
 						</div>
 					</template>
@@ -34,7 +34,7 @@
 							<UiRow v-for="e in groups.unchanged" :key="e.peerHash" :title="nameOf(e.peerHash)" sub="Unchanged"
 								tone="success" :data-peer="e.peerHash">
 								<template #lead><ContactAvatar :hash="e.peerHash" class="_avatar" /></template>
-								<template #meta>checkpoint {{ checkpointTime(e.createdAt) }}</template>
+								<template #meta>checkpoint {{ shortDayTime(e.createdAt) }}</template>
 								<template #trail><i class="_icon_verified _ok"></i></template>
 							</UiRow>
 						</div>
@@ -112,7 +112,8 @@ import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { useCheckpointOverview } from '@/composables/useCheckpointOverview';
-import { checkpointChangesLine, checkpointTime, countCheckpointChanges } from '@/lib/data/checkpointSummary';
+import { checkpointChangesLine, countCheckpointChanges } from '@/lib/data/checkpointSummary';
+import { shortDayTime } from '@/lib/shortDate';
 import { shortUserId } from '@/lib/shortUserId';
 
 const $userPQ = userPQStore();
@@ -181,7 +182,7 @@ const panelChanges = computed(() => {
 	return c.result.changes.map((x) => ({ ...x, authorName: x.senderHash === me ? 'Me' : nameOf(panelPeer.value) }));
 });
 const panelSub = computed(() => {
-	const when = panelEntry.value ? checkpointTime(panelEntry.value.createdAt) : '';
+	const when = panelEntry.value ? shortDayTime(panelEntry.value.createdAt) : '';
 	const c = panelComparison.value;
 	if (c?.state !== 'ready' || c.result.kind !== 'diff') return when;
 	return `${when} · ${checkpointChangesLine(countCheckpointChanges(c.result.changes, c.result.futureAdded))}`;

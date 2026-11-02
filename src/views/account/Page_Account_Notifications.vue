@@ -105,7 +105,7 @@ const store = useRecoveryBackupStore();
 const botUrl = `https://t.me/${ALERTS_BOT}`;
 
 onMounted(() => {
-	if (store.deployment) store.load().catch((e) => console.warn('[notifications] the backup could not be read:', e));
+	if (store.deployment && !store.loaded) store.load().catch((e) => console.warn('[notifications] the backup could not be read:', e));
 });
 
 /** The live backup's alerts, or null with no backup to be alerted about. */

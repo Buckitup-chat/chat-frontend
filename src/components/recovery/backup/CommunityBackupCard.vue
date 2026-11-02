@@ -3,7 +3,7 @@
 		<div class="cb-head">
 			<i class="_icon_guardians"></i>
 			<h2 class="cb-title">Guardians</h2>
-			<button v-if="state === 'done' && !run.revokedAt && !active" type="button" class="ui-btn _text _sm cb-manage" data-test="manage"
+			<button v-if="state === 'done' && !run.revokedAt && !active" type="button" class="ui-btn _text _sm" data-test="manage"
 				@click="open('manage')">Manage</button>
 		</div>
 
@@ -248,7 +248,6 @@ const open = (start) => {
 	line-height: var(--leading-lg);
 	font-weight: var(--weight-medium);
 }
-.cb-manage { color: var(--color-accent); }
 .cb-about {
 	margin: 0;
 	font-size: var(--text-sm);

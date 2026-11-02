@@ -2,12 +2,14 @@
 // "Safari". A user agent string is a hint, not a fact, so an unknown part
 // falls back to a generic word rather than a guess.
 
-export type DeviceKind = 'phone' | 'computer';
+export type DeviceKind = 'phone' | 'tablet' | 'computer';
 
 export interface ThisDevice {
 	name: string;
 	browser: string;
 	kind: DeviceKind;
+	/** iPhone or iPad: only Safari installs apps there, through Share. */
+	ios: boolean;
 }
 
 export function describeThisDevice(ua: string = navigator.userAgent, touchPoints: number = navigator.maxTouchPoints ?? 0): ThisDevice {
@@ -26,6 +28,9 @@ export function describeThisDevice(ua: string = navigator.userAgent, touchPoints
 		: /Chrome\/|CriOS/.test(ua) ? 'Chrome'
 		: /Safari\//.test(ua) ? 'Safari'
 		: 'Browser';
-	const kind: DeviceKind = /iPhone|Android.+Mobile/.test(ua) ? 'phone' : 'computer';
-	return { name, browser, kind };
+	const ios = /iPhone|iPod/.test(ua) || ipad;
+	const kind: DeviceKind = /iPhone|iPod|Android.+Mobile/.test(ua) ? 'phone'
+		: ipad || /Android/.test(ua) ? 'tablet'
+		: 'computer';
+	return { name, browser, kind, ios };
 }

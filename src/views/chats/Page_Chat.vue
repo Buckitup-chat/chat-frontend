@@ -66,6 +66,7 @@ import FileStateModal from '@/components/chat/FileStateModal.vue';
 import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
 import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
 import { loadCheckpointComparison } from '@/lib/data/checkpointComparison';
+import { shortDayTime } from '@/lib/shortDate';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
 import { claimPendingEdit, submitPendingEdit, failPendingEdit, awaitPendingEditUnlock, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
@@ -1022,7 +1023,7 @@ const handleCheckpointInfo = async ({ part, messageId }) => {
             };
             return;
         }
-        $swal.fire({ title: `Checkpoint · ${new Date(part.createdAt * 1000).toLocaleString()}`, text: result.text });
+        $swal.fire({ title: `Checkpoint · ${shortDayTime(part.createdAt)}`, text: result.text });
     } catch (e) {
         $swal.fire({ icon: 'error', title: 'Checkpoint check failed', text: String(e.message || e) });
     }

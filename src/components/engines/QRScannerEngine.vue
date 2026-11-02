@@ -91,8 +91,8 @@ const cameraStarting = ref(false);
 const shown = computed(() => scanning.value || !!outcome.value);
 const myName = computed(() => $userPQ.currentUser?.name || 'you');
 // A computer holds its webcam up to the phone, not screen to screen.
-const { name: deviceName, kind } = describeThisDevice();
-const computer = kind === 'computer' && deviceName !== 'iPad';
+const device = describeThisDevice();
+const computer = device.kind === 'computer';
 
 const STAGE_HINTS = {
 	A: 'Showing my identity',
@@ -125,10 +125,9 @@ onMounted(() => {
 	// well, and qr-scanner's own elsewhere: Chrome on a Mac has a
 	// BarcodeDetector too, and it did not read a phone's code that the bundled
 	// decoder (what Brave, Firefox and Safari get) read from the same camera.
-	const android = /Android/.test(navigator.userAgent);
 	qrScanner = new QrScanner(qrScannerRef.value, (result) => onScan(result.data), {
 		returnDetailedScanResult: true,
-		qrEngine: android ? undefined : import('qr-scanner/qr-scanner-worker.min.js').then((m) => m.createWorker()),
+		qrEngine: device.name === 'Android' ? undefined : import('qr-scanner/qr-scanner-worker.min.js').then((m) => m.createWorker()),
 		preferredCamera: 'user',
 		highlightScanRegion: true,
 		highlightCodeOutline: true,

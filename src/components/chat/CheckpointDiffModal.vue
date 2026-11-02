@@ -17,7 +17,8 @@
 <script setup>
 import { computed } from 'vue';
 import CheckpointDiffBody from './CheckpointDiffBody.vue';
-import { checkpointChangesLine, checkpointTime, countCheckpointChanges } from '@/lib/data/checkpointSummary';
+import { checkpointChangesLine, countCheckpointChanges } from '@/lib/data/checkpointSummary';
+import { shortDayTime } from '@/lib/shortDate';
 
 const props = defineProps({
   createdAt: { type: Number, required: true },
@@ -28,7 +29,7 @@ const props = defineProps({
 });
 const emit = defineEmits(['close', 'jump']);
 
-const fmtWhen = computed(() => checkpointTime(props.createdAt));
+const fmtWhen = computed(() => shortDayTime(props.createdAt));
 const subLine = computed(() => checkpointChangesLine(countCheckpointChanges(props.changes, props.futureAdded)));
 </script>
 

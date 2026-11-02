@@ -8,6 +8,7 @@
 // app's it keeps. The installed app opens at the build base, inside the
 // service worker's scope, so it starts with no network.
 import { computed, ref } from 'vue';
+import { describeThisDevice } from '@/lib/thisDevice';
 
 interface InstallPromptEvent extends Event {
 	prompt(): Promise<void>;
@@ -51,10 +52,8 @@ export const installModeOf = (
 ): InstallMode => {
 	if (inApp || installed) return 'installed';
 	if (offered) return 'prompt';
-	// iPadOS reports a desktop Safari; touch points tell it apart from a Mac.
-	if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && touchPoints > 1)) {
-		return /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua) ? 'ios' : 'unsupported';
-	}
+	const device = describeThisDevice(ua, touchPoints);
+	if (device.ios) return device.browser === 'Safari' ? 'ios' : 'unsupported';
 	if (/Android/.test(ua) || /Chrome\/|Edg\//.test(ua) || (/Version\/[\d.]+ Safari/.test(ua) && !/Firefox/.test(ua))) return 'menu';
 	return 'unsupported';
 };

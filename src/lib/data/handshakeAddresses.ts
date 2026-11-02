@@ -81,8 +81,7 @@ export const selectAddresses = (gathered: QWBPGatheredCandidate[], { relayOnly =
 		...ofType('relay').slice(0, MAX_RELAYS).map((c) => asOffered(c, 'relay')),
 		...(relayOnly ? [] : [
 			...ofType('srflx').slice(0, 1).map((c) => asOffered(c, 'srflx')),
-			...ofType('host').filter((c) => !looksVirtual(c.ip)).map((c) => asOffered(c, 'host')),
-			...ofType('host').filter((c) => looksVirtual(c.ip)).map((c) => asOffered(c, 'host')),
+			...ofType('host').sort((x, y) => Number(looksVirtual(x.ip)) - Number(looksVirtual(y.ip))).map((c) => asOffered(c, 'host')),
 		]),
 	]
 		.filter((o) => !o.candidate.ip.includes(':') || ++ipv6 <= MAX_IPV6)

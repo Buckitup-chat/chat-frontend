@@ -1,7 +1,7 @@
 // What a checkpoint comparison comes to, in words: the Checkpoints screen
 // sums up each dialog that moved, and the comparison's header says how much.
 // Pure — the comparison itself is describeCheckpointDiff (dialogs.store).
-import { shortDayTime } from '@/lib/shortDate';
+import { plural } from '@/lib/recovery/backupPlan';
 
 /** One change behind the checkpoint, as describeCheckpointDiff returns it. */
 export interface CheckpointChange {
@@ -27,7 +27,8 @@ export interface CheckpointCounts {
 	newAfter: number;
 }
 
-const KIND: Record<string, keyof CheckpointCounts> = {
+/** A change's kind in a word: "edited". */
+export const CHANGE_KIND: Record<string, keyof CheckpointCounts> = {
 	MESSAGE_EDITED: 'edited',
 	MESSAGE_DELETED: 'deleted',
 	MESSAGE_ADDED: 'added',
@@ -41,15 +42,13 @@ export const countCheckpointChanges = (
 ): CheckpointCounts => {
 	const counts: CheckpointCounts = { edited: 0, deleted: 0, added: 0, restored: 0, missing: 0, signed: 0, newAfter: 0 };
 	for (const c of changes) {
-		const kind = KIND[c.type];
+		const kind = CHANGE_KIND[c.type];
 		if (kind) counts[kind] += 1;
 		counts.signed += 1;
 	}
 	counts.newAfter = futureAdded?.count ?? 0;
 	return counts;
 };
-
-const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
  * "2 edits, 1 deleted · 3 new after": what changed in the signed history,
@@ -73,9 +72,6 @@ export const checkpointChangesLine = (c: CheckpointCounts): string => {
 	if (c.newAfter) parts.push(`${c.newAfter} new after`);
 	return parts.join(' · ') || 'no changes';
 };
-
-/** "12 Oct, 18:04" in the device's time zone; the year only when it is not this one. */
-export const checkpointTime = shortDayTime;
 
 export interface CheckpointEntry {
 	peerHash: string;

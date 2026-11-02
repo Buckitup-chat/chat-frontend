@@ -2,8 +2,9 @@
 // and the comparison's header.
 import { describe, it, expect } from 'vitest';
 import {
-	countCheckpointChanges, checkpointSummaryText, checkpointChangesLine, checkpointTime, groupCheckpointDialogs,
+	countCheckpointChanges, checkpointSummaryText, checkpointChangesLine, groupCheckpointDialogs,
 } from '@/lib/data/checkpointSummary';
+import { shortDayTime } from '@/lib/shortDate';
 
 const change = (type: string, n: number) => ({ type, messageId: `dmsg_${type}_${n}` });
 
@@ -36,10 +37,10 @@ describe('checkpoint summary', () => {
 
 	it('dates a checkpoint by day and time, with the year only when it is not this one', () => {
 		const at = (y: number) => Math.floor(new Date(y, 9, 12, 18, 4).getTime() / 1000);
-		expect(checkpointTime(at(2026), new Date(2026, 10, 2))).toBe('12 Oct, 18:04');
-		expect(checkpointTime(at(2025), new Date(2026, 10, 2))).toBe('12 Oct 2025, 18:04');
+		expect(shortDayTime(at(2026), new Date(2026, 10, 2))).toBe('12 Oct, 18:04');
+		expect(shortDayTime(at(2025), new Date(2026, 10, 2))).toBe('12 Oct 2025, 18:04');
 		const sep = Math.floor(new Date(2026, 8, 28, 9, 5).getTime() / 1000);
-		expect(checkpointTime(sep, new Date(2026, 10, 2))).toBe('28 Sep, 09:05');
+		expect(shortDayTime(sep, new Date(2026, 10, 2))).toBe('28 Sep, 09:05');
 	});
 
 	it('groups changed and unchanged dialogs, newest checkpoint first', () => {

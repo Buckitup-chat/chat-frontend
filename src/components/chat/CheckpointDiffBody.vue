@@ -4,21 +4,21 @@
        history does; every row jumps to its message in the feed. Shown in the
        dialog's modal and in the Checkpoints screen's panel. -->
   <div class="cd-body">
-    <div v-for="c in changes" :key="c.messageId + c.type" class="cd-change" role="button" tabindex="0"
+    <div v-for="c in rows" :key="c.messageId + c.type" class="cd-change" role="button" tabindex="0"
       @click="emit('jump', c.messageId)" @keydown.enter="emit('jump', c.messageId)">
       <div class="cd-meta">
-        <span class="cd-tag" :class="'_' + c.type.toLowerCase()">{{ label(c.type) }}</span>
+        <span class="cd-tag" :class="'_' + c.type.toLowerCase()">{{ CHANGE_KIND[c.type] || c.type }}</span>
         <span v-if="c.authorName" class="cd-author">{{ c.authorName }}</span>
       </div>
 
       <template v-if="c.type === 'MESSAGE_EDITED'">
         <div class="cd-text _old">
-          <template v-for="(p, i) in diffWords(c.oldText || '', c.newText || '')" :key="i"><del
+          <template v-for="(p, i) in c.words" :key="i"><del
               v-if="p.kind === 'removed'" class="cd-removed">{{ p.text }}</del><template
               v-else-if="p.kind === 'same'">{{ p.text }}</template></template>
         </div>
         <div class="cd-text">
-          <template v-for="(p, i) in diffWords(c.oldText || '', c.newText || '')" :key="i"><mark
+          <template v-for="(p, i) in c.words" :key="i"><mark
               v-if="p.kind === 'added'" class="cd-added">{{ p.text }}</mark><template
               v-else-if="p.kind === 'same'">{{ p.text }}</template></template>
         </div>
@@ -45,9 +45,11 @@
 </template>
 
 <script setup>
+import { computed } from 'vue';
+import { CHANGE_KIND } from '@/lib/data/checkpointSummary';
 import { diffWords } from '@/lib/data/textDiff';
 
-defineProps({
+const props = defineProps({
   /** Hydrated PAST changes only: revisions of what the checkpoint attested. */
   changes: { type: Array, required: true },
   /** New messages ahead of the pointer, collapsed: { count, firstMessageId }. */
@@ -55,14 +57,10 @@ defineProps({
 });
 const emit = defineEmits(['jump']);
 
-const LABELS = {
-  MESSAGE_ADDED: 'added',
-  MESSAGE_EDITED: 'edited',
-  MESSAGE_DELETED: 'deleted',
-  MESSAGE_RESTORED: 'restored',
-  MESSAGE_REMOVED: 'missing',
-};
-const label = (type) => LABELS[type] || type;
+// An edit's word diff, once for both its lines.
+const rows = computed(() => props.changes.map((c) => (c.type === 'MESSAGE_EDITED'
+  ? { ...c, words: diffWords(c.oldText || '', c.newText || '') }
+  : c)));
 </script>
 
 <style lang="scss" scoped>
