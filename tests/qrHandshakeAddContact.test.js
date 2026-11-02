@@ -14,12 +14,12 @@ let store;
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => store }));
 const prefetchRelay = vi.fn(async () => {});
 vi.mock('@/lib/data/turnCredentials', () => ({ prefetchRelay: () => prefetchRelay() }));
-vi.mock('@/components/Account_Item.vue', () => ({ default: { render: () => null } }));
 // The scanner engine stands in for the handshake: `completed` is what it emits.
+const toggleScanner = vi.fn(async () => {});
 const ScannerEngine = defineComponent({
 	emits: ['completed', 'scanning'],
 	setup(_, { expose }) {
-		expose({ toggleScanner: async () => {}, stopScan: () => {} });
+		expose({ toggleScanner: () => toggleScanner(), stopScan: () => {} });
 		return () => h('div', { class: 'scanner-stub' });
 	},
 });
@@ -95,12 +95,12 @@ describe('adding a contact the server does not take', () => {
 		const wrapper = await mountModal();
 		wrapper.findComponent(ScannerEngine).vm.$emit('completed', confirmedResult());
 		await flushPromises();
-		await buttonNamed(wrapper, 'Open contact').trigger('click');
+		await buttonNamed(wrapper, 'Numbers match').trigger('click');
 		await flushPromises();
 
 		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD, 'pkA');
 		expectErrorShownAndModalKept('Saved on this device, but the server did not take it');
-		expect(wrapper.text()).toContain('Existing contact'); // still on the contact, ready to try again
+		expect(wrapper.text()).toContain('Ann is in your contacts.'); // still on the contact, ready to try again
 	});
 });
 
@@ -125,7 +125,7 @@ describe('what the modal does with the handshake\'s result', () => {
 		await completeWith(wrapper, confirmedResult());
 		expect(wrapper.find('[data-test="contact-sas"]').text()).toBe('042917');
 		expect(wrapper.text()).toContain('Contact confirmed');
-		await buttonNamed(wrapper, 'Save contact').trigger('click');
+		await buttonNamed(wrapper, 'Numbers match').trigger('click');
 		await flushPromises();
 		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD, 'pkA', { name: 'Ann', notes: '', hidden: false });
 		expect(store.saveContact).not.toHaveBeenCalled();
@@ -138,7 +138,7 @@ describe('what the modal does with the handshake\'s result', () => {
 		store.contactsMap = { [A]: { user_hash: A, name: 'Ann', contact_pkey: 'pkA' } };
 		const wrapper = await mountModal();
 		await completeWith(wrapper, confirmedResult());
-		await buttonNamed(wrapper, 'Open contact').trigger('click');
+		await buttonNamed(wrapper, 'Numbers match').trigger('click');
 		await flushPromises();
 		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD, 'pkA');
 		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ title: 'Contact confirmed' }));
@@ -149,7 +149,7 @@ describe('what the modal does with the handshake\'s result', () => {
 		await completeWith(wrapper, verifiedResult());
 		expect(wrapper.text()).toContain('Key verified in person; not yet confirmed');
 		expect(wrapper.text()).toContain('Check that both phones are online, or scan again on a shared Wi-Fi.');
-		await buttonNamed(wrapper, 'Save contact').trigger('click');
+		await buttonNamed(wrapper, 'Numbers match').trigger('click');
 		await flushPromises();
 		expect(store.confirmContact).not.toHaveBeenCalled();
 		expect(store.saveContact).toHaveBeenCalledWith(A, { name: 'Ann', notes: '', hidden: false, contact_pkey: 'pkA' });
@@ -164,7 +164,7 @@ describe('what the modal does with the handshake\'s result', () => {
 		store.contactsMap = { [A]: { user_hash: A, name: 'Ann', contact_pkey: 'pkA' } };
 		const wrapper = await mountModal();
 		await completeWith(wrapper, verifiedResult('refused'));
-		await buttonNamed(wrapper, 'Open contact').trigger('click');
+		await buttonNamed(wrapper, 'Numbers match').trigger('click');
 		await flushPromises();
 		expect(store.confirmContact).not.toHaveBeenCalled();
 		expect(store.saveContact).not.toHaveBeenCalled();
@@ -192,15 +192,52 @@ describe('what the modal does with the handshake\'s result', () => {
 		store.currentUserHash = A;
 		const wrapper = await mountModal();
 		await completeWith(wrapper, confirmedResult());
-		await buttonNamed(wrapper, 'Save contact').trigger('click');
+		await buttonNamed(wrapper, 'Numbers match').trigger('click');
 		await flushPromises();
 		expect(store.confirmContact).not.toHaveBeenCalled();
 		expect(store.saveContact).not.toHaveBeenCalled();
 		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ title: 'It`s your own account' }));
 	});
 
-	it('tells to hold the phones 25–40 cm apart', async () => {
+	it('starts scanning as it opens: both screens read each other, there is no button to press', async () => {
+		vi.useFakeTimers();
+		toggleScanner.mockClear();
+		await mountModal();
+		vi.advanceTimersByTime(100);
+		vi.useRealTimers();
+		expect(toggleScanner).toHaveBeenCalledTimes(1);
+	});
+
+	it('numbers that differ: nothing is saved, and the person can scan again', async () => {
 		const wrapper = await mountModal();
-		expect(wrapper.text()).toMatch(/25–40 cm/);
+		await completeWith(wrapper, confirmedResult());
+		await buttonNamed(wrapper, 'Numbers are different').trigger('click');
+		expect(wrapper.text()).toContain('Contact not added');
+		expect(buttonNamed(wrapper, 'Numbers match')).toBeUndefined();
+		expect(store.confirmContact).not.toHaveBeenCalled();
+		expect(store.saveContact).not.toHaveBeenCalled();
+		toggleScanner.mockClear();
+		await buttonNamed(wrapper, 'Scan again').trigger('click');
+		expect(toggleScanner).toHaveBeenCalledTimes(1);
+	});
+
+	it('confirmed before with the same key: says so, and opens the chat without writing', async () => {
+		store.contactsMap = { [A]: { user_hash: A, name: 'Ann', contact_pkey: 'pkA', confirmed: true } };
+		const wrapper = await mountModal();
+		await completeWith(wrapper, confirmedResult());
+		expect(wrapper.text()).toContain('Ann is already confirmed');
+		await buttonNamed(wrapper, 'Open chat').trigger('click');
+		expect(store.confirmContact).not.toHaveBeenCalled();
+		expect(router.push).toHaveBeenCalledWith({ name: 'contact', params: { address: A } });
+	});
+
+	it('confirmed before with another key: confirms the new one', async () => {
+		store.contactsMap = { [A]: { user_hash: A, name: 'Ann', contact_pkey: 'pkOld', confirmed: true } };
+		const wrapper = await mountModal();
+		await completeWith(wrapper, confirmedResult());
+		expect(wrapper.text()).not.toContain('already confirmed');
+		await buttonNamed(wrapper, 'Numbers match').trigger('click');
+		await flushPromises();
+		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD, 'pkA');
 	});
 });

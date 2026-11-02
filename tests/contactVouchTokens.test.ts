@@ -22,7 +22,6 @@ vi.mock('vue-router', async () => {
 		useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
 	};
 });
-vi.mock('@/components/Account_Item.vue', () => ({ default: { render: () => null } }));
 const ScannerEngine = defineComponent({
 	emits: ['completed', 'scanning'],
 	setup(_, { expose }) {
@@ -278,7 +277,7 @@ const confirmByQr = async (peer: Client, shownKey = cardOf(peer.hash).contact_pk
 		cause: confirmed ? null : 'refused',
 	});
 	await flushPromises();
-	await wrapper.findAll('button').find((b) => /Save contact|Open contact/.test(b.text()))!.trigger('click');
+	await wrapper.findAll('button').find((b) => /Numbers match|Save contact|Open contact/.test(b.text()))!.trigger('click');
 	await vi.waitFor(() => expect(swal.fire).toHaveBeenCalled(), { timeout: 15_000 });
 	wrapper.unmount();
 	return swal;
