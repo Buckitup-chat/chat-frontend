@@ -28,6 +28,7 @@
 				<input class="form-control" placeholder="User ID (u_…)" type="text" v-model="userIdInput" />
 				<button type="button" class="ui-btn" v-if="userIdInput" @click="addManually()">Add</button>
 			</div>
+			<button type="button" class="ui-btn _text _sm _hs_alt" v-if="hasCamera" @click="toggleScanner()">Add in person</button>
 		</template>
 
 		<button type="button" class="ui-btn _text _sm _hs_alt" v-if="!contact && !manual" @click="setManually()">Add manually</button>
@@ -71,7 +72,7 @@
 					<button type="button" class="ui-btn _block" @click="toggleScanner()">Scan again</button>
 				</template>
 				<template v-else-if="alreadyConfirmed">
-					<button type="button" class="ui-btn _block" @click="openContact()">Open chat</button>
+					<button type="button" class="ui-btn _block" @click="openChat()">Open chat</button>
 				</template>
 				<template v-else>
 					<button type="button" class="ui-btn _block _lg" @click="addContact()">
@@ -322,9 +323,12 @@ const alreadyConfirmed = computed(() => !!contact.value?.confirmed && !!stored.v
 const shownConfirmed = computed(() => !mismatch.value && !!contact.value?.confirmed);
 const initials = computed(() => (contact.value?.name || '?').trim().slice(0, 2).toUpperCase());
 
-const openContact = () => {
+// "Numbers match · open chat" opens the chat; a contact without numbers opens its page, to be named.
+const destination = () => ({ name: contact.value.sas ? 'chat' : 'contact', params: { address: contact.value.user_hash } });
+
+const openChat = () => {
 	closeMenu();
-	$router.push({ name: 'contact', params: { address: contact.value.user_hash } });
+	$router.push({ name: 'chat', params: { address: contact.value.user_hash } });
 	closeModal();
 };
 
@@ -363,7 +367,7 @@ const addContact = async () => {
 				timer: 15000,
 			});
 			manual.value = false;
-			$router.push({ name: 'contact', params: { address: contact.value.user_hash } });
+			$router.push(destination());
 			closeModal();
 			return;
 		}
@@ -383,12 +387,12 @@ const addContact = async () => {
 				? (confirmed ? 'Contact confirmed on this device' : 'Contact added on this device')
 				: (confirmed ? 'Contact added and confirmed' : notConfirmed ? 'Key verified in person; not yet confirmed' : 'Contact added'),
 			text: sasText,
-			footer: notSyncedFooter(saved) ?? notConfirmedFooter ?? 'Now you can name it and make notes',
+			footer: notSyncedFooter(saved) ?? notConfirmedFooter ?? (contact.value.sas ? undefined : 'Now you can name it and make notes'),
 			timer: 15000,
 		});
 		
 		closeMenu();
-		$router.push({ name: 'contact', params: { address: contact.value.user_hash } });
+		$router.push(destination());
 		closeModal();
 	} catch (error) {
 		// Nothing was saved: say so, and stay here so it can be tried again.

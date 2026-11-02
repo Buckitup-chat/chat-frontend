@@ -25,8 +25,6 @@ vi.mock('qr-scanner', () => ({
 }));
 /** The last code drawn on each canvas. */
 const codes = new Map();
-// The scanner above is a fake: the decoder it would be handed is never run.
-vi.mock('qr-scanner/qr-scanner-worker.min.js', () => ({ createWorker: () => ({}) }));
 vi.mock('qrcode', () => ({ default: { toCanvas: async (canvas, text) => { codes.set(canvas, text); } } }));
 
 let net;

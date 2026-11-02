@@ -17,9 +17,14 @@ export function backupFileSavedAt(userHash: string | null | undefined): number |
 	return cache[userHash];
 }
 
+/** Never throws: the file is saved already, and a record that does not persist is only lost on reload. */
 export function rememberBackupFileSaved(userHash: string, at: number = Math.floor(Date.now() / 1000)): void {
-	localStorage.setItem(key(userHash), String(at));
 	cache[userHash] = at;
+	try {
+		localStorage.setItem(key(userHash), String(at));
+	} catch (e) {
+		console.warn('[backup] the backup file record could not be stored:', e);
+	}
 }
 
 export function forgetBackupFileRecord(userHash: string): void {

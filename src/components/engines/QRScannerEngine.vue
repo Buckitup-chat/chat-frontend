@@ -91,8 +91,7 @@ const cameraStarting = ref(false);
 const shown = computed(() => scanning.value || !!outcome.value);
 const myName = computed(() => $userPQ.currentUser?.name || 'you');
 // A computer holds its webcam up to the phone, not screen to screen.
-const device = describeThisDevice();
-const computer = device.kind === 'computer';
+const computer = describeThisDevice().kind === 'computer';
 
 const STAGE_HINTS = {
 	A: 'Showing my identity',
@@ -121,13 +120,11 @@ onMounted(() => {
 	// read at full resolution. qr-scanner's bundled decoder at 1080 px, 12 scans
 	// a second, read worse on the phones it was tried on. The region is whole
 	// pixels: qr-scanner reuses its canvas only while the size is unchanged.
-	// The decoder is the browser's BarcodeDetector on Android, where it read
-	// well, and qr-scanner's own elsewhere: Chrome on a Mac has a
-	// BarcodeDetector too, and it did not read a phone's code that the bundled
-	// decoder (what Brave, Firefox and Safari get) read from the same camera.
+	// qr-scanner picks the decoder itself: the browser's BarcodeDetector where
+	// there is one, and its bundled decoder elsewhere and on Chromium on an
+	// Apple-silicon Mac, whose detector misreads.
 	qrScanner = new QrScanner(qrScannerRef.value, (result) => onScan(result.data), {
 		returnDetailedScanResult: true,
-		qrEngine: device.name === 'Android' ? undefined : import('qr-scanner/qr-scanner-worker.min.js').then((m) => m.createWorker()),
 		preferredCamera: 'user',
 		highlightScanRegion: true,
 		highlightCodeOutline: true,

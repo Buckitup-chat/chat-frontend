@@ -80,8 +80,8 @@ describe('the route a browser without an offer has', () => {
 		expect(modeFor(SAFARI_MAC, 5)).toBe('ios');
 	});
 
-	it('another browser on iOS: none, only Safari installs there', () => {
-		expect(modeFor(CHROME_IPHONE)).toBe('unsupported');
+	it('another browser on iOS: its Share menu too', () => {
+		expect(modeFor(CHROME_IPHONE)).toBe('ios');
 	});
 
 	it('Chrome on Android, Chromium and Safari on a computer: the browser menu', () => {

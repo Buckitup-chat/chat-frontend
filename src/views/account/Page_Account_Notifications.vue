@@ -23,6 +23,10 @@
 					<template v-if="!store.deployment">
 						<div class="ui-small ui-muted">Not available in this version of the app.</div>
 					</template>
+					<template v-else-if="!store.loaded && loadError">
+						<div class="ui-small ui-secondary" data-test="alerts-load-error">Could not read your backup: {{ loadError }}</div>
+						<button type="button" class="ui-btn _outline _block" @click="load()">Try again</button>
+					</template>
 					<div v-else-if="!store.loaded" class="ui-skeleton _skel"></div>
 					<template v-else-if="alerts">
 						<div class="ui-small" data-test="alerts-channels">
@@ -91,12 +95,13 @@
 </style>
 
 <script setup>
-import { computed, inject, onMounted } from 'vue';
+import { computed, inject, onMounted, ref } from 'vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { alertsText, hasOutsideAlerts, isLiveBackup } from '@/components/recovery/backup/backupFlow';
 import { ALERTS_BOT } from '@/config/recovery';
+import errorMessage from '@/utils/errorMessage';
 
 const $userPQ = userPQStore();
 const $modal = inject('$modal');
@@ -104,8 +109,18 @@ const store = useRecoveryBackupStore();
 
 const botUrl = `https://t.me/${ALERTS_BOT}`;
 
+const loadError = ref(null);
+const load = async () => {
+	loadError.value = null;
+	try {
+		await store.load();
+	} catch (e) {
+		console.warn('[notifications] the backup could not be read:', e);
+		loadError.value = errorMessage(e);
+	}
+};
 onMounted(() => {
-	if (store.deployment && !store.loaded) store.load().catch((e) => console.warn('[notifications] the backup could not be read:', e));
+	if (store.deployment && !store.loaded) load();
 });
 
 /** The live backup's alerts, or null with no backup to be alerted about. */

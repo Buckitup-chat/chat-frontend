@@ -39,11 +39,12 @@ const runningInstalled = (): boolean =>
  * How this browser installs the app:
  * - `installed`: it is, and this may be it;
  * - `prompt`: the browser's own dialog, from a button;
- * - `ios`: Safari's Share → Add to Home Screen;
+ * - `ios`: Share → Add to Home Screen, in Safari and, since iOS 16.4, in
+ *   the other browsers there;
  * - `menu`: an item in the browser's menu. Chromium makes its offer only once
  *   its criteria are met and makes none while the app is installed; Android
  *   browsers and Safari on a Mac (File → Add to Dock) have the item anyway;
- * - `unsupported`: Firefox on a computer, and every browser on iOS but Safari.
+ * - `unsupported`: Firefox on a computer.
  */
 export type InstallMode = 'installed' | 'prompt' | 'ios' | 'menu' | 'unsupported';
 
@@ -53,7 +54,7 @@ export const installModeOf = (
 	if (inApp || installed) return 'installed';
 	if (offered) return 'prompt';
 	const device = describeThisDevice(ua, touchPoints);
-	if (device.ios) return device.browser === 'Safari' ? 'ios' : 'unsupported';
+	if (device.ios) return 'ios';
 	if (/Android/.test(ua) || /Chrome\/|Edg\//.test(ua) || (/Version\/[\d.]+ Safari/.test(ua) && !/Firefox/.test(ua))) return 'menu';
 	return 'unsupported';
 };

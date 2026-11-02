@@ -53,7 +53,7 @@
 				<div v-else-if="mode === 'unsupported'" class="ui-card _text_card" data-test="install-unsupported">
 					<div>{{ device.browser }} can't install apps</div>
 					<div class="ui-small ui-secondary">
-						Open this page in {{ device.ios ? 'Safari' : 'Chrome, Edge or Safari' }}.
+						Open this page in Chrome, Edge or Safari.
 						You can keep using BuckitUp here as it is.
 					</div>
 				</div>
@@ -250,7 +250,9 @@ const pitch = onComputer
 	? `Its own window and ${device.name === 'Mac' ? 'Dock icon' : 'icon'}. Works offline with chats already on this device.`
 	: 'Opens from the Home Screen, without the browser bar.';
 // Safari on an iPhone has its toolbar at the bottom, on an iPad at the top.
-const shareWhere = device.name === 'iPad' ? 'at the top of Safari' : 'at the bottom of Safari';
+const shareWhere = device.browser !== 'Safari' ? `in ${device.browser}'s address bar or menu`
+	: device.name === 'iPad' ? 'at the top of Safari'
+	: 'at the bottom of Safari';
 const menuHint = device.browser === 'Safari' ? 'In the menu bar, choose File → Add to Dock.'
 	: onComputer ? 'Open the browser menu and choose Install BuckitUp. If there is no such item, BuckitUp is installed on this device already.'
 	: 'Open the browser menu and choose Install app or Add to Home screen.';

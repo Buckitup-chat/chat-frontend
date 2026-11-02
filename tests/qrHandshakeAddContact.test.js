@@ -130,7 +130,7 @@ describe('what the modal does with the handshake\'s result', () => {
 		expect(store.confirmContact).toHaveBeenCalledWith(A, CARD, 'pkA', { name: 'Ann', notes: '', hidden: false });
 		expect(store.saveContact).not.toHaveBeenCalled();
 		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ icon: 'success', title: 'Contact added and confirmed', text: 'Code 042917' }));
-		expect(router.push).toHaveBeenCalledWith({ name: 'contact', params: { address: A } });
+		expect(router.push).toHaveBeenCalledWith({ name: 'chat', params: { address: A } });
 		expect(store.allNetworkUsers).toHaveLength(1); // nothing written into the network users
 	});
 
@@ -208,6 +208,16 @@ describe('what the modal does with the handshake\'s result', () => {
 		expect(toggleScanner).toHaveBeenCalledTimes(1);
 	});
 
+	it('the manual form leads back to adding in person', async () => {
+		const wrapper = await mountModal();
+		await buttonNamed(wrapper, 'Add manually').trigger('click');
+		expect(wrapper.find('input').exists()).toBe(true);
+		toggleScanner.mockClear();
+		await buttonNamed(wrapper, 'Add in person').trigger('click');
+		expect(wrapper.find('input').exists()).toBe(false);
+		expect(toggleScanner).toHaveBeenCalledTimes(1);
+	});
+
 	it('numbers that differ: nothing is saved, and the person can scan again', async () => {
 		const wrapper = await mountModal();
 		await completeWith(wrapper, confirmedResult());
@@ -228,7 +238,7 @@ describe('what the modal does with the handshake\'s result', () => {
 		expect(wrapper.text()).toContain('Ann is already confirmed');
 		await buttonNamed(wrapper, 'Open chat').trigger('click');
 		expect(store.confirmContact).not.toHaveBeenCalled();
-		expect(router.push).toHaveBeenCalledWith({ name: 'contact', params: { address: A } });
+		expect(router.push).toHaveBeenCalledWith({ name: 'chat', params: { address: A } });
 	});
 
 	it('confirmed before with another key: confirms the new one', async () => {

@@ -8,7 +8,7 @@ export interface ThisDevice {
 	name: string;
 	browser: string;
 	kind: DeviceKind;
-	/** iPhone or iPad: only Safari installs apps there, through Share. */
+	/** iPhone or iPad: apps install there through the Share menu. */
 	ios: boolean;
 }
 
