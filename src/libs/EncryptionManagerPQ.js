@@ -47,6 +47,16 @@ import { resetGate } from '@/lib/data/accessGate';
 import { deriveRootSlotUuid, randomSlotUuid } from '@buckitup/pq-client/slotId';
 import { createSlotResolver } from '@/lib/data/slots';
 
+// Files the account kept on this device: its sealed index and its pins on the
+// chunks. Loaded on demand — the file layer imports far more than the vault needs.
+const forgetKeptFiles = async (userHash) => {
+  try {
+    await (await import('@/lib/data/keptFiles')).forgetAccountKeptFiles(userHash);
+  } catch (e) {
+    console.warn('Could not delete the account\'s kept files', e);
+  }
+};
+
 const CONTACT_ACCESS_RETRY_MS = 5_000;
 const CONTACT_ACCESS_RETRY_MAX_MS = 60_000;
 const CONTACT_ACCESS_HURRY_MS = 500;
@@ -805,6 +815,7 @@ export class EncryptionManagerPQ extends EventTarget {
     }
     // Contacts' thumbnails and the dialogs owed a photo leave with the account.
     await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
+    await forgetKeptFiles(userHash);
 
     this.#localUserCards.splice(identityIndex, 1);
     await this.#saveLocalUserCards();
@@ -842,6 +853,7 @@ export class EncryptionManagerPQ extends EventTarget {
       }
       await this.#rawStore.remove(`pq-vault-owner-${id}`);
     }
+    await forgetKeptFiles(userHash);
     if (card) {
       this.#localUserCards = this.#localUserCards.filter((i) => i.user_hash !== userHash);
       await this.#saveLocalUserCards();

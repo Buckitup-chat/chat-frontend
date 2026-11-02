@@ -186,6 +186,7 @@ export const keptBytesOf = (owner: string): Promise<number> => pinnedBytesOf(own
 
 /** Removes everything `owner` keeps: called when the account leaves this device. */
 export const forgetAccountKeptFiles = async (owner: string): Promise<void> => {
-	await raw.delete(indexKey(owner));
-	await unpinAllOf(owner);
+	// Each half runs whatever the other did: a missing index must not leave pins behind.
+	const [index, pins] = await Promise.allSettled([raw.delete(indexKey(owner)), unpinAllOf(owner)]);
+	for (const r of [index, pins]) if (r.status === 'rejected') throw r.reason;
 };
