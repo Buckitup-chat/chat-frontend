@@ -15,6 +15,12 @@
         This file could not be verified: what this node holds does not match
         what its sender signed.
       </p>
+      <!-- pq_files §7: a deleted file is a tombstone with no chunk list; the
+           server reclaims its bytes. Nothing is "on the way" any more. -->
+      <p v-else-if="deletedOnServer" class="fs-note">
+        <template v-if="kept">The sender deleted this file from the server. Only this device has it now.</template>
+        <template v-else>The sender deleted this file from the server.</template>
+      </p>
       <template v-else-if="availability && !availability.unknown">
         <div class="fs-chunks">
           <span v-for="i in availability.total" :key="i" class="fs-chunk"
@@ -30,10 +36,30 @@
           request can speed them up.
         </p>
         <button type="button" class="fs-btn" :disabled="checking" @click="emit('refresh')">
-          {{ checking ? 'Checking…' : complete ? 'Download' : 'Request priority backfill' }}
+          {{ checking ? 'Checking…' : complete || kept ? 'Download' : 'Request priority backfill' }}
         </button>
       </template>
+      <p v-else-if="kept" class="fs-note">This file opens from the copy kept on this device.</p>
       <p v-else class="fs-note">The file's manifest has not reached this node yet.</p>
+
+      <!-- Keep on this device. The switch shows what is, not what was
+           tapped: it is on while the file is kept or being kept, and a keep
+           that fails leaves it off with the reason underneath. -->
+      <template v-if="!refused">
+        <div class="form-check form-switch mt-3 mb-0">
+          <input id="fs-keep" class="form-check-input" type="checkbox" role="switch"
+            :checked="kept || !!keeping" :disabled="!!keeping || (!kept && !keepable)"
+            @change="onKeepChange" />
+          <label class="form-check-label small" for="fs-keep">Keep on this device</label>
+        </div>
+        <p v-if="keeping" class="fs-note">
+          Keeping<template v-if="keeping.total"> · chunk {{ keeping.done }} of {{ keeping.total }}</template>…
+        </p>
+        <p v-else-if="keepError" class="fs-note fs-refused">{{ keepError }}</p>
+        <p v-else-if="kept && messageDeleted" class="fs-note">The message was deleted. The copy kept on this device remains.</p>
+        <p v-else-if="kept" class="fs-note">Kept on this device: it opens offline and stays if the sender deletes it. It is not copied to your other devices.</p>
+        <button v-if="deletedOnServer && kept" type="button" class="fs-btn" @click="emit('refresh')">Download</button>
+      </template>
 
       <template v-if="log.length">
         <div class="fs-log-title">Backfill so far</div>
@@ -60,8 +86,25 @@ const props = defineProps({
   from: { type: String, default: '' },
   sentAt: { type: String, default: '' },
   checking: { type: Boolean, default: false },
+  /** This account keeps the file on this device (keptFiles.ts). */
+  kept: { type: Boolean, default: false },
+  /** Progress of keeping it, in chunks, while that runs. */
+  keeping: { type: Object, default: null },
+  /** Why the last keep or release failed. */
+  keepError: { type: String, default: '' },
+  /** The message that carried the file was deleted; only the kept copy shows it. */
+  messageDeleted: { type: Boolean, default: false },
 });
-const emit = defineEmits(['close', 'refresh']);
+const emit = defineEmits(['close', 'refresh', 'keep']);
+
+const deletedOnServer = computed(() => !!props.availability && !props.availability.unknown && props.availability.deleted);
+/** Keeping needs the signed manifest, and a deleted file has none to give. */
+const keepable = computed(() => !!props.availability && !props.availability.unknown && !props.availability.deleted);
+const onKeepChange = (event) => {
+  const want = event.target.checked;
+  event.target.checked = props.kept || !!props.keeping;
+  emit('keep', want);
+};
 
 const percent = computed(() =>
   props.availability?.total ? Math.round((props.availability.present / props.availability.total) * 100) : 0);
