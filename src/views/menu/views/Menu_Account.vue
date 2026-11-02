@@ -17,7 +17,7 @@
 		<div class="_group" :class="{ 'ui-card': $breakpoint.lt('md') }">
 			<UiRow v-for="item in group.items" :key="item.title" v-bind="item" :bare="!$breakpoint.lt('md')"
 				:chevron="$breakpoint.lt('md')" :selected="!$breakpoint.lt('md') && isActive(item.to)"
-				@click="closeMenu()" @select="item.action?.()" />
+				@click="closeMenu()" />
 		</div>
 	</template>
 
@@ -33,7 +33,6 @@ import Avatar from 'vue-boring-avatars';
 import UiRow from '@/components/ui/UiRow.vue';
 import { useMenu } from '@/composables/useMenu';
 import { useBreakpoint } from '@/composables/useBreakpoint';
-import { useInstallPrompt } from '@/composables/useInstallPrompt';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { shortUserId } from '@/lib/shortUserId';
@@ -41,29 +40,15 @@ import { shortUserId } from '@/lib/shortUserId';
 const $route = inject('$route');
 const $dialogs = useDialogsStore();
 const $mitt = inject('$mitt');
-const $swal = inject('$swal');
 const $userPQ = userPQStore();
 const $breakpoint = useBreakpoint();
 const { close: closeMenu } = useMenu();
-const { canPrompt, needsManualInstall, install } = useInstallPrompt();
 
 const me = computed(() => $userPQ.currentUser ?? {});
 const avatarSrc = computed(() => (typeof me.value.avatar === 'string' ? me.value.avatar : ''));
 const shortId = computed(() => shortUserId(me.value.user_hash));
 
 const isActive = (to) => !!to && $route.name === to.name;
-
-const installApp = async () => {
-	if (canPrompt.value) {
-		await install();
-		return;
-	}
-	$swal.fire({
-		icon: 'info',
-		title: 'Install BuckitUp',
-		text: 'In Safari, tap Share, then "Add to Home Screen", and open BuckitUp from the new icon. It then works with no connection, and Safari no longer clears its data after a week without a visit.',
-	});
-};
 
 const groups = computed(() => [
 	...($breakpoint.lt('md')
@@ -82,9 +67,7 @@ const groups = computed(() => [
 				dot: $dialogs.alertingPeers.size ? 'accent' : '',
 			},
 			{ title: 'Notifications', sub: 'Alerts about recovery attempts', icon: 'notifications', to: { name: 'account_notifications' } },
-			...(canPrompt.value || needsManualInstall.value
-				? [{ title: 'Install app', sub: 'On your phone or computer', icon: 'buckup_devices', button: true, action: installApp }]
-				: []),
+			{ title: 'Install app', sub: 'On your phone or computer', icon: 'buckup_devices', to: { name: 'account_install' } },
 		],
 	},
 ]);

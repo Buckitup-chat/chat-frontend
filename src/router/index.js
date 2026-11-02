@@ -102,6 +102,12 @@ const routes = [
 				meta: { auth: true, name: 'Account Notifications', sub: true },
 			},
 			{
+				path: 'install',
+				name: 'account_install',
+				component: () => import('../views/account/Page_Account_Install.vue'),
+				meta: { auth: true, name: 'Install app', sub: true },
+			},
+			{
 				path: 'settings',
 				name: 'account_settings',
 				component: () => import('../views/account/Page_Account_Settings.vue'),
