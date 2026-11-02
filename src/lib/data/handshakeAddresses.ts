@@ -19,6 +19,42 @@ export interface OfferedAddress {
 	kind: AddressKind;
 }
 
+/**
+ * IPv4 ranges virtual machines and containers take for the networks they share
+ * with their computer: such an address reaches nothing outside it.
+ */
+const VIRTUAL_RANGES: Array<[base: string, bits: number]> = [
+	['172.16.0.0', 12], // Docker, WSL, Hyper-V
+	['192.168.139.0', 24], // OrbStack
+	['198.19.248.0', 22], // OrbStack
+	['192.168.64.0', 24], // macOS Virtualization: UTM, Lima, Tart
+	['192.168.56.0', 24], // VirtualBox host-only
+	['10.211.55.0', 24], // Parallels shared
+	['10.37.129.0', 24], // Parallels host-only
+];
+
+const ipv4Bits = (ip: string): number | null => {
+	const octets = ip.split('.').map(Number);
+	if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
+	return octets.reduce((acc, o) => acc * 256 + o, 0);
+};
+
+/**
+ * Whether a host address looks like a computer's own virtual network rather
+ * than the one it shares with the phone. A home or office network is a /24 or
+ * smaller, where an address ending in .0 is not a host's; container bridges
+ * on a Mac use such addresses.
+ */
+export const looksVirtual = (ip: string): boolean => {
+	const bits = ipv4Bits(ip);
+	if (bits === null) return false;
+	if (bits % 256 === 0) return true;
+	return VIRTUAL_RANGES.some(([base, prefix]) => {
+		const size = 2 ** (32 - prefix);
+		return Math.floor(bits / size) === Math.floor(ipv4Bits(base)! / size);
+	});
+};
+
 const asOffered = (c: QWBPGatheredCandidate, kind: AddressKind): OfferedAddress => ({
 	candidate: { ip: c.ip, port: c.port, type: kind === 'host' ? 'host' : 'srflx', protocol: 'udp' },
 	kind,
@@ -27,7 +63,8 @@ const asOffered = (c: QWBPGatheredCandidate, kind: AddressKind): OfferedAddress 
 /**
  * What a code offers: UDP only, no mDNS names; the relay's addresses first (two at most),
  * then one STUN-found address — the relay answers STUN too — then the phone's
- * own; six at most, two of them IPv6 at most. A TCP candidate only repeats an
+ * own, those that look like a virtual network last; six at most, two of them
+ * IPv6 at most. A TCP candidate only repeats an
  * address the channel reaches over UDP anyway. An mDNS name (`….local`, what a
  * browser shows for a host address without camera or microphone permission)
  * costs 19 bytes, as much as an IPv6 address, and resolves only on the same
@@ -44,7 +81,8 @@ export const selectAddresses = (gathered: QWBPGatheredCandidate[], { relayOnly =
 		...ofType('relay').slice(0, MAX_RELAYS).map((c) => asOffered(c, 'relay')),
 		...(relayOnly ? [] : [
 			...ofType('srflx').slice(0, 1).map((c) => asOffered(c, 'srflx')),
-			...ofType('host').map((c) => asOffered(c, 'host')),
+			...ofType('host').filter((c) => !looksVirtual(c.ip)).map((c) => asOffered(c, 'host')),
+			...ofType('host').filter((c) => looksVirtual(c.ip)).map((c) => asOffered(c, 'host')),
 		]),
 	]
 		.filter((o) => !o.candidate.ip.includes(':') || ++ipv6 <= MAX_IPV6)
