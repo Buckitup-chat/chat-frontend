@@ -25,7 +25,7 @@ export default async function (text, notify = true) {
 		try {
 			await navigator.clipboard.writeText(text);
 			success = true;
-		} catch (error) {
+		} catch (err) {
 			console.error('copy to clipboard error 2', err);
 		}
 	}
