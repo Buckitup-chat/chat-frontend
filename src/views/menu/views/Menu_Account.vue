@@ -30,6 +30,15 @@
 		</div>
 	</router-link>
 
+	<router-link :to="{ name: 'account_storage' }" custom v-slot="{ isExactActive, navigate }">
+		<div class="_sub_menu_btn" :class="{ _active: isExactActive }" @click="select(navigate)">
+			<div class="_i_block">
+				<i class="_icon_info" :class="{ _active: isExactActive }"></i>
+			</div>
+			<div>Storage on this device</div>
+		</div>
+	</router-link>
+
 	<div v-if="canPrompt || needsManualInstall" class="_sub_menu_btn" @click="installApp">
 		<div class="_i_block">
 			<i class="_icon_buckup_devices"></i>
