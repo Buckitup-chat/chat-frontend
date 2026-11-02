@@ -21,7 +21,7 @@
 						<div class="_file_head">
 							<i class="_icon_backup_file"></i>
 							<h2>Backup file</h2>
-							<span v-if="fileAt" class="ui-badge _success" data-test="file-saved">saved {{ dayText(fileAt) }}</span>
+							<span v-if="fileAt" class="ui-badge _success" data-test="file-saved">saved {{ shortDay(fileAt) }}</span>
 						</div>
 						<p class="ui-small ui-secondary">
 							An encrypted copy of your account. You keep the file and its password: nobody can recover them for you.
@@ -163,6 +163,7 @@ import { healthView, isLiveBackup } from '@/components/recovery/backup/backupFlo
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { userPQStore } from '@/store/userPQ.store';
 import { backupFileSavedAt } from '@/lib/backupFileRecord';
+import { shortDay } from '@/lib/shortDate';
 
 const $userPQ = userPQStore();
 const $modal = inject('$modal');
@@ -197,10 +198,4 @@ const status = computed(() => {
 		text: file ? 'You can get back in with your guardians or with your backup file.' : 'You can get back in with your guardians.',
 	};
 });
-
-const dayText = (sec) => {
-	const d = new Date(sec * 1000);
-	const sameYear = d.getFullYear() === new Date().getFullYear();
-	return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', ...(sameYear ? {} : { year: 'numeric' }) });
-};
 </script>

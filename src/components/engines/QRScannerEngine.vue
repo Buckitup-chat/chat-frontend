@@ -92,13 +92,18 @@ const log = (line) => console.debug('[handshake]', line);
 onMounted(() => {
 	if (!qrScannerRef.value) return;
 	// The scanner the PQ1 handshake used, which read these codes well on phones:
-	// the browser's BarcodeDetector where there is one (Chrome on Android),
 	// qr-scanner's default scan rate, and a square region of 95% of the frame
 	// read at full resolution. qr-scanner's bundled decoder at 1080 px, 12 scans
 	// a second, read worse on the phones it was tried on. The region is whole
 	// pixels: qr-scanner reuses its canvas only while the size is unchanged.
+	// The decoder is the browser's BarcodeDetector on Android, where it read
+	// well, and qr-scanner's own elsewhere: Chrome on a Mac has a
+	// BarcodeDetector too, and it did not read a phone's code that the bundled
+	// decoder (what Brave, Firefox and Safari get) read from the same camera.
+	const android = /Android/.test(navigator.userAgent);
 	qrScanner = new QrScanner(qrScannerRef.value, (result) => onScan(result.data), {
 		returnDetailedScanResult: true,
+		qrEngine: android ? undefined : import('qr-scanner/qr-scanner-worker.min.js').then((m) => m.createWorker()),
 		preferredCamera: 'user',
 		highlightScanRegion: true,
 		highlightCodeOutline: true,

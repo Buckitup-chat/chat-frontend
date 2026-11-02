@@ -1,6 +1,7 @@
 // What a checkpoint comparison comes to, in words: the Checkpoints screen
 // sums up each dialog that moved, and the comparison's header says how much.
 // Pure — the comparison itself is describeCheckpointDiff (dialogs.store).
+import { shortDayTime } from '@/lib/shortDate';
 
 /** One change behind the checkpoint, as describeCheckpointDiff returns it. */
 export interface CheckpointChange {
@@ -73,17 +74,8 @@ export const checkpointChangesLine = (c: CheckpointCounts): string => {
 	return parts.join(' · ') || 'no changes';
 };
 
-// Spelled out, not Intl's: en-GB abbreviates September to "Sept" in some
-// engines and "Sep" in others.
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const pad = (n: number) => String(n).padStart(2, '0');
-
 /** "12 Oct, 18:04" in the device's time zone; the year only when it is not this one. */
-export const checkpointTime = (sec: number, now: Date = new Date()): string => {
-	const d = new Date(sec * 1000);
-	const year = d.getFullYear() === now.getFullYear() ? '' : ` ${d.getFullYear()}`;
-	return `${d.getDate()} ${MONTHS[d.getMonth()]}${year}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-};
+export const checkpointTime = shortDayTime;
 
 export interface CheckpointEntry {
 	peerHash: string;
