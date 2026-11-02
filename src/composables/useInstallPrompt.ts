@@ -8,6 +8,7 @@
 // The installed app opens at the build base, inside the service worker's
 // scope, so it starts with no network.
 import { computed, ref } from 'vue';
+import { isInstalled } from '@/lib/storageStatus';
 
 interface InstallPromptEvent extends Event {
 	prompt(): Promise<void>;
@@ -29,10 +30,6 @@ export function listenForInstallPrompt(target: Window = window): void {
 	});
 }
 
-const runningInstalled = (): boolean =>
-	window.matchMedia?.('(display-mode: standalone)').matches === true
-	|| (navigator as Navigator & { standalone?: boolean }).standalone === true;
-
 const iosSafari = (): boolean => {
 	const ua = navigator.userAgent;
 	// iPadOS reports a desktop Safari; touch points tell it apart from a Mac.
@@ -41,7 +38,7 @@ const iosSafari = (): boolean => {
 };
 
 export function useInstallPrompt() {
-	const inApp = runningInstalled();
+	const inApp = isInstalled();
 	/** The browser can install the app from a button. */
 	const canPrompt = computed(() => !inApp && !installed.value && offer.value !== null);
 	/** Safari on iOS: installation is manual, through the Share menu. */
