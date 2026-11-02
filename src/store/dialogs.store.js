@@ -1471,6 +1471,44 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return scanInFlight;
     };
 
+    /**
+     * Those of `peerHashes` whose dialog holds a checkpoint pointer on this
+     * device — the dialogs an alert is possible in, for the Checkpoints
+     * screen. Null when the pointer index could not be read: "could not
+     * tell", not "none".
+     */
+    const checkpointPeers = async (peerHashes) => {
+        const me = $userPQ.currentUserHash;
+        const indexed = await pointerDialogs(me);
+        if (indexed === null || $userPQ.currentUserHash !== me) return null;
+        return peerHashes.filter((peerHash) => {
+            if (!peerHash || peerHash === me) return false;
+            const dialogHash = getDialogHash(peerHash);
+            return !!dialogHash && indexed.has(dialogHash);
+        });
+    };
+
+    /**
+     * The checkpoint part this user signed in the message `messageId` of the
+     * dialog with `peerHash` — the part an alert's pointer names, for
+     * comparing the dialog with it. Read from an admitted, decrypted row of
+     * this user's own, like the scan that found it; null when there is none.
+     */
+    const readCheckpointPart = async (peerHash, messageId) => {
+        const me = $userPQ.currentUserHash;
+        const dialogHash = getDialogHash(peerHash);
+        if (!dialogHash || !messageId) return null;
+        const stillMine = () => $userPQ.currentUserHash === me;
+        return withDialogCollections(dialogHash, async (colls) => {
+            const read = await admittedRowsOf(dialogHash, colls, stillMine);
+            const row = read?.admitted.find((r) => r.message_id === messageId);
+            if (!row || row.sender_hash !== me || row.deleted_flag || !row.content_b64) return null;
+            const decoded = await decryptMessageRow(row, colls);
+            if (!decoded.decrypted || !stillMine()) return null;
+            return (decoded.parts || []).find((p) => p.kind === 'checkpoint') ?? null;
+        });
+    };
+
     // ---------- a peer's parts, read in the background ----------
 
     /**
@@ -2113,6 +2151,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         alertingPeers,
         scanCheckpointAlerts,
         refreshCheckpointAlert,
+        checkpointPeers,
+        readCheckpointPart,
         admitMessageRow,
         isMessageAdmitted,
         blockedByOf,

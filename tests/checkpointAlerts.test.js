@@ -266,4 +266,44 @@ describe('checkpoint alerts', () => {
 		expect(messagePreloads).toBe(1);
 	});
 
+	// The Checkpoints screen lists the dialogs this device holds a pointer
+	// for — the same index the sweep is bounded by.
+	it('checkpointPeers names only the peers whose dialog holds a pointer', async () => {
+		const stranger = makeTestIdentity(13).userHash;
+		expect(await store.checkpointPeers([peer, stranger, me.userHash])).toEqual([]);
+		await indexDialog();
+		expect(await store.checkpointPeers([peer, stranger, me.userHash, ''])).toEqual([peer]);
+	});
+
+	// The pointer keeps the roots, not the frontier the diff needs: the
+	// screen reads the part back from the message the pointer names.
+	it('readCheckpointPart reads the part back from the pointer\'s own message', async () => {
+		const r1 = await row(M1, [{ kind: 'text', text: 'hi' }]);
+		const part = checkpointPart([r1]);
+		seed(r1, await row(CP, [part], { [M1]: r1.sign_hash }));
+
+		expect(await store.readCheckpointPart(peer, CP)).toMatchObject({
+			kind: 'checkpoint', viewRoot: part.viewRoot, frontierRoot: part.frontierRoot, frontier: part.frontier,
+		});
+		expect(await store.readCheckpointPart(peer, M1)).toBe(null); // a message without one
+		expect(await store.readCheckpointPart(peer, M2)).toBe(null); // not in the dialog
+	});
+
+	// The whole path the screen takes for a dialog that moved: the alert,
+	// the part, the dialog's own comparison, and the words for it.
+	it('a moved dialog compares the way the dialog itself shows it', async () => {
+		const { loadCheckpointComparison } = await import('@/lib/data/checkpointComparison');
+		const { countCheckpointChanges, checkpointSummaryText } = await import('@/lib/data/checkpointSummary');
+		const r1 = await row(M1, [{ kind: 'text', text: 'hi' }]);
+		const cp = await row(CP, [checkpointPart([r1])], { [M1]: r1.sign_hash });
+		seed(r1, cp, await row(M2, [{ kind: 'text', text: 'later' }], { [CP]: cp.sign_hash }));
+
+		const alert = await store.refreshCheckpointAlert(peer);
+		expect(alert).toMatchObject({ changed: true, messageId: CP });
+		const part = await store.readCheckpointPart(peer, alert.messageId);
+		const result = await loadCheckpointComparison(store, peer, part, alert.messageId);
+		expect(result).toMatchObject({ kind: 'diff', changes: [], futureAdded: { count: 1, firstMessageId: M2 } });
+		expect(checkpointSummaryText(countCheckpointChanges(result.changes, result.futureAdded))).toBe('1 new after');
+	});
+
 });

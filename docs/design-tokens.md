@@ -61,7 +61,9 @@ checks that every class used exists.
 
 - `UiRow` — a menu item: icon tile, title, second line, chevron. `tone`
   colours the tile and the second line by status; `dot` puts a status dot on
-  the right; `selected` marks the desktop's current item.
+  the right (`success`, `warning`, `danger`, or `accent` for "changed since
+  you looked"); the `meta` slot adds a third line in caption size; `selected`
+  marks the desktop's current item.
 - `ui-card`, `ui-group-label`, `ui-field` (label, input, `_hint` or `_error`),
   `ui-badge` (`_success`, `_warning`, `_danger`, `_accent`), `ui-notice`,
   `ui-skeleton` (loading keeps the screen's shape; no spinners).

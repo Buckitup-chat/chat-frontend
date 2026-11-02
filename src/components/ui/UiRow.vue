@@ -9,6 +9,7 @@
 		<div class="_text">
 			<div class="_title">{{ title }}<slot name="title-after" /></div>
 			<div v-if="sub" class="_sub" :class="tone && `_${tone}`">{{ sub }}</div>
+			<div v-if="$slots.meta" class="_meta"><slot name="meta" /></div>
 		</div>
 		<slot name="trail">
 			<span v-if="dot" class="_dot" :class="`_${dot}`"></span>
@@ -20,7 +21,8 @@
 <script setup>
 // A menu item: icon tile, title, second line, chevron (Foundations § 5).
 // `tone` colours the tile and the second line by status; `dot` is a status
-// dot on the right; `selected` is the desktop's current item.
+// dot on the right; the `meta` slot is a third, small line; `selected` is the
+// desktop's current item.
 import { computed } from 'vue';
 
 const props = defineProps({
@@ -28,7 +30,7 @@ const props = defineProps({
 	sub: { type: String, default: '' },
 	icon: { type: String, default: '' },
 	tone: { type: String, default: '' }, // success | warning | danger | accent
-	dot: { type: String, default: '' }, // success | warning | danger
+	dot: { type: String, default: '' }, // success | warning | danger | accent
 	to: { type: [String, Object], default: null },
 	selected: { type: Boolean, default: false },
 	chevron: { type: Boolean, default: undefined },
@@ -151,5 +153,15 @@ const clickable = computed(() => !!props.to || props.button);
 	&._success { background: var(--color-success-solid); }
 	&._warning { background: var(--color-warning-solid); }
 	&._danger { background: var(--color-danger-solid); }
+	&._accent { background: var(--color-accent); }
+}
+
+._meta {
+	font-size: var(--text-xs);
+	line-height: var(--leading-xs);
+	color: var(--color-text-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 </style>

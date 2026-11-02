@@ -24,8 +24,8 @@
       <div class="d-flex align-items-center">
         <!-- Rooms mount this component too and bind no checkpoint handler;
              without a peer there is no dialog to attest. -->
-        <button v-if="peerHash" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Sign a checkpoint of this dialog's history"
-          :disabled="checkpointSigning" @click="emit('createCheckpoint')">🔏</button>
+        <button v-if="peerHash" type="button" class="checkpoint-btn me-2" title="Sign a checkpoint of this dialog's history"
+          :disabled="checkpointSigning" @click="emit('createCheckpoint')"><i class="_icon_checkpoint"></i>Checkpoint</button>
         <!-- Only a contact confirmed in person can be asked (pq_recovery_shares § Inviting). -->
         <button v-if="peerHash && canInvite" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Ask to be your guardian"
           :disabled="inviting" @click="emit('inviteGuardian')">🛡</button>
@@ -264,7 +264,7 @@
                  Tap asks the page to verify + compare against current state. -->
             <button v-for="(cp, ci) in checkpointsOf(msg)" :key="'cp' + ci" type="button"
               class="msg-checkpoint" @click="emit('checkpointInfo', { part: cp, messageId: msg.id })">
-              🔏 History checkpoint · tap to compare
+              <i class="_icon_checkpoint"></i>History checkpoint · tap to compare
             </button>
             <RecoveryShareCard v-if="shares[msg.id] && shares[msg.id].kind !== 'holding'" :view="shares[msg.id]" :peer-name="title"
               :busy="givingBack" @give-back="(key) => emit('giveBackShare', key)" />
@@ -1400,14 +1400,39 @@ watch(() => props.messages, () => {
 .message-unplaced { opacity: .72; }
 .msg-unplaced-note { margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
 .msg-checkpoint {
-  display: block;
-  border: 1px dashed #8e2b77;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  border: 1px dashed var(--color-accent);
   background: rgba(142, 43, 119, .06);
-  color: #8e2b77;
+  color: var(--color-accent);
   border-radius: 10px;
   font-size: 12px;
   padding: 4px 10px;
   margin: 2px 0;
+
+  i { flex-shrink: 0; width: 14px; height: 14px; background-color: currentColor; }
+}
+/* the header's "sign a checkpoint" pill */
+.checkpoint-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+
+  i { width: 16px; height: 16px; background-color: currentColor; }
+  &:hover { background: var(--color-border); }
+  &:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+  &:disabled { opacity: .4; pointer-events: none; }
 }
 
 .context-menu-danger { color: #dc3545; }

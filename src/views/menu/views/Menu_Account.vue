@@ -35,9 +35,11 @@ import { useMenu } from '@/composables/useMenu';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { useInstallPrompt } from '@/composables/useInstallPrompt';
 import { userPQStore } from '@/store/userPQ.store';
+import { useDialogsStore } from '@/store/dialogs.store';
 import { shortUserId } from '@/lib/shortUserId';
 
 const $route = inject('$route');
+const $dialogs = useDialogsStore();
 const $mitt = inject('$mitt');
 const $swal = inject('$swal');
 const $userPQ = userPQStore();
@@ -74,6 +76,11 @@ const groups = computed(() => [
 	{
 		label: 'App',
 		items: [
+			// The dot is what the dialogs list's sweep already found this session.
+			{
+				title: 'Checkpoints', sub: 'Changes in signed history', icon: 'checkpoint', to: { name: 'account_checkpoints' },
+				dot: $dialogs.alertingPeers.size ? 'accent' : '',
+			},
 			{ title: 'Notifications', sub: 'Alerts about recovery attempts', icon: 'notifications', to: { name: 'account_notifications' } },
 			...(canPrompt.value || needsManualInstall.value
 				? [{ title: 'Install app', sub: 'On your phone or computer', icon: 'buckup_devices', button: true, action: installApp }]
