@@ -9,13 +9,6 @@
 				<i :class="menu === tab.key ? `_icon_${tab.icon}_filled` : `_icon_${tab.icon}`"></i>
 				<span>{{ tab.label }}</span>
 			</router-link>
-
-			<!-- The team's links to the server's own pages, desktop only. -->
-			<div class="_legacy" v-if="!$breakpoint.lt('md')">
-				<a href="/trusted" title="Trusted (previous version)">BE</a>
-				<a href="/electric" title="Electric">EL</a>
-				<div class="_bp" v-if="!$isProd">{{ $breakpoint.current }}</div>
-			</div>
 		</nav>
 
 		<div class="_sub">
@@ -109,28 +102,8 @@
 		&._active { background: rgba(255, 255, 255, 0.14); color: var(--color-text-on-dark); }
 
 		// Account sits at the bottom of the rail
-		&._account { order: 2; }
+		&._account { margin-top: auto; }
 	}
-}
-
-._legacy {
-	order: 1;
-	margin-top: auto;
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	gap: var(--space-2);
-	padding-bottom: var(--space-2);
-
-	a {
-		color: rgba(255, 255, 255, 0.5);
-		font-size: var(--text-xs);
-		font-weight: var(--weight-medium);
-		text-decoration: none;
-		&:hover { color: var(--color-text-on-dark); }
-	}
-
-	._bp { color: rgba(255, 255, 255, 0.3); font-size: var(--text-xs); }
 }
 
 ._sub {
@@ -173,7 +146,6 @@ import TransferDock from '@/components/chat/TransferDock.vue';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { shallowRef, defineAsyncComponent, inject, watch, computed } from 'vue';
 const $route = inject('$route');
-const $isProd = inject('$isProd');
 const $breakpoint = useBreakpoint();
 
 const tabs = [

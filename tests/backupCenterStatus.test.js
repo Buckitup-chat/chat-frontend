@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-// Backup Center's status line: protected by a backup file saved on this
-// device, by guardians who keep enough pieces, by both, or by nothing — and
-// no verdict before the guardians answered.
+// Backup Center's status line: only guardians who keep enough pieces protect
+// the account; a backup file saved on this device is named beside them but
+// protects nothing alone. No verdict before the guardians answered.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { ref } from 'vue';
@@ -49,10 +49,11 @@ describe('Backup Center status', () => {
 		expect(status(render()).text()).toContain('Account not protected');
 	});
 
-	it('counts a backup file saved on this device, and shows its date', () => {
+	it('does not count a backup file alone as protection, and shows its date', () => {
 		rememberBackupFileSaved(ME, Math.floor(Date.UTC(2026, 9, 12, 12) / 1000));
 		const w = render();
-		expect(status(w).text()).toContain('You can get back in with your backup file.');
+		expect(status(w).text()).toContain('Account not protected');
+		expect(status(w).text()).toContain('A backup file alone can be lost');
 		expect(w.find('[data-test="file-saved"]').text()).toBe('saved 12 Oct');
 	});
 
@@ -64,7 +65,7 @@ describe('Backup Center status', () => {
 		expect(status(render()).text()).toContain('You can get back in with your guardians.');
 
 		rememberBackupFileSaved(ME);
-		expect(status(render()).text()).toContain('You can get back in with your backup file or with your guardians.');
+		expect(status(render()).text()).toContain('You can get back in with your guardians or with your backup file.');
 	});
 
 	it('does not count a revoked backup', () => {

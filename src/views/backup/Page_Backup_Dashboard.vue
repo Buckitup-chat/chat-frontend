@@ -178,19 +178,24 @@ const fileAt = computed(() => backupFileSavedAt($userPQ.currentUserHash));
 const guardiansProtect = computed(() =>
 	isLiveBackup(store.run) && ['spare_2', 'spare_1', 'at_threshold'].includes(healthView(store.run, store.receipts).level));
 
+// Only guardians protect the account: a file can be lost, or its password forgotten.
 const status = computed(() => {
 	if (store.deployment && !store.loaded) return null;
 	const file = !!fileAt.value;
-	const guardians = guardiansProtect.value;
-	if (!file && !guardians) {
+	if (!guardiansProtect.value) {
 		return {
 			tone: 'danger',
 			title: 'Account not protected',
-			text: 'If you lose this device, you lose the account. Choose at least one way back.',
+			text: file
+				? 'A backup file alone can be lost, or its password forgotten. Add guardians, so you can get back in without it.'
+				: 'If you lose this device, you lose the account. Add guardians, so you can get back in.',
 		};
 	}
-	const ways = [file && 'your backup file', guardians && 'your guardians'].filter(Boolean).join(' or with ');
-	return { tone: 'success', title: 'Account protected', text: `You can get back in with ${ways}.` };
+	return {
+		tone: 'success',
+		title: 'Account protected',
+		text: file ? 'You can get back in with your guardians or with your backup file.' : 'You can get back in with your guardians.',
+	};
 });
 
 const dayText = (sec) => {
