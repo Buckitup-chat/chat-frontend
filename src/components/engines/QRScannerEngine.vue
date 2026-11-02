@@ -30,7 +30,7 @@
 // The optical handshake v2 (docs/task-handshake-pq2.md): the camera and the
 // QR code on screen; the result goes to the modal, which shows it. The
 // protocol is the engine's
-// (src/lib/handshake/engine.ts) and the module's (src/lib/pq/handshake.ts);
+// (src/lib/handshake/engine.ts) and the module's (packages/pq-client/src/handshake.ts);
 // this component runs one engine per session.
 //
 // A session id is checked after every await: a session restarted while the
@@ -44,7 +44,7 @@ import { userPQStore } from '@/store/userPQ.store';
 import { HandshakeEngine } from '@/lib/handshake/engine';
 import { QwbpChannel } from '@/lib/handshake/qwbpChannel';
 import { relayIceServers } from '@/lib/data/turnCredentials';
-import { toBase64, toBytes } from '@/lib/pq/signature';
+import { toBase64, toBytes } from '@buckitup/pq-client/signature';
 
 const $userPQ = userPQStore();
 

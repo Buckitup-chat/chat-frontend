@@ -3,7 +3,7 @@
 // bytes, unpadded base64. The server checks exactly those bytes
 // (chat: Chat.Pq.ProofOfPossession); a proof over anything else, such as the
 // challenge base64-decoded first, is refused.
-import { toBase64Unpadded } from './signature';
+import { toBase64Unpadded } from './signature.js';
 
 /** `sign` is ML-DSA-87 under the account's sign_skey (EncryptionManagerPQ.signChallenge, or the key itself). */
 export const proveChallenge = async (

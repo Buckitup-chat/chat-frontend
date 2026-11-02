@@ -177,7 +177,7 @@ What it builds on:
 - **In the tree:** the sealed vault and its locator (`src/lib/recovery/vault.ts`),
   the two halves (`vaultEnvelope.splitIntoHalves`), the split and its checks
   (`src/lib/recovery/shareSplit.ts`), the `recovery_share` codec
-  (`src/lib/pq/content.ts`), confirmed contacts, and the account's `evm_skey` in
+  (`packages/pq-client/src/content.ts`), confirmed contacts, and the account's `evm_skey` in
   the vault.
 - **Deployed:** contracts v2 on Sepolia, the relayer with its indexer and
   notifications, and the v2 nodes (overview §5).
@@ -214,7 +214,7 @@ The slices, in build order:
 - `src/lib/recovery/shareSplit.ts` moves to root v2: `node_set` hashed into
   `split_root` (`pq_recovery_shares` § Re-issuing), the golden vectors
   re-pinned.
-- `src/lib/pq/content.ts` gains the `recovery_invite`,
+- `packages/pq-client/src/content.ts` gains the `recovery_invite`,
   `recovery_invite_reply`, `recovery_binding` and `recovery_share_return`
   codecs; the meta keys of § Inviting and the ten-word code of § Returning come
   with them. All of it is pinned by golden vectors.
@@ -365,7 +365,7 @@ it.
   client sends the `recovery_share_return` by itself once the send gate opens.
 - **Manual return** (§ Manual return): the guardian's app emits the sealed
   block, the recovering app imports nothing until the six digits match. The
-  digits come from the derivation inside `src/lib/pq/deviceLink.ts`, factored
+  digits come from the derivation inside `packages/pq-client/src/deviceLink.ts`, factored
   out with the salt as a parameter rather than copied.
 - **The finale is not optional:** back in the original account, the client
   runs a reshare and destroys the temporary account, keys and vault together.

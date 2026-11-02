@@ -4,7 +4,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	createOffer, encodeInvite, parseInvite, acceptOffer, openOffer,
 	sealPayload, unsealPayload, signCommand, verifyCommand, DeviceLinkError,
-} from '@/lib/pq/deviceLink';
+} from '@buckitup/pq-client/deviceLink';
 
 /** One full negotiation: the new device's offer, accepted by the existing one. */
 const negotiate = () => {

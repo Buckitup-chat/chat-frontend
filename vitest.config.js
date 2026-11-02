@@ -8,6 +8,7 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			'@': fileURLToPath(new URL('./src', import.meta.url)),
+			'@buckitup/pq-client': fileURLToPath(new URL('./packages/pq-client/src', import.meta.url)),
 		},
 	},
 	define: {

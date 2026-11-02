@@ -11,7 +11,7 @@
 // already holds through the file_chunks shape and re-PUT only the gaps.
 // Progress is reported in chunks, not guessed percentages (§2.1).
 
-import { signFields, toBase64, fromBase64 } from '@/lib/pq/signature';
+import { signFields, toBase64, fromBase64 } from '@buckitup/pq-client/signature';
 import { sha3_512 } from '@noble/hashes/sha3';
 import {
 	CHUNK_SIZE,
@@ -21,7 +21,7 @@ import {
 	encryptChunk,
 	generateEncSecret,
 	newFileId,
-} from '@/lib/pq/fileCrypto';
+} from '@buckitup/pq-client/fileCrypto';
 import { sendMutationsAndAwaitShape } from './ingest';
 import { getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 import { bearerFor, openSession } from './readSession';

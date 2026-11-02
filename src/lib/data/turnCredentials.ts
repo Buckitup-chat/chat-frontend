@@ -21,7 +21,7 @@
 // challenge, an ML-DSA signature and a POST that will fail the same way.
 /* global RTCIceServer -- a DOM type */
 import { api } from '@/api/client';
-import { proveChallenge } from '@/lib/pq/challengeProof';
+import { proveChallenge } from '@buckitup/pq-client/challengeProof';
 
 declare const ELECTRIC_API_URL: string;
 /** The dev server's static relay (vite.config.js), null in every build. */

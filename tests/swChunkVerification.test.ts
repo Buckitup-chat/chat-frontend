@@ -2,7 +2,7 @@
 // verified for that index: GCM alone would play any of the file's chunks at
 // any position. Driven through the real src/sw.js and videoStream.ts.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { chunkDataHash, encryptChunk } from '@/lib/pq/fileCrypto';
+import { chunkDataHash, encryptChunk } from '@buckitup/pq-client/fileCrypto';
 import { bodyOf, loadWorker, rangeOf, type TestWorker } from './helpers/swHarness';
 
 vi.mock('workbox-precaching', () => ({

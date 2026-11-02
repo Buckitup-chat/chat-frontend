@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { _setStoreForTests } from '@/lib/data/localStore';
 import { loadPointer, savePointer, rawViewState, viewMoved, pointerDialogs, rememberPointerDialog, type AlertRow } from '@/lib/data/checkpointAlerts';
-import { buildViewTree, CHECKPOINT_SEMANTICS } from '@/lib/pq/checkpoint';
+import { buildViewTree, CHECKPOINT_SEMANTICS } from '@buckitup/pq-client/checkpoint';
 
 const M1 = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
 const M2 = 'dmsg_0192aabb-0000-7000-8000-000000000002';

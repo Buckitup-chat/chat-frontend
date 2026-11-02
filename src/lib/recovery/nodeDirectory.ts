@@ -6,7 +6,7 @@
 import { fetchDescriptor, isPrivateHost, isStableNodeUrl, nodeIsUp, verifyDescriptor, type DescriptorVerdict } from './nodeClient';
 import type { KnownNode } from './nodeChoice';
 import type { Deployment } from './deployments';
-import type { VerifiedCard } from '@/lib/pq/verifyCard';
+import type { VerifiedCard } from '@buckitup/pq-client/verifyCard';
 
 export type NodeCheck =
 	| { state: 'ready'; node: KnownNode }

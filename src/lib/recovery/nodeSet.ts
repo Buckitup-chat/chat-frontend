@@ -5,7 +5,7 @@
 // it in a return fails the root check like one who rewrites a share.
 import { sha3_512 } from '@noble/hashes/sha3';
 import { concatBytes } from '@noble/hashes/utils';
-import type { NodeSet } from '@/lib/pq/content';
+import type { NodeSet } from '@buckitup/pq-client/content';
 
 export type { NodeSet };
 

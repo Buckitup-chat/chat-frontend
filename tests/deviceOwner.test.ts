@@ -2,7 +2,7 @@
 // left alone, and the claim is a signature over the server's challenge.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { fromBase64 } from '@/lib/pq/signature';
+import { fromBase64 } from '@buckitup/pq-client/signature';
 
 const api = vi.hoisted(() => ({
 	getDeviceIdentity: vi.fn(),

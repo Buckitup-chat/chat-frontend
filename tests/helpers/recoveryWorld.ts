@@ -20,7 +20,7 @@ import { metaKeysOf, type MetaKeys } from '@/lib/recovery/guardianInvite';
 import { domainOf, typesFor } from '@/lib/recovery/typedData';
 import { releaseMessage } from '@/lib/recovery/nodeClient';
 import { secretIdOf, type Deployment } from '@/lib/recovery/deployments';
-import type { ContentPart } from '@/lib/pq/content';
+import type { ContentPart } from '@buckitup/pq-client/content';
 import type { SecretState } from '@/lib/recovery/chain';
 import type { Bodies, Dispatch, Gateway } from '@/lib/recovery/gateway';
 

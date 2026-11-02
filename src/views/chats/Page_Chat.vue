@@ -68,7 +68,7 @@ import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
 import { claimPendingEdit, submitPendingEdit, failPendingEdit, awaitPendingEditUnlock, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
-import { presentedRowFingerprint } from '@/lib/pq/verifyDialogRow';
+import { presentedRowFingerprint } from '@buckitup/pq-client/verifyDialogRow';
 import { v7 as uuidv7 } from 'uuid';
 import GalleryViewer from '@/components/GalleryViewer.vue';
 import { useAvatarsStore } from '@/store/avatars.store';

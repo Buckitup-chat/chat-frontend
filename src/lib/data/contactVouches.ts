@@ -1,6 +1,6 @@
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { signFields, type SignableFields } from '@/lib/pq/signature';
-import { signableFields, wireBool } from '@/lib/pq/schema';
+import { signFields, type SignableFields } from '@buckitup/pq-client/signature';
+import { signableFields, wireBool } from '@buckitup/pq-client/schema';
 import { getVerifiedSignPkey } from './cardRegistry';
 import { claimDeviceIfUnowned } from './deviceOwner';
 import { IngestError, sendMutationsAndAwaitShape } from './ingest';

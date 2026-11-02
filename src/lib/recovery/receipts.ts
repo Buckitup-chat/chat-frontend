@@ -2,7 +2,7 @@
 // guardian's piece stands, from what the guardian said in their dialog. The
 // roster counts a holder only on `stored`; `delivered`, the dialog's own
 // receipt, says the piece arrived and nothing more.
-import type { RecoveryHoldingPart } from '@/lib/pq/content';
+import type { RecoveryHoldingPart } from '@buckitup/pq-client/content';
 import { isReportedState, type ReportedState } from './holdings';
 import { secretRefIn } from './deployments';
 import type { BackupRun } from './backupRun';

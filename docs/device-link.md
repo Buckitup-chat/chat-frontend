@@ -3,7 +3,7 @@
 Signing an account in on a second device. The backup a user could download as a
 password-protected file travels instead over a channel that the person holding
 both devices authenticates by eye, sealed under a key only those two devices
-share. Code: `src/lib/pq/deviceLink.ts` (protocol), `src/lib/deviceLink/room.ts`
+share. Code: `packages/pq-client/src/deviceLink.ts` (protocol), `src/lib/deviceLink/room.ts`
 (transport), `Modal_Link_Device.vue` (new device), `Modal_Link_Approve.vue`
 (existing device).
 

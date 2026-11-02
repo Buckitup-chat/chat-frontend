@@ -8,8 +8,8 @@ import {
 	deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
 	proveViewKey, verifyViewProof,
 	CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
-} from '@/lib/pq/checkpoint';
-import { encodeContent, decodeContent, previewText, ContentDecodeError } from '@/lib/pq/content';
+} from '@buckitup/pq-client/checkpoint';
+import { encodeContent, decodeContent, previewText, ContentDecodeError } from '@buckitup/pq-client/content';
 
 const mid = (n: number) => `dmsg_${String(n).padStart(4, '0')}e8f0-aaaa-7bbb-8ccc-ddddeeee${String(n).padStart(4, '0')}`;
 const sh = (n: number) => 'dms_' + String(n % 10).repeat(128);

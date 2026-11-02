@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { deriveFrontierRoot, buildViewTree, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@/lib/pq/checkpoint';
+import { deriveFrontierRoot, buildViewTree, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@buckitup/pq-client/checkpoint';
 import { makeFakeLockManager } from './helpers/fakeWebLocks';
 import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 
@@ -60,7 +60,7 @@ const { SessionFencedError } = await import('@/lib/data/sessionGuard');
 const ingest = await import('@/lib/data/ingest');
 const { useDialogsStore } = await import('@/store/dialogs.store');
 const { DialogCrypto } = await import('@/libs/DialogCrypto');
-const { encodeContent } = await import('@/lib/pq/content');
+const { encodeContent } = await import('@buckitup/pq-client/content');
 
 const memStore = () => {
 	const map = new Map<string, string>();

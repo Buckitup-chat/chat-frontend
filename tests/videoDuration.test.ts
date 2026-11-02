@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { videoDurationSeconds } from '@/lib/data/imageMeta';
-import { encodeContent } from '@/lib/pq/content';
+import { encodeContent } from '@buckitup/pq-client/content';
 
 describe('videoDurationSeconds', () => {
 	it('rounds a 0.1–0.49 s clip up to 1, not down to unknown', () => {

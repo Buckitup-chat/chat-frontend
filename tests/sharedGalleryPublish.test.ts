@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { photoToWire, type ImagePart } from '@/lib/pq/content';
-import { toBase64 } from '@/lib/pq/signature';
+import { photoToWire, type ImagePart } from '@buckitup/pq-client/content';
+import { toBase64 } from '@buckitup/pq-client/signature';
 import { SessionFencedError } from '@/lib/data/sessionGuard';
 import type { UserStorageRow } from '@/lib/data/types';
 import { initialGalleryMapping, type GalleryMapping, type MappingResult } from '@/lib/avatars/galleryMapping';

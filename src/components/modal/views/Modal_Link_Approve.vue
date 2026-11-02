@@ -67,7 +67,7 @@ import { useLinkRoom } from '@/composables/useLinkRoom';
 import {
 	parseInvite, acceptOffer, sealPayload, signCommand, verifyCommand,
 	encodeBytes, decodeBytes, DeviceLinkError,
-} from '@/lib/pq/deviceLink';
+} from '@buckitup/pq-client/deviceLink';
 
 const ABORTED = 'The new device stopped the link. Start again on both devices.';
 const DROPPED = 'The connection dropped. Start again on both devices.';

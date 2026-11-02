@@ -14,8 +14,8 @@
 // the same code the unit tests pin.
 import { precacheAndRoute, createHandlerBoundToURL, cleanupOutdatedCaches } from 'workbox-precaching';
 import { NavigationRoute, registerRoute } from 'workbox-routing';
-import { parseRange, planChunks } from '@/lib/pq/videoRange';
-import { chunkDataHash } from '@/lib/pq/fileCrypto';
+import { parseRange, planChunks } from '@buckitup/pq-client/videoRange';
+import { chunkDataHash } from '@buckitup/pq-client/fileCrypto';
 
 self.skipWaiting();
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));

@@ -4,7 +4,7 @@
 // gate — the one rule that decides when this guardian's share goes back. Pure:
 // the chain's answers come in, decisions go out.
 import { RoundState } from 'backitup-secret-recovery-sdk/lib/types';
-import type { ContentPart, RecoveryBindingPart } from '@/lib/pq/content';
+import type { ContentPart, RecoveryBindingPart } from '@buckitup/pq-client/content';
 import type { SecretState } from './chain';
 import { checkBinding } from './recoveryBinding';
 

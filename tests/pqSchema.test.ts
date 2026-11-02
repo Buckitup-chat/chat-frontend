@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { signFields, toBase64 } from '@/lib/pq/signature';
-import { signableFields } from '@/lib/pq/schema';
-import { verifyUserCard } from '@/lib/pq/verifyCard';
-import { verifyMessageRow } from '@/lib/pq/verifyDialogRow';
+import { signFields, toBase64 } from '@buckitup/pq-client/signature';
+import { signableFields } from '@buckitup/pq-client/schema';
+import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
+import { verifyMessageRow } from '@buckitup/pq-client/verifyDialogRow';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 

@@ -7,7 +7,7 @@ import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { hmac } from '@noble/hashes/hmac';
 import { sha3_256 } from '@noble/hashes/sha3';
-import { sixDigitCode, DEVICE_LINK_SALT } from '@/lib/pq/deviceLink';
+import { sixDigitCode, DEVICE_LINK_SALT } from '@buckitup/pq-client/deviceLink';
 import {
 	RECOVERY_RETURN_SALT,
 	ManualReturnError,
@@ -18,7 +18,7 @@ import {
 	readReturnBlock,
 	sealReturnBlock,
 } from '@/lib/recovery/manualReturn';
-import type { RecoveryShareReturnPart } from '@/lib/pq/content';
+import type { RecoveryShareReturnPart } from '@buckitup/pq-client/content';
 
 const REF = 'eip155:11155111:0xd9ffd20f2db9c774b9f0237c4837f52dcbd937a7/0x' + '9f'.repeat(32);
 const GUARDIAN = 'u_' + 'a'.repeat(128);

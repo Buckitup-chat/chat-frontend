@@ -1,7 +1,7 @@
 // Drawing profile photos.
 
 import { isImageMime, thumbDataUrl } from '@/lib/data/imageMeta';
-import { photoFromWire, photoToWire, type AvatarPhoto } from '@/lib/pq/content';
+import { photoFromWire, photoToWire, type AvatarPhoto } from '@buckitup/pq-client/content';
 
 /** The MIME type a photo is drawn as: the sender's word only when it names a picture format. */
 export const imageMime = (mimeType: string): string => (isImageMime(mimeType) ? mimeType : 'image/jpeg');

@@ -6,7 +6,7 @@ import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
 import { CURVE } from '@noble/secp256k1';
 import { SigningKey } from 'ethers';
 import { checkStealthAddress } from 'backitup-secret-recovery-sdk/lib/keys/stealth';
-import { hkdfDerive } from '@/lib/pq/hkdf';
+import { hkdfDerive } from '@buckitup/pq-client/hkdf';
 import { personalSign, personalSigner } from './evmSign';
 
 const META_SALT = 'buckitup/stealth-meta/v1';

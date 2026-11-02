@@ -5,7 +5,7 @@
 // ingest, so signing in claims an ownerless device explicitly: a signature over
 // a fresh challenge for the card already stored there.
 import { api } from '@/api/client';
-import { toBase64Unpadded } from '@/lib/pq/signature';
+import { toBase64Unpadded } from '@buckitup/pq-client/signature';
 
 const USER_HASH = /^u_[0-9a-f]{128}$/;
 const DEVICE_ID = /^[^.\s]+$/;

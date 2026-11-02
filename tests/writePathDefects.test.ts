@@ -4,7 +4,7 @@
 // signature compared as text, an accepted write whose read model never caught
 // up, a durable retryable entry with nothing scheduled to retry it.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { toBase64 } from '@/lib/pq/signature';
+import { toBase64 } from '@buckitup/pq-client/signature';
 import { assertFreshBase, markUnconfirmed, clearUnconfirmed, isUnconfirmed, StaleBaseError, _resetStaleBase } from '@/lib/data/staleBase';
 import { scopeForRelation } from '@/lib/data/barrier';
 import type { MutationLike } from '@/lib/data/confirm';

@@ -163,7 +163,7 @@ as-is — it has to be padded with `=` to a multiple of four. This applies to
 producing a signature and to checking one: when verifying a received row the
 payload is assembled from the padded form, or not a single row will verify.
 
-`encodeField` in `src/lib/pq/signature.ts` pads `_cert`, `_pkey` and `_b64`
+`encodeField` in `packages/pq-client/src/signature.ts` pads `_cert`, `_pkey` and `_b64`
 values and each element of a binary array (`files.chunk_sign_hashes`), so the
 payload is the same whether a row is being signed or verified.
 
