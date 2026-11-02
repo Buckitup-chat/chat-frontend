@@ -45,8 +45,11 @@ const clickable = computed(() => !!props.to || props.button);
 	position: relative;
 	display: flex;
 	align-items: center;
+	// a card that pads its rows itself sets --row-pad-x; the hairline follows
+	--row-pad-x: var(--space-4);
+	--row-lead: 40px;
 	gap: var(--space-3);
-	padding: var(--space-3) var(--space-4);
+	padding: var(--space-3) var(--row-pad-x);
 	min-height: 64px;
 	color: var(--color-text);
 	text-decoration: none;
@@ -72,8 +75,8 @@ const clickable = computed(() => !!props.to || props.button);
 	content: '';
 	position: absolute;
 	top: 0;
-	left: calc(var(--space-4) + 40px + var(--space-3));
-	right: var(--space-4);
+	left: calc(var(--row-pad-x) + var(--row-lead) + var(--space-3));
+	right: var(--row-pad-x);
 	border-top: 1px solid var(--color-border);
 }
 
@@ -82,7 +85,7 @@ const clickable = computed(() => !!props.to || props.button);
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	width: 40px;
+	width: var(--row-lead);
 	height: 40px;
 	border-radius: var(--radius-input);
 	background: var(--color-surface);
@@ -95,8 +98,9 @@ const clickable = computed(() => !!props.to || props.button);
 	&._accent { background: var(--color-accent-tint); i { background-color: var(--color-accent); } }
 }
 
+._bare { --row-lead: 24px; }
+
 ._bare ._lead {
-	width: 24px;
 	background: transparent;
 	i { width: 22px; height: 22px; }
 }
