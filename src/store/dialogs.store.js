@@ -30,7 +30,8 @@ import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
 } from '@buckitup/pq-client/checkpoint';
-import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
+import { prepareUpload, uploadFile, fileAvailability } from '@/lib/data/fileTransfer';
+import { openFile } from '@/lib/data/keptFiles';
 import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
 import { openVideo } from '@/lib/data/videoStream';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
@@ -1022,9 +1023,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
     /** How much of an attachment this node can serve (§2.4). */
     const getFileAvailability = (part) => fileAvailability(part.fileId, part.uploaderHash);
 
-    /** Downloads and decrypts an attachment; progress in chunks (§2.3). */
+    /**
+     * Decrypts an attachment: from the copy kept on this device when the
+     * account keeps it (keptFiles.ts), downloaded otherwise; progress in
+     * chunks (§2.3).
+     */
     const fetchFile = (filePart, { onProgress, signal } = {}) =>
-        downloadFile({ fileId: filePart.fileId, uploaderHash: filePart.uploaderHash, encSecretB64: filePart.encSecretB64, onProgress, signal });
+        openFile($userPQ.currentUserHash, filePart, { onProgress, signal });
 
     /**
      * Deletes own message (§3.2): a new revision with deleted_flag and no
