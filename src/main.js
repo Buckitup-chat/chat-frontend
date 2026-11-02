@@ -7,6 +7,7 @@ import App from './App.vue';
 import { listenForInstallPrompt } from './composables/useInstallPrompt';
 
 import 'bootstrap';
+import './scss/tokens.css';
 import './scss/app.scss';
 
 import { userStore } from './store/user.store.js';
