@@ -95,6 +95,15 @@ describe('keep on this device', () => {
 		expect(gone.find('#fs-keep').element.disabled).toBe(true);
 	});
 
+	it('a kept file opens offline, before anything about the server is known', async () => {
+		for (const availability of [null, { present: 0, total: 0, unknown: true, deleted: false }]) {
+			const w = render({ availability, kept: true });
+			expect(w.text()).toContain('This file opens from the copy kept on this device.');
+			await w.find('.fs-btn').trigger('click');
+			expect(w.emitted('refresh')).toHaveLength(1);
+		}
+	});
+
 	it('a deleted message: the kept copy remains', () => {
 		const w = render({ kept: true, messageDeleted: true, availability: { present: 0, total: 0, unknown: true, deleted: false } });
 		expect(w.text()).toContain('The message was deleted. The copy kept on this device remains.');

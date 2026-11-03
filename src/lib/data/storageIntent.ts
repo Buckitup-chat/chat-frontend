@@ -12,6 +12,9 @@ import type { DeliveryHandle } from './ingest';
 import type { UserStorageRow } from './types';
 import { verifyReplicatedRow, type RowVerification } from './rowVerification';
 import { getVerifiedSignPkey } from './cardRegistry';
+import { withNamedLock } from './serialized';
+
+export { withNamedLock };
 
 export interface StorageIntentPayload {
 	kind: 'storage';
@@ -214,32 +217,6 @@ export const MAX_CONFLICT_RECONCILE_ATTEMPTS = 3;
 export const RECONCILE_RETRY_DELAY_MS = 300;
 
 export class BaseUnavailableError extends Error {}
-
-const inProcessLocks = new Map<string, Promise<unknown>>();
-
-async function withCrossTabLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
-	const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
-	if (!locks?.request) return fn();
-	return locks.request(name, () => fn());
-}
-
-/**
- * Runs `fn` alone under `name`: queued behind earlier calls in this tab,
- * and under the Web Lock of that name across tabs where there is one.
- */
-export function withNamedLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
-	const previous = inProcessLocks.get(name) ?? Promise.resolve();
-	const run = previous.then(() => withCrossTabLock(name, fn), () => withCrossTabLock(name, fn));
-	const settled = run.then(
-		() => undefined,
-		() => undefined
-	);
-	inProcessLocks.set(name, settled);
-	settled.then(() => {
-		if (inProcessLocks.get(name) === settled) inProcessLocks.delete(name);
-	});
-	return run;
-}
 
 export function withStorageSlotLock<T>(userHash: string, uuid: string, fn: () => Promise<T>): Promise<T> {
 	return withNamedLock(`buckitup-storage-slot:${userHash}|${uuid}`, fn);

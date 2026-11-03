@@ -24,9 +24,11 @@ const messageId = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
 const fid = (n: number) => 'f_' + String(n).repeat(32);
 
 let raw: Map<string, string>;
+let locked: Set<string>;
 let server: FakeServer;
 const accountKeys = new Map<string, CryptoKey>();
 const keyOf = async (owner: string) => {
+	if (locked.has(owner)) throw new Error('No unlocked account');
 	if (!accountKeys.has(owner)) accountKeys.set(owner, await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']));
 	return accountKeys.get(owner)!;
 };
@@ -35,15 +37,20 @@ beforeEach(() => {
 	globalThis.indexedDB = new IDBFactory();
 	__resetChunkCacheForTests();
 	raw = new Map();
-	_setKeptFilesStoreForTests({
-		get: async (k) => raw.get(k) ?? null,
-		set: async (k, v) => { raw.set(k, v); },
-		delete: async (k) => { raw.delete(k); },
-		keys: async () => [...raw.keys()],
-		clear: async () => raw.clear(),
-	}, keyOf);
+	locked = new Set();
+	_setKeptFilesStoreForTests(rawStore(), keyOf);
 	server = installFakeServer();
 });
+
+function rawStore() {
+	return {
+		get: async (k: string) => raw.get(k) ?? null,
+		set: async (k: string, v: string) => { raw.set(k, v); },
+		delete: async (k: string) => { raw.delete(k); },
+		keys: async () => [...raw.keys()],
+		clear: async () => raw.clear(),
+	};
+}
 
 const text = (bytes: Uint8Array | null) => (bytes ? new TextDecoder().decode(bytes) : null);
 
@@ -160,5 +167,29 @@ describe('letting a kept file go', () => {
 		expect(raw.has(`${ALICE}|kept`)).toBe(false);
 		expect(await pinnedBytesOf(ALICE)).toBe(0);
 		expect(Object.keys(await listKeptFiles(BOB))).toEqual([fileKey(f.part)]);
+	});
+});
+
+describe('the index across tabs and sessions', () => {
+	it('a keep in one tab does not drop what another tab kept meanwhile', async () => {
+		const [f1, f2] = [await publishFile(fid(1), ['one']), await publishFile(fid(2), ['two'])];
+		serve(server, f1);
+		serve(server, f2);
+		expect(await listKeptFiles(ALICE)).toEqual({});
+		vi.resetModules();
+		const otherTab = await import('@/lib/data/keptFiles');
+		otherTab._setKeptFilesStoreForTests(rawStore(), keyOf);
+		await otherTab.keepFile(ALICE, f1.part, messageId, { resolveSignPkey });
+		await keepFile(ALICE, f2.part, messageId, { resolveSignPkey });
+		expect(Object.keys(await listKeptFiles(ALICE)).sort()).toEqual([fileKey(f1.part), fileKey(f2.part)].sort());
+	});
+
+	it('lists nothing once the account is locked, cached or not', async () => {
+		const f = await publishFile(fid(3), ['mine']);
+		serve(server, f);
+		await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
+		locked.add(ALICE);
+		await expect(listKeptFiles(ALICE)).rejects.toThrow('No unlocked account');
+		await expect(openKeptFile(ALICE, fileKey(f.part))).rejects.toThrow('No unlocked account');
 	});
 });

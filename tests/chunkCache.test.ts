@@ -144,4 +144,27 @@ describe('kept chunks', () => {
 			restore();
 		}
 	});
+
+	it('another tab holding an older version open does not hang this one, and the cache opens once it closes', async () => {
+		const old = await new Promise<IDBDatabase>((resolve) => {
+			const req = indexedDB.open('buckitup-chunks', 1);
+			req.onsuccess = () => resolve(req.result);
+		});
+		expect(await getCachedChunk('f_a', 0, H)).toBeNull();
+		await expect(pinChunk('f_a', 0, H, ALICE, KB(1))).rejects.toThrow('The local database is not available');
+		old.close();
+		await tick();
+		await pinChunk('f_a', 0, H, ALICE, KB(1));
+		expect(await pinnedBytesOf(ALICE)).toBe(1024);
+	});
+
+	it('closes for another tab\'s upgrade instead of blocking it', async () => {
+		await putCachedChunk('f_a', 0, KB(1), H);
+		const upgraded = await new Promise<IDBDatabase>((resolve, reject) => {
+			const req = indexedDB.open('buckitup-chunks', 3);
+			req.onsuccess = () => resolve(req.result);
+			req.onblocked = () => reject(new Error('blocked'));
+		});
+		upgraded.close();
+	});
 });

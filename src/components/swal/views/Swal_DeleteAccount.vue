@@ -58,7 +58,7 @@ onMounted(async () => {
 	const hash = data?.user_hash || $userPQ.currentUser?.user_hash;
 	if (!hash) return;
 	try {
-		keptBytes.value = await (await import('@/lib/data/keptFiles')).keptBytesOf(hash);
+		keptBytes.value = await (await import('@/lib/data/chunkCache')).pinnedBytesOf(hash);
 	} catch (e) {
 		console.warn('Could not read the size of the account\'s kept files', e);
 	}

@@ -18,10 +18,10 @@
 
 import { IndexedDbStore } from './indexedDbStore';
 import { createSecureStore, type StringStore } from './secureStore';
-import { serialized } from './serialized';
+import { withNamedLock } from './serialized';
 import { fileKey } from './fileKey';
 import { downloadFile, pinFileChunks, readKeptChunks, type DownloadProgress } from './fileTransfer';
-import { pinnedBytesOf, unpinAllOf, unpinFile } from './chunkCache';
+import { unpinAllOf, unpinFile } from './chunkCache';
 import type { SignPkeyResolver } from './rowVerification';
 
 export interface KeptFile {
@@ -62,53 +62,59 @@ let keyFor = async (owner: string): Promise<CryptoKey> => (await import('./local
 export const _setKeptFilesStoreForTests = (store: StringStore, key?: (owner: string) => Promise<CryptoKey>): void => {
 	raw = store;
 	if (key) keyFor = key;
-	unsealed.clear();
+	unsealed = null;
 };
 
 const sealed = (owner: string): StringStore => createSecureStore(raw, { getKey: () => keyFor(owner) });
 const indexKey = (owner: string) => `${owner}|kept`;
-const locks = new Map<string, Promise<unknown>>();
 /**
- * Each account's index as last read or written by this tab: opening any file
- * asks whether it is kept, and that must not unseal the index every time.
- * Another tab's change shows here on the next read after a reload.
+ * Keeps and releases of one account run one at a time across tabs, each from
+ * the index as stored: the pins and the entry land together, and no tab
+ * writes back an index another tab has changed since.
  */
-const unsealed = new Map<string, KeptIndex>();
+const underIndexLock = <T>(owner: string, fn: () => Promise<T>): Promise<T> => withNamedLock(`buckitup-kept-files:${owner}`, fn);
 
-/** What `owner` keeps on this device; a copy. Throws while the account is locked. */
-export const listKeptFiles = async (owner: string): Promise<KeptIndex> => {
-	let index = unsealed.get(owner);
-	if (!index) {
-		const value = await sealed(owner).get(indexKey(owner));
-		index = value ? (JSON.parse(value) as KeptIndex) : {};
-		unsealed.set(owner, index);
-	}
+/**
+ * The open account's index as last read or written by this tab: opening any
+ * file asks whether it is kept, and that must not unseal the index every
+ * time. Another tab's change shows here after a reload.
+ */
+let unsealed: { owner: string; index: KeptIndex } | null = null;
+
+const readIndex = async (owner: string): Promise<KeptIndex> => {
+	const value = await sealed(owner).get(indexKey(owner));
+	const index = value ? (JSON.parse(value) as KeptIndex) : {};
+	unsealed = { owner, index };
 	return { ...index };
 };
 
-const updateIndex = (owner: string, change: (index: KeptIndex) => void): Promise<KeptIndex> =>
-	serialized(locks, owner, async () => {
-		const index = await listKeptFiles(owner);
-		change(index);
-		await sealed(owner).set(indexKey(owner), JSON.stringify(index));
-		unsealed.set(owner, index);
-		return { ...index };
-	});
+const writeIndex = async (owner: string, index: KeptIndex): Promise<void> => {
+	await sealed(owner).set(indexKey(owner), JSON.stringify(index));
+	unsealed = { owner, index: { ...index } };
+};
+
+/** What `owner` keeps on this device; a copy. Throws unless `owner` is the open, unlocked account. */
+export const listKeptFiles = async (owner: string): Promise<KeptIndex> => {
+	// Asked every time, cached index or not: after logout or a switch the key is gone.
+	await keyFor(owner);
+	return unsealed?.owner === owner ? { ...unsealed.index } : readIndex(owner);
+};
 
 /**
  * Keeps a file for `owner`: pins its chunks, fetching the missing ones with
  * `onProgress`, then records it in the index. Throws if any step fails — a
  * full disk as the browser's QuotaExceededError — and then nothing of it
- * stays pinned for `owner`.
+ * stays pinned for `owner`. Other keeps and releases of `owner` wait until
+ * it is done.
  */
-export const keepFile = async (
+export const keepFile = (
 	owner: string,
 	part: KeepablePart,
 	messageId: string,
 	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver } = {},
-): Promise<KeptFile> => {
+): Promise<KeptFile> => underIndexLock(owner, async () => {
 	const key = fileKey(part);
-	const index = await listKeptFiles(owner);
+	const index = await readIndex(owner);
 	if (index[key]) return index[key];
 	// Chunks are stored by file id; another sender's file under the same id
 	// would share them, and releasing one would release the other.
@@ -132,23 +138,24 @@ export const keepFile = async (
 			messageId,
 			chunkHashes,
 		};
-		await updateIndex(owner, (current) => { current[key] = entry; });
+		await writeIndex(owner, { ...index, [key]: entry });
 		return entry;
 	} catch (e) {
+		// Under the lock, with no entry for this file id: every pin `owner` holds on it is this keep's.
 		await unpinFile(part.fileId, owner).catch((err) => console.warn('[keptFiles] could not release the pins of a failed keep', err));
 		throw e;
 	}
-};
+});
 
 /** `owner` stops keeping the file: its chunks become cache again unless another account keeps them. */
-export const releaseKeptFile = async (owner: string, key: string): Promise<void> => {
-	let removed: KeptFile | undefined;
-	await updateIndex(owner, (index) => {
-		removed = index[key];
-		delete index[key];
-	});
-	if (removed) await unpinFile(removed.fileId, owner);
-};
+export const releaseKeptFile = (owner: string, key: string): Promise<void> => underIndexLock(owner, async () => {
+	const index = await readIndex(owner);
+	const removed = index[key];
+	if (!removed) return;
+	delete index[key];
+	await writeIndex(owner, index);
+	await unpinFile(removed.fileId, owner);
+});
 
 /** The kept copy's bytes, decrypted from this device alone; null when `owner` does not keep the file. */
 export const openKeptFile = async (
@@ -181,12 +188,9 @@ export const openFile = async (
 	return downloadFile({ fileId: part.fileId, uploaderHash: part.uploaderHash, encSecretB64: part.encSecretB64, ...opts });
 };
 
-/** Bytes `owner` keeps on this device; readable without the account's key. */
-export { pinnedBytesOf as keptBytesOf };
-
 /** Removes everything `owner` keeps: called when the account leaves this device. */
 export const forgetAccountKeptFiles = async (owner: string): Promise<void> => {
-	unsealed.delete(owner);
+	if (unsealed?.owner === owner) unsealed = null;
 	// Each half runs whatever the other did: a missing index must not leave pins behind.
 	const [index, pins] = await Promise.allSettled([raw.delete(indexKey(owner)), unpinAllOf(owner)]);
 	for (const r of [index, pins]) if (r.status === 'rejected') throw r.reason;

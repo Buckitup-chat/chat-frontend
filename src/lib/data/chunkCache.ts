@@ -59,8 +59,9 @@ let budgetBytes = BUDGET_BYTES;
 
 const openDb = (): Promise<IDBDatabase | null> => {
 	if (dbPromise) return dbPromise;
-	dbPromise = new Promise((resolve) => {
+	const opening: Promise<IDBDatabase | null> = new Promise((resolve) => {
 		if (typeof indexedDB === 'undefined') return resolve(null);
+		let blocked = false;
 		try {
 			const req = indexedDB.open(DB_NAME, 2);
 			req.onupgradeneeded = () => {
@@ -70,13 +71,35 @@ const openDb = (): Promise<IDBDatabase | null> => {
 				store.createIndex('evictable', 'evictable');
 				store.createIndex('pins', 'pins', { multiEntry: true });
 			};
-			req.onsuccess = () => resolve(req.result);
+			req.onsuccess = () => {
+				const db = req.result;
+				const ready = blocked ? Promise.resolve(db) : opening;
+				const forget = () => {
+					if (dbPromise === ready) dbPromise = null;
+				};
+				// Holding the connection would block another tab's upgrade.
+				db.onversionchange = () => {
+					db.close();
+					forget();
+				};
+				db.onclose = forget;
+				if (!blocked) resolve(db);
+				else if (dbPromise === opening) dbPromise = ready;
+				else db.close();
+			};
+			// Another tab holds an older version open. Until it closes, this tab
+			// works without the cache; the open goes on and takes over when it lands.
+			req.onblocked = () => {
+				blocked = true;
+				resolve(null);
+			};
 			req.onerror = () => resolve(null);
 		} catch {
 			resolve(null);
 		}
 	});
-	return dbPromise;
+	dbPromise = opening;
+	return opening;
 };
 
 /**
@@ -195,7 +218,7 @@ export class ChunkPinError extends Error {
  */
 export const pinChunk = async (fileId: string, index: number, dataHash: string, owner: string, bytes: Uint8Array): Promise<void> => {
 	const db = await openDb();
-	if (!db) throw new ChunkPinError('This browser gives the app no local database, so files cannot be kept on this device.');
+	if (!db) throw new ChunkPinError('The local database is not available, so files cannot be kept on this device.');
 	const key = chunkKey(fileId, index);
 	await inTx<void>(db, 'readwrite', (store, _settle, fail) => {
 		const req = store.get(key);

@@ -21,7 +21,7 @@
         <template v-if="kept">The sender deleted this file from the server. Only this device has it now.</template>
         <template v-else>The sender deleted this file from the server.</template>
       </p>
-      <template v-else-if="availability && !availability.unknown">
+      <template v-else-if="showsChunks">
         <div class="fs-chunks">
           <span v-for="i in availability.total" :key="i" class="fs-chunk"
             :class="{ _have: i <= availability.present }"></span>
@@ -58,7 +58,7 @@
         <p v-else-if="keepError" class="fs-note fs-refused">{{ keepError }}</p>
         <p v-else-if="kept && messageDeleted" class="fs-note">The message was deleted. The copy kept on this device remains.</p>
         <p v-else-if="kept" class="fs-note">Kept on this device: it opens offline and stays if the sender deletes it. It is not copied to your other devices.</p>
-        <button v-if="deletedOnServer && kept" type="button" class="fs-btn" @click="emit('refresh')">Download</button>
+        <button v-if="kept && !showsChunks" type="button" class="fs-btn" @click="emit('refresh')">Download</button>
       </template>
 
       <template v-if="log.length">
@@ -99,6 +99,8 @@ const emit = defineEmits(['close', 'refresh', 'keep']);
 
 const known = computed(() => !!props.availability && !props.availability.unknown);
 const deletedOnServer = computed(() => known.value && props.availability.deleted);
+/** The chunk view, whose button downloads; otherwise a kept file gets its own. */
+const showsChunks = computed(() => known.value && !props.availability.deleted);
 /** Keeping needs the signed manifest, and a deleted file has none to give. */
 const keepable = computed(() => known.value && !props.availability.deleted);
 const onKeepChange = (event) => {
