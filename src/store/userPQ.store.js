@@ -77,7 +77,7 @@ export const userPQStore = defineStore('userPQ', () => {
 
   const initialize = async () => {
     if (isInitialized.value) return;
-    reapTestbedKeys();
+    reapPlaintextKeys();
 
     // Phase 1: local vault registry (fast, offline)
     em.value = EncryptionManagerPQ.getInstance();
@@ -223,20 +223,26 @@ export const userPQStore = defineStore('userPQ', () => {
   };
 
   /**
-   * A one-time reaper, not testbed code. Builds up to this one registered the
-   * teststand route unconditionally, so a profile that opened it holds guardian
-   * EOA and spending private keys in localStorage as plaintext, alongside a
-   * payload carrying the owner key and the master secret. Nothing else in the
-   * app clears localStorage.
+   * A one-time reaper of secrets earlier builds left in localStorage as
+   * plaintext, not testbed code:
+   * - the teststand's guardian EOA and spending private keys, alongside a
+   *   payload carrying the owner key and the master secret: builds up to this
+   *   one registered the teststand route unconditionally;
+   * - each upload's file key (`bkp:pending-upload:<fileId>`), written and
+   *   never read.
    *
    * It runs on boot rather than on sign-out because most profiles never sign
    * out — they close the tab — and the keys have to go from those too. Each key
-   * is removed on its own: if one throw took the other with it, the half left
-   * behind would be the half holding the payload. Drop this once a build
+   * is removed on its own: if one throw took the others with it, the part left
+   * behind could be the part holding the payload. Drop this once a build
    * containing it has shipped.
    */
-  function reapTestbedKeys() {
-    for (const key of ['testbed.guardians', 'testbed.backups']) {
+  function reapPlaintextKeys() {
+    let keys = ['testbed.guardians', 'testbed.backups'];
+    try {
+      keys = keys.concat(Object.keys(localStorage).filter((key) => key.startsWith('bkp:pending-upload:')));
+    } catch { /* no storage in this environment */ }
+    for (const key of keys) {
       try {
         localStorage.removeItem(key);
       } catch { /* no storage in this environment */ }
