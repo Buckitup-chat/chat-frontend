@@ -56,7 +56,12 @@ const LINES = {
 	ephemeral: 'This window forgets everything when it closes',
 	unknown: 'This browser does not say whether it may clear your data: a backup keeps the account safe',
 };
-const line = computed(() => (status.value ? LINES[status.value] : 'Checking…'));
+// Installed already: a backup is what is left to do.
+const line = computed(() => {
+	if (!status.value) return 'Checking…';
+	if (status.value === 'best-effort' && probe.value?.installed) return 'This browser may clear your data when storage runs low: make a backup';
+	return LINES[status.value];
+});
 
 const rows = computed(() => (probe.value ? probeRows(probe.value, lastRequest.value, communityBackup.value) : []));
 

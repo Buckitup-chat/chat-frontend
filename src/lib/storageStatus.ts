@@ -27,7 +27,8 @@
 // `persisted()` of true outranks every signal: the signals are then read as
 // something else (a nearly full disk shrinks the quota too).
 //
-// Nothing here asks for persistence: `persisted()` and `estimate()` only read.
+// Nothing here asks for persistence: the probe calls `persisted()`,
+// `estimate()` and `getDirectory()`, and writes and removes one localStorage key.
 
 export type StorageStatus = 'persistent' | 'best-effort' | 'ephemeral' | 'unknown';
 
@@ -173,11 +174,13 @@ export const requestPersistence = async (env: StorageEnv = browserEnv()): Promis
 
 export const formatBytes = (bytes: number): string => {
 	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+	// The unit moves on by the figure shown: 1023.99 KB would print "1024 KB".
+	const shown = (v: number, u: number): string => (u === 0 ? String(v) : v.toFixed(v < 10 ? 1 : 0));
 	let value = bytes;
 	let unit = 0;
-	while (value >= 1024 && unit < units.length - 1) {
+	while (Number(shown(value, unit)) >= 1024 && unit < units.length - 1) {
 		value /= 1024;
 		unit += 1;
 	}
-	return `${unit === 0 ? value : value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+	return `${shown(value, unit)} ${units[unit]}`;
 };

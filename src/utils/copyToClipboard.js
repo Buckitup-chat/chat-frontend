@@ -20,7 +20,6 @@ export default async function (text, notify = true) {
 			console.error('copy to clipboard error 1', err);
 		}
 		document.body.removeChild(textArea);
-		return true;
 	} else {
 		try {
 			await navigator.clipboard.writeText(text);

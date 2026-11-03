@@ -25,6 +25,15 @@ describe('copyToClipboard', () => {
 		expect(fire).toHaveBeenCalledWith(expect.objectContaining({ icon: 'success' }));
 	});
 
+	it('reports what the fallback copy did when there is no clipboard API', async () => {
+		Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+		const execCommand = vi.fn(() => false);
+		Object.defineProperty(document, 'execCommand', { value: execCommand, configurable: true });
+		await expect(copyToClipboard('hello')).resolves.toBe(false);
+		expect(execCommand).toHaveBeenCalledWith('copy');
+		expect(fire).toHaveBeenCalledWith(expect.objectContaining({ icon: 'error' }));
+	});
+
 	it('reports a refused write instead of throwing', async () => {
 		clipboard(async () => {
 			throw new DOMException('Document is not focused.', 'NotAllowedError');

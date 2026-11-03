@@ -1,9 +1,10 @@
 // The storage status of this device (src/lib/storageStatus.ts), shared by
-// every screen that shows it. Read on login and again whenever a screen asks.
+// every screen that shows it, and read whenever one asks.
 //
 // The account's community backup is read with it on the storage screen: a
 // finished, not revoked backup in the account's `recovery_backup` slot, the
-// record Backup Center shows. A file backup leaves no record anywhere — the
+// record Backup Center shows. A slot this device cannot read looks the same
+// as none, so the absence of one is "not found", not "no". A file backup leaves no record anywhere — the
 // file is handed to the browser's download and nothing remembers it — so the
 // device cannot say whether one exists.
 import { computed, ref } from 'vue';
@@ -12,7 +13,7 @@ import { isLiveBackup } from '@/components/recovery/backup/backupFlow';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { BACKUP_SLOT } from '@/store/recoveryBackup.store';
 
-export type CommunityBackupState = 'yes' | 'no' | 'unknown';
+export type CommunityBackupState = 'yes' | 'not found' | 'unknown';
 
 const probe = ref<StorageProbe | null>(null);
 const lastRequest = ref<PersistRequest | null>(null);
@@ -29,16 +30,18 @@ export async function refreshStorageStatus(): Promise<StorageProbe> {
 	return next;
 }
 
-/** Whether `owner` has a finished community backup; a slot that cannot be read leaves it unknown. */
+/** Whether `owner` has a finished community backup; a slot that does not decrypt leaves it unknown. */
 export async function refreshCommunityBackup(owner: string): Promise<CommunityBackupState> {
+	const em = EncryptionManagerPQ.getInstance();
 	let state: CommunityBackupState;
 	try {
-		const slot = await EncryptionManagerPQ.getInstance().loadSlotJson(BACKUP_SLOT, { strict: true });
-		state = isLiveBackup(slot?.run) ? 'yes' : 'no';
+		const slot = await em.loadSlotJson(BACKUP_SLOT, { strict: true });
+		state = isLiveBackup(slot?.run) ? 'yes' : 'not found';
 	} catch {
 		state = 'unknown';
 	}
-	backup.value = { owner, state };
+	// Read through whoever is signed in now: another account's answer is not `owner`'s.
+	if (em.currentUserHash === owner) backup.value = { owner, state };
 	return state;
 }
 
@@ -47,8 +50,13 @@ export async function requestStoragePersistence(): Promise<PersistRequest> {
 	const result = await requestPersistence(env);
 	lastRequest.value = result;
 	const p = probe.value;
-	if (p) probe.value = { ...p, persisted: result.after, status: statusOf(result.after, p.privateSignals) };
-	else await refreshStorageStatus();
+	if (p) {
+		// A read already running answers from before the request: it is dropped.
+		generation += 1;
+		probe.value = { ...p, persisted: result.after, status: statusOf(result.after, p.privateSignals) };
+	} else {
+		await refreshStorageStatus();
+	}
 	return result;
 }
 

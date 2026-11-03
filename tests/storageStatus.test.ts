@@ -156,7 +156,7 @@ describe('requesting persistence', () => {
 describe('the probe table', () => {
 	it('holds every probed value and the request, and copies as one line per row', async () => {
 		const p = await probeStorage(fakeEnv({ quota: 2 * GB, usage: 1536 }));
-		const rows = probeRows(p, { before: false, granted: true, after: true }, 'no');
+		const rows = probeRows(p, { before: false, granted: true, after: true }, 'not found');
 		expect(Object.fromEntries(rows)).toMatchObject({
 			Status: 'best-effort',
 			'persisted()': 'no',
@@ -164,7 +164,7 @@ describe('the probe table', () => {
 			Quota: '2.0 GB',
 			'Installed (standalone)': 'no',
 			'Private window': 'not detected',
-			'Community backup': 'no',
+			'Community backup': 'not found',
 			'persisted() before persist()': 'no',
 			'persist() answered': 'yes',
 			'persisted() after persist()': 'yes',
@@ -178,5 +178,7 @@ describe('the probe table', () => {
 		expect(formatBytes(512)).toBe('512 B');
 		expect(formatBytes(SMALL_QUOTA_BYTES)).toBe('120 MB');
 		expect(formatBytes(64 * GB)).toBe('64 GB');
+		expect(formatBytes(1024 * 1024 - 1)).toBe('1.0 MB');
+		expect(formatBytes(1023)).toBe('1023 B');
 	});
 });

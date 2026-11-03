@@ -9,6 +9,7 @@ import type { StorageEnv } from '@/lib/storageStatus';
 const H = vi.hoisted(() => ({
 	slot: null as unknown,
 	slotError: null as Error | null,
+	duringLoad: null as (() => void) | null,
 	copied: [] as string[],
 	user: { currentUser: { name: 'Alice' }, currentUserHash: 'u_alice' } as Record<string, unknown>,
 }));
@@ -17,8 +18,12 @@ vi.mock('@/store/recoveryBackup.store', () => ({ BACKUP_SLOT: 'recovery_backup' 
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
 		getInstance: () => ({
+			get currentUserHash() {
+				return H.user.currentUserHash;
+			},
 			loadSlotJson: async (name: string) => {
 				expect(name).toBe('recovery_backup');
+				H.duringLoad?.();
 				if (H.slotError) throw H.slotError;
 				return H.slot;
 			},
@@ -34,7 +39,7 @@ const FullContentBlock = defineComponent({
 	setup: (_, { slots }) => () => h('div', [slots.header?.(), slots.content?.()]),
 });
 
-const env = (o: { persisted?: boolean; quota?: number; noStorage?: boolean; grants?: boolean } = {}): StorageEnv => {
+const env = (o: { persisted?: boolean; quota?: number; noStorage?: boolean; grants?: boolean; installed?: boolean } = {}): StorageEnv => {
 	let persisted = o.persisted ?? false;
 	return {
 		storage: o.noStorage
@@ -44,7 +49,7 @@ const env = (o: { persisted?: boolean; quota?: number; noStorage?: boolean; gran
 					persist: async () => (o.grants ? (persisted = true) : persisted),
 					estimate: async () => ({ usage: 1024, quota: o.quota ?? 10 * 1024 ** 3 }),
 				},
-		matchMedia: () => ({ matches: false }),
+		matchMedia: () => ({ matches: o.installed === true }),
 		userAgent: 'TestBrowser/1.0',
 		platform: 'TestOS',
 	};
@@ -63,6 +68,8 @@ const rowsOf = (w: Awaited<ReturnType<typeof render>>) =>
 beforeEach(() => {
 	H.slot = null;
 	H.slotError = null;
+	H.duringLoad = null;
+	H.user.currentUserHash = 'u_alice';
 	H.copied = [];
 });
 
@@ -73,6 +80,10 @@ describe('the plain line', () => {
 
 	it('says it may, and what protects the person, when storage is best-effort', async () => {
 		expect(lineOf(await render(env({ persisted: false })))).toBe('This browser may clear your data: install the app or make a backup');
+	});
+
+	it('asks only for a backup when the app is installed already', async () => {
+		expect(lineOf(await render(env({ persisted: false, installed: true })))).toBe('This browser may clear your data when storage runs low: make a backup');
 	});
 
 	it('says a private window forgets everything', async () => {
@@ -102,11 +113,23 @@ describe('Details', () => {
 
 	it('does not count a revoked or unfinished backup, and says when the slot cannot be read', async () => {
 		H.slot = { run: { step: 'done', revokedAt: 1 } };
-		expect(rowsOf(await render(env()))['Community backup']).toBe('no');
+		expect(rowsOf(await render(env()))['Community backup']).toBe('not found');
 		H.slot = { run: { step: 'published' } };
-		expect(rowsOf(await render(env()))['Community backup']).toBe('no');
+		expect(rowsOf(await render(env()))['Community backup']).toBe('not found');
 		H.slotError = new Error('Crypt key not loaded');
 		expect(rowsOf(await render(env()))['Community backup']).toBe('unknown');
+	});
+
+	it('drops an answer read after the account changed', async () => {
+		H.slot = { run: { step: 'done' } };
+		H.duringLoad = () => {
+			H.user.currentUserHash = 'u_bob';
+		};
+		const { refreshCommunityBackup, useStorageStatus } = await import('@/composables/useStorageStatus');
+		_resetStorageStatusForTests(env());
+		await refreshCommunityBackup('u_alice');
+		H.user.currentUserHash = 'u_alice';
+		expect(useStorageStatus(() => 'u_alice').communityBackup.value).toBeNull();
 	});
 
 	it('Request persistence shows persisted() before and after, and the line follows', async () => {

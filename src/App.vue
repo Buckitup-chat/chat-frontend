@@ -156,7 +156,6 @@ import { useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
 import { useRecoveryHelpStore } from '@/store/recoveryHelp.store';
 import { useAvatarsStore } from '@/store/avatars.store';
 import { initPersistence } from '@/lib/data/persistence';
-import { refreshStorageStatus } from '@/composables/useStorageStatus';
 
 
 import { useBreakpoint } from '@/composables/useBreakpoint';
@@ -206,15 +205,6 @@ provide('$modal', $modal);
 
 const $swalModal = ref();
 provide('$swalModal', $swalModal);
-
-// Whether the browser may clear this device's data: read again on each login.
-watch(
-	() => $userPQ.currentUserHash,
-	(hash) => {
-		if (hash) refreshStorageStatus().catch((e) => console.warn('[storage] the storage status could not be read:', e));
-	},
-	{ immediate: true },
-);
 
 watch(
 	() => $breakpoint.current,

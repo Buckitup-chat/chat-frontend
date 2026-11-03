@@ -94,9 +94,9 @@ app calls `persist()` at startup (`src/main.js`) and on each chunk download
 ## The storage status
 
 `src/lib/storageStatus.ts` reads what the browser says about the origin's
-storage; `src/composables/useStorageStatus.ts` keeps the answer, read again on
-each login and whenever a screen asks. Reading asks for nothing: only
-`persisted()` and `estimate()` are called.
+storage; `src/composables/useStorageStatus.ts` keeps the answer, read whenever a
+screen asks. Reading asks for no permission: it calls `persisted()`,
+`estimate()` and `getDirectory()`, and writes and removes one localStorage key.
 
 | Status | Meaning | Detection |
 |---|---|---|
