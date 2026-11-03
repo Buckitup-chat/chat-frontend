@@ -7,7 +7,8 @@
 // file is handed to the browser's download and nothing remembers it — so the
 // device cannot say whether one exists.
 import { computed, ref } from 'vue';
-import { probeStorage, requestPersistence, formatBytes, type PersistRequest, type StorageEnv, type StorageProbe } from '@/lib/storageStatus';
+import { probeStorage, requestPersistence, formatBytes, statusOf, type PersistRequest, type StorageEnv, type StorageProbe } from '@/lib/storageStatus';
+import { isLiveBackup } from '@/components/recovery/backup/backupFlow';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { BACKUP_SLOT } from '@/store/recoveryBackup.store';
 
@@ -33,7 +34,7 @@ export async function refreshCommunityBackup(owner: string): Promise<CommunityBa
 	let state: CommunityBackupState;
 	try {
 		const slot = await EncryptionManagerPQ.getInstance().loadSlotJson(BACKUP_SLOT, { strict: true });
-		state = slot?.run?.step === 'done' && !slot.run.revokedAt ? 'yes' : 'no';
+		state = isLiveBackup(slot?.run) ? 'yes' : 'no';
 	} catch {
 		state = 'unknown';
 	}
@@ -41,11 +42,13 @@ export async function refreshCommunityBackup(owner: string): Promise<CommunityBa
 	return state;
 }
 
-/** Asks for persistent storage (a diagnostic; may prompt in Firefox), then reads the status again. */
+/** Asks for persistent storage (a diagnostic; may prompt in Firefox). Only `persisted()` can change with it. */
 export async function requestStoragePersistence(): Promise<PersistRequest> {
 	const result = await requestPersistence(env);
 	lastRequest.value = result;
-	await refreshStorageStatus();
+	const p = probe.value;
+	if (p) probe.value = { ...p, persisted: result.after, status: statusOf(result.after, p.privateSignals) };
+	else await refreshStorageStatus();
 	return result;
 }
 

@@ -69,7 +69,7 @@ export interface PersistRequest {
 
 const messageOf = (e: unknown): string => (e instanceof Error ? `${e.name}: ${e.message}` : String(e));
 
-export const browserEnv = (): StorageEnv => {
+const browserEnv = (): StorageEnv => {
 	const nav = (typeof navigator !== 'undefined' ? navigator : {}) as Navigator & { standalone?: boolean; userAgentData?: { platform?: string } };
 	const win = typeof window !== 'undefined' ? window : undefined;
 	return {
@@ -113,10 +113,9 @@ const readEstimate = async (env: StorageEnv): Promise<{ usage: number | null; qu
 	}
 };
 
-/** The signals of a private window; each entry says what was seen. */
-export const privateWindowSignals = async (env: StorageEnv, quota: number | null): Promise<string[]> => {
+/** The signals of a private window that need no quota; each entry says what was seen. */
+const refusalSignals = async (env: StorageEnv): Promise<string[]> => {
 	const signals: string[] = [];
-	if (quota !== null && quota < SMALL_QUOTA_BYTES) signals.push(`quota ${formatBytes(quota)} is below ${formatBytes(SMALL_QUOTA_BYTES)}`);
 	// Missing is not refusing: OPFS arrived in Safari 15.2 and Firefox 111.
 	if (typeof env.storage?.getDirectory === 'function') {
 		try {
@@ -140,8 +139,11 @@ export const privateWindowSignals = async (env: StorageEnv, quota: number | null
 
 /** Reads the storage state; asks for nothing. */
 export const probeStorage = async (env: StorageEnv = browserEnv()): Promise<StorageProbe> => {
-	const [persisted, { usage, quota }] = await Promise.all([readPersisted(env), readEstimate(env)]);
-	const privateSignals = await privateWindowSignals(env, quota);
+	const [persisted, { usage, quota }, refused] = await Promise.all([readPersisted(env), readEstimate(env), refusalSignals(env)]);
+	const privateSignals = [
+		...(quota !== null && quota < SMALL_QUOTA_BYTES ? [`quota ${formatBytes(quota)} is below ${formatBytes(SMALL_QUOTA_BYTES)}`] : []),
+		...refused,
+	];
 	return {
 		status: statusOf(persisted, privateSignals),
 		persisted,
@@ -166,7 +168,7 @@ export const requestPersistence = async (env: StorageEnv = browserEnv()): Promis
 		error = messageOf(e);
 	}
 	const after = await readPersisted(env);
-	return error ? { before, granted, after, error } : { before, granted, after };
+	return { before, granted, after, error };
 };
 
 export const formatBytes = (bytes: number): string => {
