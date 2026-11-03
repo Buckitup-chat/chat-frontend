@@ -7,6 +7,10 @@ import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verified
 import { mergeContactEdit } from '@/lib/data/storageIntent';
 import { contactKeyVouch } from '@buckitup/pq-client/verifyCard';
 
+// Plaintext secrets earlier builds left in localStorage (reapPlaintextKeys).
+const TESTBED_KEYS = ['testbed.guardians', 'testbed.backups'];
+const UPLOAD_KEY_PREFIX = 'bkp:pending-upload:';
+
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
   const isInitialized = ref(false);
@@ -234,18 +238,22 @@ export const userPQStore = defineStore('userPQ', () => {
    * It runs on boot rather than on sign-out because most profiles never sign
    * out — they close the tab — and the keys have to go from those too. Each key
    * is removed on its own: if one throw took the others with it, the part left
-   * behind could be the part holding the payload. Drop this once a build
-   * containing it has shipped.
+   * behind could be the part holding the payload. It stays: a profile that has
+   * not opened the app since still holds the keys, and the check is one pass
+   * over localStorage's keys.
    */
   function reapPlaintextKeys() {
-    let keys = ['testbed.guardians', 'testbed.backups'];
+    let keys;
     try {
-      keys = keys.concat(Object.keys(localStorage).filter((key) => key.startsWith('bkp:pending-upload:')));
-    } catch { /* no storage in this environment */ }
+      keys = Object.keys(localStorage);
+    } catch {
+      return; /* no storage in this environment */
+    }
     for (const key of keys) {
+      if (!TESTBED_KEYS.includes(key) && !key.startsWith(UPLOAD_KEY_PREFIX)) continue;
       try {
         localStorage.removeItem(key);
-      } catch { /* no storage in this environment */ }
+      } catch { /* blocked: the next boot tries again */ }
     }
   }
 

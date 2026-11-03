@@ -55,25 +55,28 @@ describe('the plaintext key reaper', () => {
 	});
 
 	it('leaves everything else alone', async () => {
-		localStorage.setItem('something.else', 'keep me');
+		for (const key of ['something.else', 'bkp:other', 'bkp:pending-upload', 'testbed.other']) localStorage.setItem(key, 'keep me');
 
 		await userPQStore().initialize();
 
-		expect(localStorage.getItem('something.else')).toBe('keep me');
+		expect(Object.keys(localStorage).sort()).toEqual(['bkp:other', 'bkp:pending-upload', 'something.else', 'testbed.other']);
 	});
 
-	it('still removes the payload when removing the keys throws', async () => {
+	it('removes every key it can when removing another throws', async () => {
 		localStorage.setItem('testbed.backups', 'payload');
+		localStorage.setItem('bkp:pending-upload:f_1', 'key 1');
+		localStorage.setItem('bkp:pending-upload:f_2', 'key 2');
 		const real = localStorage.removeItem.bind(localStorage);
 		const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation((key) => {
 			// The half left behind must not be the half holding the owner key
 			// and the master secret, which is what one shared try block risked.
-			if (key === 'testbed.guardians') throw new DOMException('SecurityError');
+			if (key === 'testbed.guardians' || key === 'bkp:pending-upload:f_1') throw new DOMException('SecurityError');
 			real(key);
 		});
 		try {
 			await userPQStore().initialize();
 			expect(localStorage.getItem('testbed.backups')).toBe(null);
+			expect(localStorage.getItem('bkp:pending-upload:f_2')).toBe(null);
 		} finally {
 			spy.mockRestore();
 		}

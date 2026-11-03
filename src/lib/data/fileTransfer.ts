@@ -45,12 +45,16 @@ export interface UploadResult {
 }
 
 /**
- * Mints the identifiers an upload needs. The caller keeps BOTH for the
- * upload's life, from before the first PUT (§4.1): file_id alone cannot
+ * Mints the identifiers an upload needs. The caller keeps BOTH from before
+ * the first PUT for as long as the upload may resume: file_id alone cannot
  * resume — enc_secret is one random value per file, and a fresh secret would
- * make re-sent chunks undecryptable next to the ones already stored. The
- * secret opens the file: it stays in memory, or goes through `secureStore` if
- * it must survive a reload, never into plaintext storage (docs/invariants.md §1).
+ * make re-sent chunks undecryptable next to the ones already stored.
+ *
+ * pq_files §4.1 asks for a durable record, removed when the manifest commits,
+ * so an upload resumes after a reload. This client keeps the pair in memory
+ * (the transfer queue), so an upload resumes within the page's life only. A
+ * durable record holds the secret that opens the file: it goes through
+ * `secureStore`, never into plaintext storage (docs/invariants.md §1).
  */
 export const prepareUpload = (uuidV7: string) => ({
 	fileId: newFileId(uuidV7),

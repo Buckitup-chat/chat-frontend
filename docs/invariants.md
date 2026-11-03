@@ -28,8 +28,8 @@ OPFS, localStorage) may keep the envelope — `user_hash`, `dialog_hash`,
 End-to-end encryption of **content** (`content_b64`, `value_b64`) is untouched by
 this: it belongs to the protocol, not to local storage. A key that opens content
 is content, not metadata: a file's `enc_secret`, a dialog key or an account's
-private key is never written to local storage in the clear. It stays in memory
-or goes through `secureStore`.
+private key is never written to local storage in the clear. It stays in memory,
+in the account's vault (private keys), or goes through `secureStore`.
 
 **Consequences.**
 - A new local store need not go through `secureStore` unless it holds a key
