@@ -428,6 +428,28 @@ describe('checkpoint through the store', () => {
 		expect(diff.futureAdded).toEqual({ count: 2, firstMessageId: F1 });
 	});
 
+	// Within the pointer's millisecond the full id decides the side, as it
+	// decides where the feed shows the message.
+	it('splits a message written in the pointer\'s millisecond by its full id', async () => {
+		const CP = 'dmsg_0192aaab-0000-7000-8000-00000000000b';
+		const BEFORE = 'dmsg_0192aaab-0000-7000-8000-00000000000a';
+		const AFTER = 'dmsg_0192aaab-0000-7000-8000-00000000000c';
+
+		const v1 = await makeRow(M1, {});
+		seed(v1);
+		const { part, messageId } = await store.createDialogCheckpoint(peer);
+		unreplicate(messageId);
+		const cp = await makeRow(CP, { [M1]: v1.sign_hash });
+		const before = await makeRow(BEFORE, { [M1]: v1.sign_hash });
+		const after = await makeRow(AFTER, { [CP]: cp.sign_hash });
+		seed(cp, before, after);
+
+		const diff = await store.describeCheckpointDiff(peer, part, { pointerMessageId: CP });
+		expect(diff.status).toBe('ok');
+		expect(diff.changes.map((c) => [c.type, c.messageId])).toEqual([['MESSAGE_ADDED', BEFORE]]);
+		expect(diff.futureAdded).toEqual({ count: 1, firstMessageId: AFTER });
+	});
+
 	it('unknown reducer version: signature stands, view unverifiable (§32)', async () => {
 		seed(await makeRow(M1, {}));
 		const { part } = await store.createDialogCheckpoint(peer);
