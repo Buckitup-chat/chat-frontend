@@ -850,11 +850,7 @@ const handleKeepFile = async (on) => {
     // The only copy left: letting it go cannot be undone from here.
     const onlyCopy = !!st.msg?._deleted || !!availabilityByKey.value[key]?.deleted;
     if (!on && onlyCopy && !window.confirm('Only this device has this file. Remove it from this device?')) return;
-    await keptFiles.setKept(st.part, {
-        dialogHash: dialogHash.value,
-        messageId: st.msg?.id || '',
-        senderHash: st.msg?._raw?.sender_hash || st.part.uploaderHash,
-    }, on);
+    await keptFiles.setKept(st.part, st.msg?.id || '', on);
 };
 
 watch(() => decryptedMessages.value, (msgs) => {
@@ -952,9 +948,13 @@ const handleDownloadFile = async (filePart) => {
         downloadsByKey.value = { ...downloadsByKey.value, [key]: { status: 'done' } };
     } catch (e) {
         console.error('Download failed:', e);
-        // Deleted by its uploader: a state of the file, not a failure to retry.
-        const failed = isDeletedFile(e) ? { status: 'deleted' } : { status: 'error' };
-        downloadsByKey.value = { ...downloadsByKey.value, [key]: refuseOn(e, key) ? {} : failed };
+        // Deleted by its uploader: a state of the file, as its manifest would
+        // say, not a failure to retry.
+        if (isDeletedFile(e)) {
+            const known = availabilityByKey.value[key];
+            availabilityByKey.value = { ...availabilityByKey.value, [key]: { present: known?.present ?? 0, total: known?.total ?? 0, unknown: false, deleted: true } };
+        }
+        downloadsByKey.value = { ...downloadsByKey.value, [key]: refuseOn(e, key) || isDeletedFile(e) ? {} : { status: 'error' } };
         // A failure usually means chunks are still travelling — re-read the
         // counts so the row can say how far along it is instead of just "failed".
         checkAvailability(filePart);

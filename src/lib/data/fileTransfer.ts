@@ -13,6 +13,7 @@
 
 import { signFields, toBase64, fromBase64 } from '@buckitup/pq-client/signature';
 import { sha3_512 } from '@noble/hashes/sha3';
+import { concatBytes } from '@noble/hashes/utils';
 import {
 	CHUNK_SIZE,
 	chunkCountOf,
@@ -321,7 +322,6 @@ export const downloadFile = async (opts: {
 
 	requestPersistentStorage();
 	const parts: Uint8Array[] = [];
-	let size = 0;
 	for (let i = 0; i < total; i++) {
 		signal?.throwIfAborted();
 		const expected = await hashes.expected(i);
@@ -331,15 +331,10 @@ export const downloadFile = async (opts: {
 		// must not poison future loads.
 		if (!fromCache) void putCachedChunk(fileId, i, encrypted, expected);
 		parts.push(plain);
-		size += plain.length;
 		opts.onChunk?.(i, plain);
 		onProgress?.({ fileId, done: i + 1, total });
 	}
-
-	const out = new Uint8Array(size);
-	let off = 0;
-	for (const p of parts) { out.set(p, off); off += p.length; }
-	return out;
+	return concatBytes(...parts);
 };
 
 /**
@@ -395,18 +390,12 @@ export const readKeptChunks = async (opts: {
 	const secret = fromBase64(opts.encSecretB64);
 	const total = dataHashes.length;
 	const parts: Uint8Array[] = [];
-	let size = 0;
 	for (let i = 0; i < total; i++) {
 		signal?.throwIfAborted();
 		const encrypted = await getCachedChunk(fileId, i, dataHashes[i]);
 		if (!encrypted) throw new Error(`chunk ${i} of the kept copy of ${fileId} is not on this device`);
-		const plain = await decryptChunk(secret, encrypted);
-		parts.push(plain);
-		size += plain.length;
+		parts.push(await decryptChunk(secret, encrypted));
 		onProgress?.({ fileId, done: i + 1, total });
 	}
-	const out = new Uint8Array(size);
-	let off = 0;
-	for (const p of parts) { out.set(p, off); off += p.length; }
-	return out;
+	return concatBytes(...parts);
 };

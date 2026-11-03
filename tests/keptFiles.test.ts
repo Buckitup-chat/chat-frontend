@@ -20,7 +20,7 @@ const { fileKey } = await import('@/lib/data/fileKey');
 
 const ALICE = 'u_' + '1'.repeat(128);
 const BOB = 'u_' + '2'.repeat(128);
-const ctx = { dialogHash: 'dh_' + '3'.repeat(64), messageId: 'dmsg_0192aaaa-0000-7000-8000-000000000001', senderHash: 'u_' + 'a'.repeat(128) };
+const messageId = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
 const fid = (n: number) => 'f_' + String(n).repeat(32);
 
 let raw: Map<string, string>;
@@ -52,23 +52,23 @@ describe('keeping a file', () => {
 		const f = await publishFile(fid(1), ['alpha ', 'beta ', 'gamma']);
 		serve(server, f);
 		const progress: number[] = [];
-		const entry = await keepFile(ALICE, f.part, ctx, { resolveSignPkey, onProgress: (p) => progress.push(p.done) });
+		const entry = await keepFile(ALICE, f.part, messageId, { resolveSignPkey, onProgress: (p) => progress.push(p.done) });
 		expect(progress).toEqual([1, 2, 3]);
 		expect(server.chunkRequests).toEqual([`${f.fileId}:0`, `${f.fileId}:1`, `${f.fileId}:2`]);
-		expect(entry).toMatchObject({ fileKey: fileKey(f.part), name: 'report.pdf', dialogHash: ctx.dialogHash, messageId: ctx.messageId });
+		expect(entry).toMatchObject({ fileKey: fileKey(f.part), name: 'report.pdf', messageId });
 		expect(await pinnedBytesOf(ALICE)).toBe(f.bytes.reduce((n, b) => n + b.length, 0));
 	});
 
 	it('seals the index under the account\'s key: no secret, file id or name readable on disk', async () => {
 		const f = await publishFile(fid(2), ['secret contents']);
 		serve(server, f);
-		await keepFile(ALICE, f.part, ctx, { resolveSignPkey });
+		await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
 		expect([...raw.keys()]).toEqual([`${ALICE}|kept`]);
 		const stored = [...raw.values()].join('');
 		expect(stored).not.toContain(f.secretB64);
 		expect(stored).not.toContain(f.fileId);
 		expect(stored).not.toContain('report.pdf');
-		expect(stored).not.toContain(ctx.messageId);
+		expect(stored).not.toContain(messageId);
 		// Another account neither lists it nor opens it.
 		expect(await listKeptFiles(BOB)).toEqual({});
 		expect(await openKeptFile(BOB, fileKey(f.part))).toBeNull();
@@ -77,7 +77,7 @@ describe('keeping a file', () => {
 	it('opens offline from the kept copy alone', async () => {
 		const f = await publishFile(fid(3), ['one ', 'two']);
 		serve(server, f);
-		await keepFile(ALICE, f.part, ctx, { resolveSignPkey });
+		await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
 		server.offline = true;
 		expect(text(await openFile(ALICE, f.part))).toBe(f.plain);
 		// Not kept by BOB: for him it is a download, and there is no network.
@@ -87,7 +87,7 @@ describe('keeping a file', () => {
 	it('opens after the uploader deleted the file and the server reclaimed it', async () => {
 		const f = await publishFile(fid(4), ['still ', 'here']);
 		serve(server, f);
-		await keepFile(ALICE, f.part, ctx, { resolveSignPkey });
+		await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
 		server.deleteFile(f);
 		await expect(downloadFile({ fileId: f.fileId, uploaderHash: f.part.uploaderHash, encSecretB64: f.secretB64, resolveSignPkey }))
 			.rejects.toBeInstanceOf(FileDeletedError);
@@ -98,7 +98,7 @@ describe('keeping a file', () => {
 		__setChunkBudgetForTests(1024);
 		const f = await publishFile(fid(5), ['kept ', 'bytes']);
 		serve(server, f);
-		await keepFile(ALICE, f.part, ctx, { resolveSignPkey });
+		await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
 		for (let i = 0; i < 4; i++) await putCachedChunk(fid(6), i, new Uint8Array(1024).fill(i), 'fd_' + String(i).repeat(128));
 		server.offline = true;
 		expect(text(await openFile(ALICE, f.part))).toBe(f.plain);
@@ -107,7 +107,7 @@ describe('keeping a file', () => {
 	it('cannot keep a file the uploader already deleted', async () => {
 		const f = await publishFile(fid(7), ['gone']);
 		server.deleteFile(f);
-		await expect(keepFile(ALICE, f.part, ctx, { resolveSignPkey })).rejects.toBeInstanceOf(FileDeletedError);
+		await expect(keepFile(ALICE, f.part, messageId, { resolveSignPkey })).rejects.toBeInstanceOf(FileDeletedError);
 		expect(await listKeptFiles(ALICE)).toEqual({});
 	});
 
@@ -115,7 +115,7 @@ describe('keeping a file', () => {
 		const f = await publishFile(fid(8), ['sealed']);
 		const other = await publishFile(fid(9), ['x']);
 		serve(server, f);
-		await expect(keepFile(ALICE, { ...f.part, encSecretB64: other.secretB64 }, ctx, { resolveSignPkey })).rejects.toThrow();
+		await expect(keepFile(ALICE, { ...f.part, encSecretB64: other.secretB64 }, messageId, { resolveSignPkey })).rejects.toThrow();
 		expect(await listKeptFiles(ALICE)).toEqual({});
 		expect(await pinnedBytesOf(ALICE)).toBe(0);
 	});
@@ -127,7 +127,7 @@ describe('keeping a file', () => {
 		const restore = failWritesWithQuota((v) => (v as { key?: string }).key === `${f.fileId}:1`);
 		let error: unknown;
 		try {
-			error = await keepFile(ALICE, f.part, ctx, { resolveSignPkey }).then(() => null, (e) => e);
+			error = await keepFile(ALICE, f.part, messageId, { resolveSignPkey }).then(() => null, (e) => e);
 		} finally {
 			restore();
 		}
@@ -141,8 +141,8 @@ describe('letting a kept file go', () => {
 	it('releasing removes the entry and the account\'s pins, not another account\'s', async () => {
 		const f = await publishFile(fid(9), ['shared']);
 		serve(server, f);
-		await keepFile(ALICE, f.part, ctx, { resolveSignPkey });
-		await keepFile(BOB, f.part, ctx, { resolveSignPkey });
+		await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
+		await keepFile(BOB, f.part, messageId, { resolveSignPkey });
 		await releaseKeptFile(ALICE, fileKey(f.part));
 		expect(await listKeptFiles(ALICE)).toEqual({});
 		expect(await pinnedBytesOf(ALICE)).toBe(0);
@@ -153,8 +153,8 @@ describe('letting a kept file go', () => {
 	it('an account leaving the device takes its index and pins, without its key', async () => {
 		const f = await publishFile(fid(0), ['bye']);
 		serve(server, f);
-		await keepFile(ALICE, f.part, ctx, { resolveSignPkey });
-		await keepFile(BOB, f.part, ctx, { resolveSignPkey });
+		await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
+		await keepFile(BOB, f.part, messageId, { resolveSignPkey });
 		accountKeys.delete(ALICE);
 		await forgetAccountKeptFiles(ALICE);
 		expect(raw.has(`${ALICE}|kept`)).toBe(false);

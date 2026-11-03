@@ -715,19 +715,10 @@ const toggleQuoteChain = (msg, qi) => {
   expandedQuotes.value = next;
 };
 // A deleted message carries no parts; the copies this account kept of its
-// files stand in for them, as file rows that open from this device.
-const keptPartsByMessage = computed(() => {
-  const out = {};
-  for (const [id, entries] of Object.entries(props.keptByMessage)) {
-    out[id] = entries.map((f) => ({
-      kind: 'file', fileId: f.fileId, uploaderHash: f.uploaderHash, encSecretB64: f.encSecretB64,
-      name: f.name, size: f.size, mimeType: f.mimeType, createdAt: f.createdAt,
-    }));
-  }
-  return out;
-});
+// files stand in for them, as file rows that open from this device (a kept
+// entry is a file part with more fields).
 const filesOf = (msg) => (msg._deleted
-  ? keptPartsByMessage.value[msg.id] || []
+  ? props.keptByMessage[msg.id] || []
   : (msg.parts || []).filter((p) => p.kind === 'file'));
 
 const audioElements = new Map();
@@ -791,15 +782,15 @@ const checkpointsOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'check
  *  needs no explanation, and an unknown manifest is not a claim to make. */
 const partial = (part) => {
   const a = props.availability[fileKey(part)];
-  if (!a || a.unknown || a.deleted || !a.total) return null;
+  // A kept file is whole on this device, whatever the node holds.
+  if (!a || a.unknown || a.deleted || !a.total || props.kept[fileKey(part)]) return null;
   return a.present < a.total ? a : null;
 };
 /** A file whose manifest or chunks contradict the uploader's signatures:
  *  refused, so no download button — another attempt gets the same answer. */
 const refusedFile = (part) => !!props.refused[fileKey(part)];
-/** The uploader deleted the file: its manifest says so, or a download was answered so. */
-const deletedOnServer = (part) =>
-  !!props.availability[fileKey(part)]?.deleted || props.downloads[fileKey(part)]?.status === 'deleted';
+/** The uploader deleted the file: its manifest says so (a download answered so is recorded there too). */
+const deletedOnServer = (part) => !!props.availability[fileKey(part)]?.deleted;
 const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
 const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 

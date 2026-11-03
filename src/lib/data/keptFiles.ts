@@ -35,12 +35,8 @@ export interface KeptFile {
 	size: number;
 	mimeType: string;
 	createdAt: number;
-	dialogHash: string;
+	/** The message that carried the file: a deleted message still shows its kept copies. */
 	messageId: string;
-	/** The sender of the message carrying the file. */
-	senderHash: string;
-	/** Unix seconds. */
-	keptAt: number;
 	/** Each chunk's signed data hash, in index order, as verified when the file was kept. */
 	chunkHashes: string[];
 }
@@ -60,28 +56,34 @@ export interface KeepablePart {
 	createdAt?: number;
 }
 
-export interface KeepContext {
-	dialogHash: string;
-	messageId: string;
-	senderHash: string;
-}
-
 let raw: StringStore = new IndexedDbStore('buckitup-kept-files');
 let keyFor = async (owner: string): Promise<CryptoKey> => (await import('./localCrypto')).getLocalStorageKeyFor(owner);
 
 export const _setKeptFilesStoreForTests = (store: StringStore, key?: (owner: string) => Promise<CryptoKey>): void => {
 	raw = store;
 	if (key) keyFor = key;
+	unsealed.clear();
 };
 
 const sealed = (owner: string): StringStore => createSecureStore(raw, { getKey: () => keyFor(owner) });
 const indexKey = (owner: string) => `${owner}|kept`;
 const locks = new Map<string, Promise<unknown>>();
+/**
+ * Each account's index as last read or written by this tab: opening any file
+ * asks whether it is kept, and that must not unseal the index every time.
+ * Another tab's change shows here on the next read after a reload.
+ */
+const unsealed = new Map<string, KeptIndex>();
 
-/** What `owner` keeps on this device. Throws while the account is locked. */
+/** What `owner` keeps on this device; a copy. Throws while the account is locked. */
 export const listKeptFiles = async (owner: string): Promise<KeptIndex> => {
-	const value = await sealed(owner).get(indexKey(owner));
-	return value ? (JSON.parse(value) as KeptIndex) : {};
+	let index = unsealed.get(owner);
+	if (!index) {
+		const value = await sealed(owner).get(indexKey(owner));
+		index = value ? (JSON.parse(value) as KeptIndex) : {};
+		unsealed.set(owner, index);
+	}
+	return { ...index };
 };
 
 const updateIndex = (owner: string, change: (index: KeptIndex) => void): Promise<KeptIndex> =>
@@ -89,7 +91,8 @@ const updateIndex = (owner: string, change: (index: KeptIndex) => void): Promise
 		const index = await listKeptFiles(owner);
 		change(index);
 		await sealed(owner).set(indexKey(owner), JSON.stringify(index));
-		return index;
+		unsealed.set(owner, index);
+		return { ...index };
 	});
 
 /**
@@ -101,7 +104,7 @@ const updateIndex = (owner: string, change: (index: KeptIndex) => void): Promise
 export const keepFile = async (
 	owner: string,
 	part: KeepablePart,
-	ctx: KeepContext,
+	messageId: string,
 	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver } = {},
 ): Promise<KeptFile> => {
 	const key = fileKey(part);
@@ -126,10 +129,7 @@ export const keepFile = async (
 			size: part.size ?? 0,
 			mimeType: part.mimeType ?? '',
 			createdAt: part.createdAt ?? 0,
-			dialogHash: ctx.dialogHash,
-			messageId: ctx.messageId,
-			senderHash: ctx.senderHash,
-			keptAt: Math.floor(Date.now() / 1000),
+			messageId,
 			chunkHashes,
 		};
 		await updateIndex(owner, (current) => { current[key] = entry; });
@@ -182,10 +182,11 @@ export const openFile = async (
 };
 
 /** Bytes `owner` keeps on this device; readable without the account's key. */
-export const keptBytesOf = (owner: string): Promise<number> => pinnedBytesOf(owner);
+export { pinnedBytesOf as keptBytesOf };
 
 /** Removes everything `owner` keeps: called when the account leaves this device. */
 export const forgetAccountKeptFiles = async (owner: string): Promise<void> => {
+	unsealed.delete(owner);
 	// Each half runs whatever the other did: a missing index must not leave pins behind.
 	const [index, pins] = await Promise.allSettled([raw.delete(indexKey(owner)), unpinAllOf(owner)]);
 	for (const r of [index, pins]) if (r.status === 'rejected') throw r.reason;

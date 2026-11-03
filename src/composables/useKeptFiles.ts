@@ -4,7 +4,7 @@
 // disk is not swallowed the way a cache write is.
 import { computed, ref, watch } from 'vue';
 import { fileKey } from '@/lib/data/fileKey';
-import { keepFile, listKeptFiles, releaseKeptFile, type KeepablePart, type KeepContext, type KeptFile, type KeptIndex } from '@/lib/data/keptFiles';
+import { keepFile, listKeptFiles, releaseKeptFile, type KeepablePart, type KeptFile, type KeptIndex } from '@/lib/data/keptFiles';
 import { isDeletedFile } from '@/lib/data/fileTransfer';
 import { isRefusedFile } from '@/lib/data/fileIntegrity';
 
@@ -71,14 +71,14 @@ export function useKeptFiles(opts: {
 		opts.onError?.(message, e);
 	};
 
-	const keep = async (part: KeepablePart, ctx: KeepContext): Promise<void> => {
+	const keep = async (part: KeepablePart, messageId: string): Promise<void> => {
 		const owner = opts.owner();
 		const key = fileKey(part);
 		if (!owner || kept.value[key] || keeping.value[key]) return;
 		errors.value = without(errors.value, key);
 		keeping.value = { ...keeping.value, [key]: { done: 0, total: 0 } };
 		try {
-			const entry = await keepFile(owner, part, ctx, {
+			const entry = await keepFile(owner, part, messageId, {
 				onProgress: (p) => {
 					if (keeping.value[key]) keeping.value = { ...keeping.value, [key]: { done: p.done, total: p.total } };
 				},
@@ -104,8 +104,8 @@ export function useKeptFiles(opts: {
 	};
 
 	/** The switch: on keeps, off releases. */
-	const setKept = (part: KeepablePart, ctx: KeepContext, on: boolean): Promise<void> =>
-		on ? keep(part, ctx) : release(fileKey(part));
+	const setKept = (part: KeepablePart, messageId: string, on: boolean): Promise<void> =>
+		on ? keep(part, messageId) : release(fileKey(part));
 
-	return { kept, keptByMessage, keeping, errors, setKept, reload: load };
+	return { kept, keptByMessage, keeping, errors, setKept };
 }

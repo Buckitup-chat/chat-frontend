@@ -13,7 +13,7 @@ vi.mock('vue-boring-avatars', () => ({ default: { template: '<span />' } }));
 const PEER = 'u_' + 'b'.repeat(128);
 const FILE = { kind: 'file', fileId: 'f_' + '1'.repeat(32), uploaderHash: PEER, name: 'report.pdf', size: 2048, mimeType: 'application/pdf', encSecretB64: 'c2VjcmV0' };
 const KEY = fileKey(FILE);
-const ENTRY = { ...FILE, fileKey: KEY, dialogHash: 'dh_1', messageId: 'dmsg_1', senderHash: PEER, keptAt: 1, chunkHashes: ['fd_x'] };
+const ENTRY = { ...FILE, fileKey: KEY, messageId: 'dmsg_1', chunkHashes: ['fd_x'] };
 
 const message = (over = {}) => ({
 	id: 'dmsg_1',
@@ -41,6 +41,12 @@ describe('a file kept on this device, in the chat', () => {
 		expect(meta(render({ kept: { [KEY]: ENTRY } }))).toBe('2 KB · kept on this device');
 	});
 
+	it('kept, while the node holds only part of it: whole on this device, so no "arrives later"', () => {
+		const w = render({ kept: { [KEY]: ENTRY }, availability: { [KEY]: { present: 1, total: 3, unknown: false, deleted: false } } });
+		expect(w.text()).not.toContain('arrives later');
+		expect(render({ availability: { [KEY]: { present: 1, total: 3, unknown: false, deleted: false } } }).text()).toContain('1 of 3 chunks here');
+	});
+
 	it('kept, deleted on the server: only this device has it, and it still opens', () => {
 		const w = render({ kept: { [KEY]: ENTRY }, availability: deletedOnServer });
 		expect(meta(w)).toBe('2 KB · kept · deleted on the server, only this device has it');
@@ -51,8 +57,6 @@ describe('a file kept on this device, in the chat', () => {
 		const w = render({ availability: deletedOnServer, downloads: { [KEY]: { status: 'error' } } });
 		expect(meta(w)).toBe('2 KB · deleted by the sender');
 		expect(w.find('.msg-file-action').exists()).toBe(false);
-		const answered = render({ downloads: { [KEY]: { status: 'deleted' } } });
-		expect(meta(answered)).toBe('2 KB · deleted by the sender');
 	});
 
 	it('message deleted, copy kept: the kept file still has its row in the deleted message', async () => {

@@ -21,6 +21,11 @@
 // account's pins can be dropped without its key when it leaves the device.
 // A pinned chunk stays while any account pins it; eviction skips it, and a
 // failed pin is an error for the caller, not a swallowed cache miss.
+//
+// Eviction and per-account reads walk indexes, not the chunks: an unpinned
+// record carries `evictable` = [lastUsed, size], and the sparse index on it
+// sums and orders the cache without reading a byte or visiting a kept chunk;
+// the multi-entry index on `pins` finds one account's chunks.
 
 const DB_NAME = 'buckitup-chunks';
 const STORE = 'chunks';
@@ -36,9 +41,18 @@ interface ChunkRecord {
 	lastUsed: number;
 	/** Accounts on this device that keep the file this chunk belongs to (keptFiles.ts). Absent or empty: plain cache. */
 	pins?: string[];
+	/** [lastUsed, size], on unpinned records only: what eviction reads. */
+	evictable?: [number, number];
 }
 
-const isPinned = (rec: ChunkRecord): boolean => !!rec.pins?.length;
+const isPinned = (rec: Pick<ChunkRecord, 'pins'>): boolean => !!rec.pins?.length;
+
+/** The record as stored: `evictable` follows its pins, `pins` is dropped when empty. */
+const stored = (rec: ChunkRecord): ChunkRecord => {
+	const { pins, ...rest } = rec;
+	delete rest.evictable;
+	return pins?.length ? { ...rest, pins } : { ...rest, evictable: [rest.lastUsed, rest.size] };
+};
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 let budgetBytes = BUDGET_BYTES;
@@ -48,10 +62,13 @@ const openDb = (): Promise<IDBDatabase | null> => {
 	dbPromise = new Promise((resolve) => {
 		if (typeof indexedDB === 'undefined') return resolve(null);
 		try {
-			const req = indexedDB.open(DB_NAME, 1);
+			const req = indexedDB.open(DB_NAME, 2);
 			req.onupgradeneeded = () => {
+				// A cache: an older layout is dropped, not migrated.
+				if (req.result.objectStoreNames.contains(STORE)) req.result.deleteObjectStore(STORE);
 				const store = req.result.createObjectStore(STORE, { keyPath: 'key' });
-				store.createIndex('lastUsed', 'lastUsed');
+				store.createIndex('evictable', 'evictable');
+				store.createIndex('pins', 'pins', { multiEntry: true });
 			};
 			req.onsuccess = () => resolve(req.result);
 			req.onerror = () => resolve(null);
@@ -110,15 +127,18 @@ export const getCachedChunk = async (fileId: string, index: number, dataHash: st
 		});
 		if (!rec || rec.dataHash !== dataHash) return null;
 		// LRU touch; fire-and-forget, a failed touch only skews eviction order.
-		// It re-reads the record in its own transaction, so a pin added since
-		// the read above is kept.
-		inTx<void>(db, 'readwrite', (store) => {
-			const req = store.get(rec.key);
-			req.onsuccess = () => {
-				const cur = req.result as ChunkRecord | undefined;
-				if (cur && cur.dataHash === dataHash) store.put({ ...cur, lastUsed: Date.now() });
-			};
-		}).catch(() => {});
+		// A kept chunk is never evicted, so it is not touched. The touch
+		// re-reads the record in its own transaction, so a pin added since the
+		// read above is kept.
+		if (!isPinned(rec)) {
+			inTx<void>(db, 'readwrite', (store) => {
+				const req = store.get(rec.key);
+				req.onsuccess = () => {
+					const cur = req.result as ChunkRecord | undefined;
+					if (cur && cur.dataHash === dataHash) store.put(stored({ ...cur, lastUsed: Date.now() }));
+				};
+			}).catch(() => {});
+		}
 		return new Uint8Array(rec.bytes);
 	} catch {
 		return null;
@@ -141,7 +161,7 @@ export const putCachedChunk = async (fileId: string, index: number, bytes: Uint8
 			req.onsuccess = () => {
 				const cur = req.result as ChunkRecord | undefined;
 				if (cur && isPinned(cur) && cur.dataHash !== dataHash) return;
-				store.put({
+				store.put(stored({
 					key,
 					fileId,
 					bytes: copyOf(bytes),
@@ -149,7 +169,7 @@ export const putCachedChunk = async (fileId: string, index: number, bytes: Uint8
 					size: bytes.byteLength,
 					lastUsed: Date.now(),
 					pins: cur && cur.dataHash === dataHash ? cur.pins : undefined,
-				} satisfies ChunkRecord);
+				}));
 			};
 		});
 		await evictOverBudget(db);
@@ -183,31 +203,31 @@ export const pinChunk = async (fileId: string, index: number, dataHash: string, 
 			const cur = req.result as ChunkRecord | undefined;
 			if (cur && cur.dataHash === dataHash) {
 				const pins = cur.pins?.includes(owner) ? cur.pins : [...(cur.pins ?? []), owner];
-				store.put({ ...cur, pins, lastUsed: Date.now() });
+				store.put(stored({ ...cur, pins, lastUsed: Date.now() }));
 				return;
 			}
 			if (cur && isPinned(cur)) {
 				fail(new ChunkPinError(`Chunk ${index} of file ${fileId} is kept on this device with other contents.`));
 				return;
 			}
-			store.put({
+			store.put(stored({
 				key, fileId, bytes: copyOf(bytes), dataHash, size: bytes.byteLength, lastUsed: Date.now(), pins: [owner],
-			} satisfies ChunkRecord);
+			}));
 		};
 	});
 };
 
-/** Drops `owner`'s pins from every chunk in `range` (all of them when null); a chunk another account pins stays pinned. */
-const unpinWhere = async (owner: string, range: IDBKeyRange | null): Promise<void> => {
+/** Drops `owner`'s pins from its chunks, those of one file when `fileId` is given; a chunk another account pins stays pinned. */
+const unpinWhere = async (owner: string, fileId: string | null): Promise<void> => {
 	const db = await openDb();
 	if (!db) return;
 	await inTx<void>(db, 'readwrite', (store) => {
-		const req = store.openCursor(range);
+		const req = fileId ? store.openCursor(fileRange(fileId)) : store.index('pins').openCursor(IDBKeyRange.only(owner));
 		req.onsuccess = () => {
 			const cursor = req.result;
 			if (!cursor) return;
 			const rec = cursor.value as ChunkRecord;
-			if (rec.pins?.includes(owner)) cursor.update({ ...rec, pins: rec.pins.filter((p) => p !== owner) });
+			if (rec.pins?.includes(owner)) cursor.update(stored({ ...rec, pins: rec.pins.filter((p) => p !== owner) }));
 			cursor.continue();
 		};
 	});
@@ -216,7 +236,7 @@ const unpinWhere = async (owner: string, range: IDBKeyRange | null): Promise<voi
 };
 
 /** `owner` no longer keeps `fileId`: its chunks stay as cache unless another account keeps them. */
-export const unpinFile = (fileId: string, owner: string): Promise<void> => unpinWhere(owner, fileRange(fileId));
+export const unpinFile = (fileId: string, owner: string): Promise<void> => unpinWhere(owner, fileId);
 
 /** `owner` leaves this device: every pin it holds goes. */
 export const unpinAllOf = (owner: string): Promise<void> => unpinWhere(owner, null);
@@ -227,12 +247,11 @@ export const pinnedBytesOf = async (owner: string): Promise<number> => {
 	if (!db) return 0;
 	return inTx<number>(db, 'readonly', (store, settle) => {
 		let total = 0;
-		const req = store.openCursor();
+		const req = store.index('pins').openCursor(IDBKeyRange.only(owner));
 		req.onsuccess = () => {
 			const cursor = req.result;
 			if (!cursor) return settle(total);
-			const rec = cursor.value as ChunkRecord;
-			if (rec.pins?.includes(owner)) total += rec.size;
+			total += (cursor.value as ChunkRecord).size;
 			cursor.continue();
 		};
 	});
@@ -247,26 +266,23 @@ export const pinnedBytesOf = async (owner: string): Promise<number> => {
  */
 const evictOverBudget = (db: IDBDatabase): Promise<void> =>
 	inTx<void>(db, 'readwrite', (store) => {
+		const index = store.index('evictable');
 		let total = 0;
-		const sum = store.openCursor();
+		const sum = index.openKeyCursor();
 		sum.onsuccess = () => {
 			const cursor = sum.result;
 			if (cursor) {
-				const rec = cursor.value as ChunkRecord;
-				if (!isPinned(rec)) total += rec.size;
+				total += (cursor.key as [number, number])[1];
 				cursor.continue();
 				return;
 			}
 			if (total <= budgetBytes) return;
-			const byAge = store.index('lastUsed').openCursor();
+			const byAge = index.openKeyCursor();
 			byAge.onsuccess = () => {
 				const c = byAge.result;
 				if (!c || total <= budgetBytes) return;
-				const rec = c.value as ChunkRecord;
-				if (!isPinned(rec)) {
-					c.delete();
-					total -= rec.size;
-				}
+				store.delete(c.primaryKey);
+				total -= (c.key as [number, number])[1];
 				c.continue();
 			};
 		};

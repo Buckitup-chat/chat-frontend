@@ -21,7 +21,7 @@ const { fileKey } = await import('@/lib/data/fileKey');
 const FileStateModal = (await import('@/components/chat/FileStateModal.vue')).default;
 
 const OWNER = 'u_' + '1'.repeat(128);
-const ctx = { dialogHash: 'dh_' + '3'.repeat(64), messageId: 'dmsg_1', senderHash: 'u_' + 'a'.repeat(128) };
+const messageId = 'dmsg_1';
 const availability = { present: 2, total: 2, unknown: false, deleted: false };
 
 let server;
@@ -54,7 +54,7 @@ const mountScreen = (part) => {
 				kept: !!k.kept.value[fileKey(part)],
 				keeping: k.keeping.value[fileKey(part)] || null,
 				keepError: k.errors.value[fileKey(part)] || '',
-				onKeep: (on) => k.setKept(part, ctx, on),
+				onKeep: (on) => k.setKept(part, messageId, on),
 			});
 		},
 	});

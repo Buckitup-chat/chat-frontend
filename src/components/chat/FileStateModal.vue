@@ -97,9 +97,10 @@ const props = defineProps({
 });
 const emit = defineEmits(['close', 'refresh', 'keep']);
 
-const deletedOnServer = computed(() => !!props.availability && !props.availability.unknown && props.availability.deleted);
+const known = computed(() => !!props.availability && !props.availability.unknown);
+const deletedOnServer = computed(() => known.value && props.availability.deleted);
 /** Keeping needs the signed manifest, and a deleted file has none to give. */
-const keepable = computed(() => !!props.availability && !props.availability.unknown && !props.availability.deleted);
+const keepable = computed(() => known.value && !props.availability.deleted);
 const onKeepChange = (event) => {
   const want = event.target.checked;
   event.target.checked = props.kept || !!props.keeping;
@@ -108,8 +109,7 @@ const onKeepChange = (event) => {
 
 const percent = computed(() =>
   props.availability?.total ? Math.round((props.availability.present / props.availability.total) * 100) : 0);
-const complete = computed(() =>
-  !!props.availability && !props.availability.unknown && props.availability.present >= props.availability.total);
+const complete = computed(() => known.value && props.availability.present >= props.availability.total);
 
 const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 const fmtTime = (unix) => {
