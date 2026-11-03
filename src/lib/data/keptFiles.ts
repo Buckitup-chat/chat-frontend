@@ -68,11 +68,15 @@ export const _setKeptFilesStoreForTests = (store: StringStore, key?: (owner: str
 const sealed = (owner: string): StringStore => createSecureStore(raw, { getKey: () => keyFor(owner) });
 const indexKey = (owner: string) => `${owner}|kept`;
 /**
- * Keeps and releases of one account run one at a time across tabs, each from
- * the index as stored: the pins and the entry land together, and no tab
- * writes back an index another tab has changed since.
+ * Locks across tabs. The index lock covers one read-change-write of an
+ * account's index, each from the index as stored, so no tab writes back an
+ * index another tab has changed since. The file lock covers a keep or a
+ * release of one file id, download included, so a failed keep releases only
+ * its own pins. Taken in that order: file, then index.
  */
 const underIndexLock = <T>(owner: string, fn: () => Promise<T>): Promise<T> => withNamedLock(`buckitup-kept-files:${owner}`, fn);
+const underFileLock = <T>(owner: string, fileId: string, fn: () => Promise<T>): Promise<T> =>
+	withNamedLock(`buckitup-kept-files:${owner}|${fileId}`, fn);
 
 /**
  * The open account's index as last read or written by this tab: opening any
@@ -104,15 +108,15 @@ export const listKeptFiles = async (owner: string): Promise<KeptIndex> => {
  * Keeps a file for `owner`: pins its chunks, fetching the missing ones with
  * `onProgress`, then records it in the index. Throws if any step fails — a
  * full disk as the browser's QuotaExceededError — and then nothing of it
- * stays pinned for `owner`. Other keeps and releases of `owner` wait until
- * it is done.
+ * stays pinned for `owner`. A keep or release of the same file id waits
+ * until it is done.
  */
 export const keepFile = (
 	owner: string,
 	part: KeepablePart,
 	messageId: string,
 	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver } = {},
-): Promise<KeptFile> => underIndexLock(owner, async () => {
+): Promise<KeptFile> => underFileLock(owner, part.fileId, async () => {
 	const key = fileKey(part);
 	const index = await readIndex(owner);
 	if (index[key]) return index[key];
@@ -138,24 +142,29 @@ export const keepFile = (
 			messageId,
 			chunkHashes,
 		};
-		await writeIndex(owner, { ...index, [key]: entry });
+		await underIndexLock(owner, async () => writeIndex(owner, { ...(await readIndex(owner)), [key]: entry }));
 		return entry;
 	} catch (e) {
-		// Under the lock, with no entry for this file id: every pin `owner` holds on it is this keep's.
+		// Under the file lock, with no entry for this file id: every pin `owner` holds on it is this keep's.
 		await unpinFile(part.fileId, owner).catch((err) => console.warn('[keptFiles] could not release the pins of a failed keep', err));
 		throw e;
 	}
 });
 
 /** `owner` stops keeping the file: its chunks become cache again unless another account keeps them. */
-export const releaseKeptFile = (owner: string, key: string): Promise<void> => underIndexLock(owner, async () => {
-	const index = await readIndex(owner);
-	const removed = index[key];
-	if (!removed) return;
-	delete index[key];
-	await writeIndex(owner, index);
-	await unpinFile(removed.fileId, owner);
-});
+export const releaseKeptFile = (owner: string, key: string): Promise<void> =>
+	underFileLock(owner, key.slice(key.lastIndexOf('/') + 1), async () => {
+		const removed = await underIndexLock(owner, async () => {
+			const index = await readIndex(owner);
+			const entry = index[key];
+			if (entry) {
+				delete index[key];
+				await writeIndex(owner, index);
+			}
+			return entry;
+		});
+		if (removed) await unpinFile(removed.fileId, owner);
+	});
 
 /** The kept copy's bytes, decrypted from this device alone; null when `owner` does not keep the file. */
 export const openKeptFile = async (

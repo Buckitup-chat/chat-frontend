@@ -21,7 +21,7 @@
         <template v-if="kept">The sender deleted this file from the server. Only this device has it now.</template>
         <template v-else>The sender deleted this file from the server.</template>
       </p>
-      <template v-else-if="showsChunks">
+      <template v-else-if="onServer">
         <div class="fs-chunks">
           <span v-for="i in availability.total" :key="i" class="fs-chunk"
             :class="{ _have: i <= availability.present }"></span>
@@ -48,7 +48,7 @@
       <template v-if="!refused">
         <div class="form-check form-switch mt-3 mb-0">
           <input id="fs-keep" class="form-check-input" type="checkbox" role="switch"
-            :checked="kept || !!keeping" :disabled="!!keeping || (!kept && !keepable)"
+            :checked="kept || !!keeping" :disabled="!!keeping || (!kept && !onServer)"
             @change="onKeepChange" />
           <label class="form-check-label small" for="fs-keep">Keep on this device</label>
         </div>
@@ -58,7 +58,7 @@
         <p v-else-if="keepError" class="fs-note fs-refused">{{ keepError }}</p>
         <p v-else-if="kept && messageDeleted" class="fs-note">The message was deleted. The copy kept on this device remains.</p>
         <p v-else-if="kept" class="fs-note">Kept on this device: it opens offline and stays if the sender deletes it. It is not copied to your other devices.</p>
-        <button v-if="kept && !showsChunks" type="button" class="fs-btn" @click="emit('refresh')">Download</button>
+        <button v-if="kept && !onServer" type="button" class="fs-btn" @click="emit('refresh')">Download</button>
       </template>
 
       <template v-if="log.length">
@@ -99,10 +99,12 @@ const emit = defineEmits(['close', 'refresh', 'keep']);
 
 const known = computed(() => !!props.availability && !props.availability.unknown);
 const deletedOnServer = computed(() => known.value && props.availability.deleted);
-/** The chunk view, whose button downloads; otherwise a kept file gets its own. */
-const showsChunks = computed(() => known.value && !props.availability.deleted);
-/** Keeping needs the signed manifest, and a deleted file has none to give. */
-const keepable = computed(() => known.value && !props.availability.deleted);
+/**
+ * The server has the file's signed manifest: the chunk view shows, with its
+ * download button (otherwise a kept file gets its own), and the file can be
+ * kept. A deleted file has no manifest to give.
+ */
+const onServer = computed(() => known.value && !props.availability.deleted);
 const onKeepChange = (event) => {
   const want = event.target.checked;
   event.target.checked = props.kept || !!props.keeping;

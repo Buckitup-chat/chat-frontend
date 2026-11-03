@@ -14,8 +14,6 @@ import { verifyReplicatedRow, type RowVerification } from './rowVerification';
 import { getVerifiedSignPkey } from './cardRegistry';
 import { withNamedLock } from './serialized';
 
-export { withNamedLock };
-
 export interface StorageIntentPayload {
 	kind: 'storage';
 	relation: 'user_storage';
