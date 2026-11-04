@@ -10,7 +10,6 @@ import { setActivePinia, createPinia } from 'pinia';
 class FakeEM extends EventTarget {
 	get currentUserHash() { return null; }
 	get isAuth() { return false; }
-	async initialize() {}
 	async getLocalUserCards() { return []; }
 }
 

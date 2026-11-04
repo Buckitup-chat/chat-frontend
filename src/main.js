@@ -26,6 +26,19 @@ import globalFilters from './libs/filters';
 import * as $enigma from './libs/enigma';
 import { EncryptionManager } from './libs/EncryptionManager';
 import { EncryptionManagerPQ } from './libs/EncryptionManagerPQ';
+import { repairVaultStore } from './lib/vaultStore';
+
+// The browser offers installation once, early; keep the offer for the menu.
+listenForInstallPrompt();
+
+// Before the first vault access: the stores and managers below make it.
+if (await repairVaultStore()) {
+	$swal.fire({
+		icon: 'warning',
+		title: 'Close the other BuckitUp tabs',
+		text: 'The local account storage on this device needs a repair, and another tab of the app holds it open. Accounts load once the other tabs are closed.',
+	});
+}
 
 const app = createApp(App);
 
@@ -96,6 +109,3 @@ import('virtual:pwa-register')
 // Everything offline-first lives in browser storage (vault, shapes, chunk
 // cache, outbox, drafts) — ask the browser not to evict it under pressure.
 navigator.storage?.persist?.().catch(() => { });
-
-// The browser offers installation once, early; keep the offer for the menu.
-listenForInstallPrompt();
