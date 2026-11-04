@@ -14,6 +14,8 @@
 				     starts from the login page, where the person who needs it is. -->
 				<CommunityBackupCard />
 
+				<PasskeyRecoveryCard />
+
 				<!-- The other side of it: pieces of contacts' backups this account keeps. -->
 				<SharesIKeepCard />
 
@@ -66,6 +68,7 @@ import { inject } from 'vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
 import CommunityBackupCard from '@/components/recovery/backup/CommunityBackupCard.vue';
 import SharesIKeepCard from '@/components/recovery/SharesIKeepCard.vue';
+import PasskeyRecoveryCard from '@/components/recovery/PasskeyRecoveryCard.vue';
 
 const $userPQ = userPQStore();
 const $modal = inject('$modal');

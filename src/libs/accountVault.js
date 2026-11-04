@@ -1,7 +1,7 @@
 import { connect, rawStorage } from '@lo-fi/local-vault';
 import '@lo-fi/local-vault/adapter/idb';
 import { removeLocalAccount, deriveLockKey } from '@lo-fi/local-data-lock';
-import { createPrfPasskey, readLockSeed } from '@buckitup/pq-client/vaultLock';
+import { createPrfPasskey, readLockSeed, assertPrf, lockSeedFromPrf, lockSaltOf } from '@buckitup/pq-client/vaultLock';
 import { VaultLockedError } from '@/lib/data/keyCustody';
 
 const VAULT_KEY_OPTIONS = {}
@@ -44,7 +44,7 @@ export const discoverLegacyVault = () => connect({ storageType: 'idb', discoverV
 
 export const forgetLegacyLock = (accountID) => removeLocalAccount(accountID);
 
-const newVaultId = () => {
+export const newPrfVaultId = () => {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
   return btoa(String.fromCharCode(...bytes)).replace(/[^a-zA-Z0-9]+/g, '');
 };
@@ -65,6 +65,7 @@ const prfHandle = (vault, lockKey) => {
     id: vault.id,
     lockMode: 'prf',
     get: async (name) => vault.get(name, withKey()),
+    entries: async () => vault.entries(withKey()),
     set: async (name, value) => vault.set(name, value, withKey()),
     clear: async () => vault.clear(withKey()),
     lock: () => {
@@ -106,17 +107,55 @@ const createWithSeed = async (vaultId, lock, seed) => {
   return { vault, lock };
 };
 
-export const createPrfVault = async ({ name, credentials = navigator.credentials, rpId = location.hostname }) => {
-  const vaultId = newVaultId();
+export const createPrfVault = async ({ name, vaultId = newPrfVaultId(), credentials = navigator.credentials, rpId = location.hostname }) => {
   const { record, seed } = await createPrfPasskey(credentials, { rpId, vaultId, name });
   return createWithSeed(vaultId, record, seed);
 };
 
-export const createPrfVaultWithSeed = ({ lock, seed }) => createWithSeed(newVaultId(), lock, seed);
+export const createPrfVaultWithSeed = ({ lock, seed }) => createWithSeed(newPrfVaultId(), lock, seed);
 
-export const openPrfVault = async (vaultId, lock, { credentials = navigator.credentials } = {}) => {
+const TWO_SALT_REFUSALS = ['NotSupportedError', 'TypeError'];
+
+const assertWithRecoverySalt = async (credentials, lock, recoverySalt) => {
+  try {
+    return await assertPrf(credentials, {
+      rpId: lock.rpId, credentialId: lock.credentialId, transports: lock.transports, first: lockSaltOf(lock), second: recoverySalt,
+    });
+  } catch (e) {
+    if (TWO_SALT_REFUSALS.includes(e?.name)) return null;
+    throw e;
+  }
+};
+
+export const openPrfVault = async (vaultId, lock, { credentials = navigator.credentials, recovery = null } = {}) => {
   if (!(await vaultStorage().get(`local-vault-${vaultId}`))?.data) throw new Error(`No vault ${vaultId} on this device`);
-  return openWithSeed(vaultId, lock, await readLockSeed(credentials, lock));
+  if (!recovery) return openWithSeed(vaultId, lock, await readLockSeed(credentials, lock));
+  let answer = await assertWithRecoverySalt(credentials, lock, recovery.salt);
+  const twoSaltRefused = !answer;
+  if (twoSaltRefused) {
+    recovery.prf = null;
+    recovery.flags = null;
+    answer = await assertPrf(credentials, {
+      rpId: lock.rpId, credentialId: lock.credentialId, transports: lock.transports, first: lockSaltOf(lock),
+    });
+  }
+  try {
+    const seed = (() => {
+      try {
+        return lockSeedFromPrf(answer.first);
+      } finally {
+        answer.first.fill(0);
+      }
+    })();
+    const vault = await openWithSeed(vaultId, lock, seed);
+    recovery.prf = twoSaltRefused ? null : answer.second;
+    recovery.flags = answer.flags;
+    if (twoSaltRefused) answer.second?.fill(0);
+    return vault;
+  } catch (e) {
+    answer.second?.fill(0);
+    throw e;
+  }
 };
 
 export const dropPrfVault = async (vaultId, handle = null) => {

@@ -20,7 +20,8 @@ import { signAddSecret, signBound } from '@/lib/recovery/typedData';
 import { depositShare, holdingOf } from '@/lib/recovery/nodeClient';
 import { liveInviteId } from '@/lib/recovery/inviteThread';
 import { knownNodes, checkNode, syncedServerNode } from '@/lib/recovery/nodeDirectory';
-import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedError, advance, prepareRun, skipPendingNodes, canDiscard, sharePartOf, activeRun, unfinished, promoteReshare } from '@/lib/recovery/backupRun';
+import { RunInterruptedError, RunAbortedError, RunTakenOverError, RunStoppedError, advance, prepareRun, skipPendingNodes, canDiscard, sharePartOf, activeRun, unfinished, promoteReshare, registeredSecretOf } from '@/lib/recovery/backupRun';
+import { announceBackupMade, announceBackupRemoved } from '@/lib/recovery/backupReminder';
 import { policyProblems, settingsProblems } from '@/lib/recovery/backupPlan';
 import { setProblems } from '@/lib/recovery/nodeChoice';
 import { listSubscriptions, subscribeWebhook, telegramReply, alertWallet, unsubscribe, alertHistory } from '@/lib/recovery/alerts';
@@ -431,7 +432,11 @@ export const useRecoveryBackupStore = defineStore('recoveryBackup', () => {
 
 	/** Writes `patch` into the backup slot and shows the slot as the server took it. */
 	const writeSlot = async (patch) => {
+		const owner = $userPQ.currentUserHash;
+		const wasRegistered = !!registeredSecretOf({ run: run.value });
 		const accepted = await em().patchSlotJson(BACKUP_SLOT, patch);
+		if (registeredSecretOf(accepted)) announceBackupMade(owner, 'community');
+		else if (wasRegistered && accepted) announceBackupRemoved(owner, 'community');
 		show({
 			run: accepted ? (accepted.run ?? null) : 'run' in patch ? patch.run : run.value,
 			reshare: accepted ? (accepted.reshare ?? null) : 'reshare' in patch ? patch.reshare : reshare.value,

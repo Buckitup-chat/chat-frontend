@@ -22,7 +22,7 @@ export class PrfUnsupportedError extends Error {
 }
 
 export class PrfMissingError extends Error {
-	constructor() {
+	constructor(readonly credentialId: string | null = null) {
 		super('The passkey did not return the value that opens this vault');
 		this.name = 'PrfMissingError';
 	}
@@ -149,7 +149,7 @@ export const assertPrf = async (
 	}
 	if (!results?.first || viewOf(results.first).length !== 32) {
 		wipe();
-		throw new PrfMissingError();
+		throw new PrfMissingError(answered);
 	}
 	const out: PrfAssertion = {
 		credentialId: answered,

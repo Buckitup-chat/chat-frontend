@@ -7,6 +7,7 @@
 
 	<QuarantinedWritesBanner v-if="$userPQ.currentUser" />
 	<AccessGateBanner v-if="$userPQ.currentUser" />
+	<PasskeyRecoveryReminder v-if="$userPQ.currentUser && !$restore.active" />
 	<RecoveryAlertBanner v-if="$userPQ.currentUser && !$restore.active" />
 	<RecoveryFinaleBanner v-if="$userPQ.currentUser && !$restore.active" />
 
@@ -167,6 +168,7 @@ import { useMenu } from '@/composables/useMenu';
 import Loader from './components/Loader.vue';
 import QuarantinedWritesBanner from '@/components/QuarantinedWritesBanner.vue';
 import AccessGateBanner from '@/components/AccessGateBanner.vue';
+import PasskeyRecoveryReminder from '@/components/PasskeyRecoveryReminder.vue';
 import RecoveryAlertBanner from '@/components/RecoveryAlertBanner.vue';
 import RecoverScreen from '@/components/recovery/restore/RecoverScreen.vue';
 import RecoveryFinaleBanner from '@/components/RecoveryFinaleBanner.vue';

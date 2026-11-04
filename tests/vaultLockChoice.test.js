@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
+import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
+import { sha3_512 } from '@noble/hashes/sha3';
+import { bytesToHex } from '@noble/hashes/utils';
 import { PrfUnsupportedError } from '@buckitup/pq-client/vaultLock';
+import { toBase64 } from '@buckitup/pq-client/signature';
 
 class FakeEM extends EventTarget {
 	locks = [];
@@ -37,7 +41,13 @@ vi.mock('@/lib/data/attach', () => ({ preloadWithRetry: async () => false }));
 
 const { userPQStore } = await import('@/store/userPQ.store');
 
-const BACKUP = { identity: { user_hash: 'u_old', name: 'Old' }, keys: {} };
+const BACKUP = (() => {
+	const { publicKey, secretKey } = ml_dsa87.keygen(new Uint8Array(32).fill(7));
+	return {
+		identity: { user_hash: 'u_' + bytesToHex(sha3_512(publicKey)), name: 'Old', sign_pkey: toBase64(publicKey) },
+		keys: { sign_skey: toBase64(secretKey), crypt_skey: 'Y3J5cHQ=', evm_skey: 'ab', contact_skey: 'cd' },
+	};
+})();
 
 describe.each([
 	['registration', (store) => store.registerNewUser({ name: 'New' })],
@@ -91,5 +101,18 @@ describe.each([
 		fake.failure = new PrfUnsupportedError('AAAA', 'authenticator');
 		await expect(run(store)).rejects.toBeInstanceOf(PrfUnsupportedError);
 		expect(fake.locks).toEqual(['prf']);
+	});
+});
+
+describe('a backup that is not its account\'s', () => {
+	it('is refused before the import starts', async () => {
+		setActivePinia(createPinia());
+		fake = new FakeEM();
+		const store = userPQStore();
+		await store.initialize();
+		const spoiled = structuredClone(BACKUP);
+		spoiled.identity.user_hash = 'u_' + 'ab'.repeat(64);
+		await expect(store.importBackup(spoiled)).rejects.toMatchObject({ name: 'BackupMismatchError' });
+		expect(fake.locks).toEqual([]);
 	});
 });

@@ -10,6 +10,7 @@ import { reactive } from 'vue';
 
 vi.mock('vue-boring-avatars', () => ({ default: { template: '<span />' } }));
 vi.mock('@/components/Account_Selector.vue', () => ({ default: { template: '<div />' } }));
+vi.mock('@/components/recovery/PasskeyRestoreButton.vue', () => ({ default: { template: '<button data-test="restore-with-passkey" />' } }));
 vi.mock('@/store/user.store', () => ({ userStore: () => reactive({ vaults: [] }) }));
 vi.mock('@/libs/enigma', () => ({}));
 

@@ -162,4 +162,89 @@ describe('PRF-locked vault on lo-fi', () => {
 		expect((await accountVault.vaultStorage().keys()).length).toBe(before);
 		expect(lofiCalls).toEqual([]);
 	});
+
+	describe('opening with a recovery salt', () => {
+		const recoverySalt = () => new Uint8Array(32).fill(5);
+
+		const lockedVault = async () => {
+			const made = await newVault();
+			made.vault.lock();
+			return made;
+		};
+
+		const refusingTwoSalts = (auth, name) => {
+			const get = auth.credentials.get;
+			const requests = [];
+			auth.credentials.get = async (options) => {
+				const eval_ = options.publicKey.extensions.prf.eval;
+				requests.push(eval_.second ? 'two salts' : 'one salt');
+				if (eval_.second) throw new DOMException('two salts refused', name);
+				return get(options);
+			};
+			return requests;
+		};
+
+		it('takes the recovery value from the one prompt that opens the vault', async () => {
+			const { auth, vault, lock } = await lockedVault();
+			const before = auth.calls.length;
+			const recovery = { salt: recoverySalt() };
+			const reopened = await accountVault.openPrfVault(vault.id, lock, { credentials: auth.credentials, recovery });
+			expect(await reopened.get('evm_skey')).toBe('evm-secret-hex');
+			expect(recovery.prf).toHaveLength(32);
+			expect(recovery.flags).toEqual({ backupEligible: true, backupState: true });
+			expect(auth.calls.length - before).toBe(1);
+		});
+
+		it.each(['NotSupportedError', 'TypeError'])('a %s on the two-salt request signs in with the lock salt alone', async (name) => {
+			const { auth, vault, lock } = await lockedVault();
+			const requests = refusingTwoSalts(auth, name);
+			const recovery = { salt: recoverySalt(), prf: new Uint8Array(32).fill(9), flags: { backupEligible: true, backupState: true } };
+			const reopened = await accountVault.openPrfVault(vault.id, lock, { credentials: auth.credentials, recovery });
+			expect(await reopened.get('evm_skey')).toBe('evm-secret-hex');
+			expect(requests).toEqual(['two salts', 'one salt']);
+			expect(recovery.prf).toBeNull();
+			expect(recovery.flags).toEqual({ backupEligible: true, backupState: true });
+		});
+
+		it('the one-salt retry keeps the flags of its assertion, for a passkey that stays on this device', async () => {
+			const auth = prfAuthenticator('at-create', { backupEligible: false, backupState: false });
+			const { vault, lock } = await accountVault.createPrfVault({ name: 'Alice', credentials: auth.credentials, rpId: 'localhost' });
+			vault.lock();
+			refusingTwoSalts(auth, 'NotSupportedError');
+			const recovery = { salt: recoverySalt(), prf: new Uint8Array(32).fill(9) };
+			await accountVault.openPrfVault(vault.id, lock, { credentials: auth.credentials, recovery });
+			expect(recovery.prf).toBeNull();
+			expect(recovery.flags).toEqual({ backupEligible: false, backupState: false });
+		});
+
+		it('an authenticator that answers only the lock salt still signs in, with no recovery value', async () => {
+			const { auth, vault, lock } = await lockedVault();
+			const get = auth.credentials.get;
+			auth.credentials.get = async (options) => {
+				const credential = await get(options);
+				delete credential.getClientExtensionResults().prf.results.second;
+				return credential;
+			};
+			const recovery = { salt: recoverySalt() };
+			const reopened = await accountVault.openPrfVault(vault.id, lock, { credentials: auth.credentials, recovery });
+			expect(await reopened.get('evm_skey')).toBe('evm-secret-hex');
+			expect(recovery.prf).toBeNull();
+		});
+
+		it.each(['NotAllowedError', 'AbortError', 'SecurityError'])('a %s is passed on and the passkey is not asked again', async (name) => {
+			const { auth, vault, lock } = await lockedVault();
+			const requests = refusingTwoSalts(auth, name);
+			const recovery = { salt: recoverySalt() };
+			await expect(accountVault.openPrfVault(vault.id, lock, { credentials: auth.credentials, recovery })).rejects.toMatchObject({ name });
+			expect(requests).toEqual(['two salts']);
+			expect(recovery.prf).toBeUndefined();
+		});
+
+		it('a refusal that persists on the one-salt retry is passed on, not hidden', async () => {
+			const { auth, vault, lock } = await lockedVault();
+			auth.credentials.get = async () => { throw new DOMException('no', 'NotSupportedError'); };
+			await expect(accountVault.openPrfVault(vault.id, lock, { credentials: auth.credentials, recovery: { salt: recoverySalt() } }))
+				.rejects.toMatchObject({ name: 'NotSupportedError' });
+		});
+	});
 });

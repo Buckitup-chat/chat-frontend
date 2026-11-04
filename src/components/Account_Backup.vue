@@ -15,6 +15,15 @@
 			</div>
 		</div>
 
+		<div class="_input_block mt-2 d-flex p-3" v-if="passkeyRecovery.offerable" data-test="backup-option-passkey">
+			<div class="_icon_buckup_devices _select_icon"></div>
+			<div>
+				<div class="fw-bold fs-5">Passkey recovery</div>
+				<div class="text-secondary">If this browser's data is cleared, restore the account with your passkey alone, with no backup file. Optional, and it changes who can take the account over: read it first.</div>
+				<button type="button" class="btn btn-dark mt-2" data-test="backup-open-passkey-recovery" @click="openPasskeyRecovery()">Set it up</button>
+			</div>
+		</div>
+
 		<div class="_input_block mt-2 d-flex p-2 px-3" v-if="showLocal">
 			<div class="_icon_buckup_devices _select_icon"></div>
 			<div class="">
@@ -80,9 +89,23 @@
 <script setup>
 import errorMessage from '@/utils/errorMessage';
 import { useLocalBackupExport } from '@/composables/useLocalBackupExport';
-import { inject, ref } from 'vue';
+import { inject, onMounted, ref } from 'vue';
+import { usePasskeyRecoveryStore } from '@/store/passkeyRecovery.store';
 
 const $swal = inject('$swal');
+const $mitt = inject('$mitt');
+const $router = inject('$router');
+
+const passkeyRecovery = usePasskeyRecoveryStore();
+onMounted(() => {
+	passkeyRecovery.detectSupport();
+	passkeyRecovery.load().catch(() => {});
+});
+
+const openPasskeyRecovery = () => {
+	$mitt.emit('modal::close');
+	$router.push({ name: 'account_backups' });
+};
 
 const { protect, showPassword, password, dirty, processing, passwordErrors, exportToFile } =
 	useLocalBackupExport();
