@@ -58,7 +58,7 @@ import { getDialogCollections } from '@/lib/data/collections';
 import { useCollectionRows } from '@/lib/data/useCollection';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
 import { useAudioPlayback } from '@/composables/useAudioPlayback';
-import { feedOrderKey } from '@/lib/data/feedOrder';
+import { compareFeedOrder } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
 import { isRefusedFile } from '@/lib/data/fileIntegrity';
 import { fileKey } from '@/lib/data/fileKey';
@@ -622,8 +622,7 @@ const displayMessages = computed(() => {
     // owner_timestamp: that is the revision counter, an edit must raise it,
     // and sorting by it teleported edited messages to the end of the feed.
     return [...activeOptimistic, ...withEdits].sort((a, b) =>
-        feedOrderKey(a.id, a._raw?.owner_timestamp || a.ownerTimestamp || 0)
-        - feedOrderKey(b.id, b._raw?.owner_timestamp || b.ownerTimestamp || 0));
+        compareFeedOrder(a.id, a._raw?.owner_timestamp || a.ownerTimestamp || 0, b.id, b._raw?.owner_timestamp || b.ownerTimestamp || 0));
 });
 
 watch(dialogHash, (hash) => { if (hash) void $dialogs.ensureProjectionsHydrated(); }, { immediate: true });
@@ -1062,7 +1061,7 @@ const resolveCheckpointMessage = (wanted) => {
         if (!msg.isMine) continue;
         const part = checkpointPartOf(msg);
         if (!part) continue;
-        if (!best || feedOrderKey(msg.id, part.createdAt) > feedOrderKey(best.messageId, best.part.createdAt)) {
+        if (!best || compareFeedOrder(msg.id, part.createdAt, best.messageId, best.part.createdAt) > 0) {
             best = { part, messageId: msg.id };
         }
     }
