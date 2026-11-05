@@ -165,13 +165,24 @@ describe('a derived card', () => {
 		expect(await A.app.outbox.pendingCardWrites(A.hash)).toEqual([]);
 	});
 
-	it('of a session that ended cannot be signed any more', async () => {
+	it('cannot be signed once its account is closed', async () => {
 		await register(A);
 		const { em } = await session();
 		const card = em.derivedCard(PEER);
 		expect(verifyUserCard(card.row(1_700_000_000)).status).toBe('verified');
 		await A.app.store.logout();
 		expect(() => card.row(1_700_000_001)).toThrow(/open on this device/);
+	});
+
+	it('stays the identity it was made for, and is refused for a malformed signer', async () => {
+		await register(A);
+		const { em } = await session();
+		const signer: { kind: 'note-peer'; noteId: string } = { ...PEER };
+		const card = em.derivedCard(signer);
+		signer.noteId = 'ff'.repeat(16);
+		expect(card.signer).toEqual(PEER);
+		expect(card.row(1_700_000_000).user_hash).toBe(card.userHash);
+		expect(() => em.derivedCard({ kind: 'notes', label: 'x' })).toThrow(TypeError);
 	});
 });
 

@@ -27,8 +27,8 @@
 // is not the goal (metadata access control starts at the backend).
 import { WebLocksLeader } from '@tanstack/offline-transactions';
 import { IndexedDbStore } from './indexedDbStore';
-import { IngestError, ownerOf } from './ingest';
-import { shapeOfTable } from './writeContracts';
+import { IngestError } from './ingest';
+import { ownerOf, shapeOfTable } from './writeContracts';
 import { VaultLockedError, AccountMismatchError } from './keyCustody';
 import { isDerivedSigner, type DerivedSigner } from './sessionIdentities';
 import { createSecureStore, DecryptFailedError, type StringStore } from './secureStore';

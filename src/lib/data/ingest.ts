@@ -11,7 +11,7 @@
 import { api } from '@/api/client';
 import { mutationAppliedOnServer, derivedRowAppliedOnServer, type MutationLike } from './confirm';
 import { discoverDependencies, reconcileAccepted } from './coordinator';
-import { OWNER_FIELD } from './writeContracts';
+import { OWNER_FIELD, ownerOf } from './writeContracts';
 import { VaultLockedError, AccountMismatchError, resolveSigningKey, type SigningKeySource } from './keyCustody';
 import { derivedSigner, sessionAccount, type DerivedSigner } from './sessionIdentities';
 import { parseDeviceIdentity } from './deviceOwner';
@@ -244,27 +244,9 @@ export async function sendMutationsWithRetry(
 	throw lastError;
 }
 
-interface MutationShape {
-	type?: string;
-	modified?: Record<string, unknown>;
-	changes?: Record<string, unknown>;
-	original?: Record<string, unknown>;
-	syncMetadata?: { relation?: string };
-}
-
 // Re-exported so callers can attribute a durable intent (intents.ts, §3.1) to
 // its owner before a mutation exists to read syncMetadata.relation from.
 export { OWNER_FIELD };
-
-export const ownerOf = (mutations: unknown[]): string => {
-	const first = mutations[0] as MutationShape | undefined;
-	const relation = first?.syncMetadata?.relation;
-	if (!relation) return '';
-	const row = first?.modified ?? first?.changes;
-	const field = OWNER_FIELD[relation];
-	const value = field ? row?.[field] ?? first?.original?.[field] : undefined;
-	return typeof value === 'string' ? value : '';
-};
 
 /** Durable storage refused the write — the mutation was NOT sent. */
 export class DurabilityError extends Error {

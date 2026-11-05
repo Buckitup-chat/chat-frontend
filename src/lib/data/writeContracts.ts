@@ -97,6 +97,22 @@ export const OWNER_FIELD: Record<string, string> = {
 	vouch_tokens: 'issuer_hash',
 };
 
+/** Who wrote a batch: the owner field of its first mutation's row, or '' when it cannot be read. */
+export const ownerOf = (mutations: unknown[]): string => {
+	const first = mutations[0] as {
+		modified?: Record<string, unknown>;
+		changes?: Record<string, unknown>;
+		original?: Record<string, unknown>;
+		syncMetadata?: { relation?: string };
+	} | undefined;
+	const relation = first?.syncMetadata?.relation;
+	if (!relation) return '';
+	const row = first?.modified ?? first?.changes;
+	const field = OWNER_FIELD[relation];
+	const value = field ? row?.[field] ?? first?.original?.[field] : undefined;
+	return typeof value === 'string' ? value : '';
+};
+
 const SHAPE_OF_TABLE: Record<string, string> = {
 	user_cards: 'user_card',
 	user_storage_versions: 'user_storage',

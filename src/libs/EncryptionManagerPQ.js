@@ -16,7 +16,7 @@ import {
   BootstrapCardRejectedError, CardAuthoringBlockedError, freshestOwnCard,
 } from '@/lib/data/userCardIntent';
 import { VaultLockedError } from '@/lib/data/keyCustody';
-import { holdSessionIdentities, releaseSessionIdentities } from '@/lib/data/sessionIdentities';
+import { holdSessionIdentities, isDerivedSigner, releaseSessionIdentities } from '@/lib/data/sessionIdentities';
 import { accountNotes } from '@buckitup/pq-client/notes';
 import { signedUserCard, wipeIdentity } from '@buckitup/pq-client/derivedIdentity';
 import {
@@ -782,12 +782,17 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   /** The card of a derived identity of the open account (sessionIdentities.ts): its signer, its user_hash, and the row signed for a timestamp. */
-  derivedCard(signer) {
+  derivedCard(given) {
+    // A malformed signer stored with a queued write would be a corrupt record of the account's outbox.
+    if (!isDerivedSigner(given)) throw new TypeError('derivedCard: not a derived signer');
+    // A copy: the card stays the identity it was made for, whatever becomes of the caller's object.
+    /** @type {import('@/lib/data/sessionIdentities').DerivedSigner} */
+    const signer = given.kind === 'notes' ? { kind: 'notes' } : { kind: 'note-peer', noteId: given.noteId };
     const account = this.#currentUserHash;
     return {
       signer,
       userHash: this.#derivedSigner(account, signer).userHash,
-      // Signed when asked, and only while the session that made it lasts.
+      // Signed when asked, and only while its account is open.
       row: (ownerTimestamp) => {
         const open = this.#openNotes(account);
         if (signer.kind === 'notes') return signedUserCard(open.identity, ownerTimestamp);
