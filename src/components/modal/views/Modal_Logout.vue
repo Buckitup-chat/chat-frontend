@@ -1,6 +1,6 @@
 <template>
 	<div>
-		<Account_Selector show-local="true" />
+		<Account_Selector />
 	</div>
 </template>
 

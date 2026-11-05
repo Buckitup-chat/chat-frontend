@@ -28,8 +28,8 @@ The only phase that blocks nothing and is blocked by nothing.
 
 - **F-C1 — the Local File KDF.** `src/lib/backupCrypto.ts` (PBKDF2-SHA-256 600k
   → AES-256-GCM, a versioned header, an anti-downgrade floor on the iteration
-  count) is wired into the export screens — `Account_Backup.vue` and
-  `Modal_Account_Backup_Local.vue` — and into `Modal_Account_Restore_Local.vue`.
+  count) is wired into the export screen, `Modal_Account_Backup_Local.vue`, and
+  into `Modal_Account_Restore_Local.vue`.
   Only the new format is written: old files are test data (invariant §1a), so
   there is no legacy read path.
 - **F-H3 — keys in `localStorage`.** Profiles that opened the teststand hold

@@ -29,14 +29,6 @@ export const modalRegistry = {
 		icon: '_icon_profile',
 	},
 
-	account_backup: {
-		header: true,
-		component: 'Modal_Account_Backup',
-		modalClass: 'modal-sm',
-		title: 'Account Backup',
-		icon: '_icon_backups',
-	},
-
 	// Device link: the existing device approves, the new device receives.
 	account_link_approve: {
 		header: true,
