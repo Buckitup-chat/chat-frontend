@@ -4,23 +4,21 @@
 	     avatar again or taken out. Each change goes to the account's dialogs
 	     at once (avatars.store). -->
 	<div class="_avatar">
-		<div class="_wrap">
-			<div class="_img_wrap" :class="{ _pointer: gallery.length }" :role="gallery.length ? 'button' : undefined"
-				@click="viewer.open()">
-				<img v-if="currentSrc" :src="currentSrc" alt="Profile photo" />
-				<Avatar v-else :name="userHash || 'User'" variant="bauhaus" />
-			</div>
-
-			<a href="#" class="btn btn-dark rounded-pill p-2" title="Add a photo" :class="{ disabled: busy }"
-				@click.prevent="!busy && $refs.photoInput.click()">
-				<i class="bg-white _icon_plus"></i>
-			</a>
-			<input class="_hidden" ref="photoInput" type="file" :accept="ALLOWED_IMAGE_TYPES.join(',')" @change="pickPhoto" />
+		<div class="_img_wrap" :class="{ _pointer: gallery.length }" :role="gallery.length ? 'button' : undefined"
+			:aria-label="gallery.length ? 'Open your photos' : undefined" @click="viewer.open()">
+			<img v-if="currentSrc" :src="currentSrc" alt="Profile photo" />
+			<Avatar v-else :name="userHash || 'User'" variant="bauhaus" />
 		</div>
+
+		<button type="button" class="_edit" title="Add a photo" aria-label="Add a photo" :disabled="busy"
+			@click="$refs.photoInput.click()">
+			<i class="_icon_edit"></i>
+		</button>
+		<input class="_hidden" ref="photoInput" type="file" :accept="ALLOWED_IMAGE_TYPES.join(',')" @change="pickPhoto" />
 	</div>
-	<div v-if="gallery.length > 1" class="_photo_count text-center small mt-1" role="button" @click="viewer.open()">
+	<button v-if="gallery.length > 1" type="button" class="_photo_count ui-caption" @click="viewer.open()">
 		{{ gallery.length }} photos
-	</div>
+	</button>
 
 	<GalleryViewer v-if="viewerIndex !== null && frames.length" :frames="frames" :index="viewerIndex" count-join="of"
 		@update:index="viewer.show" @close="viewer.close">
@@ -38,12 +36,58 @@
 <style lang="scss" scoped>
 @import '@/scss/variables.scss';
 @import '@/scss/breakpoints.scss';
-@import '@/scss/profile-avatar';
 
-@include profile-avatar;
+._avatar {
+	position: relative;
+	flex-shrink: 0;
+	width: 80px;
+	height: 80px;
+
+	@include media-breakpoint-up(md) {
+		width: 88px;
+		height: 88px;
+	}
+}
+
+._img_wrap {
+	width: 100%;
+	height: 100%;
+	border-radius: 50%;
+	overflow: hidden;
+
+	img,
+	svg {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+}
+
+._edit {
+	position: absolute;
+	right: -2px;
+	bottom: -2px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 32px;
+	height: 32px;
+	border: 2px solid var(--color-surface);
+	border-radius: 50%;
+	background: var(--color-ink);
+	cursor: pointer;
+
+	i { width: 16px; height: 16px; background-color: var(--color-text-on-dark); }
+	&:disabled { opacity: 0.4; cursor: default; }
+	&:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+}
 
 ._photo_count {
-	color: $grey_dark;
+	margin-top: var(--space-1);
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--color-text-secondary);
 }
 </style>
 

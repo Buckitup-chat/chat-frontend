@@ -65,9 +65,9 @@ describe('CheckpointDiffModal', () => {
 		expect(w.find('.cd-sub').text()).toContain('no changes');
 	});
 
-	// The overlay is position:fixed over the whole screen; the ✕ and the
+	// The overlay is position:fixed over the whole screen; the close button and the
 	// backdrop are its only two exits.
-	it('closes from the ✕ button', async () => {
+	it('closes from the close button', async () => {
 		const w = mountWith([]);
 		await w.find('.cd-close').trigger('click');
 		expect(w.emitted('close')).toHaveLength(1);
@@ -93,7 +93,7 @@ describe('CheckpointDiffModal', () => {
 		expect(future.text()).toContain('57 new messages since the checkpoint');
 		// exactly two rows: the detailed past change and the single marker
 		expect(w.findAll('.cd-change')).toHaveLength(2);
-		expect(w.find('.cd-sub').text()).toContain('1 change to attested history · 57 new after');
+		expect(w.find('.cd-sub').text()).toContain('1 change to signed history · 57 new after');
 		await future.trigger('click');
 		expect(w.emitted('jump')[0]).toEqual([M2]);
 	});

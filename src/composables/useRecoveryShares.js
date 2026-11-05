@@ -9,7 +9,7 @@ import { userPQStore } from '@/store/userPQ.store';
 import { holdingFor, holdsBytes } from '@/lib/recovery/holdings';
 import { GiveBackError } from '@/lib/recovery/keeping';
 import { sentSharesOf } from '@/lib/recovery/receipts';
-import { feedOrderKey } from '@/lib/data/feedOrder';
+import { compareFeedOrder } from '@/lib/data/feedOrder';
 import { guardianDelivery } from '@/components/recovery/backup/backupFlow';
 import { confirmGiveBack, givenBackOffline } from '@/components/recovery/holdingWords';
 
@@ -38,7 +38,7 @@ export function useRecoveryShares({ peerHash, messages, peerName, swal, isAlive 
 	const fromPeer = computed(() =>
 		recoveryMessages.value
 			.filter((m) => m._raw?.sender_hash === peerHash.value && m._verify === 'verified' && m._decrypted && !m._deleted)
-			.sort((a, b) => feedOrderKey(a._raw.message_id, a._raw.owner_timestamp) - feedOrderKey(b._raw.message_id, b._raw.owner_timestamp)),
+			.sort((a, b) => compareFeedOrder(a._raw.message_id, a._raw.owner_timestamp, b._raw.message_id, b._raw.owner_timestamp)),
 	);
 
 	// "The share is saved when the chat opens" (plan § 7.3): every share the

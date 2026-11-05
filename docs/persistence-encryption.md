@@ -27,6 +27,8 @@ indistinguishable from changing it.
 Encrypting L2/L3 is a property of the implementation rather than a requirement:
 a new store may write to IndexedDB directly. `secureStore` stays available for
 when one account's records must not be readable by another in the same browser.
+The exception is a key that opens content — a file's `enc_secret`, a dialog
+key: a store that holds one goes through `secureStore` (docs/invariants.md §1).
 
 ## What L2/L3 encryption covers
 

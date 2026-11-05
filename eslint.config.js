@@ -23,7 +23,6 @@ export default [
 				ELECTRIC_API_URL: 'readonly',
 				HANDSHAKE_DEV_TURN: 'readonly',
 				IS_PRODUCTION: 'readonly',
-				TM_BOT: 'readonly',
 			},
 		},
 	},

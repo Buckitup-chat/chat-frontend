@@ -13,7 +13,6 @@ class FakeEM extends EventTarget {
 	get list() { return Object.values(this.stored?.contacts ?? {}); }
 	get currentUserHash() { return this.#userHash; }
 	get isAuth() { return !!this.#userHash; }
-	async initialize() {}
 	async getLocalUserCards() { return []; }
 	async loadContacts() { return this.list; }
 	// The real merge, as the materializer lands the patch on the stored slot.

@@ -58,13 +58,15 @@ import { getDialogCollections } from '@/lib/data/collections';
 import { useCollectionRows } from '@/lib/data/useCollection';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
 import { useAudioPlayback } from '@/composables/useAudioPlayback';
-import { feedOrderKey } from '@/lib/data/feedOrder';
+import { compareFeedOrder } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
 import { isRefusedFile } from '@/lib/data/fileIntegrity';
 import { fileKey } from '@/lib/data/fileKey';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
 import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
 import CheckpointDiffModal from '@/components/chat/CheckpointDiffModal.vue';
+import { loadCheckpointComparison } from '@/lib/data/checkpointComparison';
+import { shortDayTime } from '@/lib/shortDate';
 import { getUserCardsCollection } from '@/lib/data/collections';
 import { reconcileOptimisticReactions } from '@/lib/data/reactionReconcile';
 import { claimPendingEdit, submitPendingEdit, failPendingEdit, awaitPendingEditUnlock, reconcilePendingEditsWithVerifiedRows } from '@/lib/data/pendingEditTracker';
@@ -622,8 +624,7 @@ const displayMessages = computed(() => {
     // owner_timestamp: that is the revision counter, an edit must raise it,
     // and sorting by it teleported edited messages to the end of the feed.
     return [...activeOptimistic, ...withEdits].sort((a, b) =>
-        feedOrderKey(a.id, a._raw?.owner_timestamp || a.ownerTimestamp || 0)
-        - feedOrderKey(b.id, b._raw?.owner_timestamp || b.ownerTimestamp || 0));
+        compareFeedOrder(a.id, a._raw?.owner_timestamp || a.ownerTimestamp || 0, b.id, b._raw?.owner_timestamp || b.ownerTimestamp || 0));
 });
 
 watch(dialogHash, (hash) => { if (hash) void $dialogs.ensureProjectionsHydrated(); }, { immediate: true });
@@ -1009,30 +1010,19 @@ const checkpointDiff = ref(null); // { createdAt, changes } → CheckpointDiffMo
 
 const handleCheckpointInfo = async ({ part, messageId }) => {
     try {
-        const [verify, compare] = await Promise.all([
-            $dialogs.verifyDialogCheckpoint(peerHash.value, part),
-            $dialogs.compareDialogCheckpoint(peerHash.value, part, { pointerMessageId: messageId }),
-        ]);
-        // The interesting case gets the real diff: attested history detailed
-        // message by message, the unbounded continuation as one marker.
-        if (verify.status === 'valid' && compare.verdict === 'VIEW_CHANGED') {
-            const diff = await $dialogs.describeCheckpointDiff(peerHash.value, part, { pointerMessageId: messageId });
-            if (diff.status === 'ok' && (diff.changes.length || diff.futureAdded.count)) {
-                checkpointDiff.value = {
-                    createdAt: part.createdAt,
-                    futureAdded: diff.futureAdded,
-                    changes: diff.changes.map((c) => ({
-                        ...c,
-                        authorName: c.senderHash === $userPQ.currentUserHash ? 'Me' : chatName.value,
-                    })),
-                };
-                return;
-            }
+        const result = await loadCheckpointComparison($dialogs, peerHash.value, part, messageId);
+        if (result.kind === 'diff') {
+            checkpointDiff.value = {
+                createdAt: result.createdAt,
+                futureAdded: result.futureAdded,
+                changes: result.changes.map((c) => ({
+                    ...c,
+                    authorName: c.senderHash === $userPQ.currentUserHash ? 'Me' : chatName.value,
+                })),
+            };
+            return;
         }
-        const text = `Commitments: ${verify.status}` +
-            (verify.status === 'incomplete_history' ? ` (${verify.missingEventIds.length} missing)` : '') +
-            `\nAgainst current state: ${compare.verdict}`;
-        $swal.fire({ title: `Checkpoint · ${new Date(part.createdAt * 1000).toLocaleString()}`, text });
+        $swal.fire({ title: `Checkpoint · ${shortDayTime(part.createdAt)}`, text: result.text });
     } catch (e) {
         $swal.fire({ icon: 'error', title: 'Checkpoint check failed', text: String(e.message || e) });
     }
@@ -1062,7 +1052,7 @@ const resolveCheckpointMessage = (wanted) => {
         if (!msg.isMine) continue;
         const part = checkpointPartOf(msg);
         if (!part) continue;
-        if (!best || feedOrderKey(msg.id, part.createdAt) > feedOrderKey(best.messageId, best.part.createdAt)) {
+        if (!best || compareFeedOrder(msg.id, part.createdAt, best.messageId, best.part.createdAt) > 0) {
             best = { part, messageId: msg.id };
         }
     }

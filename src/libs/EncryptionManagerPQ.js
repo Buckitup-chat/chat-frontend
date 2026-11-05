@@ -21,7 +21,6 @@ import {
 } from '@/lib/data/outbox';
 import { recoverIntents, signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import { requestContactAccess, applyContactAccessIntent } from '@/lib/data/contactVouches';
-import { claimDeviceIfUnowned } from '@/lib/data/deviceOwner';
 import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch, upsertStorageJsonPatch, upsertStorageRow } from '@/lib/data/userStorage';
 import { getLiveServerState, entityKeyFor } from '@/lib/data/userStorageBase';
 import { getAccepted } from '@/lib/data/acceptedSnapshot';
@@ -38,6 +37,7 @@ import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
 import { forgetAccountAvatars } from '@/lib/avatars/localStore';
+import { forgetBackupFileRecord } from '@/lib/backupFileRecord';
 import { forgetPeerGalleryReads, fetchGalleryRow } from '@/lib/avatars/peerGallery';
 import { readSharedGalleryRow, galleryKeyFromB64 } from '@/lib/avatars/sharedGallery';
 import { publishInitialSharedGallery, publishSharedGalleryRecord, avatarsSlotOf } from '@/lib/avatars/sharedGalleryPublish';
@@ -246,18 +246,6 @@ export class EncryptionManagerPQ extends EventTarget {
 
   get localStorageOwnerHash() {
     return this.#bootstrapUserHash ?? this.#currentUserHash;
-  }
-
-  async initialize() {
-    try {
-      const vaultID = await this.#rawStore.get('main-vault-id');
-
-      if (vaultID) await this.#connectToUserVault(vaultID);
-
-      this.#loadLocalUserCards()
-    } catch (error) {
-      await this.handleError(error, 'Error during storage initialization');
-    }
   }
 
   // Vaults Management
@@ -595,19 +583,6 @@ export class EncryptionManagerPQ extends EventTarget {
     // Writes queued before a reload/crash can replay now that the signing key
     // is available again. Background: a slow drain must not delay login.
     this.#startOutboxDrain();
-    this.#claimDevice(userHash);
-  }
-
-  // The first person to sign in on a device owns it: one whose card reached it
-  // by sync claims it here (deviceOwner.ts). Background, like the drain; a
-  // claim the device could not answer is tried again when it comes back.
-  #claimDevice(userHash) {
-    if (this.#deviceClaimSettled === userHash) return;
-    const signingKey = this.#signingKeyOf(userHash);
-    void claimDeviceIfUnowned(userHash, async (challenge) => ml_dsa87.sign(challenge, await signingKey())).then(({ claim }) => {
-      if (claim === 'refused') console.warn('[EncryptionManagerPQ] the device refused this account\'s owner claim');
-      if (claim !== 'unavailable' && this.#currentUserHash === userHash) this.#deviceClaimSettled = userHash;
-    });
   }
 
   // Registration and import: open the account locally without activating it.
@@ -649,7 +624,6 @@ export class EncryptionManagerPQ extends EventTarget {
   // another user must not be replayed with this session's auth.
   #outboxOnlineListener = null;
   #outboxVisibleListener = null;
-  #deviceClaimSettled = null;
   #outboxWakeUnsubscribe = null;
   #outboxChangeUnsubscribe = null;
 
@@ -692,13 +666,11 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#outboxOnlineListener = () => {
       resumePendingWrites(userHash, signSkey);
       this.#recoverIntents(userHash);
-      this.#claimDevice(userHash);
     };
     this.#outboxVisibleListener = () => {
       if (document.visibilityState !== 'visible') return;
       resumePendingWrites(userHash, signSkey);
       this.#recoverIntents(userHash);
-      this.#claimDevice(userHash);
     };
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.#outboxOnlineListener);
@@ -803,12 +775,22 @@ export class EncryptionManagerPQ extends EventTarget {
     } catch (e) {
       console.warn('Could not delete from local-vault', e);
     }
-    // Contacts' thumbnails and the dialogs owed a photo leave with the account.
-    await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
+    await this.#forgetAccountLocalState(userHash);
 
     this.#localUserCards.splice(identityIndex, 1);
     await this.#saveLocalUserCards();
     console.log(`Deleted user vault: ${userHash}`);
+  }
+
+  /** What this device keeps of an account outside its vault leaves with it. */
+  async #forgetAccountLocalState(userHash) {
+    // Contacts' thumbnails and the dialogs owed a photo.
+    await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
+    try {
+      forgetBackupFileRecord(userHash);
+    } catch (e) {
+      console.warn('Could not delete the account\'s backup file record', e);
+    }
   }
 
   /**
@@ -842,6 +824,7 @@ export class EncryptionManagerPQ extends EventTarget {
       }
       await this.#rawStore.remove(`pq-vault-owner-${id}`);
     }
+    await this.#forgetAccountLocalState(userHash);
     if (card) {
       this.#localUserCards = this.#localUserCards.filter((i) => i.user_hash !== userHash);
       await this.#saveLocalUserCards();
