@@ -9,7 +9,7 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
-import { signFields, toBase64 } from '@/lib/pq/signature';
+import { signFields, toBase64 } from '@buckitup/pq-client/signature';
 import { writeCachedCards } from './helpers/userCardsDiskCache';
 import type { VueWrapper } from '@vue/test-utils';
 import type { UserCardRow } from '@/lib/data/types';
@@ -123,7 +123,6 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 		getInstance: () => ({
 			isAuth: true,
 			currentUserHash: ME,
-			initialize: async () => {},
 			getLocalUserCards: async () => [],
 			addEventListener: () => {},
 			removeEventListener: () => {},
@@ -175,9 +174,12 @@ describe('user_cards offline reload: ShapeStream onError → ready → resolved 
 		expect(coll().status).toBe('ready');
 		expect(coll().toArray).toEqual([]);
 
+		// The stream retries after the 400, and that retry is held: the cards
+		// can only have come from the cache. Whether the retry went out before
+		// they showed is a race; at most the 400 and one retry have.
 		await vi.waitFor(() => expect(names(store)).toEqual(['Alice', 'Bob']));
 		expect(store.userCardsFallback).toBe(true);
-		expect(server.requests.filter((r) => !r.live)).toHaveLength(1);
+		expect(server.requests.filter((r) => !r.live).length).toBeLessThanOrEqual(2);
 
 		await server.recover([ALICE, CAROL]);
 

@@ -5,7 +5,7 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { checkInviteReply, inviteProof, metaKeysOf } from '@/lib/recovery/guardianInvite';
 import { inviteViews, judgeInvites, liveInviteId, rosterAnswersDue, type Roster, type ThreadContext, type ThreadMessage } from '@/lib/recovery/inviteThread';
 import { GUARDIAN_SLOT, ROSTER_SLOT, InvitationError, answerInvite, sendInvite, type InvitationDeps } from '@/lib/recovery/invitations';
-import type { ContentPart } from '@/lib/pq/content';
+import type { ContentPart } from '@buckitup/pq-client/content';
 
 const OWNER = 'u_' + 'a'.repeat(128);
 const GUARDIAN = 'u_' + 'b'.repeat(128);

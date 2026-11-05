@@ -1,7 +1,7 @@
-import { verifyUserCard } from '@/lib/pq/verifyCard';
-import { verifyMessageRow, verifySideRow } from '@/lib/pq/verifyDialogRow';
-import { verifyFields, deriveSignHash } from '@/lib/pq/signature';
-import { signableFields } from '@/lib/pq/schema';
+import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
+import { verifyMessageRow, verifySideRow } from '@buckitup/pq-client/verifyDialogRow';
+import { verifyFields, deriveSignHash } from '@buckitup/pq-client/signature';
+import { signableFields } from '@buckitup/pq-client/schema';
 import { VaultLockedError } from './keyCustody';
 import { OWNER_FIELD } from './writeContracts';
 import type {

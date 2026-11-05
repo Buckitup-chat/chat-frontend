@@ -1,6 +1,6 @@
-import { isGalleryKeyB64, isGalleryUuid } from '@/lib/pq/content';
-import { deriveInitialGalleryKey, deriveInitialGalleryUuid } from '@/lib/pq/galleryKeys';
-import { toBase64Unpadded } from '@/lib/pq/signature';
+import { isGalleryKeyB64, isGalleryUuid } from '@buckitup/pq-client/content';
+import { deriveInitialGalleryKey, deriveInitialGalleryUuid } from '@buckitup/pq-client/galleryKeys';
+import { toBase64Unpadded } from '@buckitup/pq-client/signature';
 
 export const SHARED_GALLERY_FIELD = 'sharedGallery';
 

@@ -12,7 +12,7 @@ import {
 	isReconcilableStorageConflict, MAX_CONFLICT_RECONCILE_ATTEMPTS, RECONCILE_RETRY_DELAY_MS,
 	type StorageIntentPayload,
 } from './storageIntent';
-import type { ContentPart } from '@/lib/pq/content';
+import type { ContentPart } from '@buckitup/pq-client/content';
 
 export interface SignedMutationRecord {
 	type?: string;

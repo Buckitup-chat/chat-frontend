@@ -19,9 +19,9 @@
 
 import { sha3_512 } from '@noble/hashes/sha3';
 import { equalBytes } from '@noble/post-quantum/utils.js';
-import { chunkDataHash } from '@/lib/pq/fileCrypto';
-import { toBytes } from '@/lib/pq/signature';
-import { wireBool } from '@/lib/pq/schema';
+import { chunkDataHash } from '@buckitup/pq-client/fileCrypto';
+import { toBytes } from '@buckitup/pq-client/signature';
+import { wireBool } from '@buckitup/pq-client/schema';
 import { verifyReplicatedRow, verifyRowWithKey, type SignPkeyResolver } from './rowVerification';
 import { readShapeOnce } from './shapeRead';
 import { fileKey } from './fileKey';

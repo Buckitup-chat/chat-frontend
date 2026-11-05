@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { decodeContent } from '@/lib/pq/content';
+import { decodeContent } from '@buckitup/pq-client/content';
 import {
 	startLeaderElection, stopLeaderElection, currentSessionToken, SessionFencedError,
 	enqueue as outboxEnqueue, _setStorageForTests as _setOutboxStorageForTests,

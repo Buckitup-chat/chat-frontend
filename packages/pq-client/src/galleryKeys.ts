@@ -1,5 +1,5 @@
-import { hkdfDerive } from './hkdf';
-import { bytesToUuidV8 } from './slotId';
+import { hkdfDerive } from './hkdf.js';
+import { bytesToUuidV8 } from './slotId.js';
 
 const GALLERY_UUID_SALT = 'buckitup/avatar-gallery-uuid/v1';
 const GALLERY_UUID_INFO = 'gallery-uuid';

@@ -5,7 +5,7 @@ import { getVerifiedSignPkey } from './cardRegistry';
 import { readDialogRow } from './dialogCache';
 import { readCachedCard } from './userCardsCache';
 import { settled } from './shapeLink';
-import { verifyUserCard } from '@/lib/pq/verifyCard';
+import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
 import { enqueueIntent } from './intents';
 import { signAndDispatchIntent, type DialogIntentPayload, type MessageIntentPayload, type ReadyRowIntent } from './intentRecovery';
 import type { SessionToken } from './outbox';
@@ -16,7 +16,7 @@ import type { UserCardRow } from './types';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
-import { encodeContent, fileRefsOf, type ContentPart } from '@/lib/pq/content';
+import { encodeContent, fileRefsOf, type ContentPart } from '@buckitup/pq-client/content';
 
 function decode(str: string, fieldName: string): Uint8Array {
 	const result = decodeHexOrBase64(str);

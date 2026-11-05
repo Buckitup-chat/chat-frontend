@@ -3,7 +3,7 @@
 // user_storage keeps its record — the owner's roster before the invitation
 // leaves, the guardian's answer next to its holdings.
 import { hexToBytes } from '@noble/hashes/utils';
-import type { RecoveryInvitePart, RecoveryInviteReplyPart } from '@/lib/pq/content';
+import type { RecoveryInvitePart, RecoveryInviteReplyPart } from '@buckitup/pq-client/content';
 import { inviteProof, metaKeysOf, newInviteId } from './guardianInvite';
 import type { GuardianAnswer, Roster, RosterAnswer, RosterInvite } from './inviteThread';
 

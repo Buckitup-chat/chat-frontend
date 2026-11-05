@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 // eslint-disable-next-line import/no-relative-packages
 import { generateSchema, findChatRepo, OUTPUT_PATH } from '../scripts/gen-pq-schema.mjs';
-import { SIGNABLE } from '@/lib/pq/schema';
+import { SIGNABLE } from '@buckitup/pq-client/schema';
 
 const chatRepo = findChatRepo();
 

@@ -16,7 +16,7 @@ const { sealSharedGallery } = await import('@/lib/avatars/sharedGallery');
 const { randomBytes } = await import('@noble/hashes/utils');
 const { _setActiveSessionForTests } = await import('@/lib/data/outbox');
 const { SessionFencedError } = await import('@/lib/data/sessionGuard');
-const { toBase64Unpadded } = await import('@/lib/pq/signature');
+const { toBase64Unpadded } = await import('@buckitup/pq-client/signature');
 const { galleryAccount, signPkeyResolver, galleryRecord, signStorageRow } = await import('./helpers/sharedGalleryRows');
 
 const OWNER = galleryAccount(1);
@@ -40,7 +40,7 @@ const electricBody = (rows: Row[]) => JSON.stringify([
 ]);
 
 const fakeFetch = async (input: string | URL): Promise<Response> => {
-	const url = new URL(String(input));
+	const url = new URL(String(input), 'http://host'); // the client may request a path on its own origin
 	const where = url.searchParams.get('where') ?? '';
 	requests.push(where);
 	if (respond) return respond();

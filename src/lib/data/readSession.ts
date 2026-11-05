@@ -10,10 +10,8 @@
 // reload nor logout. A server restart drops all sessions; a 401 on a locally
 // valid token triggers a fresh open.
 
-import { proveChallenge } from '@/lib/pq/challengeProof';
 import { markShapeBlocked, markShapeUnblocked, isShapeBlocked } from './accessGate';
-
-declare const ELECTRIC_API_URL: string;
+import { transport } from './transport';
 
 interface ReadSessionEntry {
 	token: string;
@@ -109,6 +107,7 @@ export function clearSessions(): void {
 
 type EncryptionManager = InstanceType<typeof import('@/libs/EncryptionManagerPQ').EncryptionManagerPQ>;
 const UNKNOWN_USER = Symbol('unknown_user');
+const STALE = Symbol('stale');
 
 async function doOpen(shape: string, gen: number): Promise<ReadSessionEntry | null> {
 	const stale = () => gen !== generation;
@@ -158,67 +157,39 @@ async function recoverCard(em: EncryptionManager, userHash: string, epoch: numbe
 async function requestSession(
 	em: EncryptionManager, userHash: string, shape: string, stale: () => boolean,
 ): Promise<ReadSessionEntry | null | typeof UNKNOWN_USER> {
-	const challengeResp = await fetchChallenge();
-	if (stale()) return null;
-	const signature = await proveChallenge(challengeResp.challenge, (message) => em.signChallenge(message));
-	if (stale()) return null;
-
-	const resp = await fetch(`${ELECTRIC_API_URL}/read_session`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			user_hash: userHash,
-			shape,
-			challenge_id: challengeResp.challenge_id,
-			signature,
-		}),
-		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-	});
-
-	if (resp.ok) {
-		const body = await resp.json() as { token: string; shape: string; expires_in: number };
-		if (stale()) return null;
-		const entry: ReadSessionEntry = {
-			token: body.token,
-			shape: body.shape,
-			expiresAt: Date.now() + body.expires_in * 1000,
-			renewTimer: null,
-		};
-		sessions.set(body.shape, entry);
-		scheduleRenewal(entry);
-		if (isShapeBlocked(body.shape)) markShapeUnblocked(body.shape);
-		return entry;
+	// A session ended while the challenge was in flight signs nothing.
+	const sign = (message: Uint8Array) => {
+		if (stale()) throw STALE;
+		return em.signChallenge(message);
+	};
+	let outcome;
+	try {
+		outcome = await transport.openReadSession(userHash, shape, sign, { timeoutMs: FETCH_TIMEOUT_MS });
+	} catch (e) {
+		if (e === STALE) return null;
+		throw e;
 	}
+	if (stale()) return null;
 
-	if (resp.status === 403) {
-		const body = await resp.json().catch(() => null) as { error?: string } | null;
-		if (stale()) return null;
-		if (body?.error === 'not_in_trust_chain') {
+	switch (outcome.kind) {
+		case 'opened': {
+			const entry: ReadSessionEntry = { token: outcome.token, shape: outcome.shape, expiresAt: outcome.expiresAt, renewTimer: null };
+			sessions.set(outcome.shape, entry);
+			scheduleRenewal(entry);
+			if (isShapeBlocked(outcome.shape)) markShapeUnblocked(outcome.shape);
+			return entry;
+		}
+		case 'not_in_trust_chain':
 			markShapeBlocked(shape);
 			return null;
-		}
+		case 'unknown_user':
+			return UNKNOWN_USER;
+		case 'bad_proof':
+		case 'unknown_shape':
+			return null;
+		case 'refused':
+			throw new Error(`read_session for ${shape}: HTTP ${outcome.status}`);
 	}
-
-	if (resp.status === 401) {
-		const body = await resp.json().catch(() => null) as { error?: string } | null;
-		if (stale()) return null;
-		return body?.error === 'unknown_user' ? UNKNOWN_USER : null;
-	}
-
-	if (resp.status === 400) {
-		return null;
-	}
-
-	throw new Error(`read_session for ${shape}: HTTP ${resp.status}`);
-}
-
-async function fetchChallenge(): Promise<{ challenge_id: string; challenge: string }> {
-	const resp = await fetch(`${ELECTRIC_API_URL}/challenge`, {
-		headers: { accept: 'application/json' },
-		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-	});
-	if (!resp.ok) throw new Error(`challenge: HTTP ${resp.status}`);
-	return resp.json();
 }
 
 function scheduleRenewal(entry: ReadSessionEntry): void {

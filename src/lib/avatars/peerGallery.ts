@@ -1,4 +1,4 @@
-import { isGalleryUuid } from '@/lib/pq/content';
+import { isGalleryUuid } from '@buckitup/pq-client/content';
 import { isShapeBlocked } from '@/lib/data/accessGate';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { currentSessionToken, sameSessionToken, type SessionToken } from '@/lib/data/outbox';

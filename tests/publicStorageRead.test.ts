@@ -3,7 +3,7 @@
 // must be distinguishable — "nothing is stored here" and "the server did not
 // answer" lead to opposite next steps for the person recovering.
 import { describe, it, expect } from 'vitest';
-import { newWrapKey, deriveVaultLocator } from '@/lib/pq/vaultEnvelope';
+import { newWrapKey, deriveVaultLocator } from '@buckitup/pq-client/vaultEnvelope';
 import { getPublicStorageRowsByUuid } from '@/lib/data/userStorage';
 
 const row = (locator: string, over: Record<string, unknown> = {}) => ({

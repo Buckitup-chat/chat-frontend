@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { randomBytes } from '@noble/hashes/utils';
-import { encryptChunk, decryptChunk, chunkDataHash, chunkCountOf, generateEncSecret, newFileId, CHUNK_SIZE } from '@/lib/pq/fileCrypto';
+import { encryptChunk, decryptChunk, chunkDataHash, chunkCountOf, generateEncSecret, newFileId, CHUNK_SIZE } from '@buckitup/pq-client/fileCrypto';
 
 describe('chunk crypto', () => {
 	it('round-trips bytes through encrypt/decrypt', async () => {

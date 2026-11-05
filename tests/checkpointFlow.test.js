@@ -14,7 +14,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, toBase64 } from '@/lib/pq/signature';
+import { signFields, deriveSignHash, toBase64 } from '@buckitup/pq-client/signature';
 import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { makeTestIdentity, signedDialogKeyRow } from './helpers/signedFixtures';
 import { startLeaderElection, stopLeaderElection, enqueue, _setStorageForTests } from '@/lib/data/outbox';
@@ -23,8 +23,8 @@ import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import { _setStoreForTests } from '@/lib/data/localStore';
 import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { loadPointer } from '@/lib/data/checkpointAlerts';
-import { deriveFrontierRoot, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@/lib/pq/checkpoint';
-import { decodeContent } from '@/lib/pq/content';
+import { deriveFrontierRoot, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@buckitup/pq-client/checkpoint';
+import { decodeContent } from '@buckitup/pq-client/content';
 import { recoverIntents } from '@/lib/data/intentRecovery';
 import { materializeMessageIntent } from '@/lib/data/messageIntent';
 import { intentsOf, getIntent } from '@/lib/data/intents';
@@ -426,6 +426,28 @@ describe('checkpoint through the store', () => {
 			['MESSAGE_EDITED', M1],
 		]);
 		expect(diff.futureAdded).toEqual({ count: 2, firstMessageId: F1 });
+	});
+
+	// Within the pointer's millisecond the full id decides the side, as it
+	// decides where the feed shows the message.
+	it('splits a message written in the pointer\'s millisecond by its full id', async () => {
+		const CP = 'dmsg_0192aaab-0000-7000-8000-00000000000b';
+		const BEFORE = 'dmsg_0192aaab-0000-7000-8000-00000000000a';
+		const AFTER = 'dmsg_0192aaab-0000-7000-8000-00000000000c';
+
+		const v1 = await makeRow(M1, {});
+		seed(v1);
+		const { part, messageId } = await store.createDialogCheckpoint(peer);
+		unreplicate(messageId);
+		const cp = await makeRow(CP, { [M1]: v1.sign_hash });
+		const before = await makeRow(BEFORE, { [M1]: v1.sign_hash });
+		const after = await makeRow(AFTER, { [CP]: cp.sign_hash });
+		seed(cp, before, after);
+
+		const diff = await store.describeCheckpointDiff(peer, part, { pointerMessageId: CP });
+		expect(diff.status).toBe('ok');
+		expect(diff.changes.map((c) => [c.type, c.messageId])).toEqual([['MESSAGE_ADDED', BEFORE]]);
+		expect(diff.futureAdded).toEqual({ count: 1, firstMessageId: AFTER });
 	});
 
 	it('unknown reducer version: signature stands, view unverifiable (§32)', async () => {

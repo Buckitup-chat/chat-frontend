@@ -26,12 +26,15 @@ OPFS, localStorage) may keep the envelope — `user_hash`, `dialog_hash`,
 `sender_hash`, `owner_timestamp`, signatures, names — in the clear.
 
 End-to-end encryption of **content** (`content_b64`, `value_b64`) is untouched by
-this: it belongs to the protocol, not to local storage.
+this: it belongs to the protocol, not to local storage. A key that opens content
+is content, not metadata: a file's `enc_secret`, a dialog key or an account's
+private key is never written to local storage in the clear. It stays in memory,
+in the account's vault (private keys), or goes through `secureStore`.
 
 **Consequences.**
-- A new local store need not go through `secureStore`; the layer exists and
-  serves the outbox and localStore, and using it for new data is a convenience,
-  not a requirement.
+- A new local store need not go through `secureStore` unless it holds a key
+  that opens content; the layer exists and serves the outbox and localStore, and
+  using it for other data is a convenience, not a requirement.
 - A library that writes plaintext to disk (wa-sqlite, IndexedDB adapters) needs
   no encrypting wrapper to be acceptable.
 - Shape persistence (L1) is behind a flag; enabling it is a decision about
@@ -163,7 +166,7 @@ as-is — it has to be padded with `=` to a multiple of four. This applies to
 producing a signature and to checking one: when verifying a received row the
 payload is assembled from the padded form, or not a single row will verify.
 
-`encodeField` in `src/lib/pq/signature.ts` pads `_cert`, `_pkey` and `_b64`
+`encodeField` in `packages/pq-client/src/signature.ts` pads `_cert`, `_pkey` and `_b64`
 values and each element of a binary array (`files.chunk_sign_hashes`), so the
 payload is the same whether a row is being signed or verified.
 

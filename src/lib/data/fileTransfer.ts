@@ -11,7 +11,7 @@
 // already holds through the file_chunks shape and re-PUT only the gaps.
 // Progress is reported in chunks, not guessed percentages (§2.1).
 
-import { signFields, toBase64, fromBase64 } from '@/lib/pq/signature';
+import { signFields, toBase64, fromBase64 } from '@buckitup/pq-client/signature';
 import { sha3_512 } from '@noble/hashes/sha3';
 import {
 	CHUNK_SIZE,
@@ -21,7 +21,7 @@ import {
 	encryptChunk,
 	generateEncSecret,
 	newFileId,
-} from '@/lib/pq/fileCrypto';
+} from '@buckitup/pq-client/fileCrypto';
 import { sendMutationsAndAwaitShape } from './ingest';
 import { getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 import { bearerFor, openSession } from './readSession';
@@ -45,10 +45,16 @@ export interface UploadResult {
 }
 
 /**
- * Mints the identifiers an upload needs. The caller persists BOTH before the
- * first PUT (§4.1): file_id alone cannot resume — enc_secret is one random
- * value per file, and a fresh secret would make re-sent chunks undecryptable
- * next to the ones already stored.
+ * Mints the identifiers an upload needs. The caller keeps BOTH from before
+ * the first PUT for as long as the upload may resume: file_id alone cannot
+ * resume — enc_secret is one random value per file, and a fresh secret would
+ * make re-sent chunks undecryptable next to the ones already stored.
+ *
+ * pq_files §4.1 asks for a durable record, removed when the manifest commits,
+ * so an upload resumes after a reload. This client keeps the pair in memory
+ * (the transfer queue), so an upload resumes within the page's life only. A
+ * durable record holds the secret that opens the file: it goes through
+ * `secureStore`, never into plaintext storage (docs/invariants.md §1).
  */
 export const prepareUpload = (uuidV7: string) => ({
 	fileId: newFileId(uuidV7),

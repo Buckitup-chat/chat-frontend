@@ -5,8 +5,11 @@ import { getUserCardsCollection } from '@/lib/data/collections';
 import { preloadWithRetry } from '@/lib/data/attach';
 import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verifiedCards } from '@/lib/data/userCardsLink';
 import { mergeContactEdit } from '@/lib/data/storageIntent';
-import { contactKeyVouch } from '@/lib/pq/verifyCard';
-import { forgetPlaintextUploadKeys } from '@/lib/forgetUploadKeys';
+import { contactKeyVouch } from '@buckitup/pq-client/verifyCard';
+
+// Plaintext secrets earlier builds left in localStorage (reapPlaintextKeys).
+const TESTBED_KEYS = ['testbed.guardians', 'testbed.backups'];
+const UPLOAD_KEY_PREFIX = 'bkp:pending-upload:';
 
 export const userPQStore = defineStore('userPQ', () => {
   const em = ref(null);
@@ -78,15 +81,13 @@ export const userPQStore = defineStore('userPQ', () => {
 
   const initialize = async () => {
     if (isInitialized.value) return;
-    reapTestbedKeys();
-    forgetPlaintextUploadKeys();
+    reapPlaintextKeys();
 
     // Phase 1: local vault registry (fast, offline)
     em.value = EncryptionManagerPQ.getInstance();
     // Every auth transition dispatches authChange: login, logout,
     // createUserVault (logs in), deleteUserVault (logs out if current).
     bindAuthListener(em.value);
-    await em.value.initialize();
     syncAuthState();
     myLocalUsers.value = await em.value.getLocalUserCards();
     localDataReady.value = true;
@@ -225,23 +226,33 @@ export const userPQStore = defineStore('userPQ', () => {
   };
 
   /**
-   * A one-time reaper, not testbed code. Builds up to this one registered the
-   * teststand route unconditionally, so a profile that opened it holds guardian
-   * EOA and spending private keys in localStorage as plaintext, alongside a
-   * payload carrying the owner key and the master secret. Plaintext upload
-   * keys left by earlier builds go at the same time (forgetPlaintextUploadKeys).
+   * A one-time reaper of secrets earlier builds left in localStorage as
+   * plaintext, not testbed code:
+   * - the teststand's guardian EOA and spending private keys, alongside a
+   *   payload carrying the owner key and the master secret: builds up to this
+   *   one registered the teststand route unconditionally;
+   * - each upload's file key (`bkp:pending-upload:<fileId>`), written and
+   *   never read.
    *
    * It runs on boot rather than on sign-out because most profiles never sign
    * out — they close the tab — and the keys have to go from those too. Each key
-   * is removed on its own: if one throw took the other with it, the half left
-   * behind would be the half holding the payload. Drop this once a build
-   * containing it has shipped.
+   * is removed on its own: if one throw took the others with it, the part left
+   * behind could be the part holding the payload. It stays: a profile that has
+   * not opened the app since still holds the keys, and the check is one pass
+   * over localStorage's keys.
    */
-  function reapTestbedKeys() {
-    for (const key of ['testbed.guardians', 'testbed.backups']) {
+  function reapPlaintextKeys() {
+    let keys;
+    try {
+      keys = Object.keys(localStorage);
+    } catch {
+      return; /* no storage in this environment */
+    }
+    for (const key of keys) {
+      if (!TESTBED_KEYS.includes(key) && !key.startsWith(UPLOAD_KEY_PREFIX)) continue;
       try {
         localStorage.removeItem(key);
-      } catch { /* no storage in this environment */ }
+      } catch { /* blocked: the next boot tries again */ }
     }
   }
 

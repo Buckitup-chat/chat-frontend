@@ -6,7 +6,7 @@
 // been stopped, it shows, sends, logs and reports nothing more.
 import { bytesToHex } from '@noble/hashes/utils';
 import { equalBytes } from '@noble/post-quantum/utils.js';
-import { toBytes } from '@/lib/pq/signature';
+import { toBytes } from '@buckitup/pq-client/signature';
 import type { UserCardRow } from '@/lib/data/types';
 import { signPq, type Identity } from './identity';
 import {
@@ -16,7 +16,7 @@ import {
 import {
 	checkConfirm, confirmMessage, encode, newNonce, parse, pqMessage, sasOf, sessionTag, signOptical, transcript,
 	verifyOptical, type Fingerprints, type Message, type Party,
-} from '@/lib/pq/handshake';
+} from '@buckitup/pq-client/handshake';
 
 export interface ChannelLink {
 	send(text: string): void;

@@ -39,7 +39,7 @@ import type { UserStorageRow } from './types';
 import { readShapeOnce } from './shapeRead';
 import { verifyReplicatedRow } from './rowVerification';
 import { getVerifiedSignPkey } from './cardRegistry';
-import { wireBool } from '@/lib/pq/schema';
+import { wireBool } from '@buckitup/pq-client/schema';
 
 // Slot addresses are not constants here: reads are public, so a fixed uuid
 // per slot would be the same address on every account. See lib/pq/slotId for

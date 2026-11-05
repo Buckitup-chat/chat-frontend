@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { deriveInitialGalleryUuid, deriveInitialGalleryKey } from '@/lib/pq/galleryKeys';
-import { toBase64Unpadded } from '@/lib/pq/signature';
+import { deriveInitialGalleryUuid, deriveInitialGalleryKey } from '@buckitup/pq-client/galleryKeys';
+import { toBase64Unpadded } from '@buckitup/pq-client/signature';
 
 const SECRET = new Uint8Array(32).fill(7);
 

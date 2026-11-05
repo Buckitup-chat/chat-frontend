@@ -7,7 +7,7 @@
 // user_storage write. Fetching is done by nobody — the account is what is
 // being recovered — so it takes the wrap key and nothing else, and reads the
 // public shape rather than an account's collection.
-import { deriveVaultLocator, sealVault, openVault, VaultEnvelopeError } from '@/lib/pq/vaultEnvelope';
+import { deriveVaultLocator, sealVault, openVault, VaultEnvelopeError } from '@buckitup/pq-client/vaultEnvelope';
 import { putStorageRow, getPublicStorageRowsByUuid } from '@/lib/data/userStorage';
 import { parseBackupContents, type BackupContents } from '@/lib/backupContents';
 

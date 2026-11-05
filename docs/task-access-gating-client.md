@@ -44,7 +44,7 @@ Parts 3 and 4 below are the contract to review that branch against.
 - `src/lib/data/ingest.ts` treats any `422` as permanent and everything else,
   `403` included, as transient. The spec forbids both for a blocked row.
 - *Awaiting approval* knows only blocked reads; blocked writes do not enter it.
-- No `vouch_tokens` in `src/lib/pq/schema.generated.ts`, and no client issues
+- No `vouch_tokens` in `packages/pq-client/src/schema.generated.ts`, and no client issues
   or revokes a vouch.
 
 In `open` mode, the default, none of the gate responses occur, so the app works

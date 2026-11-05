@@ -19,17 +19,17 @@ import {
     quarantinedEntries, discardEntry, currentSessionToken, sameSessionToken, pendingEntries, awaitServerAccepted, onOutboxChange,
     awaitingApprovalIds,
 } from '@/lib/data/outbox';
-import { feedOrderKey } from '@/lib/data/feedOrder';
+import { compareFeedOrder, feedOrderKey } from '@/lib/data/feedOrder';
 import { serialized } from '@/lib/data/serialized';
 import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyReplicatedRow } from '@/lib/data/rowVerification';
 import { projectionReplacement } from '@/lib/data/operationLifecycle';
-import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError, fileRefsOf } from '@/lib/pq/content';
+import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError, fileRefsOf } from '@buckitup/pq-client/content';
 import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
-} from '@/lib/pq/checkpoint';
+} from '@buckitup/pq-client/checkpoint';
 import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
 import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
 import { openVideo } from '@/lib/data/videoStream';
@@ -204,7 +204,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         if (!alive()) return null;
         const rows = colls.messages.toArray
             .filter((r) => r.sign_hash)
-            .sort((a, b) => feedOrderKey(a.message_id, a.owner_timestamp) - feedOrderKey(b.message_id, b.owner_timestamp));
+            .sort((a, b) => compareFeedOrder(a.message_id, a.owner_timestamp, b.message_id, b.owner_timestamp));
         for (const row of rows) await admitMessageRow(row, colls);
         return { rows, admitted: rows.filter((r) => isRowAdmitted(dialogHash, r)) };
     };
@@ -958,15 +958,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     // ---------- file transport (§1.5, §2.1–2.3) ----------
 
-    // §4.1: file_id + enc_secret are minted before the first PUT and reused by
-    // every retry of the same upload (the transfer queue keeps them for the
-    // row's life) — a fresh secret would make re-sent chunks undecryptable next
-    // to the ones already stored.
-
-    /**
-     * Uploads a file and sends the message referencing it. Progress is in
-     * chunks (§2.1 — chunks, not guessed percentages). Returns the fileId.
-     */
     /**
      * Uploads one attachment and returns its content part.
      *
@@ -981,8 +972,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
 
-        // The queue mints the pair up front so pause/resume re-enter with the
-        // same file_id + enc_secret; a direct call mints its own.
+        // The transfer queue mints the pair up front and keeps it for the row's
+        // life, so pause/resume re-enter with the same file_id + enc_secret: a
+        // fresh secret would make re-sent chunks undecryptable next to the ones
+        // already stored (§4.1). A direct call mints its own.
         const prepared = preparedIn ?? prepareUpload((await import('uuid')).v7());
 
         const up = await uploadFile({
@@ -1339,7 +1332,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             .filter((r) => r.sender_hash === me && !r.deleted_flag && r.content_b64)
             .map((r) => ({ row: r, order: feedOrderKey(r.message_id, r.owner_timestamp) }))
             .filter((e) => e.order > pointer.scannedTo)
-            .sort((a, b) => b.order - a.order);
+            .sort((a, b) => (b.order - a.order) || compareFeedOrder(b.row.message_id, b.row.owner_timestamp, a.row.message_id, a.row.owner_timestamp));
 
         // The watermark advances only past rows that actually decrypted. A row
         // that failed (its dialog key has not arrived yet) must be rescanned,
@@ -1526,7 +1519,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         }
     };
 
-    // ---------- signed DAG checkpoint (src/lib/pq/checkpoint.ts) ----------
+    // ---------- signed DAG checkpoint (packages/pq-client/src/checkpoint.ts) ----------
     //
     // A checkpoint attests "this device held this causally complete local
     // state and it materialized to this view". It rides an ordinary message
@@ -1847,18 +1840,17 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const diff = await diffDialogCheckpoint(peerHash, part);
         if (diff.status !== 'ok') return diff;
 
-        const pointerKey = feedOrderKey(pointerMessageId, part.createdAt);
         const past = [];
         const futureAdds = [];
         for (const c of diff.changes) {
             if (c.messageId === pointerMessageId) continue; // the pointer itself
-            if (c.type === 'MESSAGE_ADDED' && feedOrderKey(c.messageId, part.createdAt) >= pointerKey) {
+            if (c.type === 'MESSAGE_ADDED' && compareFeedOrder(c.messageId, part.createdAt, pointerMessageId, part.createdAt) > 0) {
                 futureAdds.push(c);
             } else {
                 past.push(c);
             }
         }
-        futureAdds.sort((a, b) => feedOrderKey(a.messageId, 0) - feedOrderKey(b.messageId, 0));
+        futureAdds.sort((a, b) => compareFeedOrder(a.messageId, 0, b.messageId, 0));
 
         const msgColl = getDialogCollections(dialogHash).messages;
         const changes = [];

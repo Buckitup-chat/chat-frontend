@@ -1,7 +1,7 @@
 import { serialized } from '@/lib/data/serialized';
 import {
 	AVATAR_GALLERY_ACCESS_VERSION, type AvatarGalleryAccessPart, type ContentPart,
-} from '@/lib/pq/content';
+} from '@buckitup/pq-client/content';
 import type { GalleryMapping } from './galleryMapping';
 import type { GrantedMap } from './localStore';
 import type { GalleryGrant } from './peerGallery';

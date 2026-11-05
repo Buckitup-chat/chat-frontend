@@ -44,8 +44,10 @@ Phoenix / Ecto).
 
 - Local storage does not need extra encryption to hide metadata (CTO
   decision, 2026-08-19): access control for metadata starts at the backend.
-  Message content stays end-to-end encrypted by the protocol. `secureStore`
-  exists for outbox/localStore but is optional for new stores.
+  Message content stays end-to-end encrypted by the protocol, and a key that
+  opens content (a file's `enc_secret`, a dialog key, a private key) is
+  content: never stored in the clear. `secureStore` exists for
+  outbox/localStore; a new store needs it only if it holds such a key.
 - HTTP 200 from `/ingest_each` ≠ row visible in the shape. Writes whose
   successor reads the shape must go through `sendMutationsAndAwaitShape`.
 - `owner_timestamp` must be strictly monotonic: use `nextOwnerTimestamp`, never
@@ -90,7 +92,7 @@ Facts reviewers cannot infer from the code:
 - Compare a branch against the current `origin/main` (`git fetch origin`
   first): compute the merge-base with it and check the commit count against
   what the author claimed.
-- `src/lib/pq/` is the cryptographic layer: diffs touching it get their own
+- `packages/pq-client/src/` is the cryptographic layer: diffs touching it get their own
   security axis and canonicalization checks by execution. Root derivations
   are pinned byte-for-byte by golden vectors in `tests/pqCheckpoint.test.ts`
   — a derivation change must bump the version constants and re-pin them.

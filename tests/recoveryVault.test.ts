@@ -5,7 +5,7 @@
 // did not take it — so what is exercised is the joining logic and not a lie
 // about the transport.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { newWrapKey, deriveVaultLocator, sealVault } from '@/lib/pq/vaultEnvelope';
+import { newWrapKey, deriveVaultLocator, sealVault } from '@buckitup/pq-client/vaultEnvelope';
 
 interface Row {
 	user_hash: string;

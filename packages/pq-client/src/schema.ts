@@ -11,7 +11,7 @@
 // The lists themselves are generated from the backend Ecto schemas — see
 // scripts/gen-pq-schema.mjs — so the contract has one source of truth.
 
-import { SIGNABLE, type FieldType, type SignableSchema } from './schema.generated';
+import { SIGNABLE, type FieldType, type SignableSchema } from './schema.generated.js';
 
 export { SIGNABLE, type FieldType, type SignableSchema };
 

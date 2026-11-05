@@ -13,9 +13,9 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import {
 	checkConfirm, confirmMessage, encode, parse, pqMessage, refusalMessage, sasOf, sessionTag, signOptical, transcript, verifyOptical, type Message,
 	type Party,
-} from '@/lib/pq/handshake';
-import { fromBase64 } from '@/lib/pq/signature';
-import { proveChallenge } from '@/lib/pq/challengeProof';
+} from '@buckitup/pq-client/handshake';
+import { fromBase64 } from '@buckitup/pq-client/signature';
+import { proveChallenge } from '@buckitup/pq-client/challengeProof';
 import { candidateSelector, expectedRelays, selectAddresses } from '@/lib/data/handshakeAddresses';
 import { decode as decodeQwbp, encode as encodeQwbp, type QWBPGatheredCandidate } from 'qwbp';
 import { makeTestIdentity, resignedCard, type TestIdentity } from './helpers/signedFixtures';

@@ -22,7 +22,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { prepareUpload } from '@/lib/data/fileTransfer';
-import { CHUNK_SIZE, chunkCountOf } from '@/lib/pq/fileCrypto';
+import { CHUNK_SIZE, chunkCountOf } from '@buckitup/pq-client/fileCrypto';
 import { useDialogsStore } from '@/store/dialogs.store';
 
 let seq = 0;

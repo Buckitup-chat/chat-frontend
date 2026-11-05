@@ -119,6 +119,8 @@ export default defineConfig(({ command, mode }) => {
 		resolve: {
 			alias: {
 				'@': fileURLToPath(new URL('./src', import.meta.url)),
+				// The protocol library's sources: the app builds from them, npm gets its dist.
+				'@buckitup/pq-client': fileURLToPath(new URL('./packages/pq-client/src', import.meta.url)),
 				bootstrap: path.resolve(__dirname, 'node_modules/bootstrap'), // ✅ Fix Sass Import
 				'aes-js': path.resolve(__dirname, 'node_modules/ethers/node_modules/aes-js/lib.commonjs/index.js'),
 				// '@noble/hashes/hmac': '@noble/hashes/hmac.js',

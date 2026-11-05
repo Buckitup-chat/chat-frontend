@@ -1,16 +1,14 @@
 // @vitest-environment jsdom
-// Profiles that opened the teststand before it was deleted still hold its
-// guardian EOA and spending private keys in localStorage as plaintext, next to
-// a payload carrying the owner key and the master secret. Nothing else in the
-// app clears localStorage, so the store reaps them on boot — most profiles
-// never sign out, they close the tab.
+// Earlier builds left secrets in localStorage as plaintext: the teststand's
+// guardian EOA and spending private keys, next to a payload carrying the owner
+// key and the master secret, and each upload's file key. The store reaps them
+// on boot — most profiles never sign out, they close the tab.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 
 class FakeEM extends EventTarget {
 	get currentUserHash() { return null; }
 	get isAuth() { return false; }
-	async initialize() {}
 	async getLocalUserCards() { return []; }
 }
 
@@ -28,7 +26,7 @@ vi.mock('@/lib/data/attach', () => ({
 
 const { userPQStore } = await import('@/store/userPQ.store');
 
-describe('the teststand key reaper', () => {
+describe('the plaintext key reaper', () => {
 	beforeEach(() => {
 		setActivePinia(createPinia());
 		fake = new FakeEM();
@@ -47,32 +45,37 @@ describe('the teststand key reaper', () => {
 
 	it('removes the plaintext file keys of earlier uploads on boot too', async () => {
 		localStorage.setItem('bkp:pending-upload:f_1', JSON.stringify({ encSecretB64: 'AAAA', name: 'a.png', size: 1 }));
+		localStorage.setItem('bkp:pending-upload:f_2', '{}');
 
 		await userPQStore().initialize();
 
 		expect(localStorage.getItem('bkp:pending-upload:f_1')).toBe(null);
+		expect(localStorage.getItem('bkp:pending-upload:f_2')).toBe(null);
 	});
 
 	it('leaves everything else alone', async () => {
-		localStorage.setItem('something.else', 'keep me');
+		for (const key of ['something.else', 'bkp:other', 'bkp:pending-upload', 'testbed.other']) localStorage.setItem(key, 'keep me');
 
 		await userPQStore().initialize();
 
-		expect(localStorage.getItem('something.else')).toBe('keep me');
+		expect(Object.keys(localStorage).sort()).toEqual(['bkp:other', 'bkp:pending-upload', 'something.else', 'testbed.other']);
 	});
 
-	it('still removes the payload when removing the keys throws', async () => {
+	it('removes every key it can when removing another throws', async () => {
 		localStorage.setItem('testbed.backups', 'payload');
+		localStorage.setItem('bkp:pending-upload:f_1', 'key 1');
+		localStorage.setItem('bkp:pending-upload:f_2', 'key 2');
 		const real = localStorage.removeItem.bind(localStorage);
 		const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation((key) => {
 			// The half left behind must not be the half holding the owner key
 			// and the master secret, which is what one shared try block risked.
-			if (key === 'testbed.guardians') throw new DOMException('SecurityError');
+			if (key === 'testbed.guardians' || key === 'bkp:pending-upload:f_1') throw new DOMException('SecurityError');
 			real(key);
 		});
 		try {
 			await userPQStore().initialize();
 			expect(localStorage.getItem('testbed.backups')).toBe(null);
+			expect(localStorage.getItem('bkp:pending-upload:f_2')).toBe(null);
 		} finally {
 			spy.mockRestore();
 		}

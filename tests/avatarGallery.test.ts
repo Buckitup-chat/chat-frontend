@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
 	newAvatarId, ownGalleryOf, nextAt, addPatch, setMainPatch, removePatch,
 } from '@/lib/avatars/gallery';
-import { type AvatarPhoto } from '@/lib/pq/content';
+import { type AvatarPhoto } from '@buckitup/pq-client/content';
 import { mergeJsonPatch, stripPatchDirectives } from '@/lib/data/storageIntent';
 
 // pq_avatars § The owner's gallery slot.

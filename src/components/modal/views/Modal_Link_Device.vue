@@ -69,7 +69,7 @@ import { parseBackupContents } from '@/lib/backupContents';
 import {
 	createOffer, encodeInvite, openOffer, unsealPayload, signCommand, verifyCommand,
 	encodeBytes, decodeBytes, DeviceLinkError,
-} from '@/lib/pq/deviceLink';
+} from '@buckitup/pq-client/deviceLink';
 
 const QR_OPTIONS = { errorCorrectionLevel: 'M', width: 300, margin: 1 };
 const ABORTED = 'The other device stopped the link. Start again on both devices.';

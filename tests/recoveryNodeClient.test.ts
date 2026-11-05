@@ -7,8 +7,8 @@ import { SigningKey, computeAddress, verifyMessage } from 'ethers';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import * as secp from '@noble/secp256k1';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
-import { toBase64 } from '@/lib/pq/signature';
-import type { VerifiedCard } from '@/lib/pq/verifyCard';
+import { toBase64 } from '@buckitup/pq-client/signature';
+import type { VerifiedCard } from '@buckitup/pq-client/verifyCard';
 import {
 	NodeError,
 	depositMessage,

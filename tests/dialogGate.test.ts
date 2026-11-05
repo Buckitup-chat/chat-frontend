@@ -4,8 +4,8 @@ import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, toBase64, fromBase64 } from '@/lib/pq/signature';
-import { verifyUserCard } from '@/lib/pq/verifyCard';
+import { signFields, deriveSignHash, toBase64, fromBase64 } from '@buckitup/pq-client/signature';
+import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
 import { createDialogGate, type MessageLike } from '@/lib/data/dialogGate';
 import type { UserCardRow } from '@/lib/data/types';
 

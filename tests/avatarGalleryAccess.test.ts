@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
 	encodeContent, decodeContent, contentToText, previewText, quoteSnapshot,
 	type AvatarGalleryAccessPart, type ContentPart,
-} from '@/lib/pq/content';
-import { toBase64Unpadded } from '@/lib/pq/signature';
+} from '@buckitup/pq-client/content';
+import { toBase64Unpadded } from '@buckitup/pq-client/signature';
 
 const UUID = '0b7e3a52-9c1d-4f6e-8a2b-3c4d5e6f7a8b';
 const KEY = toBase64Unpadded(new Uint8Array(32).fill(7));

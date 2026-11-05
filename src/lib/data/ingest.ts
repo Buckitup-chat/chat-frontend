@@ -21,6 +21,7 @@ import {
 } from './outbox';
 import { setWriteProber, syncBlockedWrites } from './accessGate';
 import type { IngestRowResult } from './types';
+import { checkResults, isNoAnswer, NOT_IN_TRUST_CHAIN, TransportError } from '@buckitup/pq-client/transport';
 
 export class IngestError extends Error {
 	/** true when retrying can never succeed (server-side validation) */
@@ -62,7 +63,7 @@ export class IngestError extends Error {
 	}
 }
 
-export const NOT_IN_TRUST_CHAIN = 'not_in_trust_chain';
+export { NOT_IN_TRUST_CHAIN };
 
 const isApprovalBlocked = (r: IngestRowResult): boolean => r.status === 'error' && r.error === NOT_IN_TRUST_CHAIN;
 
@@ -82,31 +83,12 @@ const isTimestampNotNewer = (r: IngestRowResult): boolean => {
 const isExistsConflict = (r: IngestRowResult): boolean => r.status === 'exists';
 
 function validateBatchResults(results: unknown, mutationCount: number, status: number): IngestRowResult[] {
-	if (!Array.isArray(results)) {
-		throw new IngestError(`ingest HTTP ${status}: no per-row results`, { permanent: false, status });
+	try {
+		return checkResults(results, mutationCount, status);
+	} catch (e) {
+		if (e instanceof TransportError) throw new IngestError(e.message, { permanent: false, status });
+		throw e;
 	}
-	if (results.length !== mutationCount) {
-		throw new IngestError(
-			`ingest: expected ${mutationCount} results, got ${results.length}`,
-			{ permanent: false, status }
-		);
-	}
-	const seen = new Set<number>();
-	for (const r of results) {
-		const index = (r as { index?: unknown } | null)?.index;
-		if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index >= mutationCount) {
-			throw new IngestError(`ingest: malformed result index ${JSON.stringify(index)}`, { permanent: false, status });
-		}
-		if (seen.has(index)) {
-			throw new IngestError(`ingest: duplicate result index ${index}`, { permanent: false, status });
-		}
-		seen.add(index);
-		const rowStatus = (r as { status?: unknown } | null)?.status;
-		if (rowStatus !== 'ok' && rowStatus !== 'error' && rowStatus !== 'exists') {
-			throw new IngestError(`ingest: unknown result status ${JSON.stringify(rowStatus)} at index ${index}`, { permanent: false, status });
-		}
-	}
-	return results as IngestRowResult[];
 }
 
 export interface SendResult {
@@ -129,7 +111,7 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 		if (e instanceof VaultLockedError || e instanceof AccountMismatchError) throw e;
 		// Only a request that got no answer — fetch failed or timed out — is a
 		// fact about connectivity; a server that answered with garbage is not.
-		const network = e instanceof TypeError || (e as Error)?.name === 'TimeoutError' || (e as Error)?.name === 'AbortError';
+		const network = (e instanceof TransportError && e.network) || isNoAnswer(e);
 		throw new IngestError(`ingest network error: ${e}`, { permanent: false, network });
 	}
 

@@ -1,9 +1,9 @@
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, toBase64, type SignableFields } from '@/lib/pq/signature';
-import { signableFields } from '@/lib/pq/schema';
-import { photoToWire, type ImagePart } from '@/lib/pq/content';
+import { signFields, deriveSignHash, toBase64, type SignableFields } from '@buckitup/pq-client/signature';
+import { signableFields } from '@buckitup/pq-client/schema';
+import { photoToWire, type ImagePart } from '@buckitup/pq-client/content';
 import type { UserStorageRow } from '@/lib/data/types';
 import type { SharedGalleryRecord } from '@/lib/avatars/sharedGallery';
 
