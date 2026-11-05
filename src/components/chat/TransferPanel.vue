@@ -53,12 +53,13 @@
           {{ expanded ? 'Collapse the list' : `${hiddenCount} more files` }}
         </div>
       </div>
+      <input ref="picker" type="file" class="d-none" data-test="repick" @change="onPicked" />
     </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, reactive, computed } from 'vue';
 import { useTransfersStore } from '@/store/transfers.store';
 
 const props = defineProps({
@@ -74,8 +75,30 @@ const expanded = ref(false);
 const visibleItems = computed(() =>
   expanded.value ? $transfers.items : $transfers.items.slice(0, MAX_ROWS));
 const hiddenCount = computed(() => Math.max(0, $transfers.items.length - MAX_ROWS));
-const hasStartable = computed(() =>
-  $transfers.items.some((it) => it.status === 'paused' || it.status === 'error'));
+const hasStartable = computed(() => $transfers.items.some($transfers.startable));
+
+const { needsFile } = $transfers;
+const picker = ref(null);
+const pickingId = ref(null);
+const refused = reactive(new Set()); // rows whose last pick was another file
+const pickFor = (it) => {
+  pickingId.value = it.id;
+  picker.value.value = '';
+  picker.value.click();
+};
+const onPicked = async (event) => {
+  const file = event.target.files?.[0];
+  const id = pickingId.value;
+  pickingId.value = null;
+  if (!file || !id) return;
+  // A file that cannot be read is not the one being sent either.
+  const same = await $transfers.repick(id, file).catch((e) => {
+    console.warn('[transfers] the picked file could not be read:', e);
+    return false;
+  });
+  if (same) refused.delete(id);
+  else refused.add(id);
+};
 
 const dragFrom = ref(null);
 // The full HTML5 recipe: without setData some engines cancel the drag on the
@@ -106,6 +129,11 @@ const captionOf = (it) => {
     case 'active':
       return `${percentOf(it)}% · chunk ${it.done} of ${it.total}` + (it.speed ? ` · ${fmtSpeed(it.speed)}` : '');
     case 'paused':
+      if (needsFile(it)) {
+        return refused.has(it.id)
+          ? 'Not the same file · pick the one you were sending, or cancel'
+          : 'Paused by a reload · pick the file again to resume';
+      }
       return `Paused · ${percentOf(it)}%` + (it.done ? ` · chunk ${it.done} of ${it.total}` : '');
     case 'waiting':
       return `Waiting · ${fmtSize(it.size)}`;
@@ -122,9 +150,10 @@ const captionOf = (it) => {
   }
 };
 
-const actionOf = (it) => ({ active: 'Pause', paused: 'Resume', error: 'Retry', waiting: null, awaiting_approval: null, rejected: null, done: null }[it.status]);
+const actionOf = (it) => (needsFile(it) ? 'Pick file' : { active: 'Pause', paused: 'Resume', error: 'Retry', waiting: null, awaiting_approval: null, rejected: null, done: null }[it.status]);
 const applyAction = (it) => {
-  if (it.status === 'active') $transfers.pause(it.id);
+  if (needsFile(it)) pickFor(it);
+  else if (it.status === 'active') $transfers.pause(it.id);
   else $transfers.start(it.id);
 };
 </script>

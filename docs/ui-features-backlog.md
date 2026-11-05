@@ -123,7 +123,8 @@ mid-upload.
 
 An interrupted upload resumes: the client asks the server which chunks it
 already has and sends the rest. The file does not start over — even after a tab
-reload or losing the network halfway.
+reload or losing the network halfway. After a reload the person picks the same
+file again, since the browser keeps no file across a reload.
 
 **For the designer.** What a paused upload looks like. Whether it resumes
 automatically when the network returns or on a button. What to show after an app

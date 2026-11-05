@@ -45,6 +45,7 @@ import { forgetPeerGalleryReads, fetchGalleryRow } from '@/lib/avatars/peerGalle
 import { readSharedGalleryRow, galleryKeyFromB64 } from '@/lib/avatars/sharedGallery';
 import { publishInitialSharedGallery, publishSharedGalleryRecord, avatarsSlotOf } from '@/lib/avatars/sharedGalleryPublish';
 import { forgetAccountUploads } from '@/lib/data/uploadReuse';
+import { forgetAccountPendingUploads } from '@/lib/data/pendingUploads';
 import { clearSessions } from '@/lib/data/readSession';
 import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
@@ -919,6 +920,7 @@ export class EncryptionManagerPQ extends EventTarget {
     // Contacts' thumbnails and the dialogs owed a photo.
     await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
     await forgetAccountUploads(userHash).catch((e) => console.warn('Could not delete the account\'s upload references', e));
+    await forgetAccountPendingUploads(userHash).catch((e) => console.warn('Could not delete the account\'s unfinished uploads', e));
     await forgetKeptFiles(userHash);
     try {
       forgetBackupFileRecord(userHash);

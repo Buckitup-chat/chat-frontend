@@ -967,7 +967,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
 
-        const digest = await uploadDigest(bytes);
+        // The transfer queue hashes the bytes already, to name them in its record.
+        const digest = fileMeta.digest ?? await uploadDigest(bytes);
         const existing = await reusableUpload(uploaderHash, digest, fileAvailability).catch((e) => {
             console.warn('[dialogs] upload reuse unavailable:', e);
             return null;
