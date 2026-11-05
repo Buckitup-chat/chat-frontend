@@ -9,7 +9,7 @@
       </div>
 
       <div class="fs-name">{{ part.name }}</div>
-      <div class="fs-meta">{{ fmtSize(part.size) }}<template v-if="from"> · from {{ from }}</template><template v-if="sentAt"> · {{ sentAt }}</template></div>
+      <div class="fs-meta">{{ fileSize(part.size) }}<template v-if="from"> · from {{ from }}</template><template v-if="sentAt"> · {{ sentAt }}</template></div>
 
       <p v-if="refused" class="fs-note fs-refused">
         This file could not be verified: what this node holds does not match
@@ -76,6 +76,7 @@
 
 <script setup>
 import { computed } from 'vue';
+import { fileSize } from '@/utils/formatBytes';
 
 const props = defineProps({
   part: { type: Object, required: true },
@@ -115,7 +116,6 @@ const percent = computed(() =>
   props.availability?.total ? Math.round((props.availability.present / props.availability.total) * 100) : 0);
 const complete = computed(() => known.value && props.availability.present >= props.availability.total);
 
-const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 const fmtTime = (unix) => {
   const d = new Date(unix * 1000);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;

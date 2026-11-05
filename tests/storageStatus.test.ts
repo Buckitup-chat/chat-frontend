@@ -2,7 +2,7 @@
 // clearing this origin's data, read through a fake navigator.storage and
 // matchMedia so every branch is reached without a real browser.
 import { describe, it, expect } from 'vitest';
-import { probeStorage, requestPersistence, isInstalled, formatBytes, probeRows, probeText, SMALL_QUOTA_BYTES, type StorageEnv } from '@/lib/storageStatus';
+import { probeStorage, requestPersistence, isInstalled, probeRows, probeText, SMALL_QUOTA_BYTES, type StorageEnv } from '@/lib/storageStatus';
 
 const GB = 1024 ** 3;
 
@@ -96,7 +96,7 @@ describe('the storage status', () => {
 
 		const small = await probeStorage(fakeEnv({ localStorage: refused, quota: SMALL_QUOTA_BYTES - 1 }));
 		expect(small.status).toBe('ephemeral');
-		expect(small.privateSignals).toEqual([expect.stringMatching(/^quota .* is below /)]);
+		expect(small.privateSignals).toEqual([expect.stringMatching(/^quota .* is below 120 MB$/)]);
 	});
 
 	it('does not take a missing file system for a refusing one', async () => {
@@ -177,13 +177,5 @@ describe('the probe table', () => {
 			'User agent': 'TestBrowser/1.0',
 		});
 		expect(probeText(rows).split('\n')).toContain('Quota: 2.0 GB');
-	});
-
-	it('formats sizes for people', () => {
-		expect(formatBytes(512)).toBe('512 B');
-		expect(formatBytes(SMALL_QUOTA_BYTES)).toBe('120 MB');
-		expect(formatBytes(64 * GB)).toBe('64 GB');
-		expect(formatBytes(1024 * 1024 - 1)).toBe('1.0 MB');
-		expect(formatBytes(1023)).toBe('1023 B');
 	});
 });

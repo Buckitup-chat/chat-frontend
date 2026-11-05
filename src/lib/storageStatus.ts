@@ -34,6 +34,8 @@
 // Nothing here asks for persistence: the probe calls `persisted()`,
 // `estimate()` and `getDirectory()`, and writes and removes one localStorage key.
 
+import { formatBytes } from '@/utils/formatBytes';
+
 export type StorageStatus = 'persistent' | 'best-effort' | 'ephemeral' | 'unknown';
 
 /** Whether the account has a community backup, as far as this device can read (storageStatus.store.ts). */
@@ -182,19 +184,6 @@ export const requestPersistence = async (env: StorageEnv = browserEnv()): Promis
 	}
 	const after = await readPersisted(env);
 	return { before, granted, after, error };
-};
-
-export const formatBytes = (bytes: number): string => {
-	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-	// The unit moves on by the figure shown: 1023.99 KB would print "1024 KB".
-	const shown = (v: number, u: number): string => (u === 0 ? String(v) : v.toFixed(v < 10 ? 1 : 0));
-	let value = bytes;
-	let unit = 0;
-	while (Number(shown(value, unit)) >= 1024 && unit < units.length - 1) {
-		value /= 1024;
-		unit += 1;
-	}
-	return `${shown(value, unit)} ${units[unit]}`;
 };
 
 const yesNo = (v: boolean | null): string => (v === null ? 'unavailable' : v ? 'yes' : 'no');

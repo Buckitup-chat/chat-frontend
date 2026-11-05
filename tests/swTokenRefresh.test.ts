@@ -135,12 +135,11 @@ describe('page answers need-token only for its own video session', () => {
 			bearerFor: () => 'Bearer expired-token',
 			openSession: async () => 'fresh-token',
 		}));
-		vi.doMock('@/lib/data/fileTransfer', () => ({ downloadFile: async () => { throw new Error('fallback not expected'); } }));
-		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: async () => null, putCachedMedia: async () => {} }));
-		vi.doMock('@/lib/data/fileIntegrity', async (importOriginal) => ({
-			...(await importOriginal<typeof import('@/lib/data/fileIntegrity')>()),
-			readVerifiedFile: async () => ({ manifest: { fileId: FILE_ID, chunkCount: 2, deleted: false }, hashes: { expected: async () => 'fd_00' } }),
+		vi.doMock('@/lib/data/fileTransfer', () => ({
+			downloadFile: async () => { throw new Error('fallback not expected'); },
+			readLiveFile: async () => ({ hashes: { expected: async () => 'fd_00' } }),
 		}));
+		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: async () => null, putCachedMedia: async () => {} }));
 
 		const swListeners: Record<string, Listener[]> = {};
 		const toWorker: any[] = [];
@@ -165,7 +164,6 @@ describe('page answers need-token only for its own video session', () => {
 		vi.doUnmock('@/lib/data/readSession');
 		vi.doUnmock('@/lib/data/fileTransfer');
 		vi.doUnmock('@/lib/data/mediaCache');
-		vi.doUnmock('@/lib/data/fileIntegrity');
 	});
 
 	it('control: the owning tab answers need-token with its token', async () => {

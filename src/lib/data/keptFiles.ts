@@ -18,10 +18,10 @@
 
 import { IndexedDbStore } from './indexedDbStore';
 import { createSecureStore, type StringStore } from './secureStore';
-import { withNamedLock } from './serialized';
+import { serialized, withNamedLock } from './serialized';
 import { fileKey } from './fileKey';
 import { downloadFile, pinFileChunks, readKeptChunks, type DownloadProgress } from './fileTransfer';
-import { unpinAllOf, unpinFile } from './chunkCache';
+import { pinnedFileIdsOf, unpinAllOf, unpinFile } from './chunkCache';
 import type { SignPkeyResolver } from './rowVerification';
 
 export interface KeptFile {
@@ -62,7 +62,12 @@ let keyFor = async (owner: string): Promise<CryptoKey> => (await import('./local
 export const _setKeptFilesStoreForTests = (store: StringStore, key?: (owner: string) => Promise<CryptoKey>): void => {
 	raw = store;
 	if (key) keyFor = key;
-	unsealed = null;
+	setUnsealed(null);
+	swept.clear();
+};
+/** Resolves once no sweep is running: one left over from a test must not run into the next. */
+export const _settleKeptFilesSweepsForTests = async (): Promise<void> => {
+	while (sweeping.size) await Promise.allSettled([...sweeping.values()]);
 };
 
 const sealed = (owner: string): StringStore => createSecureStore(raw, { getKey: () => keyFor(owner) });
@@ -84,24 +89,77 @@ const underFileLock = <T>(owner: string, fileId: string, fn: () => Promise<T>): 
  * time. Another tab's change shows here after a reload.
  */
 let unsealed: { owner: string; index: KeptIndex } | null = null;
+/** Changes of the index by this tab: a read that one overtook does not put back what it read. */
+let changes = 0;
+const setUnsealed = (value: typeof unsealed): void => {
+	unsealed = value;
+	changes += 1;
+};
 
 const readIndex = async (owner: string): Promise<KeptIndex> => {
+	const before = changes;
 	const value = await sealed(owner).get(indexKey(owner));
 	const index = value ? (JSON.parse(value) as KeptIndex) : {};
-	unsealed = { owner, index };
+	if (changes === before) unsealed = { owner, index };
 	return { ...index };
 };
 
 const writeIndex = async (owner: string, index: KeptIndex): Promise<void> => {
 	await sealed(owner).set(indexKey(owner), JSON.stringify(index));
-	unsealed = { owner, index: { ...index } };
+	setUnsealed({ owner, index: { ...index } });
+};
+
+const fileIdsOf = (index: KeptIndex): Set<string> => new Set(Object.values(index).map((f) => f.fileId));
+
+/**
+ * Releases `owner`'s pins on files its index does not list: what an unpin
+ * that failed, or a page closed in the middle of a keep, left behind. Each
+ * under its file lock, so a keep still pinning its chunks is waited for, not
+ * undone. Runs in the background: once per account and page, at its first
+ * listing, and after an unpin fails; a sweep that fails runs again at the
+ * next listing.
+ */
+const sweepStrayPins = async (owner: string): Promise<void> => {
+	let listed = fileIdsOf(await currentIndex(owner));
+	const failed: unknown[] = [];
+	for (const fileId of await pinnedFileIdsOf(owner)) {
+		if (listed.has(fileId)) continue;
+		await underFileLock(owner, fileId, async () => {
+			listed = fileIdsOf(await readIndex(owner));
+			if (!listed.has(fileId)) await unpinFile(fileId, owner);
+		}).catch((e) => failed.push(e));
+	}
+	if (failed.length) throw new AggregateError(failed, `${failed.length} files kept their stray pins`);
+};
+const swept = new Set<string>();
+/** Each account's sweeps run one after another; one still waiting to start covers the calls made meanwhile. */
+const sweeping = new Map<string, Promise<unknown>>();
+const waiting = new Set<string>();
+const sweepStrayPinsSoon = (owner: string): void => {
+	swept.add(owner);
+	if (waiting.has(owner)) return;
+	waiting.add(owner);
+	void serialized(sweeping, owner, () => {
+		waiting.delete(owner);
+		return sweepStrayPins(owner);
+	}).catch((e) => {
+		swept.delete(owner);
+		console.warn('[keptFiles] stray pins were not released', e);
+	});
+};
+
+/** The index as this tab knows it; a copy. Throws unless `owner` is the open, unlocked account. */
+const currentIndex = async (owner: string): Promise<KeptIndex> => {
+	// Asked every time, cached index or not: after logout or a switch the key is gone.
+	await keyFor(owner);
+	return unsealed?.owner === owner ? { ...unsealed.index } : readIndex(owner);
 };
 
 /** What `owner` keeps on this device; a copy. Throws unless `owner` is the open, unlocked account. */
 export const listKeptFiles = async (owner: string): Promise<KeptIndex> => {
-	// Asked every time, cached index or not: after logout or a switch the key is gone.
-	await keyFor(owner);
-	return unsealed?.owner === owner ? { ...unsealed.index } : readIndex(owner);
+	const index = await currentIndex(owner);
+	if (!swept.has(owner)) sweepStrayPinsSoon(owner);
+	return index;
 };
 
 /**
@@ -122,7 +180,7 @@ export const keepFile = (
 	if (index[key]) return index[key];
 	// Chunks are stored by file id; another sender's file under the same id
 	// would share them, and releasing one would release the other.
-	if (Object.values(index).some((f) => f.fileId === part.fileId)) {
+	if (fileIdsOf(index).has(part.fileId)) {
 		throw new Error('Another file with the same id is already kept on this device.');
 	}
 	try {
@@ -146,12 +204,20 @@ export const keepFile = (
 		return entry;
 	} catch (e) {
 		// Under the file lock, with no entry for this file id: every pin `owner` holds on it is this keep's.
-		await unpinFile(part.fileId, owner).catch((err) => console.warn('[keptFiles] could not release the pins of a failed keep', err));
+		await unpinFile(part.fileId, owner).catch((err) => {
+			console.warn('[keptFiles] could not release the pins of a failed keep', err);
+			sweepStrayPinsSoon(owner);
+		});
 		throw e;
 	}
 });
 
-/** `owner` stops keeping the file: its chunks become cache again unless another account keeps them. */
+/**
+ * `owner` stops keeping the file: its chunks become cache again unless another
+ * account keeps them. The entry goes first, so once it is gone the file is no
+ * longer kept; an unpin that fails leaves pins with no entry for the sweep
+ * (sweepStrayPins) to drop, and is not the caller's failure.
+ */
 export const releaseKeptFile = (owner: string, key: string): Promise<void> =>
 	underFileLock(owner, key.slice(key.lastIndexOf('/') + 1), async () => {
 		const removed = await underIndexLock(owner, async () => {
@@ -163,7 +229,12 @@ export const releaseKeptFile = (owner: string, key: string): Promise<void> =>
 			}
 			return entry;
 		});
-		if (removed) await unpinFile(removed.fileId, owner);
+		if (removed) {
+			await unpinFile(removed.fileId, owner).catch((e) => {
+				console.warn('[keptFiles] the pins of a released file stay until the sweep', e);
+				sweepStrayPinsSoon(owner);
+			});
+		}
 	});
 
 /** The kept copy's bytes, decrypted from this device alone; null when `owner` does not keep the file. */
@@ -199,8 +270,11 @@ export const openFile = async (
 
 /** Removes everything `owner` keeps: called when the account leaves this device. */
 export const forgetAccountKeptFiles = async (owner: string): Promise<void> => {
-	if (unsealed?.owner === owner) unsealed = null;
+	// Before and after: a read of the index under way meanwhile must not cache it again.
+	const forget = () => setUnsealed(unsealed?.owner === owner ? null : unsealed);
+	forget();
 	// Each half runs whatever the other did: a missing index must not leave pins behind.
 	const [index, pins] = await Promise.allSettled([raw.delete(indexKey(owner)), unpinAllOf(owner)]);
+	forget();
 	for (const r of [index, pins]) if (r.status === 'rejected') throw r.reason;
 };

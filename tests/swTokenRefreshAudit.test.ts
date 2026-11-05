@@ -249,12 +249,11 @@ describe('E. multi-tab ownership of need-token (real videoStream.ts)', () => {
 			bearerFor: () => 'Bearer expired-token',
 			openSession: openSessionSpy,
 		}));
-		vi.doMock('@/lib/data/fileTransfer', () => ({ downloadFile: async () => { throw new Error('fallback not expected'); } }));
-		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: async () => null, putCachedMedia: async () => {} }));
-		vi.doMock('@/lib/data/fileIntegrity', async (importOriginal) => ({
-			...(await importOriginal<typeof import('@/lib/data/fileIntegrity')>()),
-			readVerifiedFile: async () => ({ manifest: { fileId: FILE_ID, chunkCount: 2, deleted: false }, hashes: { expected: async (i: number) => hashes[i] } }),
+		vi.doMock('@/lib/data/fileTransfer', () => ({
+			downloadFile: async () => { throw new Error('fallback not expected'); },
+			readLiveFile: async () => ({ hashes: { expected: async (i: number) => hashes[i] } }),
 		}));
+		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: async () => null, putCachedMedia: async () => {} }));
 
 		const swListeners: Record<string, Listener[]> = {};
 		const toWorker: any[] = [];
@@ -281,7 +280,6 @@ describe('E. multi-tab ownership of need-token (real videoStream.ts)', () => {
 		vi.doUnmock('@/lib/data/readSession');
 		vi.doUnmock('@/lib/data/fileTransfer');
 		vi.doUnmock('@/lib/data/mediaCache');
-		vi.doUnmock('@/lib/data/fileIntegrity');
 	});
 
 	it('E1 the owning tab answers with the requested sessionId, and only it opens a file_chunk session', async () => {
