@@ -37,6 +37,7 @@ import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { mergeLiveWithCached } from '@/lib/data/readCache';
 import { readDialogRow, readDialogRows } from '@/lib/data/dialogCache';
 import { settled } from '@/lib/data/shapeLink';
+import { withBudget } from '@/lib/withBudget';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
@@ -45,15 +46,6 @@ const safeBase64Decode = (str, fieldName) => {
     const result = decodeHexOrBase64(str);
     if (!result) throw new Error(`${fieldName} is empty`);
     return result;
-};
-
-/** `promise`, or a rejection once `ms` pass first: one slow dialog read must not wedge what waits on it. */
-const withBudget = (promise, ms, label) => {
-    let timer;
-    return Promise.race([
-        promise,
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} budget exceeded`)), ms); }),
-    ]).finally(() => clearTimeout(timer));
 };
 
 export const useDialogsStore = defineStore('dialogs', () => {
@@ -1386,12 +1378,20 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // Every await below may outlive the session: nothing is written for
         // `me` once another account is open.
         const stillMine = () => $userPQ.currentUserHash === me;
-        const { rows, pointer } = await withDialogCollections(dialogHash, async (colls) => {
+        const { rows, readable, pointer } = await withDialogCollections(dialogHash, async (colls) => {
             const read = await admittedRowsOf(dialogHash, colls, stillMine);
-            if (!read) return { rows: [], pointer: stored };
+            if (!read) return { rows: [], readable: false, pointer: stored };
             const { rows: loaded, admitted } = read;
             const isAdmitted = (r) => isRowAdmitted(dialogHash, r);
-            return { rows: admitted, pointer: await findLatestCheckpoint(dialogHash, loaded, stored, colls, isAdmitted, me) };
+            const found = await findLatestCheckpoint(dialogHash, loaded, stored, colls, isAdmitted, me);
+            // A dialog that did not load reads as empty, and an empty dialog
+            // differs from every checkpoint. The checkpoint's own message
+            // missing is either that or a removal, and only a live shape
+            // tells the two apart.
+            const readable = !found.checkpoint
+                || loaded.some((r) => r.message_id === found.checkpoint.messageId)
+                || await liveWithinBudget(colls.messages);
+            return { rows: admitted, readable, pointer: found };
         });
         if (!stillMine()) return null;
         if (pointer.scannedTo !== stored.scannedTo || pointer.checkpoint !== stored.checkpoint) {
@@ -1407,6 +1407,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             checkpointAlerts.value.delete(peerHash);
             return null;
         }
+        if (!readable) throw new Error('the dialog could not be read');
 
         const alert = {
             changed: viewMoved(rows, pointer.checkpoint.viewRoot, pointer.checkpoint.messageId),
@@ -1440,15 +1441,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
             // that is hundreds of strangers. An alert is only possible where
             // this account has a checkpoint pointer, and those dialogs are
             // indexed; everything else is skipped without opening a shape.
-            const indexed = await pointerDialogs($userPQ.currentUserHash);
+            const peers = await checkpointPeers(peerHashes);
             // null = the index could not be read (locked storage, transient
             // failure). Skipping the tick keeps the 30s retry alive; treating
             // it as "empty" would silently disable every alert for the session.
-            if (indexed === null) return;
-            for (const peerHash of peerHashes) {
-                if (!peerHash || peerHash === $userPQ.currentUserHash) continue;
-                const dialogHash = getDialogHash(peerHash);
-                if (!dialogHash || !indexed.has(dialogHash)) continue;
+            if (peers === null) return;
+            for (const peerHash of peers) {
                 try {
                     await withBudget(refreshCheckpointAlert(peerHash), REFRESH_BUDGET_MS, 'refresh');
                 } catch (e) {
@@ -1457,6 +1455,44 @@ export const useDialogsStore = defineStore('dialogs', () => {
             }
         })().finally(() => { scanInFlight = null; });
         return scanInFlight;
+    };
+
+    /**
+     * Those of `peerHashes` whose dialog holds a checkpoint pointer on this
+     * device — the dialogs an alert is possible in, for the Checkpoints
+     * screen. Null when the pointer index could not be read: "could not
+     * tell", not "none".
+     */
+    const checkpointPeers = async (peerHashes) => {
+        const me = $userPQ.currentUserHash;
+        const indexed = await pointerDialogs(me);
+        if (indexed === null || $userPQ.currentUserHash !== me) return null;
+        return peerHashes.filter((peerHash) => {
+            if (!peerHash || peerHash === me) return false;
+            const dialogHash = getDialogHash(peerHash);
+            return !!dialogHash && indexed.has(dialogHash);
+        });
+    };
+
+    /**
+     * The checkpoint part this user signed in the message `messageId` of the
+     * dialog with `peerHash` — the part an alert's pointer names, for
+     * comparing the dialog with it. Read from an admitted, decrypted row of
+     * this user's own, like the scan that found it; null when there is none.
+     */
+    const readCheckpointPart = async (peerHash, messageId) => {
+        const me = $userPQ.currentUserHash;
+        const dialogHash = getDialogHash(peerHash);
+        if (!dialogHash || !messageId) return null;
+        const stillMine = () => $userPQ.currentUserHash === me;
+        return withDialogCollections(dialogHash, async (colls) => {
+            const read = await admittedRowsOf(dialogHash, colls, stillMine);
+            const row = read?.admitted.find((r) => r.message_id === messageId);
+            if (!row || row.sender_hash !== me || row.deleted_flag || !row.content_b64) return null;
+            const decoded = await decryptMessageRow(row, colls);
+            if (!decoded.decrypted || !stillMine()) return null;
+            return (decoded.parts || []).find((p) => p.kind === 'checkpoint') ?? null;
+        });
     };
 
     // ---------- a peer's parts, read in the background ----------
@@ -2100,6 +2136,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         alertingPeers,
         scanCheckpointAlerts,
         refreshCheckpointAlert,
+        checkpointPeers,
+        readCheckpointPart,
         admitMessageRow,
         isMessageAdmitted,
         blockedByOf,

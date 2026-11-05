@@ -96,14 +96,11 @@ const defaultAvatar = '/img/profile.webp';
 const $userPQ = userPQStore();
 const $avatars = useAvatarsStore();
 
-const { account, self } = defineProps({
+const { account } = defineProps({
   account: { type: Object },
-  self: { type: Boolean },
 });
 
-const acc = computed(() => {
-  return self ? { ...$userPQ.currentUser } : account;
-});
+const acc = computed(() => account);
 
 const root = ref(null);
 const onScreen = ref(typeof IntersectionObserver === 'undefined');
@@ -120,12 +117,11 @@ onMounted(() => {
 });
 onBeforeUnmount(() => observer?.disconnect());
 
-// The own account keeps its picture as a data URL. A list of network cards
+// A local account keeps its picture as a data URL. A list of network cards
 // carries no photos: a contact's comes from the cache its dialog left next to
 // the contact.
 const avatarSrc = computed(() => {
   if (typeof acc.value?.avatar === 'string') return acc.value.avatar;
-  if (self) return '';
   const hash = acc.value?.user_hash;
   return $avatars.peerAvatarSrc(hash, { fetch: onScreen.value, fallback: acc.value?.avatar ?? $userPQ.contactsMap?.[hash]?.avatar });
 });

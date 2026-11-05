@@ -1,0 +1,184 @@
+// The design system's building blocks (tokens: tokens.css; reference:
+// docs/design-tokens.md). Global classes with the ui- prefix: a screen puts
+// them on its own elements, and the rows and groups that need markup are
+// components in src/components/ui/.
+
+// Text steps
+.ui-caption { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ui-small { font-size: var(--text-sm); line-height: var(--leading-sm); }
+.ui-body { font-size: var(--text-base); line-height: var(--leading-base); }
+.ui-title-sm { font-size: var(--text-lg); line-height: var(--leading-lg); font-weight: var(--weight-semibold); }
+.ui-title { font-size: var(--text-xl); line-height: var(--leading-xl); font-weight: var(--weight-semibold); }
+.ui-title-lg { font-size: var(--text-2xl); line-height: var(--leading-2xl); font-weight: var(--weight-semibold); }
+.ui-display { font-size: var(--text-3xl); line-height: var(--leading-3xl); font-weight: var(--weight-bold); }
+.ui-secondary { color: var(--color-text-secondary); }
+.ui-muted { color: var(--color-text-muted); }
+.ui-mono { font-family: var(--font-mono); }
+
+// A group's label in a menu: caption, medium, upper case.
+.ui-group-label {
+	font-size: var(--text-xs);
+	line-height: var(--leading-xs);
+	font-weight: var(--weight-medium);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--color-text-muted);
+	padding: 0 var(--space-1);
+	margin: var(--space-6) 0 var(--space-2);
+
+	&._danger { color: var(--color-danger); }
+}
+
+.ui-card {
+	background: var(--color-bg);
+	border-radius: var(--radius-card);
+	box-shadow: var(--shadow-sm);
+}
+
+// Buttons: primary (dark), outline (icon right of the text), text, danger
+// (outline) and danger solid. 44 px high, 52 for the large one. Disabled is
+// 40 % opacity; the reason goes in text under the button.
+.ui-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: var(--space-2);
+	min-height: var(--control-h);
+	padding: 0 var(--space-5);
+	border: 1px solid transparent;
+	border-radius: var(--radius-button);
+	font: inherit;
+	font-size: var(--text-base);
+	line-height: var(--leading-base);
+	font-weight: var(--weight-medium);
+	text-align: center;
+	cursor: pointer;
+	user-select: none;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+	background: var(--color-ink);
+	color: var(--color-text-on-dark);
+
+	&:hover { background: #3a2a3a; }
+	&:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+	&:disabled,
+	&._disabled { opacity: 0.4; pointer-events: none; }
+
+	i { background-color: currentColor; width: 20px; height: 20px; }
+
+	&._outline {
+		background: var(--color-bg);
+		color: var(--color-text);
+		border-color: var(--color-ink);
+		&:hover { background: var(--color-surface); color: var(--color-accent-dark); }
+	}
+
+	&._text {
+		background: transparent;
+		color: var(--color-accent);
+		padding: 0 var(--space-3);
+		&:hover { background: var(--color-surface); color: var(--color-accent-dark); }
+	}
+
+	&._danger {
+		background: var(--color-bg);
+		color: var(--color-danger);
+		border-color: var(--color-danger);
+		&:hover { background: var(--color-danger-bg); }
+	}
+
+	&._danger_solid {
+		background: var(--color-danger);
+		color: var(--color-text-on-dark);
+		&:hover { background: #8f2230; }
+	}
+
+	&._lg { min-height: var(--control-h-lg); }
+	&._block { display: flex; width: 100%; }
+	&._sm { min-height: 36px; padding: 0 var(--space-3); font-size: var(--text-sm); }
+}
+
+// Text fields: label above, hint or error below.
+.ui-field {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-1);
+
+	label { font-size: var(--text-sm); line-height: var(--leading-sm); color: var(--color-text); }
+
+	input,
+	textarea {
+		min-height: var(--control-h);
+		padding: var(--space-2) var(--space-3);
+		border: 1px solid var(--color-border-strong);
+		border-radius: var(--radius-input);
+		background: var(--color-bg);
+		color: var(--color-text);
+		font: inherit;
+		font-size: var(--text-base);
+		line-height: var(--leading-base);
+		outline: none;
+
+		&::placeholder { color: var(--color-text-muted); }
+		&:focus { border: 2px solid var(--color-accent); padding: calc(var(--space-2) - 1px) calc(var(--space-3) - 1px); }
+	}
+
+	._hint { font-size: var(--text-xs); line-height: var(--leading-xs); color: var(--color-text-muted); }
+	._error { font-size: var(--text-xs); line-height: var(--leading-xs); color: var(--color-danger); }
+
+	&._invalid input,
+	&._invalid textarea { border-color: var(--color-danger); }
+}
+
+// Badges: caption on a tint.
+.ui-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	padding: 2px var(--space-2);
+	border-radius: var(--radius-xs);
+	font-size: var(--text-xs);
+	line-height: var(--leading-xs);
+	font-weight: var(--weight-medium);
+	background: var(--color-surface);
+	color: var(--color-text-secondary);
+	white-space: nowrap;
+
+	i { background-color: currentColor; width: 12px; height: 12px; min-width: 12px; }
+
+	&._success { background: var(--color-success-bg); color: var(--color-success); }
+	&._warning { background: var(--color-warning-bg); color: var(--color-warning); }
+	&._danger { background: var(--color-danger-bg); color: var(--color-danger); }
+	&._accent { background: var(--color-accent-tint); color: var(--color-accent-dark); }
+}
+
+// A notice in a card: a tinted block of small text.
+.ui-notice {
+	padding: var(--space-3) var(--space-4);
+	border-radius: var(--radius-input);
+	font-size: var(--text-sm);
+	line-height: var(--leading-sm);
+	background: var(--color-surface);
+	color: var(--color-text-secondary);
+
+	&._warning { background: var(--color-warning-bg); color: var(--color-warning); }
+	&._danger { background: var(--color-danger-bg); color: var(--color-danger); }
+	&._success { background: var(--color-success-bg); color: var(--color-success); }
+}
+
+// Loading: a frame of the same shape, no spinner.
+.ui-skeleton {
+	display: block;
+	border-radius: var(--radius-xs);
+	background: linear-gradient(90deg, #eeebef 0%, #f6f4f7 50%, #eeebef 100%);
+	background-size: 200% 100%;
+	animation: ui-skeleton 1.4s ease-in-out infinite;
+}
+
+@keyframes ui-skeleton {
+	from { background-position: 100% 0; }
+	to { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.ui-skeleton { animation: none; }
+}

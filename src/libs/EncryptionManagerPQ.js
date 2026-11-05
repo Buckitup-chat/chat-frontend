@@ -37,6 +37,7 @@ import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
 import { forgetAccountAvatars } from '@/lib/avatars/localStore';
+import { forgetBackupFileRecord } from '@/lib/backupFileRecord';
 import { forgetPeerGalleryReads, fetchGalleryRow } from '@/lib/avatars/peerGallery';
 import { readSharedGalleryRow, galleryKeyFromB64 } from '@/lib/avatars/sharedGallery';
 import { publishInitialSharedGallery, publishSharedGalleryRecord, avatarsSlotOf } from '@/lib/avatars/sharedGalleryPublish';
@@ -774,12 +775,22 @@ export class EncryptionManagerPQ extends EventTarget {
     } catch (e) {
       console.warn('Could not delete from local-vault', e);
     }
-    // Contacts' thumbnails and the dialogs owed a photo leave with the account.
-    await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
+    await this.#forgetAccountLocalState(userHash);
 
     this.#localUserCards.splice(identityIndex, 1);
     await this.#saveLocalUserCards();
     console.log(`Deleted user vault: ${userHash}`);
+  }
+
+  /** What this device keeps of an account outside its vault leaves with it. */
+  async #forgetAccountLocalState(userHash) {
+    // Contacts' thumbnails and the dialogs owed a photo.
+    await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
+    try {
+      forgetBackupFileRecord(userHash);
+    } catch (e) {
+      console.warn('Could not delete the account\'s backup file record', e);
+    }
   }
 
   /**
@@ -813,6 +824,7 @@ export class EncryptionManagerPQ extends EventTarget {
       }
       await this.#rawStore.remove(`pq-vault-owner-${id}`);
     }
+    await this.#forgetAccountLocalState(userHash);
     if (card) {
       this.#localUserCards = this.#localUserCards.filter((i) => i.user_hash !== userHash);
       await this.#saveLocalUserCards();

@@ -17,47 +17,8 @@
 	text-overflow: ellipsis; // Adds "..." at the end of truncated text
 }
 
-._btn_back {
-	padding: 0.875rem 0.8rem;
-	cursor: pointer;
-	i {
-		margin-top: 0.15rem;
-		height: 1rem;
-		width: 1rem;
-		background-color: $black;
-	}
-}
-
 ._swal_modal_backdrop {
 	z-index: 1056; /* Set your desired z-index */
-}
-
-._sub_menu_btn {
-	display: flex;
-	align-items: center;
-	padding: 0.5rem;
-	width: 100%;
-	cursor: pointer;
-	border-radius: $blockRadiusSm;
-	&:hover {
-		background-color: lighten($black, 90%);
-	}
-	&._selected,
-	&._active {
-		background-color: lighten($black, 85%);
-	}
-	._i_block {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		height: 2.5rem;
-		width: 2.5rem;
-		i {
-			height: 1.8rem;
-			width: 1.8rem;
-		}
-		margin-right: 1rem;
-	}
 }
 
 ._input_block {

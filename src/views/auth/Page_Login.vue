@@ -107,7 +107,6 @@
 	color: #e0d4ff;
 	max-width: 720px;
 	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
-	font-family: system-ui, -apple-system, sans-serif;
 	position: relative;
 	overflow: hidden;
 

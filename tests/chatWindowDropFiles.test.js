@@ -148,9 +148,9 @@ describe('a room, which has no peer and takes no files', () => {
 });
 
 describe('the attach button', () => {
-	it('draws the line paperclip of the UI icon set, not an emoji', () => {
+	it('draws the paperclip of the app\'s own icon set, not an emoji', () => {
 		const w = render();
-		expect(w.find('.attach-btn i.bi.bi-paperclip').exists()).toBe(true);
+		expect(w.find('.attach-btn i._icon_attach').exists()).toBe(true);
 		expect(w.find('.attach-btn').text()).toBe('');
 	});
 });

@@ -16,7 +16,7 @@ import {
 } from '@buckitup/pq-client/handshake';
 import { fromBase64 } from '@buckitup/pq-client/signature';
 import { proveChallenge } from '@buckitup/pq-client/challengeProof';
-import { candidateSelector, expectedRelays, selectAddresses } from '@/lib/data/handshakeAddresses';
+import { candidateSelector, expectedRelays, looksVirtual, selectAddresses } from '@/lib/data/handshakeAddresses';
 import { decode as decodeQwbp, encode as encodeQwbp, type QWBPGatheredCandidate } from 'qwbp';
 import { makeTestIdentity, resignedCard, type TestIdentity } from './helpers/signedFixtures';
 import type { UserCardRow } from '@/lib/data/types';
@@ -262,6 +262,14 @@ describe('the addresses a code offers (§5a)', () => {
 		expect(described(selectAddresses(gathered.filter((c) => c.type === 'host')))).toEqual([
 			'host/host/192.168.1.5', 'host/host/fd00::1', 'host/host/fd00::2', 'host/host/10.0.0.5',
 		]);
+	});
+
+	it('offers the network the phone can reach before the computer\'s virtual ones', () => {
+		// A Mac running OrbStack, as gathered: its Wi-Fi address comes last.
+		const mac = ['192.168.139.3', '192.168.107.0', '192.168.117.0', '192.168.148.0', '192.168.155.0', '192.168.215.0', '172.17.0.1', '192.168.1.103']
+			.map((ip) => at(ip, 'host'));
+		expect(described(selectAddresses(mac))[0]).toBe('host/host/192.168.1.103');
+		expect(['10.0.0.5', '192.168.1.5', '172.32.0.1', 'fd00::1'].filter(looksVirtual)).toEqual([]);
 	});
 
 	it('the relay alone, under the test switch', () => {

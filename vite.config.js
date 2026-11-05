@@ -114,7 +114,6 @@ export default defineConfig(({ command, mode }) => {
 			),
 			API_URL: JSON.stringify(apiBase),
 			IS_PRODUCTION: isProduction,
-			TM_BOT: JSON.stringify(isLocalhost ? 'BuckitUpLocalBot' : 'BuckitUpDemoBot'),
 		},
 		resolve: {
 			alias: {
