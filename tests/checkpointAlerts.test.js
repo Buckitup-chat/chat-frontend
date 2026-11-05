@@ -100,7 +100,7 @@ describe('checkpoint alerts', () => {
 	// registration signing a checkpoint performs.
 	const indexDialog = () => savePointer(me.userHash, dialogHash, {
 		checkpoint: { messageId: M1, viewRoot: 'dvr_x', frontierRoot: 'dfr_x', createdAt: 1 },
-		scannedTo: 0,
+		scannedTo: null,
 	});
 
 	beforeEach(async () => {
@@ -164,6 +164,44 @@ describe('checkpoint alerts', () => {
 		seedKeyRow(); // the key row replicates
 		const found = await store.refreshCheckpointAlert(peer);
 		expect(found).toMatchObject({ changed: false, messageId: CP });
+	});
+
+	// #101: the watermark sits on the newest row the last scan decoded. A
+	// checkpoint signed on another device in that same millisecond, and newer
+	// by id, arrives later; the next scan must still find it, or the dialog
+	// keeps an alert the person already cleared there.
+	it('finds a later-arriving checkpoint in the watermark\'s millisecond', async () => {
+		const M0 = 'dmsg_0192aabb-0000-7000-8000-000000000004';
+		const CP2 = 'dmsg_0192aacc-0000-7000-8000-000000000009'; // CP's millisecond, newer by id
+		const r1 = await row(M1, [{ kind: 'text', text: 'hi' }]);
+		const r0 = await row(M0, [{ kind: 'text', text: 'also here' }]);
+		const cp = await row(CP, [checkpointPart([r1])], { [M1]: r1.sign_hash });
+		seed(r1, r0, cp);
+		expect(await store.refreshCheckpointAlert(peer)).toMatchObject({ changed: true, messageId: CP });
+
+		seed(await row(CP2, [checkpointPart([r1, r0, cp])], { [M1]: r1.sign_hash, [M0]: r0.sign_hash, [CP]: cp.sign_hash }));
+		expect(await store.refreshCheckpointAlert(peer)).toMatchObject({ changed: false, messageId: CP2 });
+	});
+
+	// A rescan from the start (a pointer whose watermark is unset, or was a
+	// millisecond before #101) meets older checkpoints too. While the known
+	// one cannot be read, an older one must not take its place.
+	it('keeps the known checkpoint over an older one while the known one cannot be read', async () => {
+		const CP0 = 'dmsg_0192aabb-0000-7000-8000-000000000005';
+		const r1 = await row(M1, [{ kind: 'text', text: 'hi' }]);
+		const part = checkpointPart([r1]);
+		seed(
+			r1,
+			await row(CP0, [checkpointPart([r1])], { [M1]: r1.sign_hash }),
+			await row(CP, [part], { [M1]: r1.sign_hash }, { content_b64: 'AAAA' }),
+		);
+		await savePointer(me.userHash, dialogHash, {
+			checkpoint: { messageId: CP, viewRoot: part.viewRoot, frontierRoot: part.frontierRoot, createdAt: part.createdAt },
+			scannedTo: null,
+		});
+
+		expect(await store.refreshCheckpointAlert(peer)).toMatchObject({ messageId: CP });
+		expect((await loadPointer(me.userHash, dialogHash)).checkpoint.messageId).toBe(CP);
 	});
 
 	// Roots from other checkpoint semantics are incomparable with locally

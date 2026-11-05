@@ -157,6 +157,17 @@ describe('readPeerParts', () => {
 		expect((await store.readPeerParts(peer.userHash, ['recovery_holding'], { newestMatch: () => true, after: at(3) })).messages.map((m) => m.messageId)).toEqual([at(5)]);
 	});
 
+	it('with after, leaves out what the peer wrote earlier in the same millisecond', async () => {
+		// id(n) share one millisecond; UUIDv7 counts up inside it, so these were written in this order.
+		seed(
+			await message(peer, peerKey, 1, [holding('given_back')]),
+			await message(me, myKey, 2, [{ kind: 'text', text: 'the share' }]),
+		);
+		expect((await store.readPeerParts(peer.userHash, ['recovery_holding'], { newestMatch: () => true, after: id(2) })).messages).toEqual([]);
+		seed(await message(peer, peerKey, 3, [holding('stored')]));
+		expect((await store.readPeerParts(peer.userHash, ['recovery_holding'], { newestMatch: () => true, after: id(2) })).messages.map((m) => m.messageId)).toEqual([id(3)]);
+	});
+
 	it('names a message delivered only on the peer\'s own verified receipt', async () => {
 		seed(await message(me, myKey, 1, [{ kind: 'text', text: 'share' }]), await message(me, myKey, 2, [{ kind: 'text', text: 'other' }]));
 		const forged = receipt(peer, id(2), 'delivered');
