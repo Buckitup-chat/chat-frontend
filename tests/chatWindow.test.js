@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi } from 'vitest';
-import { mount } from '@vue/test-utils';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mount, flushPromises, enableAutoUnmount } from '@vue/test-utils';
 import ChatWindow from '@/components/chat/ChatWindow.vue';
 
 // useBreakpoint and useMenu are plain reactive state and work under jsdom, so
@@ -16,10 +16,11 @@ const message = (over = {}) => ({
 	...over,
 });
 
-const render = (messages) =>
+const render = (messages, opts = {}) =>
 	mount(ChatWindow, {
 		props: { title: 'Peer', messages, reactions: {} },
 		global: { stubs: { Avatar: true } },
+		...opts,
 	});
 
 /** Right-click a bubble to open the context menu. */
@@ -51,6 +52,88 @@ describe('edit failure is visible', () => {
 		const w = render([message({ isMine: true, _syncStatus: 'synced' })]);
 
 		expect(w.find('.sync-status.error').exists()).toBe(false);
+	});
+});
+
+describe('editing a long message', () => {
+	// Mounted with attachTo: a failed assertion must not leave a focused box and document listeners behind.
+	enableAutoUnmount(afterEach);
+
+	const text = 'line\n'.repeat(400);
+	const mine = (id) => message({ id, isMine: true, text: `${id}: ${text}`, _syncStatus: 'synced' });
+	const edit = async (w, index = 0) => {
+		const menu = await openMenu(w, index);
+		await menu.findAll('.context-menu-action').find((b) => b.text() === 'Edit').trigger('click');
+		await flushPromises();
+		return w.find('.message-edit textarea');
+	};
+	const editLong = async () => {
+		const w = render([mine('m1')], { attachTo: document.body });
+		return { w, box: await edit(w) };
+	};
+
+	// The edit box sat in a v-for, so its template ref was an array: focus()
+	// threw and the box opened without a caret.
+	it('opens focused, with the caret after the text', async () => {
+		const { box } = await editLong();
+		expect(document.activeElement).toBe(box.element);
+		expect(box.element.selectionStart).toBe(box.element.value.length);
+		expect(box.element.value).toBe(`m1: ${text}`);
+	});
+
+	// Vue mounts the new box before it unmounts the old one.
+	it('focuses the box of an earlier message when the edit moves to it', async () => {
+		const w = render([mine('m1'), mine('m2')], { attachTo: document.body });
+		await edit(w, 1);
+		const box = await edit(w, 0);
+		expect(w.findAll('.message-edit textarea')).toHaveLength(1);
+		expect(box.element.value).toBe(`m1: ${text}`);
+		expect(document.activeElement).toBe(box.element);
+	});
+
+	it('keeps the bubble wide, and grows the box with its text as it is typed', async () => {
+		const scrollHeight = vi.spyOn(HTMLTextAreaElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+		try {
+			const { w, box } = await editLong();
+			expect(w.find('.message-bubble').classes()).toContain('message-editing');
+			// the CSS caps it at half the screen and scrolls beyond that
+			expect(box.element.style.height).toBe('900px');
+			scrollHeight.mockReturnValue(950);
+			await box.setValue(`${box.element.value}more`);
+			expect(box.element.style.height).toBe('950px');
+		} finally {
+			scrollHeight.mockRestore();
+		}
+	});
+
+	// Right-click and a long press are how text is selected, pasted and spell-checked.
+	it('leaves the browser its own menu in the box, and a long press there opens none of ours', async () => {
+		const { w, box } = await editLong();
+		const right = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+		box.element.dispatchEvent(right);
+		await flushPromises();
+		expect(right.defaultPrevented).toBe(false);
+		expect(w.find('.context-menu').exists()).toBe(false);
+
+		vi.useFakeTimers();
+		try {
+			await box.trigger('touchstart', { touches: [{ clientX: 50, clientY: 60 }] });
+			await vi.advanceTimersByTimeAsync(600);
+			expect(w.find('.context-menu').exists()).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(box.element.value).toBe(`m1: ${text}`);
+	});
+
+	it('is not carried out of view by a message arriving meanwhile', async () => {
+		const { w } = await editLong();
+		const chat = w.find('.chat-body').element;
+		chat.scrollTop = 120;
+		await w.setProps({ messages: [mine('m1'), message({ id: 'm2', text: 'new' })] });
+		await flushPromises();
+		expect(chat.scrollTop).toBe(120);
+		expect(w.find('.message-edit textarea').exists()).toBe(true);
 	});
 });
 
