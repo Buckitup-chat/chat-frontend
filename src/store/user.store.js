@@ -386,16 +386,6 @@ export const userStore = defineStore('user', () => {
 		}
 	};
 
-	async function clearIndexedDB() {
-		return new Promise((resolve, reject) => {
-			let databases = indexedDB.databases();
-			databases.then((dbs) => {
-				let deletions = dbs.map((db) => indexedDB.deleteDatabase(db.name));
-				Promise.all(deletions).then(resolve).catch(reject);
-			});
-		});
-	}
-
 	return {
 		vaults,
 		logout,
@@ -413,7 +403,6 @@ export const userStore = defineStore('user', () => {
 		generateAccount,
 
 		setEncryptionManager,
-		clearIndexedDB,
 
 		accountInfoKeys,
 		contactKeys,
