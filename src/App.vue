@@ -94,7 +94,7 @@
 	position: fixed;
 	top: 0;
 	left: 0;
-	width: 360px;
+	width: 100%;
 	transform: translateX(-100%);
 	transition: transform 0.3s ease;
 
@@ -104,10 +104,10 @@
 
 	@include media-breakpoint-up(md) {
 		position: unset;
+		width: unset;
 		transform: none;
 	}
 
-	box-shadow: 15px 0rem 1rem 0px rgb(0 0 0 / 12%);
 	overflow: hidden;
 }
 

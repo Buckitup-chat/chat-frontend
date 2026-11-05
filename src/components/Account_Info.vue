@@ -75,14 +75,15 @@ import errorMessage from '@/utils/errorMessage';
 import copyToClipboard from '@/utils/copyToClipboard';
 import Avatar from 'vue-boring-avatars';
 import { ALLOWED_IMAGE_TYPES, AVATAR_MAX_SIDE } from '@/lib/avatars/gallery';
+import { MAX_NAME_LENGTH, MAX_NOTES_LENGTH } from '@/lib/profileFields';
 
 const $swal = inject('$swal');
 const $mitt = inject('$mitt');
 const $loader = useLoader();
 const $user = userPQStore();
 
-const maxNameLength = 30;
-const maxNotesLength = 300;
+const maxNameLength = MAX_NAME_LENGTH;
+const maxNotesLength = MAX_NOTES_LENGTH;
 
 const emit = defineEmits(['update', 'avatar-draft']);
 const account = ref();

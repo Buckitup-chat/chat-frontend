@@ -90,10 +90,28 @@ const routes = [
 			},
 
 			{
+				path: 'checkpoints',
+				name: 'account_checkpoints',
+				component: () => import('../views/account/Page_Account_Checkpoints.vue'),
+				meta: { auth: true, name: 'Checkpoints', sub: true },
+			},
+			{
 				path: 'notifications',
 				name: 'account_notifications',
 				component: () => import('../views/account/Page_Account_Notifications.vue'),
 				meta: { auth: true, name: 'Account Notifications', sub: true },
+			},
+			{
+				path: 'storage',
+				name: 'account_storage',
+				component: () => import('../views/account/Page_Account_Storage.vue'),
+				meta: { auth: true, name: 'Storage on this device', sub: true },
+			},
+			{
+				path: 'install',
+				name: 'account_install',
+				component: () => import('../views/account/Page_Account_Install.vue'),
+				meta: { auth: true, name: 'Install app', sub: true },
 			},
 			{
 				path: 'settings',

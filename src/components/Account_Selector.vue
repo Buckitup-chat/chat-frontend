@@ -38,7 +38,7 @@
 		<div class="d-flex w-100" v-if="selected">
 			<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center w-100"
 				v-if="selected.user_hash === $userPQ.currentUser?.user_hash" @click="logout()">
-				<i class="_icon_signout bg-white me-2"></i> Logout
+				<i class="_icon_logout bg-white me-2"></i> Logout
 			</button>
 
 			<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center w-100"

@@ -27,7 +27,6 @@ $_icons: (
 	'reload',
 	'info',
 	'signin',
-	'signout',
 	'eye',
 	'eye_cross',
 	//
@@ -38,7 +37,30 @@ $_icons: (
 	'timer',
 	'notifications',
 	'tag',
-	'unlock'
+	'unlock',
+	'attach',
+	'reply',
+	'arrow_down',
+	// the 2026-10 set: account, devices, backups, notes, the handshake, message states
+	'backup_file',
+	'checkpoint',
+	'device_link',
+	'devices',
+	'guardians',
+	'msg_failed',
+	'msg_pending',
+	'notes',
+	'passkey',
+	'qr_handshake',
+	'share_ios',
+	'venue',
+	'verified',
+	// filled: the selected tab
+	'chats_filled',
+	'contacts_filled',
+	'notes_filled',
+	'profile_filled',
+	'rooms_filled'
 );
 
 @each $name in $_icons {
@@ -50,4 +72,12 @@ $_icons: (
 		display: block;
 		background-color: $black;
 	}
+}
+
+// An icon set inline with text: the text's colour, sitting on its baseline.
+.icon-inline {
+	display: inline-block;
+	vertical-align: -0.15em;
+	margin-right: 0.5rem;
+	background-color: currentColor;
 }

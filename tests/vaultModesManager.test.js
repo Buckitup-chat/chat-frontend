@@ -50,7 +50,6 @@ vi.mock('@/lib/data/userStorage', () => ({
 	putStorageJsonPatch: async () => ({ sync: Promise.resolve({ status: 'synced' }) }),
 	saveStorageJsonPatch: async () => 'synced',
 }));
-vi.mock('@/lib/data/deviceOwner', () => ({ claimDeviceIfUnowned: async () => ({ claim: 'unavailable' }) }));
 const openedHandles = [];
 let legacyVault = null;
 let forgetLegacy = async () => {};
