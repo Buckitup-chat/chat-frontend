@@ -131,11 +131,12 @@ standalone`, or `navigator.standalone` on iOS) and the usage and quota from
 Account → **Storage on this device** (`/account/storage`) shows the status as
 one plain line and, under Details, the probe table: `persisted()`, usage and
 quota, installed, the private-window signals, whether localStorage takes a
-write, whether the account has a
-finished community backup, platform and user agent. Its **Request persistence**
-button calls `persist()` and shows `persisted()` before and after (Firefox
-shows its prompt), and **Copy** puts the table on the clipboard as text, for
-results from real devices.
+write, whether the account has a finished community backup, platform and user
+agent. Its **Request persistence** button calls `persist()` and shows
+`persisted()` before and after (Firefox shows its prompt), and **Copy** puts
+the table on the clipboard as text, for results from real devices. The page's
+row in the account menu says the status in a few words, read each time the
+Account section opens.
 
 The backup shown is the community backup: a finished, not revoked run in the
 account's `recovery_backup` slot, the record Backup Center shows. A file
