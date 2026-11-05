@@ -175,9 +175,12 @@ describe('user_cards offline reload: ShapeStream onError → ready → resolved 
 		expect(coll().status).toBe('ready');
 		expect(coll().toArray).toEqual([]);
 
+		// The stream retries after the 400, and that retry is held: the cards
+		// can only have come from the cache. Whether the retry went out before
+		// they showed is a race; at most the 400 and one retry have.
 		await vi.waitFor(() => expect(names(store)).toEqual(['Alice', 'Bob']));
 		expect(store.userCardsFallback).toBe(true);
-		expect(server.requests.filter((r) => !r.live)).toHaveLength(1);
+		expect(server.requests.filter((r) => !r.live).length).toBeLessThanOrEqual(2);
 
 		await server.recover([ALICE, CAROL]);
 

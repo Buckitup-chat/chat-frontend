@@ -238,6 +238,42 @@ describe('a spare piece', () => {
 	});
 });
 
+describe('what the backup reminder hears', () => {
+	const heard = [];
+	let stop = null;
+	beforeEach(async () => {
+		heard.length = 0;
+		const { onBackupChange } = await import('@/lib/recovery/backupReminder');
+		stop?.();
+		stop = onBackupChange((userHash, kind, change) => heard.push([userHash, kind, change]));
+	});
+
+	it('a revoke the server accepted is a community backup removed, said once', async () => {
+		const store = await loaded(done());
+		await store.revoke();
+		expect(heard.filter(([, , change]) => change === 'removed')).toEqual([[OWNER, 'community', 'removed']]);
+		expect(heard.some(([, , change]) => change === 'made')).toBe(false);
+	});
+
+	it('a revoke the server did not take, or that never reached the record, says nothing', async () => {
+		const store = await loaded(done());
+		em.patchSlotJson.mockRejectedValueOnce(new Error('offline'));
+		await expect(store.revoke()).rejects.toThrow('offline');
+		expect(slots.recovery_backup.run.revokedAt).toBeUndefined();
+		expect(heard).toEqual([]);
+
+		H.onSign = () => (user.currentUserHash = U('z'));
+		await store.revoke();
+		expect(heard).toEqual([]);
+	});
+
+	it('a write onto a registered backup says it is there', async () => {
+		const store = await loaded(done());
+		await store.setPolicy({ delaySec: 86400, windowSec: 2 * 86400 });
+		expect(heard).toEqual([[OWNER, 'community', 'made']]);
+	});
+});
+
 describe('another account signed in during a change', () => {
 	it('sends and writes nothing more for the one that started it', async () => {
 		const store = await loaded(done());

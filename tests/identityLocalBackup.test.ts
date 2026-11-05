@@ -58,7 +58,7 @@ const mountWith = (component: Component, svc: Services, props: Record<string, un
 const openBackupFromIdentity = async (svc: Services) => {
 	const page = mountWith(Page_Account_Info, svc);
 	const button = present(
-		page.findAll('button').find((b) => b.find('i._icon_backups').exists()),
+		page.findAll('button, [role=button]').find((b) => /Download backup file/.test(b.text())),
 		'Identity has a backup button',
 	);
 	await button.trigger('click');

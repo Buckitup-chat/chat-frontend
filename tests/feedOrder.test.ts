@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { feedOrderKey } from '@/lib/data/feedOrder';
+import { v7 } from 'uuid';
+import { compareFeedOrder, feedOrderKey } from '@/lib/data/feedOrder';
 
 // uuidv7 with a chosen ms timestamp: first 12 hex digits are the ms.
 const idAt = (ms: number) => {
@@ -30,5 +31,26 @@ describe('feed order', () => {
 		// an optimistic row stamped at second 2000 sits between ms 1_999_000 and 2_001_000
 		expect(feedOrderKey('opt_x', 2000)).toBeGreaterThan(feedOrderKey(idAt(1999000), 0));
 		expect(feedOrderKey('opt_x', 2000)).toBeLessThan(feedOrderKey(idAt(2001000), 0));
+	});
+
+	// Two sends inside one millisecond share the key. Sorting by the key alone
+	// left them in whatever order the feed's sources listed them, and that
+	// order shifts while placeholders are replaced by their echoes.
+	it('orders two messages written in the same millisecond as they were written', () => {
+		const [first, second] = [0, 1].map((seq) => 'dmsg_' + v7({ msecs: 1788500000000, seq }));
+		expect(feedOrderKey(first, 0)).toBe(feedOrderKey(second, 0));
+		const rows = [{ id: second }, { id: first }];
+		expect(rows.sort((a, b) => compareFeedOrder(a.id, 0, b.id, 0)).map((r) => r.id)).toEqual([first, second]);
+	});
+
+	it('treats an entry as equal to itself', () => {
+		expect(compareFeedOrder(idAt(1000), 0, idAt(1000), 0)).toBe(0);
+	});
+
+	it('leaves a tie that is not between two dmsg_ ids to the input order', () => {
+		expect(compareFeedOrder('opt_msg_10', 5, 'opt_msg_9', 5)).toBe(0);
+		expect(compareFeedOrder(idAt(5000), 0, 'opt_x', 5)).toBe(0);
+		expect(compareFeedOrder(undefined, 5, '', 5)).toBe(0);
+		expect(compareFeedOrder('', 5, undefined, 5)).toBe(0);
 	});
 });

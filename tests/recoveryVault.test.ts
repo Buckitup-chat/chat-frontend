@@ -37,6 +37,8 @@ vi.mock('@/lib/data/userStorage', () => ({
 }));
 
 import { publishVault, fetchVault, VaultLookupError } from '@/lib/recovery/vault';
+import { BackupMismatchError } from '@/lib/backupContents';
+import { recoveryFailureOf } from '@/lib/recovery/passkeyRecovery';
 
 const OWNER = 'u_owner';
 const SIGN_SKEY = new Uint8Array(32).fill(7);
@@ -99,7 +101,16 @@ describe('the vault, published by an account and found by a key', () => {
 	it('refuses a row that opens but is not an account backup', async () => {
 		const s = newWrapKey();
 		await publish(s, '{"hello":1}');
-		await expect(fetchVault(s)).rejects.toThrow(/not an account backup/);
+		const failure = await fetchVault(s).catch((e) => e);
+		expect(failure).toBeInstanceOf(BackupMismatchError);
+		expect(failure.message).toMatch(/not an account backup/);
+		expect(recoveryFailureOf(failure)).toBe('invalid');
+	});
+
+	it('refuses a row that opens but is not JSON, as the same managed failure', async () => {
+		const s = newWrapKey();
+		await publish(s, 'not json');
+		expect(recoveryFailureOf(await fetchVault(s).catch((e) => e))).toBe('invalid');
 	});
 
 	it('is not a backup until the server has it', async () => {

@@ -38,7 +38,7 @@
 		<div class="d-flex w-100" v-if="selected">
 			<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center w-100"
 				v-if="selected.user_hash === $userPQ.currentUser?.user_hash" @click="logout()">
-				<i class="_icon_signout bg-white me-2"></i> Logout
+				<i class="_icon_logout bg-white me-2"></i> Logout
 			</button>
 
 			<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center w-100"
@@ -335,6 +335,12 @@ const signinPQ = async () => {
 				icon: 'error',
 				title: 'Passkey belongs to another account',
 				text: 'Choose the Bitwarden passkey for the selected account and try again.',
+			});
+		} else if (error?.name === 'PrfMissingError') {
+			$swal.fire({
+				icon: 'error',
+				title: 'This passkey did not unlock the account',
+				text: 'The browser or passkey provider in use here does not support the PRF extension this account is locked with. Sign in where it is supported, or restore the account from a backup.',
 			});
 		}
 	}

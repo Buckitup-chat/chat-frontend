@@ -7,6 +7,7 @@
 
 	<QuarantinedWritesBanner v-if="$userPQ.currentUser" />
 	<AccessGateBanner v-if="$userPQ.currentUser" />
+	<PasskeyRecoveryReminder v-if="$userPQ.currentUser && !$restore.active" />
 	<RecoveryAlertBanner v-if="$userPQ.currentUser && !$restore.active" />
 	<RecoveryFinaleBanner v-if="$userPQ.currentUser && !$restore.active" />
 
@@ -93,7 +94,7 @@
 	position: fixed;
 	top: 0;
 	left: 0;
-	width: 360px;
+	width: 100%;
 	transform: translateX(-100%);
 	transition: transform 0.3s ease;
 
@@ -103,10 +104,10 @@
 
 	@include media-breakpoint-up(md) {
 		position: unset;
+		width: unset;
 		transform: none;
 	}
 
-	box-shadow: 15px 0rem 1rem 0px rgb(0 0 0 / 12%);
 	overflow: hidden;
 }
 
@@ -167,6 +168,7 @@ import { useMenu } from '@/composables/useMenu';
 import Loader from './components/Loader.vue';
 import QuarantinedWritesBanner from '@/components/QuarantinedWritesBanner.vue';
 import AccessGateBanner from '@/components/AccessGateBanner.vue';
+import PasskeyRecoveryReminder from '@/components/PasskeyRecoveryReminder.vue';
 import RecoveryAlertBanner from '@/components/RecoveryAlertBanner.vue';
 import RecoverScreen from '@/components/recovery/restore/RecoverScreen.vue';
 import RecoveryFinaleBanner from '@/components/RecoveryFinaleBanner.vue';
@@ -205,6 +207,12 @@ provide('$modal', $modal);
 
 const $swalModal = ref();
 provide('$swalModal', $swalModal);
+
+$userPQ.setLegacyLockConsent(() => $swalModal.value?.open({
+	id: 'confirm',
+	title: 'This passkey cannot lock the account the new way',
+	content: 'Your browser or passkey provider does not support the PRF extension. The account can still be locked with the older method, which keeps the key to this device\'s account data in the passkey\'s account details, where password managers do not guard it as a secret. Continue with the older lock?',
+}) ?? false);
 
 watch(
 	() => $breakpoint.current,

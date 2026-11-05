@@ -1,88 +1,97 @@
 <template>
-	<div class="card mb-3 shadow-sm border-0 cb-card" data-test="community-backup-card">
-		<div class="card-body d-flex flex-column gap-2">
-			<div class="d-flex align-items-center">
-				<svg class="me-3" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#241824" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"></path>
-					<path d="M9 12l2 2 4-4"></path>
-				</svg>
-				<h5 class="card-title mb-0 fw-bold">Community backup</h5>
-			</div>
-
-			<!-- No network to back up on in this build -->
-			<template v-if="state === 'unavailable'">
-				<p class="card-text text-secondary mb-0">{{ ABOUT }}</p>
-				<div class="cb-muted">Not available in this version of the app.</div>
-			</template>
-
-			<template v-else-if="state === 'loading'">
-				<p class="card-text text-secondary mb-0">{{ ABOUT }}</p>
-				<div v-if="loadError" class="cb-muted">
-					Could not read your backup: {{ loadError }}
-					<button class="btn btn-link btn-sm p-0 ms-1 align-baseline" @click="load">Try again</button>
-				</div>
-				<div v-else class="cb-muted"><span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Loading…</div>
-			</template>
-
-			<!-- 1.2: a run that has not finished — the first backup, or the change of a finished one above its health -->
-			<template v-else-if="state === 'unfinished' || state === 'done'">
-				<template v-if="active">
-					<div class="cb-warn" data-test="unfinished">
-						<div class="fw-semibold">{{ unfinishedTitle }}</div>
-						<div class="text-secondary">{{ unfinishedText }}</div>
-					</div>
-					<div class="d-flex gap-2">
-						<button v-if="showDiscard" class="btn btn-outline-dark flex-fill" :disabled="busy" data-test="discard" @click="discard">Discard</button>
-						<button v-if="store.canTakeOver" class="btn btn-outline-dark flex-fill" :disabled="busy" data-test="continue" @click="cont">Show progress</button>
-						<button v-if="store.canTakeOver" class="btn btn-dark flex-fill" :disabled="busy" data-test="take-over" @click="takeOver">Continue on this device</button>
-						<button v-else class="btn btn-dark flex-fill" :disabled="busy" data-test="continue" @click="cont">{{ continueLabel }}</button>
-					</div>
-					<div v-if="actionError" class="cb-field-error">{{ actionError }}</div>
-				</template>
-
-				<!-- Revoked for good: nothing protects the account any more, and a new backup can take its place -->
-				<template v-if="state === 'done' && run.revokedAt">
-					<div class="cb-muted" data-test="revoked">This backup was revoked for good. No recovery can use it.</div>
-					<div class="d-flex gap-2">
-						<button class="btn btn-outline-dark flex-fill" @click="open('manage')">Manage</button>
-						<button class="btn btn-dark flex-fill" :disabled="!!createBlocked" data-test="create-new" @click="open('guardians')">Create a new backup</button>
-					</div>
-					<div v-if="createBlocked" class="text-secondary small" data-test="create-reason">{{ createBlocked }}</div>
-				</template>
-
-				<!-- 1.0 / 1.3: the backup exists -->
-				<template v-else-if="state === 'done'">
-					<HealthLine :view="roster.health" :extra="healthExtra" />
-					<div v-if="roster.prompt && !active" class="cb-warn" data-test="reshare-prompt">
-						<span>{{ roster.prompt.text }}</span>
-						<div><button class="btn btn-sm btn-dark" data-test="reshare-cta" @click="open('reshare')">{{ roster.prompt.action }}</button></div>
-					</div>
-					<div v-if="!outsideAlerts" class="cb-warn" data-test="no-alerts">No alerts. You may not learn about an attempt in time to stop it.</div>
-					<div v-if="!active" class="d-flex gap-2">
-						<button v-if="!outsideAlerts" class="btn btn-outline-dark flex-fill" @click="open('alerts')">Set up alerts</button>
-						<button class="btn btn-dark flex-fill" data-test="manage" @click="open('manage')">Manage</button>
-					</div>
-				</template>
-			</template>
-
-			<!-- 1.1: no backup yet -->
-			<template v-else>
-				<p class="card-text text-secondary mb-0">{{ ABOUT }}</p>
-				<div class="d-flex align-items-center gap-2">
-					<div class="d-flex cb-card-faces">
-						<ContactAvatar v-for="c in agreed.slice(0, 3)" :key="c.userHash" :hash="c.userHash" small />
-						<span v-for="i in Math.max(0, 2 - agreed.length)" :key="`p${i}`" class="cb-card-slot"></span>
-					</div>
-					<span class="small fw-medium" data-test="agreed">{{ agreedText }}</span>
-				</div>
-				<div class="d-flex gap-2">
-					<button class="btn btn-outline-dark flex-fill" @click="open('guardians')">Ask guardians</button>
-					<button class="btn btn-dark flex-fill" :disabled="!!createBlocked" data-test="create" @click="open('guardians')">Create backup</button>
-				</div>
-				<div v-if="createBlocked" class="text-secondary small" data-test="create-reason">{{ createBlocked }}</div>
-			</template>
+	<section class="ui-card cb-card" data-test="community-backup-card">
+		<div class="cb-head">
+			<i class="_icon_guardians"></i>
+			<h2 class="cb-title">Guardians</h2>
+			<button v-if="state === 'done' && !run.revokedAt && !active" type="button" class="ui-btn _text _sm" data-test="manage"
+				@click="open('manage')">Manage</button>
 		</div>
-	</div>
+
+		<!-- No network to back up on in this build -->
+		<template v-if="state === 'unavailable'">
+			<p class="cb-about">{{ ABOUT }}</p>
+			<div class="ui-small ui-muted">Not available in this version of the app.</div>
+		</template>
+
+		<template v-else-if="state === 'loading'">
+			<div v-if="loadError" class="ui-small ui-secondary">
+				Could not read your backup: {{ loadError }}
+				<button type="button" class="ui-btn _text _sm" @click="load">Try again</button>
+			</div>
+			<template v-else>
+				<div class="ui-skeleton cb-skel-line"></div>
+				<div class="ui-skeleton cb-skel-bar"></div>
+				<div class="ui-caption ui-muted">Asking guardians…</div>
+			</template>
+		</template>
+
+		<!-- 1.2: a run that has not finished — the first backup, or the change of a finished one above its health -->
+		<template v-else-if="state === 'unfinished' || state === 'done'">
+			<template v-if="active">
+				<div class="ui-notice _warning cb-notice" data-test="unfinished">
+					<div class="cb-notice-title">{{ unfinishedTitle }}</div>
+					<div>{{ unfinishedText }}</div>
+				</div>
+				<div class="cb-actions">
+					<button v-if="showDiscard" type="button" class="ui-btn _outline" :disabled="busy" data-test="discard" @click="discard">Discard</button>
+					<button v-if="store.canTakeOver" type="button" class="ui-btn _outline" :disabled="busy" data-test="continue" @click="cont">Show progress</button>
+					<button v-if="store.canTakeOver" type="button" class="ui-btn" :disabled="busy" data-test="take-over" @click="takeOver">Continue on this device</button>
+					<button v-else type="button" class="ui-btn" :disabled="busy" data-test="continue" @click="cont">{{ continueLabel }}</button>
+				</div>
+				<div v-if="actionError" class="ui-caption cb-error-text">{{ actionError }}</div>
+			</template>
+
+			<!-- Revoked for good: nothing protects the account any more, and a new backup can take its place -->
+			<template v-if="state === 'done' && run.revokedAt">
+				<div class="ui-small ui-secondary" data-test="revoked">This backup was revoked for good. No recovery can use it.</div>
+				<div class="cb-actions">
+					<button type="button" class="ui-btn _outline" @click="open('manage')">Manage</button>
+					<button type="button" class="ui-btn" :disabled="!!createBlocked" data-test="create-new" @click="open('guardians')">Create a new backup</button>
+				</div>
+				<div v-if="createBlocked" class="ui-caption ui-muted" data-test="create-reason">{{ createBlocked }}</div>
+			</template>
+
+			<!-- 1.0 / 1.3: the backup exists -->
+			<template v-else-if="state === 'done'">
+				<HealthLine :view="roster.health" :extra="healthExtra" />
+				<ul v-if="!active" class="cb-roster">
+					<li v-for="g in roster.rows" :key="g.userHash">
+						<ContactAvatar :hash="g.userHash" small />
+						<span class="cb-roster-name">{{ g.name }}</span>
+						<span class="ui-caption" :class="`cb-state-${rosterTone(g)}`">{{ g.text }}</span>
+					</li>
+				</ul>
+				<div v-if="roster.prompt && !active" class="ui-notice _warning cb-notice" data-test="reshare-prompt">
+					<span>{{ roster.prompt.text }}</span>
+					<div><button type="button" class="ui-btn _sm" data-test="reshare-cta" @click="open('reshare')">{{ roster.prompt.action }}</button></div>
+				</div>
+				<!-- The alerts bot is what lets the owner stop a recovery started from the guardians' pieces. -->
+				<div v-if="!outsideAlerts" class="ui-notice _warning cb-notice" data-test="no-alerts">
+					<span>No alerts. You may not learn about an attempt in time to stop it.</span>
+					<span>{{ BOT_LINE }}</span>
+					<div v-if="!active"><button type="button" class="ui-btn _sm" @click="open('alerts')">Set up alerts</button></div>
+				</div>
+			</template>
+		</template>
+
+		<!-- 1.1: no backup yet -->
+		<template v-else>
+			<p class="cb-about">{{ ABOUT }}</p>
+			<div class="cb-agreed">
+				<div class="cb-card-faces">
+					<ContactAvatar v-for="c in agreed.slice(0, 3)" :key="c.userHash" :hash="c.userHash" small />
+					<span v-for="i in Math.max(0, 2 - agreed.length)" :key="`p${i}`" class="cb-card-slot"></span>
+				</div>
+				<span class="ui-small" data-test="agreed">{{ agreedText }}</span>
+			</div>
+			<div class="cb-actions">
+				<button type="button" class="ui-btn _outline" @click="open('guardians')">Ask guardians</button>
+				<button type="button" class="ui-btn" :disabled="!!createBlocked" data-test="create" @click="open('guardians')">Create backup</button>
+			</div>
+			<div v-if="createBlocked" class="ui-caption ui-muted" data-test="create-reason">{{ createBlocked }}</div>
+			<div class="ui-caption ui-muted">{{ BOT_LINE }}</div>
+		</template>
+	</section>
 </template>
 
 <script setup>
@@ -93,9 +102,13 @@ import { canDiscard, stepNumber, unfinished } from '@/lib/recovery/backupRun';
 import HealthLine from './HealthLine.vue';
 import ContactAvatar from './ContactAvatar.vue';
 import errorMessage from '@/utils/errorMessage';
+import { ALERTS_BOT } from '@/config/recovery';
 import { plural } from '@/lib/recovery/backupPlan';
 import { STEP_LABELS, agoText, alertsText, guardianName, hasOutsideAlerts, rosterView, sparesLeft } from './backupFlow';
 
+// The alerts bot, named where the owner decides about the backup: it is how
+// they learn of a recovery started from the guardians' pieces in time to stop it.
+const BOT_LINE = `@${ALERTS_BOT} on Telegram tells you when someone starts recovering your account from your guardians' pieces, so you can stop it.`;
 const ABOUT = 'Your keys are split between contacts you trust and a few independent nodes. Nobody can open your account alone.';
 
 const store = useRecoveryBackupStore();
@@ -202,32 +215,99 @@ const healthExtra = computed(() => {
 	return outsideAlerts.value ? `${spares} · alerts: ${alertsText(run.value.alerts.channels)}` : spares;
 });
 
+/** A guardian's row colour: a stored piece is good, one on its way pending, one that no longer counts bad. */
+const rosterTone = (g) => (g.lost ? 'bad' : g.state === 'stored' ? 'ok' : 'pending');
+
 const open = (start) => {
 	$modal.value.open({ id: 'community_backup', start });
 };
 </script>
 
 <style lang="scss" scoped>
-@import './tokens';
-@include cb-tokens;
-
 .cb-card {
-	background-color: #f8f9fa;
-	border-radius: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-3);
+	padding: var(--space-4);
+
+	@media (min-width: 768px) {
+		padding: var(--space-4) var(--space-5);
+	}
 }
-.cb-warn {
-	padding: 10px 12px;
-	gap: 2px;
+.cb-head {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+
+	i { width: 22px; height: 22px; background-color: var(--color-text); }
 }
-.cb-card-faces > * + * {
-	margin-left: -6px;
+.cb-title {
+	flex: 1;
+	margin: 0;
+	font-size: var(--text-lg);
+	line-height: var(--leading-lg);
+	font-weight: var(--weight-medium);
+}
+.cb-about {
+	margin: 0;
+	font-size: var(--text-sm);
+	line-height: var(--leading-sm);
+	color: var(--color-text-secondary);
+}
+.cb-notice {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+}
+.cb-notice-title { font-weight: var(--weight-medium); }
+.cb-actions {
+	display: flex;
+	gap: var(--space-2);
+
+	> * { flex: 1; }
+}
+.cb-error-text { color: var(--color-danger); }
+.cb-agreed {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+}
+.cb-card-faces {
+	display: flex;
+	> * + * { margin-left: -6px; }
 }
 .cb-card-slot {
+	display: inline-block;
 	width: 26px;
 	height: 26px;
 	border-radius: 50%;
-	background: #fff;
-	border: 2px dashed #c9c9cc;
-	display: inline-block;
+	background: var(--color-bg);
+	border: 2px dashed var(--color-border-strong);
 }
+.cb-roster {
+	display: flex;
+	flex-direction: column;
+	gap: var(--space-2);
+	margin: 0;
+	padding: 0;
+	list-style: none;
+
+	li {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+	}
+}
+.cb-roster-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.cb-state-ok { color: var(--color-success); }
+.cb-state-pending { color: var(--color-warning); }
+.cb-state-bad { color: var(--color-danger); }
+.cb-skel-line { height: 16px; width: 60%; }
+.cb-skel-bar { height: 8px; }
 </style>

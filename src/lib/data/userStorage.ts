@@ -478,10 +478,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * what identifies the owner's row, and nothing else can.
  *
  * An empty array means nothing is stored there — a legitimate answer meaning
- * this secret has no backup on this server.
+ * this secret has no backup on this server. `anonymous` reads as a client
+ * with no account does, even from a signed-in session (readShapeOnce).
  */
 export async function getPublicStorageRowsByUuid(
-	uuid: string, signal?: AbortSignal,
+	uuid: string, signal?: AbortSignal, { anonymous = false }: { anonymous?: boolean } = {},
 ): Promise<UserStorageRow[]> {
 	// Validation, not sanitization, as with every other identifier this layer
 	// puts in a where clause: encodeURIComponent protects the URL, not the SQL
@@ -494,6 +495,6 @@ export async function getPublicStorageRowsByUuid(
 	// parser runs on a raw shape read, so a tombstone arrives as true, 't', 1
 	// or '1' depending on the hop, and misreading one hands back a vault its
 	// owner deliberately revoked.
-	const rows = await readShapeOnce<UserStorageRow>('user_storage', `uuid='${uuid}'`, signal);
+	const rows = await readShapeOnce<UserStorageRow>('user_storage', `uuid='${uuid}'`, signal, { anonymous });
 	return rows.filter((v) => !wireBool(v.deleted_flag));
 }

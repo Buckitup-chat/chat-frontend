@@ -1,0 +1,48 @@
+/* Design tokens (designer's tokens v1, 2026-10-26). The text scale and where
+ * each step is used: docs/design-tokens.md. Use these values; no sizes, radii
+ * or colours outside them. */
+:root {
+	--font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', 'Helvetica Neue', sans-serif;
+	--font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Roboto Mono', monospace;
+
+	/* text: size / line height */
+	--text-xs: 12px; --leading-xs: 16px; /* caption: times, badges, hints under fields */
+	--text-sm: 14px; --leading-sm: 20px; /* small: second lines, explanations, meta */
+	--text-base: 16px; --leading-base: 24px; /* body: text, messages, menu items, buttons, fields */
+	--text-lg: 18px; --leading-lg: 26px; /* title-sm: card and group titles */
+	--text-xl: 20px; --leading-xl: 28px; /* title: screen title on a phone */
+	--text-2xl: 24px; --leading-2xl: 32px; /* title-lg: screen title on a desktop, large figures */
+	--text-3xl: 30px; --leading-3xl: 38px; /* display: sign-in, final states */
+	--weight-regular: 400; --weight-medium: 500; --weight-semibold: 600; --weight-bold: 700;
+
+	/* spacing, step 4 */
+	--space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 24px;
+	--space-8: 32px; --space-10: 40px; --space-12: 48px; --space-16: 64px;
+
+	/* radii */
+	--radius-xs: 6px; --radius-input: 12px; --radius-button: 12px; --radius-card: 16px; --radius-sheet: 24px;
+	--radius-bubble: 18px; --radius-bubble-tail: 6px; --radius-pill: 999px;
+
+	/* shadows */
+	--shadow-sm: 0 1px 2px rgba(28, 23, 32, 0.06), 0 0 0 1px rgba(28, 23, 32, 0.04);
+	--shadow-md: 0 4px 16px rgba(28, 23, 32, 0.08);
+	--shadow-lg: 0 12px 40px rgba(28, 23, 32, 0.16);
+
+	/* brand */
+	--color-accent: #8e2b77; --color-accent-dark: #611e52; --color-accent-tint: #f7e0f7; --color-ink: #241824;
+	--gradient-brand: linear-gradient(120deg, #4a2a8c 0%, #8e2b77 52%, #d0683a 100%);
+
+	/* text */
+	--color-text: #1c1720; --color-text-secondary: #5c5563; --color-text-muted: #736b79; --color-text-on-dark: #ffffff;
+
+	/* surfaces */
+	--color-bg: #ffffff; --color-surface: #f6f4f7; --color-border: #e6e2e8; --color-border-strong: #cfc9d3;
+
+	/* states: text on a tint / the tint / solid (dots and bars, never under text) */
+	--color-success: #1c6e14; --color-success-bg: #eaf6e7; --color-success-solid: #2ebe21;
+	--color-warning: #8a4f08; --color-warning-bg: #fff3e0; --color-warning-solid: #f0a03c;
+	--color-danger: #b02a37; --color-danger-bg: #fdecee; --color-danger-solid: #dc3545;
+
+	/* controls */
+	--control-h: 44px; --control-h-lg: 52px;
+}

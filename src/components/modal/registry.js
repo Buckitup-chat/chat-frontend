@@ -13,7 +13,7 @@ export const modalRegistry = {
 	add_contact_handshake: {
 		header: false,
 		component: 'Modal_QrHandshake',
-		modalClass: 'modal-md',
+		modalClass: 'modal-lg',
 	},
 	save_contact: {
 		header: false,

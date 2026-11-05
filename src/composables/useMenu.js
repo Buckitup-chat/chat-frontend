@@ -12,14 +12,9 @@ export function useMenu() {
 		isOpen.value = false;
 	};
 
-	const toggle = () => {
-		isOpen.value = !isOpen.value;
-	};
-
 	return {
 		isOpen,
 		open,
 		close,
-		toggle,
 	};
 }
