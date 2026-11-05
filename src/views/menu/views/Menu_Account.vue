@@ -67,6 +67,7 @@ const groups = computed(() => [
 				dot: $dialogs.alertingPeers.size ? 'accent' : '',
 			},
 			{ title: 'Notifications', sub: 'Alerts about recovery attempts', icon: 'notifications', to: { name: 'account_notifications' } },
+			{ title: 'Storage on this device', icon: 'info', to: { name: 'account_storage' } },
 			{ title: 'Install app', sub: 'On your phone or computer', icon: 'buckup_devices', to: { name: 'account_install' } },
 		],
 	},

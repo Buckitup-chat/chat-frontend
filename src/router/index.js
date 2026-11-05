@@ -102,6 +102,12 @@ const routes = [
 				meta: { auth: true, name: 'Account Notifications', sub: true },
 			},
 			{
+				path: 'storage',
+				name: 'account_storage',
+				component: () => import('../views/account/Page_Account_Storage.vue'),
+				meta: { auth: true, name: 'Storage on this device', sub: true },
+			},
+			{
 				path: 'install',
 				name: 'account_install',
 				component: () => import('../views/account/Page_Account_Install.vue'),

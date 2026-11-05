@@ -8,6 +8,7 @@
 // app's it keeps. The installed app opens at the build base, inside the
 // service worker's scope, so it starts with no network.
 import { computed, ref } from 'vue';
+import { isInstalled } from '@/lib/storageStatus';
 import { describeThisDevice } from '@/lib/thisDevice';
 
 interface InstallPromptEvent extends Event {
@@ -30,10 +31,6 @@ export function listenForInstallPrompt(target: Window = window): void {
 		installed.value = true;
 	});
 }
-
-const runningInstalled = (): boolean =>
-	window.matchMedia?.('(display-mode: standalone)').matches === true
-	|| (navigator as Navigator & { standalone?: boolean }).standalone === true;
 
 /**
  * How this browser installs the app:
@@ -60,7 +57,7 @@ export const installModeOf = (
 };
 
 export function useInstallPrompt() {
-	const inApp = runningInstalled();
+	const inApp = isInstalled();
 	const mode = computed(() => installModeOf({
 		inApp, installed: installed.value, offered: offer.value !== null,
 		ua: navigator.userAgent, touchPoints: navigator.maxTouchPoints ?? 0,
