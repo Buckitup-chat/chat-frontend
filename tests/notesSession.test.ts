@@ -44,7 +44,7 @@ const session = async () => {
 		ids: await import('@/lib/data/sessionIdentities'),
 		/** Publishes `signer`'s card as the app does. */
 		publish: (signer: typeof NOTES | typeof PEER, verifiedCard?: (userHash: string) => Promise<string | null>) =>
-			ensureDerivedCard(signer, em.derivedCard(signer), accountKey, verifiedCard),
+			ensureDerivedCard(em.derivedCard(signer), accountKey, verifiedCard),
 		/** The account's notes, derived outside the session: what another device of the account derives. */
 		notes: async () => {
 			const keys = await em.exportVaultKeys();
@@ -105,7 +105,7 @@ describe('the notes identity in the session', () => {
 
 	it('queues a write offline in the account\'s outbox, and replays it after a new sign-in, proven by the notes identity', async () => {
 		await register(A);
-		let { em, publish } = await session();
+		const { em, publish } = await session();
 		const notesHash = em.notesUserHash;
 
 		net.mode = 'offline';
@@ -116,7 +116,6 @@ describe('the notes identity in the session', () => {
 		expect(server.table('user_cards').has(notesHash)).toBe(false);
 
 		await signIn(A);
-		({ em, publish } = await session());
 		goOnline();
 		await vi.waitFor(() => expect(server.table('user_cards').has(notesHash)).toBe(true), { timeout: 15_000, interval: 100 });
 		expect(proofsBy(notesHash).at(-1)).toEqual({ author: notesHash, valid: true });
@@ -179,14 +178,13 @@ describe('a derived card', () => {
 describe('a note peer', () => {
 	it('queued in an earlier session, goes in the next one without the note being opened there', async () => {
 		await register(A);
-		let { em, publish } = await session();
+		const { em, publish } = await session();
 		const peerHash = em.notePeerHash(NOTE_ID);
 		net.mode = 'offline';
 		await publish(PEER).catch(() => {});
 
 		// a new session, which has not looked at the note: it derives the peer from the entry
 		await signIn(A);
-		({ em, publish } = await session());
 		goOnline();
 		await vi.waitFor(() => expect(server.table('user_cards').has(peerHash)).toBe(true), { timeout: 15_000, interval: 100 });
 		expect(proofsBy(peerHash)).toEqual([{ author: peerHash, valid: true }]);

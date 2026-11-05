@@ -256,7 +256,7 @@ interface MutationShape {
 // its owner before a mutation exists to read syncMetadata.relation from.
 export { OWNER_FIELD };
 
-const ownerOf = (mutations: unknown[]): string => {
+export const ownerOf = (mutations: unknown[]): string => {
 	const first = mutations[0] as MutationShape | undefined;
 	const relation = first?.syncMetadata?.relation;
 	if (!relation) return '';

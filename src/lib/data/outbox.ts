@@ -27,9 +27,8 @@
 // is not the goal (metadata access control starts at the backend).
 import { WebLocksLeader } from '@tanstack/offline-transactions';
 import { IndexedDbStore } from './indexedDbStore';
-import { IngestError } from './ingest';
+import { IngestError, ownerOf } from './ingest';
 import { shapeOfTable } from './writeContracts';
-import { authorOf } from './rowVerification';
 import { VaultLockedError, AccountMismatchError } from './keyCustody';
 import { isDerivedSigner, type DerivedSigner } from './sessionIdentities';
 import { createSecureStore, DecryptFailedError, type StringStore } from './secureStore';
@@ -1782,9 +1781,7 @@ export async function pendingCardWrites(userHash: string): Promise<OutboxEntry[]
 
 /** Whose card a user_cards entry writes: an account's queue may hold the cards of identities derived from it too. */
 export function cardOf(entry: OutboxEntry): string | null {
-	if (entry.relation !== 'user_cards') return null;
-	const m = entry.mutations[0] as { modified?: Record<string, unknown>; changes?: Record<string, unknown>; original?: Record<string, unknown> } | undefined;
-	return authorOf('user_cards', { ...m?.original, ...(m?.modified ?? m?.changes) });
+	return entry.relation === 'user_cards' ? ownerOf(entry.mutations) || null : null;
 }
 
 export async function readableOwnEntries(userHash: string): Promise<OutboxEntry[]> {

@@ -781,10 +781,11 @@ export class EncryptionManagerPQ extends EventTarget {
     return this.#openNotes().peerHash(noteId);
   }
 
-  /** The card of a derived identity of the open account (sessionIdentities.ts): its user_hash, and the row signed for a timestamp. */
+  /** The card of a derived identity of the open account (sessionIdentities.ts): its signer, its user_hash, and the row signed for a timestamp. */
   derivedCard(signer) {
     const account = this.#currentUserHash;
     return {
+      signer,
       userHash: this.#derivedSigner(account, signer).userHash,
       // Signed when asked, and only while the session that made it lasts.
       row: (ownerTimestamp) => {
