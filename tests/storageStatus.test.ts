@@ -1,12 +1,8 @@
 // The storage status (src/lib/storageStatus.ts): what a browser says about
 // clearing this origin's data, read through a fake navigator.storage and
 // matchMedia so every branch is reached without a real browser.
-import { describe, it, expect, vi } from 'vitest';
-import { probeStorage, requestPersistence, isInstalled, formatBytes, SMALL_QUOTA_BYTES, type StorageEnv } from '@/lib/storageStatus';
-import { probeRows, probeText } from '@/composables/useStorageStatus';
-
-vi.mock('@/libs/EncryptionManagerPQ', () => ({ EncryptionManagerPQ: { getInstance: () => ({}) } }));
-vi.mock('@/store/recoveryBackup.store', () => ({ BACKUP_SLOT: 'recovery_backup' }));
+import { describe, it, expect } from 'vitest';
+import { probeStorage, requestPersistence, isInstalled, formatBytes, probeRows, probeText, SMALL_QUOTA_BYTES, type StorageEnv } from '@/lib/storageStatus';
 
 const GB = 1024 ** 3;
 
@@ -89,10 +85,18 @@ describe('the storage status', () => {
 		expect(p.privateSignals).toEqual([expect.stringContaining('SecurityError')]);
 	});
 
-	it('is ephemeral when localStorage refuses a write', async () => {
-		const p = await probeStorage(fakeEnv({ localStorage: Object.assign(new Error('quota'), { name: 'QuotaExceededError' }) }));
-		expect(p.status).toBe('ephemeral');
-		expect(p.privateSignals).toEqual([expect.stringContaining('localStorage refused')]);
+	// Storage blocked in the settings or a full localStorage area refuses the write too.
+	it('reports a refused localStorage write without taking it for a private window', async () => {
+		const refused = Object.assign(new Error('the area is full'), { name: 'QuotaExceededError' });
+		const p = await probeStorage(fakeEnv({ localStorage: refused }));
+		expect(p.status).toBe('best-effort');
+		expect(p.privateSignals).toEqual([]);
+		expect(p.localStorage).toBe('refused (QuotaExceededError: the area is full)');
+		expect(Object.fromEntries(probeRows(p, null, null)).localStorage).toBe('refused (QuotaExceededError: the area is full)');
+
+		const small = await probeStorage(fakeEnv({ localStorage: refused, quota: SMALL_QUOTA_BYTES - 1 }));
+		expect(small.status).toBe('ephemeral');
+		expect(small.privateSignals).toEqual([expect.stringMatching(/^quota .* is below /)]);
 	});
 
 	it('does not take a missing file system for a refusing one', async () => {
@@ -164,6 +168,7 @@ describe('the probe table', () => {
 			Quota: '2.0 GB',
 			'Installed (standalone)': 'no',
 			'Private window': 'not detected',
+			localStorage: 'accepts writes',
 			'Community backup': 'not found',
 			'persisted() before persist()': 'no',
 			'persist() answered': 'yes',

@@ -1,18 +1,23 @@
 // @vitest-environment jsdom
 // Account → Storage on this device: the one plain line per storage status, the
 // Details table, the diagnostic persistence request and Copy.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { defineComponent, h } from 'vue';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { defineComponent, h, nextTick } from 'vue';
 import { mount, flushPromises } from '@vue/test-utils';
+import { createPinia, setActivePinia } from 'pinia';
 import type { StorageEnv } from '@/lib/storageStatus';
 
-const H = vi.hoisted(() => ({
-	slot: null as unknown,
-	slotError: null as Error | null,
-	duringLoad: null as (() => void) | null,
-	copied: [] as string[],
-	user: { currentUser: { name: 'Alice' }, currentUserHash: 'u_alice' } as Record<string, unknown>,
-}));
+const H = await vi.hoisted(async () => {
+	// Reactive, as the real store is: the page and the store follow the signed-in account.
+	const { reactive } = await import('vue');
+	return {
+		slot: null as unknown,
+		slotError: null as Error | null,
+		duringLoad: null as (() => void) | null,
+		copied: [] as string[],
+		user: reactive({ currentUser: { name: 'Alice' }, currentUserHash: 'u_alice' }) as Record<string, unknown>,
+	};
+});
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => H.user }));
 vi.mock('@/store/recoveryBackup.store', () => ({ BACKUP_SLOT: 'recovery_backup' }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
@@ -33,13 +38,13 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 vi.mock('@/utils/copyToClipboard', () => ({ default: async (text: string) => (H.copied.push(text), true) }));
 
 const { default: Page } = await import('@/views/account/Page_Account_Storage.vue');
-const { _resetStorageStatusForTests } = await import('@/composables/useStorageStatus');
+const { _useStorageEnvForTests, useStorageStatusStore } = await import('@/store/storageStatus.store');
 
 const FullContentBlock = defineComponent({
 	setup: (_, { slots }) => () => h('div', [slots.header?.(), slots.content?.()]),
 });
 
-const env = (o: { persisted?: boolean; quota?: number; noStorage?: boolean; grants?: boolean; installed?: boolean } = {}): StorageEnv => {
+const env = (o: { persisted?: boolean; quota?: number; noStorage?: boolean; grants?: boolean; installed?: boolean; localStorage?: Error } = {}): StorageEnv => {
 	let persisted = o.persisted ?? false;
 	return {
 		storage: o.noStorage
@@ -50,13 +55,20 @@ const env = (o: { persisted?: boolean; quota?: number; noStorage?: boolean; gran
 					estimate: async () => ({ usage: 1024, quota: o.quota ?? 10 * 1024 ** 3 }),
 				},
 		matchMedia: () => ({ matches: o.installed === true }),
+		localStorage: () => ({
+			setItem: () => {
+				if (o.localStorage) throw o.localStorage;
+			},
+			removeItem: () => {},
+		}),
 		userAgent: 'TestBrowser/1.0',
 		platform: 'TestOS',
 	};
 };
 
 const render = async (fake: StorageEnv) => {
-	_resetStorageStatusForTests(fake);
+	setActivePinia(createPinia());
+	_useStorageEnvForTests(fake);
 	const w = mount(Page, { global: { stubs: { FullContentBlock } } });
 	await flushPromises();
 	return w;
@@ -72,6 +84,7 @@ beforeEach(() => {
 	H.user.currentUserHash = 'u_alice';
 	H.copied = [];
 });
+afterEach(() => _useStorageEnvForTests());
 
 describe('the plain line', () => {
 	it('says the browser will not clear the data when storage is persistent', async () => {
@@ -106,9 +119,28 @@ describe('Details', () => {
 			Quota: '10 GB',
 			'Installed (standalone)': 'no',
 			'Private window': 'not detected',
+			localStorage: 'accepts writes',
 			'Community backup': 'yes',
 			'User agent': 'TestBrowser/1.0',
 		});
+	});
+
+	it('shows a refused localStorage write on its own row, under the line of the status', async () => {
+		const w = await render(env({ persisted: false, localStorage: Object.assign(new Error('the area is full'), { name: 'QuotaExceededError' }) }));
+		expect(lineOf(w)).toBe('This browser may clear your data: install the app or make a backup');
+		expect(rowsOf(w)).toMatchObject({ 'Private window': 'not detected', localStorage: 'refused (QuotaExceededError: the area is full)' });
+	});
+
+	it('reads the backup of the account that signs in next, and never shows the previous one\'s', async () => {
+		H.slot = { run: { step: 'done' } };
+		const w = await render(env());
+		expect(rowsOf(w)['Community backup']).toBe('yes');
+		H.slot = null;
+		H.user.currentUserHash = 'u_bob';
+		await nextTick();
+		expect(rowsOf(w)['Community backup']).toBeUndefined();
+		await flushPromises();
+		expect(rowsOf(w)['Community backup']).toBe('not found');
 	});
 
 	it('does not count a revoked or unfinished backup, and says when the slot cannot be read', async () => {
@@ -125,11 +157,11 @@ describe('Details', () => {
 		H.duringLoad = () => {
 			H.user.currentUserHash = 'u_bob';
 		};
-		const { refreshCommunityBackup, useStorageStatus } = await import('@/composables/useStorageStatus');
-		_resetStorageStatusForTests(env());
-		await refreshCommunityBackup('u_alice');
+		setActivePinia(createPinia());
+		const storage = useStorageStatusStore();
+		await storage.refreshCommunityBackup();
 		H.user.currentUserHash = 'u_alice';
-		expect(useStorageStatus(() => 'u_alice').communityBackup.value).toBeNull();
+		expect(storage.communityBackup).toBeNull();
 	});
 
 	it('Request persistence shows persisted() before and after, and the line follows', async () => {

@@ -20,8 +20,12 @@
 //  - the quota from `estimate()` is very small (below SMALL_QUOTA_BYTES);
 //  - the Origin Private File System refuses to open (Firefox private windows
 //    reject `getDirectory()` with a SecurityError, Safari private windows with
-//    "unknown transient reason");
-//  - localStorage refuses a write.
+//    "unknown transient reason").
+//
+// A refused localStorage write is not one of them: storage blocked in the
+// browser's settings or the origin's full localStorage area refuses it too,
+// and the private windows of current browsers take the write. It is reported
+// on its own.
 //
 // A browser does not grant persistent storage to a private window, so a
 // `persisted()` of true outranks every signal: the signals are then read as
@@ -31,6 +35,9 @@
 // `estimate()` and `getDirectory()`, and writes and removes one localStorage key.
 
 export type StorageStatus = 'persistent' | 'best-effort' | 'ephemeral' | 'unknown';
+
+/** Whether the account has a community backup, as far as this device can read (storageStatus.store.ts). */
+export type CommunityBackupState = 'yes' | 'not found' | 'unknown';
 
 /** Below this quota a window is suspected private. Normal profiles get a share of the free disk, gigabytes on most devices. */
 export const SMALL_QUOTA_BYTES = 120 * 1024 * 1024;
@@ -56,6 +63,8 @@ export interface StorageProbe {
 	installed: boolean;
 	/** Why this looks like a private window; empty when nothing does. */
 	privateSignals: string[];
+	/** What localStorage did with a test write: 'accepts writes', 'refused (…)', or 'unavailable' when there is none to ask. */
+	localStorage: string;
 	userAgent: string;
 	platform: string;
 }
@@ -114,36 +123,38 @@ const readEstimate = async (env: StorageEnv): Promise<{ usage: number | null; qu
 	}
 };
 
-/** The signals of a private window that need no quota; each entry says what was seen. */
-const refusalSignals = async (env: StorageEnv): Promise<string[]> => {
-	const signals: string[] = [];
+/** The file system's refusal to open, a private-window signal; null when it opens or is missing. */
+const fileSystemRefusal = async (env: StorageEnv): Promise<string | null> => {
 	// Missing is not refusing: OPFS arrived in Safari 15.2 and Firefox 111.
-	if (typeof env.storage?.getDirectory === 'function') {
-		try {
-			await env.storage.getDirectory();
-		} catch (e) {
-			signals.push(`file system refused (${messageOf(e)})`);
-		}
+	if (typeof env.storage?.getDirectory !== 'function') return null;
+	try {
+		await env.storage.getDirectory();
+		return null;
+	} catch (e) {
+		return `file system refused (${messageOf(e)})`;
 	}
-	if (env.localStorage) {
-		const key = 'buckitup:storage-probe';
-		try {
-			const store = env.localStorage();
-			store.setItem(key, '1');
-			store.removeItem(key);
-		} catch (e) {
-			signals.push(`localStorage refused (${messageOf(e)})`);
-		}
+};
+
+/** Whether localStorage takes a write; not a private-window signal (above). */
+const localStorageWrite = (env: StorageEnv): string => {
+	if (!env.localStorage) return 'unavailable';
+	const key = 'buckitup:storage-probe';
+	try {
+		const store = env.localStorage();
+		store.setItem(key, '1');
+		store.removeItem(key);
+		return 'accepts writes';
+	} catch (e) {
+		return `refused (${messageOf(e)})`;
 	}
-	return signals;
 };
 
 /** Reads the storage state; asks for nothing. */
 export const probeStorage = async (env: StorageEnv = browserEnv()): Promise<StorageProbe> => {
-	const [persisted, { usage, quota }, refused] = await Promise.all([readPersisted(env), readEstimate(env), refusalSignals(env)]);
+	const [persisted, { usage, quota }, fileSystem] = await Promise.all([readPersisted(env), readEstimate(env), fileSystemRefusal(env)]);
 	const privateSignals = [
 		...(quota !== null && quota < SMALL_QUOTA_BYTES ? [`quota ${formatBytes(quota)} is below ${formatBytes(SMALL_QUOTA_BYTES)}`] : []),
-		...refused,
+		...(fileSystem ? [fileSystem] : []),
 	];
 	return {
 		status: statusOf(persisted, privateSignals),
@@ -152,6 +163,7 @@ export const probeStorage = async (env: StorageEnv = browserEnv()): Promise<Stor
 		quota,
 		installed: isInstalled(env),
 		privateSignals,
+		localStorage: localStorageWrite(env),
 		userAgent: env.userAgent,
 		platform: env.platform,
 	};
@@ -184,3 +196,30 @@ export const formatBytes = (bytes: number): string => {
 	}
 	return `${shown(value, unit)} ${units[unit]}`;
 };
+
+const yesNo = (v: boolean | null): string => (v === null ? 'unavailable' : v ? 'yes' : 'no');
+const bytes = (v: number | null): string => (v === null ? 'unavailable' : formatBytes(v));
+
+/** The probe as label/value rows: the Details table, and the text Copy puts on the clipboard. */
+export const probeRows = (p: StorageProbe, request: PersistRequest | null, communityBackup: CommunityBackupState | null): [string, string][] => {
+	const rows: [string, string][] = [
+		['Status', p.status],
+		['persisted()', yesNo(p.persisted)],
+		['Usage', bytes(p.usage)],
+		['Quota', bytes(p.quota)],
+		['Installed (standalone)', p.installed ? 'yes' : 'no'],
+		['Private window', p.privateSignals.length ? `suspected: ${p.privateSignals.join('; ')}` : 'not detected'],
+		['localStorage', p.localStorage],
+	];
+	if (communityBackup) rows.push(['Community backup', communityBackup]);
+	if (request) {
+		rows.push(['persisted() before persist()', yesNo(request.before)]);
+		rows.push(['persist() answered', request.error ? `failed: ${request.error}` : yesNo(request.granted)]);
+		rows.push(['persisted() after persist()', yesNo(request.after)]);
+	}
+	rows.push(['Platform', p.platform || 'unavailable']);
+	rows.push(['User agent', p.userAgent || 'unavailable']);
+	return rows;
+};
+
+export const probeText = (rows: [string, string][]): string => rows.map(([k, v]) => `${k}: ${v}`).join('\n');

@@ -96,8 +96,8 @@ app calls `persist()` at startup (`src/main.js`) and on each chunk download
 ## The storage status
 
 `src/lib/storageStatus.ts` reads what the browser says about the origin's
-storage; `src/composables/useStorageStatus.ts` keeps the answer, read whenever a
-screen asks. Reading asks for no permission: it calls `persisted()`,
+storage; the `storageStatus` store (`src/store/storageStatus.store.ts`) keeps
+the answer, read whenever a screen asks. Reading asks for no permission: it calls `persisted()`,
 `estimate()` and `getDirectory()`, and writes and removes one localStorage key.
 
 | Status | Meaning | Detection |
@@ -110,16 +110,19 @@ screen asks. Reading asks for no permission: it calls `persisted()`,
 A private window cannot be asked about directly, so the check collects signals:
 a quota from `estimate()` below 120 MiB, the Origin Private File System
 refusing to open (Firefox private windows reject `getDirectory()` with a
-SecurityError, Safari's with "unknown transient reason"), and localStorage
-refusing a write. Any one of them makes the status `ephemeral`, unless
-`persisted()` is true: browsers do not grant persistence to a private window.
+SecurityError, Safari's with "unknown transient reason"). Either one makes the
+status `ephemeral`, unless `persisted()` is true: browsers do not grant
+persistence to a private window. A refused localStorage write is shown on its
+own and is not a signal: storage blocked in the browser's settings or the
+origin's full localStorage area (a few MiB, whatever the free disk) refuses it
+too, and the private windows of current browsers take it.
 
 The heuristic misses and over-reports in known ways:
 
 - current Chromium incognito windows report a normal-looking quota and open
   OPFS, so they read as `best-effort`;
 - a nearly full disk shrinks the quota of a normal window, and a storage error
-  unrelated to privacy refuses OPFS or localStorage: both read as `ephemeral`.
+  unrelated to privacy refuses OPFS: both read as `ephemeral`.
 
 The status comes with whether the app runs installed (`display-mode:
 standalone`, or `navigator.standalone` on iOS) and the usage and quota from
@@ -127,16 +130,17 @@ standalone`, or `navigator.standalone` on iOS) and the usage and quota from
 
 Account → **Storage on this device** (`/account/storage`) shows the status as
 one plain line and, under Details, the probe table: `persisted()`, usage and
-quota, installed, the private-window signals, whether the account has a
+quota, installed, the private-window signals, whether localStorage takes a
+write, whether the account has a
 finished community backup, platform and user agent. Its **Request persistence**
 button calls `persist()` and shows `persisted()` before and after (Firefox
 shows its prompt), and **Copy** puts the table on the clipboard as text, for
 results from real devices.
 
-Whether a backup exists is known only for the community backup: a finished,
-not revoked run in the account's `recovery_backup` slot, the record Backup
-Center shows. A file backup leaves no record — the file is handed to the
-browser's download — so the device cannot tell whether one was made.
+The backup shown is the community backup: a finished, not revoked run in the
+account's `recovery_backup` slot, the record Backup Center shows. A file
+backup is known only from this device's note that it saved one
+(`src/lib/backupFileRecord.ts`); a file saved elsewhere is not known here.
 
 ## A consequence of L2/L3 encryption: data is readable only after login
 
