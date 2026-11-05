@@ -336,6 +336,12 @@ const signinPQ = async () => {
 				title: 'Passkey belongs to another account',
 				text: 'Choose the Bitwarden passkey for the selected account and try again.',
 			});
+		} else if (error?.name === 'PrfMissingError') {
+			$swal.fire({
+				icon: 'error',
+				title: 'This passkey did not unlock the account',
+				text: 'The browser or passkey provider in use here does not support the PRF extension this account is locked with. Sign in where it is supported, or restore the account from a backup.',
+			});
 		}
 	}
 

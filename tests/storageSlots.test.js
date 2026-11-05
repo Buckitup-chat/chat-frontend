@@ -132,7 +132,7 @@ beforeEach(() => {
 
 const login = async () => {
 	const em = new EncryptionManagerPQ();
-	await em.createUserVault({ name: 'Tester' });
+	await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 	return em;
 };
 
@@ -248,9 +248,9 @@ describe('destroying an account on this device', () => {
 	// The temporary account of a recovery, then the recovered one signed in on top of it.
 	const twoAccounts = async () => {
 		const em = new EncryptionManagerPQ();
-		const temp = await em.createUserVault({ name: 'Recovering account' });
+		const temp = await em.createUserVault({ name: 'Recovering account', lock: 'legacy' });
 		await em.saveRecoveryProgress({ v: 1, candidateKey: '0x' + '11'.repeat(32) });
-		await em.createUserVault({ name: 'Me' });
+		await em.createUserVault({ name: 'Me', lock: 'legacy' });
 		const seed = await em.guardianMetaSeed();
 		return { em, temp, seed };
 	};
@@ -276,10 +276,10 @@ describe('destroying an account on this device', () => {
 		expect((await em.getLocalUserCards()).map((c) => c.user_hash)).toContain(temp.user_hash);
 		expect(await vaults.get(temp.vaultId).get('crypt_skey')).toBeDefined();
 
-		clearMode = 'clears';
+		clearMode = 'throws';
 		await em.destroyUserVault({ userHash: 'u_' + 'f'.repeat(128), vaultId: temp.vaultId });
-		expect(vaults.get(temp.vaultId).peek('crypt_skey')).toBeUndefined();
 		expect(await rawStore.get(`local-vault-${temp.vaultId}`)).toBeUndefined();
+		expect(await rawStore.get(`pq-vault-owner-${temp.vaultId}`)).toBeUndefined();
 	});
 });
 
@@ -350,7 +350,7 @@ describe('the recovery vault', () => {
 		onRowWritten = async () => {
 			onRowWritten = null;
 			await em.logout();
-			await em.createUserVault({ name: 'Other' });
+			await em.createUserVault({ name: 'Other', lock: 'legacy' });
 		};
 		await expect(em.publishRecoveryVault(key(), '{}')).rejects.toThrow(/account changed/);
 	});
@@ -442,7 +442,7 @@ describe('a named slot written from more than one place', () => {
 		onRowWritten = async () => {
 			if (switched) return;
 			switched = true;
-			await em.createUserVault({ name: 'Someone else' });
+			await em.createUserVault({ name: 'Someone else', lock: 'legacy' });
 		};
 		const first = em.patchContacts({ mine: { user_hash: 'mine' } });
 		const second = em.patchContacts({ 'also mine': { user_hash: 'also mine' } });
@@ -461,7 +461,7 @@ describe('a named slot written from more than one place', () => {
 		onRowWritten = async () => {
 			if (switched) return;
 			switched = true;
-			await em.createUserVault({ name: 'Someone else' });
+			await em.createUserVault({ name: 'Someone else', lock: 'legacy' });
 		};
 		const [first, second] = await Promise.allSettled([
 			em.patchContacts({ again: { user_hash: 'again' } }),

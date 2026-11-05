@@ -13,7 +13,12 @@ let dialogCache;
 
 const makeVault = (id) => {
 	const data = new Map();
-	return { id, async set(k, v) { data.set(k, v); }, async get(k) { return data.get(k); } };
+	return {
+		id,
+		async set(k, v) { data.set(k, v); },
+		async get(k) { return data.get(k); },
+		async clear() { data.clear(); await rawStore.remove(`local-vault-${id}`); },
+	};
 };
 
 const makeStorage = () => {

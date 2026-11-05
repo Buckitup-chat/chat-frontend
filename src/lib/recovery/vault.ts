@@ -9,7 +9,7 @@
 // public shape rather than an account's collection.
 import { deriveVaultLocator, sealVault, openVault, VaultEnvelopeError } from '@buckitup/pq-client/vaultEnvelope';
 import { putStorageRow, getPublicStorageRowsByUuid } from '@/lib/data/userStorage';
-import { parseBackupContents, type BackupContents } from '@/lib/backupContents';
+import { parseBackupContents, BackupMismatchError, type BackupContents } from '@/lib/backupContents';
 
 // A stalled /shapes request would otherwise hold the restore screen — and the
 // key in memory — until the tab is closed.
@@ -32,16 +32,23 @@ export const publishVault = async (opts: {
 	signSkey: Uint8Array;
 	wrapKey: Uint8Array;
 	json: string;
+	beforeWrite?: () => void;
 }): Promise<string> => {
 	const uuid = deriveVaultLocator(opts.wrapKey);
+	const valueB64 = await sealVault(opts.json, opts.wrapKey);
+	opts.beforeWrite?.();
 	await putStorageRow({
 		userHash: opts.userHash,
 		uuid,
-		valueB64: await sealVault(opts.json, opts.wrapKey),
+		valueB64,
 		hashB64: null,
 		signSkey: opts.signSkey,
 	});
 	return uuid;
+};
+
+export const assertVaultReadableAnonymously = async (wrapKey: Uint8Array): Promise<void> => {
+	await getPublicStorageRowsByUuid(deriveVaultLocator(wrapKey), AbortSignal.timeout(FETCH_TIMEOUT_MS), { anonymous: true });
 };
 
 /**
@@ -66,7 +73,7 @@ export const fetchVault = async (wrapKey: Uint8Array): Promise<BackupContents> =
 		try {
 			return parseBackupContents(JSON.parse(text));
 		} catch (e) {
-			throw new Error('The vault opened, but it is not an account backup.', { cause: e });
+			throw new BackupMismatchError('The vault opened, but it is not an account backup.', { cause: e });
 		}
 	}
 	throw new VaultLookupError('Something is stored at this address, but not under this key.', 'foreign');

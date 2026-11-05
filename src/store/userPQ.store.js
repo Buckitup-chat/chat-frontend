@@ -6,6 +6,8 @@ import { preloadWithRetry } from '@/lib/data/attach';
 import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verifiedCards } from '@/lib/data/userCardsLink';
 import { mergeContactEdit } from '@/lib/data/storageIntent';
 import { contactKeyVouch } from '@buckitup/pq-client/verifyCard';
+import { PrfUnsupportedError, forgetUnusablePasskey } from '@buckitup/pq-client/vaultLock';
+import { assertBackupConsistent } from '@/lib/backupContents';
 
 // Plaintext secrets earlier builds left in localStorage (reapPlaintextKeys).
 const TESTBED_KEYS = ['testbed.guardians', 'testbed.backups'];
@@ -85,6 +87,7 @@ export const userPQStore = defineStore('userPQ', () => {
 
     // Phase 1: local vault registry (fast, offline)
     em.value = EncryptionManagerPQ.getInstance();
+    await em.value.initialize();
     // Every auth transition dispatches authChange: login, logout,
     // createUserVault (logs in), deleteUserVault (logs out if current).
     bindAuthListener(em.value);
@@ -143,12 +146,26 @@ export const userPQStore = defineStore('userPQ', () => {
     showingCachedCards.value = false;
   };
 
+  let legacyLockConsent = null;
+  const setLegacyLockConsent = (ask) => { legacyLockConsent = ask; };
+
+  const withVaultLock = async (lock, run) => {
+    try {
+      return await run(lock);
+    } catch (e) {
+      if (lock !== 'prf' || !(e instanceof PrfUnsupportedError)) throw e;
+      forgetUnusablePasskey(e.credentialId);
+      if (!(await legacyLockConsent?.(e))) throw e;
+      return run('legacy');
+    }
+  };
+
   // A photo chosen at creation is the gallery's first (avatars.store
   // addPhoto), added by the caller once the account exists.
-  const registerNewUser = async ({ name = "Anonymous", notes }) => {
+  const registerNewUser = async ({ name = "Anonymous", notes, lock = 'prf' }) => {
     await initialize();
 
-    const newIdentity = await em.value.createUserVault({ name, notes });
+    const newIdentity = await withVaultLock(lock, (mode) => em.value.createUserVault({ name, notes, lock: mode }));
 
     currentUser.value = newIdentity;
 
@@ -511,25 +528,33 @@ export const userPQStore = defineStore('userPQ', () => {
 
   const exportBackup = async () => {
     if (!em.value) throw new Error('Not signed in.');
-    const keys = await em.value.exportVaultKeys();
-    // The guardian seed travels with the other keys: a restored account or a
-    // linked device derives the same guardian keys.
-    const metaSeed = await em.value.guardianMetaSeed();
-    if (metaSeed) keys.meta_seed = metaSeed;
-    if (!keys.contact_skey) {
-      // A vault restored before contact_skey was carried has none, and an
-      // import refuses a backup without it - so refuse here, before it is
-      // sealed, downloaded or sent.
-      throw new Error('This account has no contact key in its vault and cannot be backed up or linked.');
-    }
-    return {
-      version: 1,
-      identity: currentUser.value,
-      keys
-    };
+    return em.value.exportBackup(currentUser.value);
   };
 
-  const importBackup = async (backupData) => {
+  const changePasskey = async () => {
+    if (!em.value || !currentUser.value || !currentUserHash.value) throw new Error('Sign in before changing the passkey.');
+    const account = currentUserHash.value;
+    let result;
+    try {
+      result = await em.value.rotateVaultPasskey();
+    } catch (e) {
+      if (e instanceof PrfUnsupportedError) forgetUnusablePasskey(e.credentialId);
+      throw e;
+    }
+    if (currentUserHash.value === account) {
+      currentUser.value = { ...currentUser.value, vaultId: result.card.vaultId, vaultLock: 'prf' };
+      await refreshMyLocalUsers();
+    }
+    return result;
+  };
+
+  const hasLocalVault = async (userHash) => {
+    if (!isInitialized.value) await initialize();
+    return em.value.hasLocalVault(userHash);
+  };
+
+  const importBackup = async (backupData, { lock = 'prf' } = {}) => {
+    assertBackupConsistent(backupData);
     if (isAuthenticated.value) {
       await logout();
     }
@@ -538,7 +563,7 @@ export const userPQStore = defineStore('userPQ', () => {
     }
     const { identity, keys } = backupData;
     if (!identity?.name) identity.name = 'Imported Account';
-    const result = await em.value.importVaultKeys(keys, identity);
+    const result = await withVaultLock(lock, (mode) => em.value.importVaultKeys(keys, identity, { lock: mode }));
     // importVaultKeys signs in at the manager level only; the store's side of
     // a session is the same as after login, or the import lands on the login
     // page with no contacts.
@@ -614,7 +639,10 @@ export const userPQStore = defineStore('userPQ', () => {
     getMyUserByHash,
 
     exportBackup,
+    changePasskey,
     importBackup,
+    hasLocalVault,
+    setLegacyLockConsent,
     signContactChallenge,
     signHandshakePQ,
     signedOwnCard,

@@ -31,6 +31,8 @@ import {
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
 } from '@buckitup/pq-client/checkpoint';
 import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
+import { chunkCountOf } from '@buckitup/pq-client/fileCrypto';
+import { uploadDigest, reusableUpload, rememberUpload } from '@/lib/data/uploadReuse';
 import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
 import { openVideo } from '@/lib/data/videoStream';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
@@ -964,15 +966,32 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
 
+        const digest = await uploadDigest(bytes);
+        const existing = await reusableUpload(uploaderHash, digest, fileAvailability).catch((e) => {
+            console.warn('[dialogs] upload reuse unavailable:', e);
+            return null;
+        });
+        if ($userPQ.currentUserHash !== uploaderHash) throw new Error('The account changed while preparing the file');
+
         // The transfer queue mints the pair up front and keeps it for the row's
         // life, so pause/resume re-enter with the same file_id + enc_secret: a
         // fresh secret would make re-sent chunks undecryptable next to the ones
         // already stored (§4.1). A direct call mints its own.
         const prepared = preparedIn ?? prepareUpload((await import('uuid')).v7());
-
-        const up = await uploadFile({
-            bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,
-        });
+        let up = existing;
+        if (up) {
+            signal?.throwIfAborted();
+            const total = chunkCountOf(bytes.length);
+            onProgress?.({ fileId: up.fileId, done: total, total });
+        } else {
+            up = await uploadFile({
+                bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,
+            });
+            const save = () => rememberUpload(uploaderHash, digest, up).catch((e) =>
+                console.warn('[dialogs] uploaded file reference not saved for reuse:', e));
+            if (up.manifestAwaitingApproval) void up.manifestAwaitingApproval.then(save, () => {});
+            else await save();
+        }
 
         const common = {
             name,

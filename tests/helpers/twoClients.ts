@@ -301,7 +301,7 @@ export const startApp = async (client: Client) => {
 };
 export const register = async (client: Client) => {
 	const { store } = await startApp(client);
-	await store.registerNewUser({ name: client.name } as never);
+	await store.registerNewUser({ name: client.name, lock: 'legacy' } as never);
 	client.hash = store.currentUserHash as unknown as string;
 	return client.app;
 };

@@ -13,6 +13,7 @@ vi.mock('@/store/recoveryBackup.store', () => ({ useRecoveryBackupStore: () => H
 // The cards have their own tests; here they would only pull in the crypto stack.
 vi.mock('@/components/recovery/backup/CommunityBackupCard.vue', () => ({ default: { render: () => null } }));
 vi.mock('@/components/recovery/SharesIKeepCard.vue', () => ({ default: { render: () => null } }));
+vi.mock('@/components/recovery/PasskeyRecoveryCard.vue', () => ({ default: { render: () => null } }));
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => ({ currentUser: { user_hash: ME }, currentUserHash: ME }) }));
 
 const { default: Page } = await import('@/views/backup/Page_Backup_Dashboard.vue');

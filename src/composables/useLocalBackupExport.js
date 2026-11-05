@@ -2,6 +2,7 @@ import { ref, computed, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { encryptBackupFile } from '@/lib/backupCrypto';
 import downloadFile from '@/utils/downloadFile';
+import { markFileBackupMade } from '@/lib/recovery/backupReminder';
 import { rememberBackupFileSaved } from '@/lib/backupFileRecord';
 
 // The password policy and the file naming live here rather than in each screen
@@ -84,6 +85,7 @@ export function useLocalBackupExport() {
 			// ten-character password left a two-byte key.
 			const body = password.value ? await encryptBackupFile(json, password.value) : json;
 			downloadFile(body, backupFileName($userPQ.currentUser?.name || 'account', !!password.value), 'text/plain');
+			void markFileBackupMade(vault.identity.user_hash);
 			if ($userPQ.currentUserHash) rememberBackupFileSaved($userPQ.currentUserHash);
 
 			showPassword.value = true;

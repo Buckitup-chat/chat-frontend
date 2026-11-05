@@ -35,6 +35,8 @@
 					<CommunityBackupCard />
 				</div>
 
+				<PasskeyRecoveryCard />
+
 				<!-- The other side of it: pieces of contacts' backups this account keeps. -->
 				<SharesIKeepCard />
 
@@ -159,6 +161,7 @@ import FullContentBlock from '@/components/FullContentBlock.vue';
 import UiRow from '@/components/ui/UiRow.vue';
 import CommunityBackupCard from '@/components/recovery/backup/CommunityBackupCard.vue';
 import SharesIKeepCard from '@/components/recovery/SharesIKeepCard.vue';
+import PasskeyRecoveryCard from '@/components/recovery/PasskeyRecoveryCard.vue';
 import { healthView, isLiveBackup } from '@/components/recovery/backup/backupFlow';
 import { useRecoveryBackupStore } from '@/store/recoveryBackup.store';
 import { userPQStore } from '@/store/userPQ.store';

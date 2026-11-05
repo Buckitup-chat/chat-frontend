@@ -1,6 +1,7 @@
-import { connect, rawStorage } from '@lo-fi/local-vault';
-import '@lo-fi/local-vault/adapter/idb';
-import { removeLocalAccount } from '@lo-fi/local-data-lock';
+import {
+  vaultStorage, createLegacyVault, openLegacyVault, discoverLegacyVault, forgetLegacyLock,
+  createPrfVault, createPrfVaultWithSeed, newPrfVaultId, openPrfVault, dropPrfVault, prfLockOf, isPrfVault,
+} from './accountVault';
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
@@ -31,7 +32,9 @@ import { wireBool } from '@buckitup/pq-client/schema';
 import { obtainGalleryMapping, initialGalleryMapping } from '@/lib/avatars/galleryMapping';
 import { setStorageJsonCodec } from '@/lib/data/storageIntent';
 import { kvGet, kvSet, kvDelete } from '@/lib/data/localStore';
-import { publishVault } from '@/lib/recovery/vault';
+import { publishVault, assertVaultReadableAnonymously } from '@/lib/recovery/vault';
+import { PASSKEY_RECOVERY_SLOT, recoverySalt, renewPasskeyRecoveryAtLogin } from '@/lib/recovery/passkeyRecovery';
+import { assertBackupConsistent } from '@/lib/backupContents';
 import { newMetaSeed } from '@/lib/recovery/guardianInvite';
 import { resetUserStorageCollection } from '@/lib/data/collections';
 import { clearReadCache } from '@/lib/data/readCache';
@@ -41,6 +44,7 @@ import { forgetBackupFileRecord } from '@/lib/backupFileRecord';
 import { forgetPeerGalleryReads, fetchGalleryRow } from '@/lib/avatars/peerGallery';
 import { readSharedGalleryRow, galleryKeyFromB64 } from '@/lib/avatars/sharedGallery';
 import { publishInitialSharedGallery, publishSharedGalleryRecord, avatarsSlotOf } from '@/lib/avatars/sharedGalleryPublish';
+import { forgetAccountUploads } from '@/lib/data/uploadReuse';
 import { clearSessions } from '@/lib/data/readSession';
 import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
@@ -50,46 +54,26 @@ import { createSlotResolver } from '@/lib/data/slots';
 const CONTACT_ACCESS_RETRY_MS = 5_000;
 const CONTACT_ACCESS_RETRY_MAX_MS = 60_000;
 const CONTACT_ACCESS_HURRY_MS = 500;
+const RESTORE_LEFTOVER_PREFIX = 'pq-restore-leftover-';
+const RESTORE_PENDING_PREFIX = 'pq-restore-pending-';
+const PASSKEY_ROTATION_PREFIX = 'pq-passkey-rotation-';
+const TOMBSTONE_VALUE_B64 = 'AA==';
 
-const VAULT_KEY_OPTIONS = {
-  // Only the fields local-data-lock's getLockKey() actually reads survive the
-  // trip (relyingParty*, username/displayName, addNewPasskey, …). WebAuthn
-  // registration options like authenticatorSelection are silently dropped by
-  // the library — they are enforced by the credentials.create wrapper below.
-}
-
-// The vault's lock-key seed lives inside the passkey's userHandle, and only a
-// discoverable (resident) credential returns the userHandle on auth. A
-// server-side credential logs in once — registration still has the seed in
-// memory — and then locks the account out forever with "did not provide a
-// valid encryption/decryption key". Platform authenticators make passkeys
-// discoverable voluntarily, which masks this; security keys and strict
-// implementations do not. local-data-lock gives no way to pass
-// authenticatorSelection through, so it is enforced here: a passkey that
-// cannot hold the seed must fail at registration, not at the next login.
-if (typeof navigator !== 'undefined' && navigator.credentials?.create) {
-  const nativeCreate = navigator.credentials.create.bind(navigator.credentials);
-  navigator.credentials.create = (options) => {
-    if (options?.publicKey && !options.publicKey.authenticatorSelection) {
-      options = {
-        ...options,
-        publicKey: {
-          ...options.publicKey,
-          authenticatorSelection: {
-            residentKey: 'required',
-            requireResidentKey: true,
-            userVerification: 'preferred',
-          },
-        },
-      };
-    }
-    return nativeCreate(options);
-  };
-}
+const withRestoreLock = (run) => {
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  return locks ? locks.request('pq-restore', run) : run();
+};
 
 class VaultKeyError extends Error {}
 
 /** What an account's vault holds that must be gone once it is destroyed (destroyUserVault). */
+export class AccountAlreadyHereError extends Error {
+  constructor() {
+    super('This account is already on this device. Sign in to it instead.');
+    this.name = 'AccountAlreadyHereError';
+  }
+}
+
 export class LocalVaultMissingError extends VaultKeyError {
   constructor() {
     super('This account is listed on this device, but its encrypted keys are missing. Restore it from a backup or another device.');
@@ -139,7 +123,7 @@ export class AccountImportIncompleteError extends Error {
 export class EncryptionManagerPQ extends EventTarget {
   static instance = null;
 
-  #rawStore = rawStorage('idb');
+  #rawStore = vaultStorage();
   #currentVault = null;
 
   #localUserCards = []
@@ -248,15 +232,149 @@ export class EncryptionManagerPQ extends EventTarget {
     return this.#bootstrapUserHash ?? this.#currentUserHash;
   }
 
+  async initialize() {
+    if (typeof this.#rawStore.keys === 'function') {
+      await this.clearPasskeyRotations().catch((e) => console.warn('[EncryptionManagerPQ] passkey-change cleanup will retry:', e));
+    }
+  }
+
   // Vaults Management
 
-  async createUserVault({ name, notes }) {
-    const userVault = await connect({
-      storageType: 'idb',
-      addNewVault: true,
-      keyOptions: { ...VAULT_KEY_OPTIONS, username: name, displayName: name }
-    });
+  async #newVault({ name, lock }) {
+    if (lock === 'legacy') return createLegacyVault({ name });
+    const { vault } = lock === 'prf' ? await createPrfVault({ name }) : await createPrfVaultWithSeed(lock);
+    return vault;
+  }
 
+  clearPasskeyRotations() {
+    return withRestoreLock(() => this.#clearPasskeyRotations());
+  }
+
+  async #clearPasskeyRotations() {
+    const keys = await this.#rawStore.keys();
+    const storedRegistry = await this.#rawStore.get('pq-vaults-registry');
+    const registry = Array.isArray(storedRegistry) ? storedRegistry : [];
+    let remaining = 0;
+    for (const key of keys.filter((value) => value.startsWith(PASSKEY_ROTATION_PREFIX))) {
+      const marker = await this.#rawStore.get(key);
+      if (!marker?.userHash || !marker?.oldVaultId || !marker?.newVaultId) {
+        remaining++;
+        continue;
+      }
+      const card = registry.find((entry) => entry.user_hash === marker.userHash);
+      const discardId = card?.vaultId === marker.newVaultId ? marker.oldVaultId
+        : card?.vaultId === marker.oldVaultId ? marker.newVaultId : null;
+      if (!discardId || this.#currentVault?.id === discardId || registry.some((entry) => entry.user_hash !== marker.userHash && entry.vaultId === discardId)) {
+        remaining++;
+        continue;
+      }
+      try {
+        await this.#clearAccountVault(discardId, 'prf');
+        await this.#rawStore.remove(key);
+      } catch (e) {
+        remaining++;
+        console.warn('[EncryptionManagerPQ] an interrupted passkey change could not be cleared:', e);
+      }
+    }
+    return remaining;
+  }
+
+  rotateVaultPasskey() {
+    return withRestoreLock(() => this.#rotateVaultPasskey());
+  }
+
+  async #rotateVaultPasskey() {
+    const userHash = this.#currentUserHash;
+    const session = currentSessionToken();
+    const oldVault = this.#currentVault;
+    if (!userHash || !this.isAuth || !isPrfVault(oldVault)) throw new Error('Sign in to a PRF-locked account before changing its passkey.');
+    await this.#clearPasskeyRotations();
+    await this.#loadLocalUserCards();
+    const card = this.#localUserCards.find((entry) => entry.user_hash === userHash);
+    if (!card || card.vaultId !== oldVault.id) throw new Error('The account vault changed while preparing its new passkey.');
+    const oldLock = await prfLockOf(oldVault.id);
+    if (!oldLock) throw new LocalVaultMissingError();
+    const newVaultId = newPrfVaultId();
+    const markerKey = `${PASSKEY_ROTATION_PREFIX}${newVaultId}`;
+    const current = () => this.#currentUserHash === userHash && sameSessionToken(session, currentSessionToken()) && this.#currentVault === oldVault;
+    await this.#rawStore.set(markerKey, { userHash, oldVaultId: oldVault.id, newVaultId });
+    let newVault = null;
+    let committed = false;
+    try {
+      const created = await createPrfVault({ name: card.name, vaultId: newVaultId });
+      newVault = created.vault;
+      if (!current()) throw new SessionFencedError('The account changed while creating its new passkey.');
+      if (created.lock.credentialId === oldLock.credentialId) throw new Error('The new passkey is the same credential as the old one.');
+      const values = await oldVault.entries();
+      for (const [name, value] of values) await newVault.set(name, value);
+      for (const [name, value] of values) {
+        if (JSON.stringify(await newVault.get(name)) !== JSON.stringify(value)) throw new Error(`The new vault did not preserve ${name}.`);
+      }
+      if (!current()) throw new SessionFencedError('The account changed while copying its vault.');
+      await this.#rawStore.set(`pq-vault-owner-${newVaultId}`, userHash);
+      const updatedCard = { ...card, vaultId: newVaultId, vaultLock: 'prf' };
+      const cards = this.#localUserCards.map((entry) => entry.user_hash === userHash ? updatedCard : entry);
+      await this.#rawStore.set('pq-vaults-registry', cards);
+      committed = true;
+      this.#localUserCards = cards;
+      this.#currentVault = newVault;
+      this.#loginPasskeyFlags = null;
+      oldVault.lock();
+      try {
+        await this.#clearAccountVault(oldVault.id, 'prf');
+        await this.#rawStore.remove(markerKey);
+      } catch (e) {
+        console.warn('[EncryptionManagerPQ] the old passkey vault will be cleared on next start:', e);
+      }
+      return { card: updatedCard, oldCredentialId: oldLock.credentialId, newCredentialId: created.lock.credentialId };
+    } catch (e) {
+      if (!committed) {
+        try {
+          if (newVault) newVault.lock();
+          await this.#clearAccountVault(newVaultId, 'prf');
+          await this.#rawStore.remove(markerKey);
+        } catch (cleanupError) {
+          e.cleanupError = cleanupError;
+          console.warn('[EncryptionManagerPQ] the new passkey vault will be cleared on next start:', cleanupError);
+        }
+      }
+      throw e;
+    }
+  }
+
+  async #openVault(vaultId, mode) {
+    const lock = await prfLockOf(vaultId);
+    if (mode === 'prf' || lock) {
+      if (!lock) throw new LocalVaultMissingError();
+      return openPrfVault(vaultId, lock);
+    }
+    return openLegacyVault(vaultId);
+  }
+
+  async createUserVault({ name, notes, lock = 'prf' }) {
+    const userVault = await this.#newVault({ name, lock });
+    let identity;
+    try {
+      identity = await this.#writeNewAccount(userVault, name);
+    } catch (e) {
+      await this.#lockUnlessCurrent(userVault);
+      throw e;
+    }
+    const userHash = identity.user_hash;
+    try {
+      await this.#pushOwnCard({ ...identity, name }, { bootstrap: 'register' });
+    } catch (e) {
+      await this.#abortBootstrap();
+      throw e;
+    }
+    this.#activateSession(userHash, identity);
+
+    await this.updateUserStorage({ name, notes });
+
+    return this.#localUserCards.find(i => i.user_hash === userHash);
+  }
+
+  async #writeNewAccount(userVault, name) {
     const seed = randomBytes(32);
 
     const { publicKey: signPubKey, secretKey: signSkey } = ml_dsa87.keygen(seed);
@@ -287,6 +405,7 @@ export class EncryptionManagerPQ extends EventTarget {
     const identity = {
       user_hash: userHash,
       vaultId: userVault.id,
+      vaultLock: isPrfVault(userVault) ? 'prf' : 'legacy',
       name,
       sign_pkey: arrayToBase64(signPubKey),
       crypt_pkey: cryptPubKeyB64,
@@ -306,18 +425,13 @@ export class EncryptionManagerPQ extends EventTarget {
     // sealed with them), the card is published and accepted, and only then is
     // the session activated — the UI never sees an account whose prerequisite
     // card the server does not have yet.
-    await this.#openForBootstrap(userHash);
-    try {
-      await this.#pushOwnCard({ ...identity, name }, { bootstrap: 'register' });
-    } catch (e) {
-      await this.#abortBootstrap();
-      throw e;
-    }
-    this.#activateSession(userHash, identity);
+    await this.#openForBootstrap(userHash, userVault);
+    return identity;
+  }
 
-    await this.updateUserStorage({ name, notes });
-
-    return this.#localUserCards.find(i => i.user_hash === userHash);
+  async #lockUnlessCurrent(vault) {
+    if (this.#currentVault === vault) return;
+    try { await vault.lock?.(); } catch {}
   }
 
   async #connectToUserVault(vaultId) {
@@ -325,11 +439,7 @@ export class EncryptionManagerPQ extends EventTarget {
       return this.#currentVault;
     }
 
-    this.#currentVault = await connect({
-      vaultID: vaultId,
-      storageType: 'idb',
-      keyOptions: VAULT_KEY_OPTIONS
-    });
+    this.#currentVault = await this.#openVault(vaultId);
 
     return this.#currentVault;
   }
@@ -347,10 +457,16 @@ export class EncryptionManagerPQ extends EventTarget {
       await this.logout();
     }
 
+    const recovery = { salt: recoverySalt(), prf: null, flags: null };
+    const dropRecovery = () => {
+      recovery.prf?.fill(0);
+      recovery.prf = null;
+    };
     let identity;
     try {
-      identity = await this.#openAccountLocally(userHash);
+      identity = await this.#openAccountLocally(userHash, null, recovery);
     } catch (e) {
+      dropRecovery();
       if (e instanceof VaultKeyError) {
         // isAuth is currentUserHash && signSkey: leaving the hash set with the
         // key gone would strand the app half-logged-in — and this is the one
@@ -369,10 +485,13 @@ export class EncryptionManagerPQ extends EventTarget {
       const card = await this.#passBootstrapCard(userHash, { mode: 'sign-in', card: identity, deferDelivery: true });
       if (card === 'deferred') throw new LoginDeferredError(userHash);
     } catch (e) {
+      dropRecovery();
       await this.#abortBootstrap();
       throw e;
     }
     this.#activateSession(userHash, identity);
+    this.#loginPasskeyFlags = recovery.flags;
+    this.#renewPasskeyRecoveryAfterLogin(recovery);
     return identity;
   }
 
@@ -472,7 +591,7 @@ export class EncryptionManagerPQ extends EventTarget {
     }
   }
 
-  async #openAccountLocally(userHash) {
+  async #openAccountLocally(userHash, madeVault = null, recovery = null) {
     await this.#loadLocalUserCards();
 
     const identity = this.#localUserCards.find(i => i.user_hash === userHash);
@@ -485,9 +604,16 @@ export class EncryptionManagerPQ extends EventTarget {
     const vaultEntry = identity.vaultId
       ? await this.#rawStore.get(`local-vault-${identity.vaultId}`)
       : null;
-    const discoverVault = !vaultEntry?.accountID || !vaultEntry?.data;
+    const prfLock = await prfLockOf(identity.vaultId);
+    const prfAccount = identity.vaultLock === 'prf' || !!prfLock;
+    if (prfAccount && (!vaultEntry?.data || !prfLock)) throw new LocalVaultMissingError();
+    const discoverVault = !prfAccount && (!vaultEntry?.accountID || !vaultEntry?.data);
     let vault;
-    if (discoverVault) {
+    if (madeVault && madeVault.id === identity.vaultId) {
+      vault = madeVault;
+    } else if (prfAccount) {
+      vault = await openPrfVault(identity.vaultId, prfLock, { recovery });
+    } else if (discoverVault) {
       const vaultKeys = await this.#rawStore.keys();
       const [legacyCards, legacyCurrentVaultId] = await Promise.all([
         this.#rawStore.get('vaults-registry'),
@@ -509,48 +635,53 @@ export class EncryptionManagerPQ extends EventTarget {
         key,
         entry: await this.#rawStore.get(key),
         owner: await this.#rawStore.get(`pq-vault-owner-${key.slice('local-vault-'.length)}`),
-      })))).filter(({ entry, owner }) => entry?.accountID && entry?.data && (owner === userHash || owner == null));
+        prf: await prfLockOf(key.slice('local-vault-'.length)),
+      })))).filter(({ entry, owner, prf }) => entry?.accountID && entry?.data && !prf && (owner === userHash || owner == null));
       if (!candidates.length) throw new LocalVaultMissingError();
       try {
         vault = candidates.length === 1
-          ? await connect({ vaultID: candidates[0].key.slice('local-vault-'.length), storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS })
-          : await connect({ storageType: 'idb', discoverVault: true, keyOptions: VAULT_KEY_OPTIONS });
+          ? await openLegacyVault(candidates[0].key.slice('local-vault-'.length))
+          : await discoverLegacyVault();
       } catch (e) {
         if (e?.message?.startsWith('No matching vault found in storage')) throw new LocalVaultMissingError();
         throw e;
       }
     } else {
-      vault = await connect({ vaultID: identity.vaultId, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS });
+      vault = await openLegacyVault(identity.vaultId);
     }
 
-    const signSkey = this.#normalizeKey(await vault.get('sign_skey'));
-    const cryptSkey = this.#normalizeKey(await vault.get('crypt_skey'));
-    const evmSkey = await vault.get('evm_skey');
-    const contactSkey = await vault.get('contact_skey');
+    let signSkey, cryptSkey, evmSkey, contactSkey;
+    try {
+      signSkey = this.#normalizeKey(await vault.get('sign_skey'));
+      cryptSkey = this.#normalizeKey(await vault.get('crypt_skey'));
+      evmSkey = await vault.get('evm_skey');
+      contactSkey = await vault.get('contact_skey');
 
-    if (discoverVault) {
-      const discoveredEntry = await this.#rawStore.get(`local-vault-${vault.id}`);
-      if (!discoveredEntry?.accountID || !discoveredEntry?.data) throw new LocalVaultMissingError();
-    }
-    if (!(signSkey instanceof Uint8Array)) {
-      if (discoverVault) throw new LocalVaultMissingError();
-      throw new VaultKeyError('Failed to load secret key from vault');
-    }
+      if (discoverVault) {
+        const discoveredEntry = await this.#rawStore.get(`local-vault-${vault.id}`);
+        if (!discoveredEntry?.accountID || !discoveredEntry?.data) throw new LocalVaultMissingError();
+      }
+      if (!(signSkey instanceof Uint8Array)) {
+        if (discoverVault) throw new LocalVaultMissingError();
+        throw new VaultKeyError('Failed to load secret key from vault');
+      }
 
-    // The card's vault ID is only a pointer: a stale or swapped one opens a
-    // vault that holds another account's keys. Signing in on those keys would
-    // sign this account's writes with a key its card does not carry, so the
-    // binding is checked on every path, not only when the vault is discovered.
-    if (!this.#signKeyMatchesIdentity(signSkey, identity)) {
-      try { await vault.lock?.(); } catch { /* The account binding still fails. */ }
-      throw new AccountPasskeyMismatchError();
-    }
-    if (discoverVault) {
-      identity.vaultId = vault.id;
-      await this.#saveLocalUserCards();
-      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
-    } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`))) {
-      await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
+      // The card's vault ID is only a pointer: a stale or swapped one opens a
+      // vault that holds another account's keys. Signing in on those keys would
+      // sign this account's writes with a key its card does not carry, so the
+      // binding is checked on every path, not only when the vault is discovered.
+      if (!this.#signKeyMatchesIdentity(signSkey, identity)) throw new AccountPasskeyMismatchError();
+
+      if (discoverVault) {
+        identity.vaultId = vault.id;
+        await this.#saveLocalUserCards();
+        await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
+      } else if (!(await this.#rawStore.get(`pq-vault-owner-${vault.id}`))) {
+        await this.#rawStore.set(`pq-vault-owner-${vault.id}`, userHash);
+      }
+    } catch (e) {
+      await this.#lockUnlessCurrent(vault);
+      throw e;
     }
 
     this.#currentVault = vault;
@@ -590,11 +721,11 @@ export class EncryptionManagerPQ extends EventTarget {
   // sealed for one account at a time. The outbox session is started for the
   // account (its card goes out through the outbox) without the general drain
   // or intent recovery, which wait for #activateSession.
-  async #openForBootstrap(userHash) {
+  async #openForBootstrap(userHash, madeVault) {
     if (this.#currentUserHash !== null) await this.logout();
     this.#slotResolver = null;
     resetUserStorageCollection();
-    const identity = await this.#openAccountLocally(userHash);
+    const identity = await this.#openAccountLocally(userHash, madeVault);
     startLeaderElection(userHash, () => {});
     return identity;
   }
@@ -611,8 +742,13 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#evmSkey = null;
     this.#contactSkey = null;
     this.#metaSeed = null;
-    this.#currentVault = null;
+    this.#lockCurrentVault();
     this.#bootstrapUserHash = null;
+  }
+
+  #lockCurrentVault() {
+    if (isPrfVault(this.#currentVault)) this.#currentVault.lock();
+    this.#currentVault = null;
   }
 
   // Replays the durable outbox for the logged-in account: once right away,
@@ -730,9 +866,10 @@ export class EncryptionManagerPQ extends EventTarget {
     this.#evmSkey = null;
     this.#contactSkey = null;
     this.#metaSeed = null;
+    this.#loginPasskeyFlags = null;
     this.#currentUserHash = null;
     this.#bootstrapUserHash = null;
-    this.#currentVault = null;
+    this.#lockCurrentVault();
     // Slot addresses and the storage shape belong to the account that just
     // left; carrying either into the next login would point at its rows.
     this.#slotResolver = null;
@@ -760,25 +897,10 @@ export class EncryptionManagerPQ extends EventTarget {
       await this.logout();
     }
 
-    try {
-      const vaultId = identity.vaultId;
-      const vaultData = await this.#rawStore.get(`local-vault-${vaultId}`);
-      
-      const vaultToClear = await this.#connectToUserVault(vaultId);
-      await vaultToClear.clear();
-
-      if (vaultData && vaultData.accountID) {
-        removeLocalAccount(vaultData.accountID);
-      }
-      await this.#rawStore.remove(`local-vault-${vaultId}`);
-      await this.#rawStore.remove(`pq-vault-owner-${vaultId}`);
-    } catch (e) {
-      console.warn('Could not delete from local-vault', e);
-    }
+    if (identity.vaultId) await this.#clearAccountVault(identity.vaultId, identity.vaultLock ?? 'legacy');
     await this.#forgetAccountLocalState(userHash);
 
-    this.#localUserCards.splice(identityIndex, 1);
-    await this.#saveLocalUserCards();
+    await this.#removeLocalUserCard(userHash);
     console.log(`Deleted user vault: ${userHash}`);
   }
 
@@ -786,6 +908,7 @@ export class EncryptionManagerPQ extends EventTarget {
   async #forgetAccountLocalState(userHash) {
     // Contacts' thumbnails and the dialogs owed a photo.
     await forgetAccountAvatars(userHash).catch((e) => console.warn('Could not delete the account\'s photo records', e));
+    await forgetAccountUploads(userHash).catch((e) => console.warn('Could not delete the account\'s upload references', e));
     try {
       forgetBackupFileRecord(userHash);
     } catch (e) {
@@ -797,38 +920,55 @@ export class EncryptionManagerPQ extends EventTarget {
    * Destroys an account on this device for good, or throws: its vault — the
    * keys, crypt_skey among them, and anything else kept beside them, such as a
    * recovery's candidate key — is cleared, and its row checked to be gone,
-   * before the account's card goes. A vault that does not clear
-   * leaves both in place, so the caller can try again; with `vaultId` it is
-   * found even once the card is gone. The account signed in now, if another,
-   * keeps its own vault open.
+   * before the account's card goes. A step that fails leaves the card in
+   * place, so the caller can try again; with `vaultId` the vault is found
+   * even once the card is gone, and its mode is then read from its lock record
+   * alone (#clearAccountVault). The account signed in now, if another, keeps
+   * its own vault open.
    */
   async destroyUserVault({ userHash, vaultId = null }) {
     await this.#loadLocalUserCards();
     const card = this.#localUserCards.find((i) => i.user_hash === userHash);
     const id = vaultId ?? card?.vaultId ?? null;
     if (this.#currentUserHash === userHash) await this.logout();
-    if (id) {
-      const stored = await this.#rawStore.get(`local-vault-${id}`);
-      if (stored) {
-        const vault = this.#currentVault?.id === id
-          ? this.#currentVault
-          : await connect({ vaultID: id, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS });
-        await vault.clear();
-        // A cleared vault has no row left; reading one would write an empty row
-        // back and ask for a passkey, so the row is what is checked.
-        if ((await this.#rawStore.get(`local-vault-${id}`)) != null) {
-          throw new Error('The account\'s vault on this device did not clear.');
-        }
-        if (stored.accountID) removeLocalAccount(stored.accountID);
-        if (this.#currentVault?.id === id) this.#currentVault = null;
-      }
-      await this.#rawStore.remove(`pq-vault-owner-${id}`);
-    }
+    if (id) await this.#clearAccountVault(id, card?.vaultId === id ? (card.vaultLock ?? 'legacy') : null);
     await this.#forgetAccountLocalState(userHash);
-    if (card) {
-      this.#localUserCards = this.#localUserCards.filter((i) => i.user_hash !== userHash);
-      await this.#saveLocalUserCards();
+    if (card) await this.#removeLocalUserCard(userHash);
+  }
+
+  async #clearAccountVault(vaultId, vaultLock) {
+    const stored = await this.#rawStore.get(`local-vault-${vaultId}`);
+    const open = this.#currentVault?.id === vaultId ? this.#currentVault : null;
+    const prf = vaultLock === 'prf' || !!(await prfLockOf(vaultId));
+    if (prf) {
+      await dropPrfVault(vaultId, open);
+    } else if (stored && vaultLock === 'legacy') {
+      await (open ?? await openLegacyVault(vaultId)).clear();
+    } else if (stored) {
+      await this.#rawStore.remove(`local-vault-${vaultId}`);
     }
+    // A cleared vault has no row left; reading one would write an empty row
+    // back and ask for a passkey, so the row is what is checked.
+    if ((await this.#rawStore.get(`local-vault-${vaultId}`)) != null) {
+      throw new Error('The account\'s vault on this device did not clear.');
+    }
+    if (open) this.#currentVault = null;
+    if (!prf && stored?.accountID && stored.accountID !== vaultId) await this.#forgetLegacyLock(stored.accountID);
+    await this.#rawStore.remove(`pq-vault-owner-${vaultId}`);
+  }
+
+  async #forgetLegacyLock(accountID) {
+    try {
+      await forgetLegacyLock(accountID);
+    } catch (e) {
+      console.warn('[vault] local-data-lock\'s record of the legacy passkey could not be removed', e);
+    }
+  }
+
+  async #removeLocalUserCard(userHash) {
+    const remaining = this.#localUserCards.filter((i) => i.user_hash !== userHash);
+    await this.#rawStore.set('pq-vaults-registry', remaining);
+    this.#localUserCards = remaining;
   }
 
   #normalizeKey(key) {
@@ -863,12 +1003,33 @@ export class EncryptionManagerPQ extends EventTarget {
     try {
       const data = await this.#rawStore.get('pq-vaults-registry');
 
-      this.#localUserCards = Array.isArray(data) ? data : [];
+      this.#localUserCards = await this.#withoutFailedRestores(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Failed to load local user cards:', err);
 
       this.#localUserCards = [];
     }
+  }
+
+  async #failedRestoreMark(vaultId) {
+    try {
+      const leftover = await this.#rawStore.get(`${RESTORE_LEFTOVER_PREFIX}${vaultId}`);
+      if (leftover) return leftover;
+      const pending = await this.#rawStore.get(`${RESTORE_PENDING_PREFIX}${vaultId}`);
+      return pending?.failed ? pending : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async #withoutFailedRestores(cards) {
+    const shown = [];
+    for (const card of cards) {
+      const mark = card.vaultId ? await this.#failedRestoreMark(card.vaultId) : null;
+      if (mark?.userHash !== card.user_hash) shown.push(card);
+      else if (mark.replacedCard) shown.push(mark.replacedCard);
+    }
+    return shown;
   }
 
   async #saveLocalUserCards() {
@@ -1040,7 +1201,12 @@ export class EncryptionManagerPQ extends EventTarget {
     };
   }
 
-  async importVaultKeys(keys, identity) {
+  async importVaultKeys(keys, identity, { lock = 'prf' } = {}) {
+    if (typeof lock === 'object') return withRestoreLock(() => this.#importVaultKeys(keys, identity, { lock, locked: true }));
+    return this.#importVaultKeys(keys, identity, { lock, locked: false });
+  }
+
+  async #importVaultKeys(keys, identity, { lock, locked }) {
     if (!keys.evm_skey) {
       throw new Error('EVM key missing from backup. Cannot safely restore account.');
     }
@@ -1051,28 +1217,139 @@ export class EncryptionManagerPQ extends EventTarget {
     if (!keys.contact_skey) {
       throw new Error('Contact key missing from backup. Cannot safely restore account.');
     }
+    assertBackupConsistent({ identity, keys });
 
     const signSkey = new Uint8Array(atob(keys.sign_skey).split('').map(c => c.charCodeAt(0)));
     const cryptSkey = new Uint8Array(atob(keys.crypt_skey).split('').map(c => c.charCodeAt(0)));
 
+    await (locked ? this.#clearRestoreLeftovers() : this.clearRestoreLeftovers())
+      .catch((e) => console.warn('[EncryptionManagerPQ] a failed restore\'s vault could not be cleared:', e));
     await this.#loadLocalUserCards();
     const existing = this.#localUserCards.find(i => i.user_hash === identity.user_hash);
     // A registry card can outlive its encrypted vault (for example after an
     // older client cleared all local-vault entries). A backup supplies the
     // missing private keys, so create a fresh passkey-protected vault instead
     // of trying to connect to the empty row that local-vault auto-created.
-    const existingVault = existing?.vaultId
-      ? await this.#rawStore.get(`local-vault-${existing.vaultId}`)
-      : null;
-    const reuseExistingVault = !!existingVault?.accountID && !!existingVault?.data;
+    const reuseExistingVault = await this.#holdsVault(existing);
+    if (reuseExistingVault && typeof lock === 'object') throw new AccountAlreadyHereError();
     const userVault = reuseExistingVault
-      ? await connect({ vaultID: existing.vaultId, storageType: 'idb', keyOptions: VAULT_KEY_OPTIONS })
-      : await connect({
-        storageType: 'idb',
-        addNewVault: true,
-        keyOptions: { ...VAULT_KEY_OPTIONS, username: identity.name, displayName: identity.name }
-      });
+      ? await this.#openVault(existing.vaultId, existing.vaultLock)
+      : await this.#newVault({ name: identity.name, lock });
+    const restoring = !reuseExistingVault && typeof lock === 'object';
+    const replacedCard = existing ? { ...existing } : null;
+    const undoFailedRestore = restoring
+      ? this.#restoreUndoer(userVault.id, identity.user_hash, replacedCard)
+      : async () => [];
+    const failWith = async (e) => {
+      const undoFailures = await undoFailedRestore();
+      if (undoFailures.length) e.undoFailures = undoFailures;
+      return e;
+    };
+    try {
+      if (restoring) await this.#rawStore.set(`${RESTORE_PENDING_PREFIX}${userVault.id}`, { userHash: identity.user_hash, replacedCard });
+      await this.#writeImportedAccount(userVault, { keys, identity, existing, reuseExistingVault, signSkey, cryptSkey });
+    } catch (e) {
+      await this.#lockUnlessCurrent(userVault);
+      throw await failWith(e);
+    }
+    let card;
+    try {
+      card = await this.#pushOwnCard(identity, { deferDelivery: true, bootstrap: 'import' });
+    } catch (e) {
+      await this.#abortBootstrap();
+      throw await failWith(e instanceof CardNotDurableError ? new AccountImportIncompleteError(identity.user_hash, e.cause) : e);
+    }
+    if (restoring) {
+      try {
+        await this.#rawStore.remove(`${RESTORE_PENDING_PREFIX}${userVault.id}`);
+      } catch (e) {
+        console.warn('[EncryptionManagerPQ] a restore\'s mark could not be removed:', e);
+      }
+    }
+    if (card === 'deferred') {
+      await this.#abortBootstrap();
+      return { status: 'card-deferred', userHash: identity.user_hash };
+    }
+    this.#activateSession(identity.user_hash, identity);
+    return { status: 'active', userHash: identity.user_hash };
+  }
 
+  #restoreUndoer(vaultId, userHash, replacedCard) {
+    return async () => {
+      const failures = [];
+      const step = async (what, run) => {
+        try {
+          await run();
+          return true;
+        } catch (e) {
+          console.warn(`[EncryptionManagerPQ] a failed restore could not be undone: ${what}:`, e);
+          failures.push(e);
+          return false;
+        }
+      };
+      const marked = await step('marking its vault', () => this.#rawStore.set(`${RESTORE_LEFTOVER_PREFIX}${vaultId}`, { userHash, replacedCard }));
+      if (!marked) {
+        await step('marking its restore failed', () => this.#rawStore.set(`${RESTORE_PENDING_PREFIX}${vaultId}`, { userHash, replacedCard, failed: true }));
+      }
+      const registryBack = await step('putting the account entry back', async () => {
+        const cards = replacedCard
+          ? this.#localUserCards.map((c) => (c.user_hash === userHash ? replacedCard : c))
+          : this.#localUserCards.filter((c) => c.user_hash !== userHash);
+        await this.#rawStore.set('pq-vaults-registry', cards);
+        this.#localUserCards = cards;
+      });
+      const vaultGone = await step('clearing its vault', () => this.#clearAccountVault(vaultId, 'prf'));
+      if (registryBack && vaultGone) {
+        await step('removing its marks', async () => {
+          await this.#rawStore.remove(`${RESTORE_LEFTOVER_PREFIX}${vaultId}`);
+          await this.#rawStore.remove(`${RESTORE_PENDING_PREFIX}${vaultId}`);
+        });
+      }
+      return failures;
+    };
+  }
+
+  clearRestoreLeftovers() {
+    return withRestoreLock(() => this.#clearRestoreLeftovers());
+  }
+
+  async #clearRestoreLeftovers() {
+    const keys = [...(await this.#rawStore.keys())];
+    const vaultIds = new Set(keys
+      .filter((k) => k.startsWith(RESTORE_LEFTOVER_PREFIX) || k.startsWith(RESTORE_PENDING_PREFIX))
+      .map((k) => k.slice(k.startsWith(RESTORE_LEFTOVER_PREFIX) ? RESTORE_LEFTOVER_PREFIX.length : RESTORE_PENDING_PREFIX.length)));
+    if (!vaultIds.size) return 0;
+    await this.#loadLocalUserCards();
+    let left = 0;
+    for (const vaultId of vaultIds) {
+      const failed = !!(await this.#failedRestoreMark(vaultId));
+      const inUse = this.#currentVault?.id === vaultId || this.#localUserCards.some((c) => c.vaultId === vaultId);
+      if (inUse && !failed) {
+        try {
+          await this.#rawStore.remove(`${RESTORE_PENDING_PREFIX}${vaultId}`);
+        } catch {
+        }
+        continue;
+      }
+      if (inUse) {
+        left++;
+        continue;
+      }
+      try {
+        const stored = (await this.#rawStore.get('pq-vaults-registry')) ?? [];
+        if (stored.some((c) => c.vaultId === vaultId)) await this.#rawStore.set('pq-vaults-registry', this.#localUserCards);
+        await this.#clearAccountVault(vaultId, 'prf');
+        await this.#rawStore.remove(`${RESTORE_LEFTOVER_PREFIX}${vaultId}`);
+        await this.#rawStore.remove(`${RESTORE_PENDING_PREFIX}${vaultId}`);
+      } catch (e) {
+        left++;
+        console.warn('[EncryptionManagerPQ] a failed restore\'s vault could not be cleared:', e);
+      }
+    }
+    return left;
+  }
+
+  async #writeImportedAccount(userVault, { keys, identity, existing, reuseExistingVault, signSkey, cryptSkey }) {
     await userVault.set(`sign_skey`, signSkey);
     await userVault.set(`crypt_skey`, cryptSkey);
     await userVault.set(`evm_skey`, keys.evm_skey);
@@ -1086,6 +1363,7 @@ export class EncryptionManagerPQ extends EventTarget {
     }
 
     identity.vaultId = userVault.id;
+    identity.vaultLock = isPrfVault(userVault) ? 'prf' : 'legacy';
     if (existing) {
       Object.assign(existing, identity);
     } else {
@@ -1096,21 +1374,7 @@ export class EncryptionManagerPQ extends EventTarget {
 
     // Same card boundary as registration: the card may not exist on this Pi
     // yet, and the session activates only once it is accepted.
-    await this.#openForBootstrap(identity.user_hash);
-    let card;
-    try {
-      card = await this.#pushOwnCard(identity, { deferDelivery: true, bootstrap: 'import' });
-    } catch (e) {
-      await this.#abortBootstrap();
-      if (e instanceof CardNotDurableError) throw new AccountImportIncompleteError(identity.user_hash, e.cause);
-      throw e;
-    }
-    if (card === 'deferred') {
-      await this.#abortBootstrap();
-      return { status: 'card-deferred', userHash: identity.user_hash };
-    }
-    this.#activateSession(identity.user_hash, identity);
-    return { status: 'active', userHash: identity.user_hash };
+    await this.#openForBootstrap(identity.user_hash, userVault);
   }
 
 
@@ -1189,7 +1453,7 @@ export class EncryptionManagerPQ extends EventTarget {
     await putStorageRow({
       userHash: this.#currentUserHash,
       uuid,
-      valueB64: '',
+      valueB64: TOMBSTONE_VALUE_B64,
       hashB64: null,
       signSkey: this.#signSkey,
       deletedFlag: true,
@@ -1279,6 +1543,105 @@ export class EncryptionManagerPQ extends EventTarget {
     // staleVaults against the base the patch actually lands on.
     await this.#writeRootPatch({ vaultUuid: uuid });
     return uuid;
+  }
+
+  /**
+   * The account's backup, as a backup file holds it: `identity` is what the
+   * caller shows as the account (the store's currentUser), and the keys are the
+   * vault's, with the guardian seed, so a restored account or a linked device
+   * derives the same guardian keys.
+   */
+  async exportBackup(identity) {
+    const keys = await this.exportVaultKeys();
+    const metaSeed = await this.guardianMetaSeed();
+    if (metaSeed) keys.meta_seed = metaSeed;
+    if (!keys.contact_skey) {
+      // A vault restored before contact_skey was carried has none, and an
+      // import refuses a backup without it - so refuse here, before it is
+      // sealed, downloaded or sent.
+      throw new Error('This account has no contact key in its vault and cannot be backed up or linked.');
+    }
+    return { version: 1, identity, keys };
+  }
+
+  #loginPasskeyFlags = null;
+
+  passkeyFlags() {
+    return this.#loginPasskeyFlags;
+  }
+
+  #renewPasskeyRecoveryAfterLogin(recovery) {
+    const prf = recovery.prf;
+    recovery.prf = null;
+    if (!prf) return;
+    let scope;
+    try {
+      scope = this.passkeyRecoveryScope();
+    } catch (e) {
+      prf.fill(0);
+      return;
+    }
+    const owner = scope.userHash;
+    const card = { ...this.#localUserCards.find((u) => u.user_hash === owner) };
+    const flags = recovery.flags;
+    void (async () => {
+      const lock = await scope.vaultLock();
+      if (!lock) return;
+      await renewPasskeyRecoveryAtLogin({
+        prf, flags, owner, lock,
+        assertCurrent: scope.assertCurrent,
+        readEntry: async (key) => (await scope.readSlot())?.passkeys?.[key] ?? null,
+        assertReadable: (wrapKey) => scope.pinned(() => assertVaultReadableAnonymously(wrapKey)),
+        exportBackup: () => scope.pinned(() => this.exportBackup(card)),
+        publish: scope.publish,
+        recordEntry: (key, entry) => scope.patchSlot({ $keyed: ['passkeys'], passkeys: { [key]: entry } }),
+      });
+    })().catch((e) => {
+      console.warn('[EncryptionManagerPQ] the passkey recovery copy was not renewed at sign-in:', e?.message ?? e);
+    }).finally(() => prf.fill(0));
+  }
+
+  async hasLocalVault(userHash) {
+    await this.#loadLocalUserCards();
+    return this.#holdsVault(this.#localUserCards.find((i) => i.user_hash === userHash));
+  }
+
+  async #holdsVault(card) {
+    const row = card?.vaultId ? await this.#rawStore.get(`local-vault-${card.vaultId}`) : null;
+    return !!row?.accountID && !!row?.data;
+  }
+
+  async currentVaultLock() {
+    const vault = this.#currentVault;
+    return isPrfVault(vault) ? prfLockOf(vault.id) : null;
+  }
+
+  passkeyRecoveryScope() {
+    const assertSession = this.#sessionFence('passkey recovery');
+    const userHash = this.#currentUserHash;
+    const signSkey = this.#signSkey;
+    const vault = this.#currentVault;
+    const assertCurrent = () => {
+      assertSession();
+      if (this.#currentVault !== vault) throw new SessionFencedError('passkey recovery: the vault passkey changed');
+    };
+    const pinned = async (run) => {
+      assertCurrent();
+      const result = await run();
+      assertCurrent();
+      return result;
+    };
+    return {
+      userHash,
+      assertCurrent,
+      pinned,
+      vaultLock: () => pinned(async () => (isPrfVault(vault) ? prfLockOf(vault.id) : null)),
+      passkeyFlags: () => pinned(async () => this.#loginPasskeyFlags),
+      readSlot: () => pinned(() => this.loadSlotJson(PASSKEY_RECOVERY_SLOT, { strict: true })),
+      patchSlot: (patch) => pinned(() => this.patchSlotJson(PASSKEY_RECOVERY_SLOT, patch)),
+      publish: (wrapKey, json) => pinned(() => publishVault({ userHash, signSkey, wrapKey, json, beforeWrite: assertCurrent })),
+      tombstone: (locator) => pinned(() => putStorageRow({ userHash, uuid: locator, valueB64: TOMBSTONE_VALUE_B64, hashB64: null, signSkey, deletedFlag: true })),
+    };
   }
 
   #sameAccount(userHash) {

@@ -10,6 +10,10 @@ import {
 	CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
 } from '@buckitup/pq-client/checkpoint';
 import { encodeContent, decodeContent, previewText, ContentDecodeError } from '@buckitup/pq-client/content';
+import { lockSeedFromPrf, VAULT_LOCK_VERSION } from '@buckitup/pq-client/vaultLock';
+import { bytesToHex } from '@noble/hashes/utils';
+import { recoverySalt, recoveryWrapKey, credentialKey, RECOVERY_PRF_LABEL, PRF_RECOVERY_SALT } from '@/lib/recovery/passkeyRecovery';
+import { deriveVaultLocator } from '@buckitup/pq-client/vaultEnvelope';
 
 const mid = (n: number) => `dmsg_${String(n).padStart(4, '0')}e8f0-aaaa-7bbb-8ccc-ddddeeee${String(n).padStart(4, '0')}`;
 const sh = (n: number) => 'dms_' + String(n % 10).repeat(128);
@@ -202,5 +206,30 @@ describe('checkpoint envelope (07 §"checkpoint")', () => {
 		expect(() => decodeContent(encodeContent([evil]))).toThrow(ContentDecodeError);
 		const badValue = { ...part, frontier: { [mid(1)]: 'dms_short' } };
 		expect(() => decodeContent(encodeContent([badValue]))).toThrow(ContentDecodeError);
+	});
+});
+
+describe('golden vault lock seed (vault-lock v1)', () => {
+	it('reproduces byte for byte', () => {
+		expect(VAULT_LOCK_VERSION).toBe(1);
+		const prf = Uint8Array.from({ length: 32 }, (_, i) => i);
+		expect(bytesToHex(lockSeedFromPrf(prf))).toBe('e00e60c6ca3bfc15ad465abf799d9318b8ae6956af3dc4e7d3a944915ed2fe85');
+	});
+});
+
+describe('golden passkey recovery (prf-recovery v1)', () => {
+	it('reproduces salt_r, R and the locator byte for byte', () => {
+		expect(RECOVERY_PRF_LABEL).toBe('buckitup/vault-recovery/v1');
+		expect(PRF_RECOVERY_SALT).toBe('buckitup/prf-recovery/v1');
+		expect(bytesToHex(recoverySalt())).toBe('c42a4e2e5ce6b0c2cebe466807d13ac9441808ffb29e8499030f9a6547093fef');
+		const prf = Uint8Array.from({ length: 32 }, (_, i) => i);
+		const wrapKey = recoveryWrapKey(prf);
+		expect(bytesToHex(wrapKey)).toBe('82afc365ebe350c69da870000996a9d84d8dd60675504ea62e2a28adbc79c460');
+		expect(deriveVaultLocator(wrapKey)).toBe('03820095-66e1-8484-abe9-840ab1680e20');
+	});
+
+	it('keys a credential by lowercase hex SHA3-256 of its raw ID, however the base64 is padded', () => {
+		expect(credentialKey('8PHy8/T19vf4+fr7/P3+/w==')).toBe('300f8660e7f42fa10f6bc25a36333ae9bf3c87595ee14ae4905863267682766c');
+		expect(credentialKey('8PHy8/T19vf4+fr7/P3+/w')).toBe('300f8660e7f42fa10f6bc25a36333ae9bf3c87595ee14ae4905863267682766c');
 	});
 });

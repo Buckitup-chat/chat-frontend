@@ -123,6 +123,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 		getInstance: () => ({
 			isAuth: true,
 			currentUserHash: ME,
+			initialize: async () => {},
 			getLocalUserCards: async () => [],
 			addEventListener: () => {},
 			removeEventListener: () => {},

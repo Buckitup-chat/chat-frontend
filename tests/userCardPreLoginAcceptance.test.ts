@@ -72,7 +72,7 @@ vi.mock('@/api/client', async () => {
 const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
 
 interface TestManager {
-	createUserVault(opts: { name: string }): Promise<unknown>;
+	createUserVault(opts: { name: string; lock?: 'prf' | 'legacy' }): Promise<unknown>;
 	updateOwnUserCardName(name: string): Promise<unknown>;
 	getLocalUserCards(): Promise<Array<{ name: string; user_hash: string }>>;
 }
@@ -112,7 +112,7 @@ describe('pre-login user_cards acceptance is recorded through the real coordinat
 		const em = freshManager();
 		expect(currentSessionUserHash()).toBeNull();
 
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 
 		const userHash = (await em.getLocalUserCards())[0].user_hash;
 		const accepted = await getAccepted('user_cards', userHash);
@@ -131,7 +131,7 @@ describe('pre-login user_cards acceptance is recorded through the real coordinat
 		};
 
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 		const userHash = (await em.getLocalUserCards())[0].user_hash;
 
 		expect(sessionDuringPush).toBe(userHash);
@@ -139,7 +139,7 @@ describe('pre-login user_cards acceptance is recorded through the real coordinat
 
 	it('an update issued right after creation gets a timestamp strictly greater than the accepted insert, even though the shape is still stale', async () => {
 		const em = freshManager();
-		await em.createUserVault({ name: 'Tester' });
+		await em.createUserVault({ name: 'Tester', lock: 'legacy' });
 
 		const userHash = (await em.getLocalUserCards())[0].user_hash;
 		const insertAccepted = await getAccepted('user_cards', userHash);
@@ -161,11 +161,11 @@ describe('pre-login user_cards acceptance is recorded through the real coordinat
 
 	it('a second account (B) cannot read or overwrite account A\'s accepted snapshot', async () => {
 		const emA = freshManager();
-		await emA.createUserVault({ name: 'Alice' });
+		await emA.createUserVault({ name: 'Alice', lock: 'legacy' });
 		const hashA = (await emA.getLocalUserCards()).find((c: { name: string; user_hash: string }) => c.name === 'Alice')!.user_hash;
 
 		const emB = freshManager();
-		await emB.createUserVault({ name: 'Bob' });
+		await emB.createUserVault({ name: 'Bob', lock: 'legacy' });
 		const hashB = (await emB.getLocalUserCards()).find((c: { name: string; user_hash: string }) => c.name === 'Bob')!.user_hash;
 
 		expect(hashA).not.toBe(hashB);
@@ -187,12 +187,12 @@ describe('pre-login user_cards acceptance is recorded through the real coordinat
 			return baseIngest(mutations);
 		};
 
-		const createA = emA.createUserVault({ name: 'Alice' });
+		const createA = emA.createUserVault({ name: 'Alice', lock: 'legacy' });
 		await vi.waitFor(() => expect(resolveA).not.toBeNull());
 
 		ingestImpl = acceptEverything;
 		const emB = freshManager();
-		await emB.createUserVault({ name: 'Bob' });
+		await emB.createUserVault({ name: 'Bob', lock: 'legacy' });
 		const hashB = (await emB.getLocalUserCards()).find((c: { name: string; user_hash: string }) => c.name === 'Bob')!.user_hash;
 		expect(currentSessionUserHash()).toBe(hashB);
 		const acceptedBBefore = await getAccepted('user_cards', hashB);

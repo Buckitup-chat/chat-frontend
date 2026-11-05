@@ -7,6 +7,7 @@
 
 	<QuarantinedWritesBanner v-if="$userPQ.currentUser" />
 	<AccessGateBanner v-if="$userPQ.currentUser" />
+	<PasskeyRecoveryReminder v-if="$userPQ.currentUser && !$restore.active" />
 	<RecoveryAlertBanner v-if="$userPQ.currentUser && !$restore.active" />
 	<RecoveryFinaleBanner v-if="$userPQ.currentUser && !$restore.active" />
 
@@ -167,6 +168,7 @@ import { useMenu } from '@/composables/useMenu';
 import Loader from './components/Loader.vue';
 import QuarantinedWritesBanner from '@/components/QuarantinedWritesBanner.vue';
 import AccessGateBanner from '@/components/AccessGateBanner.vue';
+import PasskeyRecoveryReminder from '@/components/PasskeyRecoveryReminder.vue';
 import RecoveryAlertBanner from '@/components/RecoveryAlertBanner.vue';
 import RecoverScreen from '@/components/recovery/restore/RecoverScreen.vue';
 import RecoveryFinaleBanner from '@/components/RecoveryFinaleBanner.vue';
@@ -205,6 +207,12 @@ provide('$modal', $modal);
 
 const $swalModal = ref();
 provide('$swalModal', $swalModal);
+
+$userPQ.setLegacyLockConsent(() => $swalModal.value?.open({
+	id: 'confirm',
+	title: 'This passkey cannot lock the account the new way',
+	content: 'Your browser or passkey provider does not support the PRF extension. The account can still be locked with the older method, which keeps the key to this device\'s account data in the passkey\'s account details, where password managers do not guard it as a secret. Continue with the older lock?',
+}) ?? false);
 
 watch(
 	() => $breakpoint.current,

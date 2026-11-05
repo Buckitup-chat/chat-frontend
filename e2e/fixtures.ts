@@ -17,8 +17,10 @@ export { expect };
 const pageAuth = new WeakMap<Page, { cdp: CDPSession; id: string }>();
 
 /** Arm a silent platform authenticator for this page. Must run before the
- * app checks isUserVerifyingPlatformAuthenticatorAvailable. */
-export async function armWebAuthn(context: BrowserContext, page: Page): Promise<void> {
+ * app checks isUserVerifyingPlatformAuthenticatorAvailable. It has the PRF
+ * extension, as the passkeys the app locks vaults with do; `prf: false`
+ * gives one without it. */
+export async function armWebAuthn(context: BrowserContext, page: Page, { prf = true }: { prf?: boolean } = {}): Promise<void> {
 	const cdp = await context.newCDPSession(page);
 	await cdp.send('WebAuthn.enable');
 	const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
@@ -29,6 +31,7 @@ export async function armWebAuthn(context: BrowserContext, page: Page): Promise<
 			hasUserVerification: true,
 			isUserVerified: true,
 			automaticPresenceSimulation: true,
+			hasPrf: prf,
 		},
 	});
 	pageAuth.set(page, { cdp, id: authenticatorId });
@@ -39,6 +42,13 @@ const authOf = (page: Page) => {
 	if (!a) throw new Error('page has no armed authenticator');
 	return a;
 };
+
+export async function clearSiteData(page: Page): Promise<void> {
+	const origin = new URL(page.url()).origin;
+	await page.goto('about:blank');
+	await authOf(page).cdp.send('Storage.clearDataForOrigin', { origin, storageTypes: 'all' });
+	await page.goto(origin + '/');
+}
 
 export async function exportCredentials(page: Page): Promise<Record<string, unknown>[]> {
 	const a = authOf(page);
