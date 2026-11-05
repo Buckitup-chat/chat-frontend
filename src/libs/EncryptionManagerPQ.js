@@ -248,18 +248,6 @@ export class EncryptionManagerPQ extends EventTarget {
     return this.#bootstrapUserHash ?? this.#currentUserHash;
   }
 
-  async initialize() {
-    try {
-      const vaultID = await this.#rawStore.get('main-vault-id');
-
-      if (vaultID) await this.#connectToUserVault(vaultID);
-
-      this.#loadLocalUserCards()
-    } catch (error) {
-      await this.handleError(error, 'Error during storage initialization');
-    }
-  }
-
   // Vaults Management
 
   async createUserVault({ name, notes }) {

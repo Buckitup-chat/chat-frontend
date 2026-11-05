@@ -88,7 +88,6 @@ export const userPQStore = defineStore('userPQ', () => {
     // Every auth transition dispatches authChange: login, logout,
     // createUserVault (logs in), deleteUserVault (logs out if current).
     bindAuthListener(em.value);
-    await em.value.initialize();
     syncAuthState();
     myLocalUsers.value = await em.value.getLocalUserCards();
     localDataReady.value = true;

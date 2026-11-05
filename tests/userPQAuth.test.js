@@ -14,7 +14,6 @@ class FakeEM extends EventTarget {
 	#userHash = null;
 	get currentUserHash() { return this.#userHash; }
 	get isAuth() { return !!this.#userHash; }
-	async initialize() {}
 	async getLocalUserCards() { return []; }
 	fakeLogin(hash) {
 		this.#userHash = hash;
