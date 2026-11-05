@@ -183,16 +183,30 @@
                   <template v-else-if="downloads[fileKey(f)]?.status === 'downloading'">
                     {{ fmtSize(f.size) }} · chunk {{ downloads[fileKey(f)].done }} of {{ downloads[fileKey(f)].total }}
                   </template>
+                  <template v-else-if="keeping[fileKey(f)]">
+                    {{ fmtSize(f.size) }} · keeping<template v-if="keeping[fileKey(f)].total">, chunk {{ keeping[fileKey(f)].done }} of {{ keeping[fileKey(f)].total }}</template>
+                  </template>
+                  <!-- Keep on this device: the copy and where else the file still is. -->
+                  <template v-else-if="kept[fileKey(f)] && msg._deleted">
+                    {{ fmtSize(f.size) }} · message deleted, copy kept on this device
+                  </template>
+                  <template v-else-if="kept[fileKey(f)] && deletedOnServer(f)">
+                    {{ fmtSize(f.size) }} · kept · deleted on the server, only this device has it
+                  </template>
+                  <template v-else-if="deletedOnServer(f)">
+                    {{ fmtSize(f.size) }} · deleted by the sender
+                  </template>
                   <template v-else-if="downloads[fileKey(f)]?.status === 'error'">
                     {{ fmtSize(f.size) }} · <span class="msg-file-err">download failed — tap to retry</span>
                   </template>
                   <template v-else-if="downloads[fileKey(f)]?.status === 'done'">
-                    {{ fmtSize(f.size) }} · saved
+                    {{ fmtSize(f.size) }} · saved<template v-if="kept[fileKey(f)]"> · kept on this device</template>
                   </template>
+                  <template v-else-if="kept[fileKey(f)]">{{ fmtSize(f.size) }} · kept on this device</template>
                   <template v-else>{{ fmtSize(f.size) }}</template>
                 </div>
               </div>
-              <template v-if="!refusedFile(f)">
+              <template v-if="!refusedFile(f) && (kept[fileKey(f)] || !deletedOnServer(f))">
                 <template v-if="playableAudioType(f)">
                   <span v-if="audios[fileKey(f)]?.status === 'loading'" class="msg-file-spinner" title="Loading audio"></span>
                   <button v-else-if="audios[fileKey(f)]?.status !== 'ready'" type="button"
@@ -499,6 +513,21 @@ const props = defineProps({
     type: Object,
     default: () => ({})
   },
+  /** fileKey → the entry of a file this account keeps on this device (keptFiles.ts). */
+  kept: {
+    type: Object,
+    default: () => ({})
+  },
+  /** fileKey → { done, total } while a file is being kept. */
+  keeping: {
+    type: Object,
+    default: () => ({})
+  },
+  /** message id → kept entries of the files it carried: a deleted message still shows them. */
+  keptByMessage: {
+    type: Object,
+    default: () => ({})
+  },
   /** fileKey → true for a file whose manifest or chunks contradict the uploader's signatures (docs/invariants.md §6a). */
   refused: {
     type: Object,
@@ -680,7 +709,12 @@ const toggleQuoteChain = (msg, qi) => {
   else next.add(key);
   expandedQuotes.value = next;
 };
-const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
+// A deleted message carries no parts; the copies this account kept of its
+// files stand in for them, as file rows that open from this device (a kept
+// entry is a file part with more fields).
+const filesOf = (msg) => (msg._deleted
+  ? props.keptByMessage[msg.id] || []
+  : (msg.parts || []).filter((p) => p.kind === 'file'));
 
 const audioElements = new Map();
 const playWhenReady = new Set();
@@ -743,12 +777,15 @@ const checkpointsOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'check
  *  needs no explanation, and an unknown manifest is not a claim to make. */
 const partial = (part) => {
   const a = props.availability[fileKey(part)];
-  if (!a || a.unknown || a.deleted || !a.total) return null;
+  // A kept file is whole on this device, whatever the node holds.
+  if (!a || a.unknown || a.deleted || !a.total || props.kept[fileKey(part)]) return null;
   return a.present < a.total ? a : null;
 };
 /** A file whose manifest or chunks contradict the uploader's signatures:
  *  refused, so no download button — another attempt gets the same answer. */
 const refusedFile = (part) => !!props.refused[fileKey(part)];
+/** The uploader deleted the file: its manifest says so (a download answered so is recorded there too). */
+const deletedOnServer = (part) => !!props.availability[fileKey(part)]?.deleted;
 const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
 const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 

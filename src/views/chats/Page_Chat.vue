@@ -5,6 +5,7 @@
             :version-counts="versionCountByMsgId"
             :downloads="downloadsByKey" :images="imagesByKey"
             :availability="availabilityByKey" :videos="videosByKey" :audios="audiosByKey" :refused="refusedFiles"
+            :kept="keptFiles.kept.value" :keeping="keptFiles.keeping.value" :kept-by-message="keptFiles.keptByMessage.value"
             @show-history="handleShowHistory" @delete-message="handleDeleteMessage"
             @send-file="handleSendFile" @download-file="handleDownloadFile" @show-file-state="handleShowFileState" @discard-message="(id) => $dialogs.discardFailedItem(id)"
             @show-image="handleShowImage" @play-video="handlePlayVideo" @play-audio="handlePlayAudio"
@@ -36,7 +37,11 @@
             :from="fileState.msg?.isMine ? 'me' : chatName"
             :sent-at="fileState.msg?.timestamp || ''"
             :checking="fileStateChecking"
-            @close="fileState = null" @refresh="handleFileStateAction" />
+            :kept="!!keptFiles.kept.value[fileKey(fileState.part)]"
+            :keeping="keptFiles.keeping.value[fileKey(fileState.part)] || null"
+            :keep-error="keptFiles.errors.value[fileKey(fileState.part)] || ''"
+            :message-deleted="!!fileState.msg?._deleted"
+            @close="fileState = null" @refresh="handleFileStateAction" @keep="handleKeepFile" />
         <GalleryViewer v-if="viewer.index.value !== null && viewer.frames.value.length" :frames="viewer.frames.value"
             :index="viewer.index.value" count-join="of" @update:index="viewer.show" @close="viewer.close" />
     </div>
@@ -61,6 +66,8 @@ import { useAudioPlayback } from '@/composables/useAudioPlayback';
 import { compareFeedOrder } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
 import { isRefusedFile } from '@/lib/data/fileIntegrity';
+import { isDeletedFile } from '@/lib/data/fileTransfer';
+import { useKeptFiles } from '@/composables/useKeptFiles';
 import { fileKey } from '@/lib/data/fileKey';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
 import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
@@ -812,13 +819,14 @@ const handleShowFileState = (part, msg) => {
 };
 
 // One button, two honest meanings: complete → download; partial → re-poll
-// the counts now (the closest a client can get to "prioritize this").
+// the counts now (the closest a client can get to "prioritize this"). A kept
+// file is complete on this device whatever the node holds.
 const handleFileStateAction = async () => {
     const st = fileState.value;
     const key = st && fileKey(st.part);
     if (!st || refusedFiles.value[key]) return;
     const a = availabilityByKey.value[key];
-    if (a && !a.unknown && a.present >= a.total) {
+    if (keptFiles.kept.value[key] || (a && !a.unknown && a.present >= a.total)) {
         fileState.value = null;
         await handleDownloadFile(st.part);
         return;
@@ -826,6 +834,24 @@ const handleFileStateAction = async () => {
     fileStateChecking.value = true;
     try { await checkAvailability(st.part); }
     finally { fileStateChecking.value = false; }
+};
+
+// Keep on this device (keptFiles.ts): the account's kept files, the switch in
+// the file state screen, and a failure said out loud — a keep that did not
+// fit is not a cache miss to swallow.
+const keptFiles = useKeptFiles({
+    owner: () => $userPQ.currentUserHash,
+    onError: (message) => $swal.fire({ icon: 'error', title: 'File not kept', text: message }),
+});
+
+const handleKeepFile = async (on) => {
+    const st = fileState.value;
+    if (!st) return;
+    const key = fileKey(st.part);
+    // The only copy left: letting it go cannot be undone from here.
+    const onlyCopy = !!st.msg?._deleted || !!availabilityByKey.value[key]?.deleted;
+    if (!on && onlyCopy && !window.confirm('Only this device has this file. Remove it from this device?')) return;
+    await keptFiles.setKept(st.part, st.msg?.id || '', on);
 };
 
 watch(() => decryptedMessages.value, (msgs) => {
@@ -923,7 +949,13 @@ const handleDownloadFile = async (filePart) => {
         downloadsByKey.value = { ...downloadsByKey.value, [key]: { status: 'done' } };
     } catch (e) {
         console.error('Download failed:', e);
-        downloadsByKey.value = { ...downloadsByKey.value, [key]: refuseOn(e, key) ? {} : { status: 'error' } };
+        // Deleted by its uploader: a state of the file, as its manifest would
+        // say, not a failure to retry.
+        if (isDeletedFile(e)) {
+            const known = availabilityByKey.value[key];
+            availabilityByKey.value = { ...availabilityByKey.value, [key]: { present: known?.present ?? 0, total: known?.total ?? 0, unknown: false, deleted: true } };
+        }
+        downloadsByKey.value = { ...downloadsByKey.value, [key]: refuseOn(e, key) || isDeletedFile(e) ? {} : { status: 'error' } };
         // A failure usually means chunks are still travelling — re-read the
         // counts so the row can say how far along it is instead of just "failed".
         checkAvailability(filePart);

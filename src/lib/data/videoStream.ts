@@ -15,7 +15,7 @@
 
 import { fromBase64 } from '@buckitup/pq-client/signature';
 import { CHUNK_SIZE } from '@buckitup/pq-client/fileCrypto';
-import { downloadFile, type DownloadProgress } from './fileTransfer';
+import { downloadFile, FileDeletedError, type DownloadProgress } from './fileTransfer';
 import { FileVerificationError, readVerifiedFile, type ChunkHashes } from './fileIntegrity';
 import { fileKey } from './fileKey';
 import { getCachedMedia, putCachedMedia } from './mediaCache';
@@ -157,7 +157,7 @@ export const openVideo = async (
 		// verified now, so a refused file is refused at open.
 		const file = await readVerifiedFile(video.fileId, video.uploaderHash, { signal: opts.signal });
 		if (!file) throw new Error('file manifest not found');
-		if (file.manifest.deleted) throw new Error('file was deleted by its uploader');
+		if (file.manifest.deleted) throw new FileDeletedError(video.fileId);
 		const first = await file.hashes.expected(0);
 		const sessionId = crypto.randomUUID();
 		const bearer = bearerFor('file_chunk');

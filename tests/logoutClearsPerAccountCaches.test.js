@@ -156,3 +156,36 @@ describe('EncryptionManagerPQ.deleteUserVault(): the account\'s photo records', 
 		expect((await getThumb(OTHER, PEER))?.thumb).toBe('b');
 	});
 });
+
+describe('EncryptionManagerPQ.deleteUserVault(): the files the account kept on this device', () => {
+	it('drops its sealed index and its pins, and no other account\'s', async () => {
+		const { IDBFactory, IDBKeyRange } = await import('fake-indexeddb');
+		const saved = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange };
+		globalThis.indexedDB = new IDBFactory();
+		globalThis.IDBKeyRange = IDBKeyRange;
+		const { pinChunk, pinnedBytesOf, __resetChunkCacheForTests } = await import('@/lib/data/chunkCache');
+		const { _setKeptFilesStoreForTests } = await import('@/lib/data/keptFiles');
+		__resetChunkCacheForTests();
+		try {
+			const OTHER = 'u_' + 'e'.repeat(128);
+			const index = makeStorage();
+			_setKeptFilesStoreForTests(index);
+			await index.set(`${ACCOUNT}|kept`, 'sealed');
+			await index.set(`${OTHER}|kept`, 'sealed');
+			const H = 'fd_' + '01'.repeat(64);
+			await pinChunk('f_' + '1'.repeat(32), 0, H, ACCOUNT, new Uint8Array(10));
+			await pinChunk('f_' + '1'.repeat(32), 0, H, OTHER, new Uint8Array(10));
+
+			const em = await signedInManager();
+			await em.deleteUserVault(ACCOUNT);
+
+			expect(await index.keys()).toEqual([`${OTHER}|kept`]);
+			expect(await pinnedBytesOf(ACCOUNT)).toBe(0);
+			expect(await pinnedBytesOf(OTHER)).toBe(10);
+		} finally {
+			globalThis.indexedDB = saved.indexedDB;
+			globalThis.IDBKeyRange = saved.IDBKeyRange;
+			__resetChunkCacheForTests();
+		}
+	});
+});
