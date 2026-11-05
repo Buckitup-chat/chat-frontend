@@ -8,3 +8,18 @@ export const serialized = <T>(locks: Map<string, Promise<unknown>>, key: string,
 	void settledRun.then(() => { if (locks.get(key) === settledRun) locks.delete(key); });
 	return run;
 };
+
+const inProcessLocks = new Map<string, Promise<unknown>>();
+
+const withCrossTabLock = <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+	const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+	if (!locks?.request) return fn();
+	return locks.request(name, () => fn());
+};
+
+/**
+ * Runs `fn` alone under `name`: queued behind earlier calls in this tab,
+ * and under the Web Lock of that name across tabs where there is one.
+ */
+export const withNamedLock = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
+	serialized(inProcessLocks, name, () => withCrossTabLock(name, fn));

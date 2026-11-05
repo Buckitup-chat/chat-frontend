@@ -14,6 +14,18 @@
 // IndexedDB, budgeted, LRU by last use. Everything degrades to a no-op where
 // IndexedDB is missing (node, some private windows): the cache is an
 // optimization, never a dependency.
+//
+// A chunk can also be pinned: an account on this device keeps the file it
+// belongs to (keptFiles.ts). Each record lists the accounts pinning it in the
+// clear (local metadata need not be hidden, docs/invariants.md §1), so an
+// account's pins can be dropped without its key when it leaves the device.
+// A pinned chunk stays while any account pins it; eviction skips it, and a
+// failed pin is an error for the caller, not a swallowed cache miss.
+//
+// Eviction and per-account reads walk indexes, not the chunks: an unpinned
+// record carries `evictable` = [lastUsed, size], and the sparse index on it
+// sums and orders the cache without reading a byte or visiting a kept chunk;
+// the multi-entry index on `pins` finds one account's chunks.
 
 const DB_NAME = 'buckitup-chunks';
 const STORE = 'chunks';
@@ -27,87 +39,277 @@ interface ChunkRecord {
 	dataHash: string;
 	size: number;
 	lastUsed: number;
+	/** Accounts on this device that keep the file this chunk belongs to (keptFiles.ts). Absent or empty: plain cache. */
+	pins?: string[];
+	/** [lastUsed, size], on unpinned records only: what eviction reads. */
+	evictable?: [number, number];
 }
 
+const isPinned = (rec: Pick<ChunkRecord, 'pins'>): boolean => !!rec.pins?.length;
+
+/** The record as stored: `evictable` follows its pins, `pins` is dropped when empty. */
+const stored = (rec: ChunkRecord): ChunkRecord => {
+	const { pins, ...rest } = rec;
+	delete rest.evictable;
+	return pins?.length ? { ...rest, pins } : { ...rest, evictable: [rest.lastUsed, rest.size] };
+};
+
 let dbPromise: Promise<IDBDatabase | null> | null = null;
+let budgetBytes = BUDGET_BYTES;
 
 const openDb = (): Promise<IDBDatabase | null> => {
 	if (dbPromise) return dbPromise;
-	dbPromise = new Promise((resolve) => {
+	const opening: Promise<IDBDatabase | null> = new Promise((resolve) => {
 		if (typeof indexedDB === 'undefined') return resolve(null);
+		let blocked = false;
 		try {
-			const req = indexedDB.open(DB_NAME, 1);
+			const req = indexedDB.open(DB_NAME, 2);
 			req.onupgradeneeded = () => {
+				// A cache: an older layout is dropped, not migrated.
+				if (req.result.objectStoreNames.contains(STORE)) req.result.deleteObjectStore(STORE);
 				const store = req.result.createObjectStore(STORE, { keyPath: 'key' });
-				store.createIndex('lastUsed', 'lastUsed');
+				store.createIndex('evictable', 'evictable');
+				store.createIndex('pins', 'pins', { multiEntry: true });
 			};
-			req.onsuccess = () => resolve(req.result);
+			req.onsuccess = () => {
+				const db = req.result;
+				const ready = blocked ? Promise.resolve(db) : opening;
+				const forget = () => {
+					if (dbPromise === ready) dbPromise = null;
+				};
+				// Holding the connection would block another tab's upgrade.
+				db.onversionchange = () => {
+					db.close();
+					forget();
+				};
+				db.onclose = forget;
+				if (!blocked) resolve(db);
+				else if (dbPromise === opening) dbPromise = ready;
+				else db.close();
+			};
+			// Another tab holds an older version open. Until it closes, this tab
+			// works without the cache; the open goes on and takes over when it lands.
+			req.onblocked = () => {
+				blocked = true;
+				resolve(null);
+			};
 			req.onerror = () => resolve(null);
 		} catch {
 			resolve(null);
 		}
 	});
-	return dbPromise;
+	dbPromise = opening;
+	return opening;
 };
 
-const tx = (db: IDBDatabase, mode: globalThis.IDBTransactionMode) => db.transaction(STORE, mode).objectStore(STORE);
-
-const reqAsPromise = <T>(request: IDBRequest<T>): Promise<T> =>
+/**
+ * One transaction, settled when it commits. `body` issues its requests from
+ * request callbacks, so every read and the write it decides stay inside the
+ * same transaction — another tab's pin cannot land between them. A failed
+ * request aborts the transaction and the promise rejects with the
+ * transaction's error: a full disk arrives here as QuotaExceededError.
+ */
+const inTx = <T>(db: IDBDatabase, mode: globalThis.IDBTransactionMode, body: (store: IDBObjectStore, settle: (value: T) => void, fail: (e: Error) => void) => void): Promise<T> =>
 	new Promise((resolve, reject) => {
-		request.onsuccess = () => resolve(request.result);
-		request.onerror = () => reject(request.error);
+		let result: T | undefined;
+		let failure: Error | null = null;
+		let tx: IDBTransaction;
+		try {
+			tx = db.transaction(STORE, mode);
+		} catch (e) {
+			reject(e);
+			return;
+		}
+		tx.oncomplete = () => (failure ? reject(failure) : resolve(result as T));
+		tx.onabort = () => reject(failure ?? tx.error ?? new DOMException('The chunk store transaction was aborted', 'AbortError'));
+		const fail = (e: Error) => {
+			failure = e;
+			try { tx.abort(); } catch { /* already finished */ }
+		};
+		try {
+			body(tx.objectStore(STORE), (value) => { result = value; }, fail);
+		} catch (e) {
+			fail(e as Error);
+		}
 	});
 
 const chunkKey = (fileId: string, index: number) => `${fileId}:${index}`;
+/** Every chunk key of one file: `${fileId}:` followed by an index. */
+const fileRange = (fileId: string) => IDBKeyRange.bound(`${fileId}:`, `${fileId}:￿`);
+
+const copyOf = (bytes: Uint8Array): ArrayBuffer => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 
 /** The cached chunk if it is the one with `dataHash`; anything else reads as absent and is overwritten by the next store. */
 export const getCachedChunk = async (fileId: string, index: number, dataHash: string): Promise<Uint8Array | null> => {
 	const db = await openDb();
 	if (!db) return null;
 	try {
-		const rec = await reqAsPromise<ChunkRecord | undefined>(tx(db, 'readonly').get(chunkKey(fileId, index)));
+		const rec = await inTx<ChunkRecord | undefined>(db, 'readonly', (store, settle) => {
+			const req = store.get(chunkKey(fileId, index));
+			req.onsuccess = () => settle(req.result as ChunkRecord | undefined);
+		});
 		if (!rec || rec.dataHash !== dataHash) return null;
-		// LRU touch; fire-and-forget, a failed touch only skews eviction order
-		tx(db, 'readwrite').put({ ...rec, lastUsed: Date.now() });
+		// LRU touch; fire-and-forget, a failed touch only skews eviction order.
+		// A kept chunk is never evicted, so it is not touched. The touch
+		// re-reads the record in its own transaction, so a pin added since the
+		// read above is kept.
+		if (!isPinned(rec)) {
+			inTx<void>(db, 'readwrite', (store) => {
+				const req = store.get(rec.key);
+				req.onsuccess = () => {
+					const cur = req.result as ChunkRecord | undefined;
+					if (cur && cur.dataHash === dataHash) store.put(stored({ ...cur, lastUsed: Date.now() }));
+				};
+			}).catch(() => {});
+		}
 		return new Uint8Array(rec.bytes);
 	} catch {
 		return null;
 	}
 };
 
-/** Stores a chunk whose bytes hash to `dataHash`; the caller has checked that they do. */
+/**
+ * Stores a chunk whose bytes hash to `dataHash`; the caller has checked that
+ * they do. A cache write: failures are swallowed. Pins on the same chunk are
+ * kept, and a kept chunk is never replaced by another file's bytes under the
+ * same key.
+ */
 export const putCachedChunk = async (fileId: string, index: number, bytes: Uint8Array, dataHash: string): Promise<void> => {
 	const db = await openDb();
 	if (!db) return;
 	try {
-		const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-		await reqAsPromise(tx(db, 'readwrite').put({
-			key: chunkKey(fileId, index),
-			fileId,
-			bytes: buf,
-			dataHash,
-			size: bytes.byteLength,
-			lastUsed: Date.now(),
-		} satisfies ChunkRecord));
+		const key = chunkKey(fileId, index);
+		await inTx<void>(db, 'readwrite', (store) => {
+			const req = store.get(key);
+			req.onsuccess = () => {
+				const cur = req.result as ChunkRecord | undefined;
+				if (cur && isPinned(cur) && cur.dataHash !== dataHash) return;
+				store.put(stored({
+					key,
+					fileId,
+					bytes: copyOf(bytes),
+					dataHash,
+					size: bytes.byteLength,
+					lastUsed: Date.now(),
+					pins: cur && cur.dataHash === dataHash ? cur.pins : undefined,
+				}));
+			};
+		});
 		await evictOverBudget(db);
 	} catch {
 		/* cache full or blocked — the network path still works */
 	}
 };
 
-/** Oldest-used chunks go first once the byte budget is crossed. */
-const evictOverBudget = async (db: IDBDatabase): Promise<void> => {
-	const all = await reqAsPromise<ChunkRecord[]>(tx(db, 'readonly').getAll());
-	let total = all.reduce((n, r) => n + r.size, 0);
-	if (total <= BUDGET_BYTES) return;
-	const byAge = [...all].sort((a, b) => a.lastUsed - b.lastUsed);
-	const store = tx(db, 'readwrite');
-	for (const rec of byAge) {
-		if (total <= BUDGET_BYTES) break;
-		store.delete(rec.key);
-		total -= rec.size;
+/** Thrown where a chunk cannot be kept on this device; the person is told. */
+export class ChunkPinError extends Error {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options);
+		this.name = 'ChunkPinError';
 	}
+}
+
+/**
+ * Marks chunk `index` of `fileId` as kept by `owner`, storing `bytes` if the
+ * device does not hold the chunk. Unlike a cache write, a failure throws — a
+ * full disk rejects with the browser's QuotaExceededError — and nothing is
+ * pinned. A chunk another account keeps under a different hash is not
+ * replaced.
+ */
+export const pinChunk = async (fileId: string, index: number, dataHash: string, owner: string, bytes: Uint8Array): Promise<void> => {
+	const db = await openDb();
+	if (!db) throw new ChunkPinError('The local database is not available, so files cannot be kept on this device.');
+	const key = chunkKey(fileId, index);
+	await inTx<void>(db, 'readwrite', (store, _settle, fail) => {
+		const req = store.get(key);
+		req.onsuccess = () => {
+			const cur = req.result as ChunkRecord | undefined;
+			if (cur && cur.dataHash === dataHash) {
+				const pins = cur.pins?.includes(owner) ? cur.pins : [...(cur.pins ?? []), owner];
+				store.put(stored({ ...cur, pins, lastUsed: Date.now() }));
+				return;
+			}
+			if (cur && isPinned(cur)) {
+				fail(new ChunkPinError(`Chunk ${index} of file ${fileId} is kept on this device with other contents.`));
+				return;
+			}
+			store.put(stored({
+				key, fileId, bytes: copyOf(bytes), dataHash, size: bytes.byteLength, lastUsed: Date.now(), pins: [owner],
+			}));
+		};
+	});
 };
+
+/** Drops `owner`'s pins from its chunks, those of one file when `fileId` is given; a chunk another account pins stays pinned. */
+const unpinWhere = async (owner: string, fileId: string | null): Promise<void> => {
+	const db = await openDb();
+	if (!db) return;
+	await inTx<void>(db, 'readwrite', (store) => {
+		const req = fileId ? store.openCursor(fileRange(fileId)) : store.index('pins').openCursor(IDBKeyRange.only(owner));
+		req.onsuccess = () => {
+			const cursor = req.result;
+			if (!cursor) return;
+			const rec = cursor.value as ChunkRecord;
+			if (rec.pins?.includes(owner)) cursor.update(stored({ ...rec, pins: rec.pins.filter((p) => p !== owner) }));
+			cursor.continue();
+		};
+	});
+	// What is no longer kept is cache again, and counts against its budget.
+	await evictOverBudget(db).catch(() => {});
+};
+
+/** `owner` no longer keeps `fileId`: its chunks stay as cache unless another account keeps them. */
+export const unpinFile = (fileId: string, owner: string): Promise<void> => unpinWhere(owner, fileId);
+
+/** `owner` leaves this device: every pin it holds goes. */
+export const unpinAllOf = (owner: string): Promise<void> => unpinWhere(owner, null);
+
+/** Bytes of the chunks `owner` keeps; a chunk shared with another account counts for both. */
+export const pinnedBytesOf = async (owner: string): Promise<number> => {
+	const db = await openDb();
+	if (!db) return 0;
+	return inTx<number>(db, 'readonly', (store, settle) => {
+		let total = 0;
+		const req = store.index('pins').openCursor(IDBKeyRange.only(owner));
+		req.onsuccess = () => {
+			const cursor = req.result;
+			if (!cursor) return settle(total);
+			total += (cursor.value as ChunkRecord).size;
+			cursor.continue();
+		};
+	});
+};
+
+/**
+ * Oldest-used unpinned chunks go first once the cache's byte budget is
+ * crossed. Kept chunks are never evicted and do not count against the
+ * budget: keeping files does not shrink the cache, and the cache never
+ * pushes a kept file out. One transaction, so a chunk pinned meanwhile is not
+ * deleted.
+ */
+const evictOverBudget = (db: IDBDatabase): Promise<void> =>
+	inTx<void>(db, 'readwrite', (store) => {
+		const index = store.index('evictable');
+		let total = 0;
+		const sum = index.openKeyCursor();
+		sum.onsuccess = () => {
+			const cursor = sum.result;
+			if (cursor) {
+				total += (cursor.key as [number, number])[1];
+				cursor.continue();
+				return;
+			}
+			if (total <= budgetBytes) return;
+			const byAge = index.openKeyCursor();
+			byAge.onsuccess = () => {
+				const c = byAge.result;
+				if (!c || total <= budgetBytes) return;
+				store.delete(c.primaryKey);
+				total -= (c.key as [number, number])[1];
+				c.continue();
+			};
+		};
+	});
 
 /** Ask the browser not to evict our origin storage under pressure. */
 export const requestPersistentStorage = (): void => {
@@ -121,4 +323,10 @@ export const requestPersistentStorage = (): void => {
 /** Test seam: forget the open database so a fresh fake can be installed. */
 export const __resetChunkCacheForTests = (): void => {
 	dbPromise = null;
+	budgetBytes = BUDGET_BYTES;
+};
+
+/** Test seam: a small budget, so eviction can be exercised with small chunks. */
+export const __setChunkBudgetForTests = (bytes: number): void => {
+	budgetBytes = bytes;
 };

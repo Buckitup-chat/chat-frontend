@@ -64,6 +64,57 @@ describe('file state screen', () => {
 	});
 });
 
+describe('keep on this device', () => {
+	// The switch shows what is: a tap asks, and the page answers through props.
+	it('asks to keep, and stays as the props say until they change', async () => {
+		const w = render();
+		const input = w.find('#fs-keep');
+		input.element.checked = true;
+		await input.trigger('change');
+		expect(w.emitted('keep')).toEqual([[true]]);
+		expect(input.element.checked).toBe(false);
+		await w.setProps({ keeping: { done: 1, total: 12 } });
+		expect(input.element.checked).toBe(true);
+		expect(input.element.disabled).toBe(true);
+		expect(w.text()).toContain('chunk 1 of 12');
+		await w.setProps({ keeping: null, keepError: 'There is not enough storage on this device to keep this file.' });
+		expect(input.element.checked).toBe(false);
+		expect(w.find('.fs-refused').text()).toContain('not enough storage');
+	});
+
+	it('a file deleted on the server: kept, only this device has it; not kept, nothing to keep', () => {
+		const deleted = { present: 0, total: 12, unknown: false, deleted: true };
+		const kept = render({ availability: deleted, kept: true });
+		expect(kept.text()).toContain('Only this device has it now.');
+		expect(kept.find('.fs-chunks').exists()).toBe(false);
+		expect(kept.find('#fs-keep').element.disabled).toBe(false);
+		expect(kept.find('.fs-btn').text()).toBe('Download');
+
+		const gone = render({ availability: deleted });
+		expect(gone.text()).toContain('The sender deleted this file from the server.');
+		expect(gone.find('#fs-keep').element.disabled).toBe(true);
+	});
+
+	it('a kept file opens offline, before anything about the server is known', async () => {
+		for (const availability of [null, { present: 0, total: 0, unknown: true, deleted: false }]) {
+			const w = render({ availability, kept: true });
+			expect(w.text()).toContain('This file opens from the copy kept on this device.');
+			await w.find('.fs-btn').trigger('click');
+			expect(w.emitted('refresh')).toHaveLength(1);
+		}
+	});
+
+	it('a deleted message: the kept copy remains', () => {
+		const w = render({ kept: true, messageDeleted: true, availability: { present: 0, total: 0, unknown: true, deleted: false } });
+		expect(w.text()).toContain('The message was deleted. The copy kept on this device remains.');
+		expect(w.text()).toContain('opens from the copy kept on this device');
+	});
+
+	it('offers no switch for a file that could not be verified', () => {
+		expect(render({ refused: true }).find('#fs-keep').exists()).toBe(false);
+	});
+});
+
 describe('availability journal', () => {
 	beforeEach(() => vi.restoreAllMocks());
 

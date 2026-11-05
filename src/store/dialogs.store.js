@@ -19,7 +19,7 @@ import {
     quarantinedEntries, discardEntry, currentSessionToken, sameSessionToken, pendingEntries, awaitServerAccepted, onOutboxChange,
     awaitingApprovalIds,
 } from '@/lib/data/outbox';
-import { feedOrderKey } from '@/lib/data/feedOrder';
+import { compareFeedOrder, feedOrderKey } from '@/lib/data/feedOrder';
 import { serialized } from '@/lib/data/serialized';
 import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
@@ -30,13 +30,17 @@ import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
 } from '@buckitup/pq-client/checkpoint';
-import { prepareUpload, uploadFile, downloadFile, fileAvailability } from '@/lib/data/fileTransfer';
+import { prepareUpload, uploadFile, fileAvailability } from '@/lib/data/fileTransfer';
+import { openFile } from '@/lib/data/keptFiles';
+import { chunkCountOf } from '@buckitup/pq-client/fileCrypto';
+import { uploadDigest, reusableUpload, rememberUpload } from '@/lib/data/uploadReuse';
 import { buildImagePreview, buildVideoPreview, isImageMime, isVideoMime } from '@/lib/data/imageMeta';
 import { openVideo } from '@/lib/data/videoStream';
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { mergeLiveWithCached } from '@/lib/data/readCache';
 import { readDialogRow, readDialogRows } from '@/lib/data/dialogCache';
 import { settled } from '@/lib/data/shapeLink';
+import { withBudget } from '@/lib/withBudget';
 import { DialogCrypto } from '@/libs/DialogCrypto';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
@@ -45,15 +49,6 @@ const safeBase64Decode = (str, fieldName) => {
     const result = decodeHexOrBase64(str);
     if (!result) throw new Error(`${fieldName} is empty`);
     return result;
-};
-
-/** `promise`, or a rejection once `ms` pass first: one slow dialog read must not wedge what waits on it. */
-const withBudget = (promise, ms, label) => {
-    let timer;
-    return Promise.race([
-        promise,
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} budget exceeded`)), ms); }),
-    ]).finally(() => clearTimeout(timer));
 };
 
 export const useDialogsStore = defineStore('dialogs', () => {
@@ -204,7 +199,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         if (!alive()) return null;
         const rows = colls.messages.toArray
             .filter((r) => r.sign_hash)
-            .sort((a, b) => feedOrderKey(a.message_id, a.owner_timestamp) - feedOrderKey(b.message_id, b.owner_timestamp));
+            .sort((a, b) => compareFeedOrder(a.message_id, a.owner_timestamp, b.message_id, b.owner_timestamp));
         for (const row of rows) await admitMessageRow(row, colls);
         return { rows, admitted: rows.filter((r) => isRowAdmitted(dialogHash, r)) };
     };
@@ -958,15 +953,6 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     // ---------- file transport (§1.5, §2.1–2.3) ----------
 
-    // §4.1: file_id + enc_secret persist BEFORE the first PUT — file_id alone
-    // cannot resume, since a fresh secret would make re-sent chunks
-    // undecryptable next to the ones already stored.
-    const pendingUploadKey = (fileId) => `bkp:pending-upload:${fileId}`;
-
-    /**
-     * Uploads a file and sends the message referencing it. Progress is in
-     * chunks (§2.1 — chunks, not guessed percentages). Returns the fileId.
-     */
     /**
      * Uploads one attachment and returns its content part.
      *
@@ -981,18 +967,32 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
 
-        // The queue mints the pair up front so pause/resume re-enter with the
-        // same file_id + enc_secret; a direct call mints its own.
-        const prepared = preparedIn ?? prepareUpload((await import('uuid')).v7());
-        try {
-            localStorage.setItem(pendingUploadKey(prepared.fileId), JSON.stringify({
-                encSecretB64: prepared.encSecretB64, name, size: bytes.length,
-            }));
-        } catch { /* private mode: resume across reloads degrades, upload still works */ }
-
-        const up = await uploadFile({
-            bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,
+        const digest = await uploadDigest(bytes);
+        const existing = await reusableUpload(uploaderHash, digest, fileAvailability).catch((e) => {
+            console.warn('[dialogs] upload reuse unavailable:', e);
+            return null;
         });
+        if ($userPQ.currentUserHash !== uploaderHash) throw new Error('The account changed while preparing the file');
+
+        // The transfer queue mints the pair up front and keeps it for the row's
+        // life, so pause/resume re-enter with the same file_id + enc_secret: a
+        // fresh secret would make re-sent chunks undecryptable next to the ones
+        // already stored (§4.1). A direct call mints its own.
+        const prepared = preparedIn ?? prepareUpload((await import('uuid')).v7());
+        let up = existing;
+        if (up) {
+            signal?.throwIfAborted();
+            const total = chunkCountOf(bytes.length);
+            onProgress?.({ fileId: up.fileId, done: total, total });
+        } else {
+            up = await uploadFile({
+                bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,
+            });
+            const save = () => rememberUpload(uploaderHash, digest, up).catch((e) =>
+                console.warn('[dialogs] uploaded file reference not saved for reuse:', e));
+            if (up.manifestAwaitingApproval) void up.manifestAwaitingApproval.then(save, () => {});
+            else await save();
+        }
 
         const common = {
             name,
@@ -1022,9 +1022,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
     /** How much of an attachment this node can serve (§2.4). */
     const getFileAvailability = (part) => fileAvailability(part.fileId, part.uploaderHash);
 
-    /** Downloads and decrypts an attachment; progress in chunks (§2.3). */
+    /**
+     * Decrypts an attachment: from the copy kept on this device when the
+     * account keeps it (keptFiles.ts), downloaded otherwise; progress in
+     * chunks (§2.3).
+     */
     const fetchFile = (filePart, { onProgress, signal } = {}) =>
-        downloadFile({ fileId: filePart.fileId, uploaderHash: filePart.uploaderHash, encSecretB64: filePart.encSecretB64, onProgress, signal });
+        openFile($userPQ.currentUserHash, filePart, { onProgress, signal });
 
     /**
      * Deletes own message (§3.2): a new revision with deleted_flag and no
@@ -1344,7 +1348,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             .filter((r) => r.sender_hash === me && !r.deleted_flag && r.content_b64)
             .map((r) => ({ row: r, order: feedOrderKey(r.message_id, r.owner_timestamp) }))
             .filter((e) => e.order > pointer.scannedTo)
-            .sort((a, b) => b.order - a.order);
+            .sort((a, b) => (b.order - a.order) || compareFeedOrder(b.row.message_id, b.row.owner_timestamp, a.row.message_id, a.row.owner_timestamp));
 
         // The watermark advances only past rows that actually decrypted. A row
         // that failed (its dialog key has not arrived yet) must be rescanned,
@@ -1398,12 +1402,20 @@ export const useDialogsStore = defineStore('dialogs', () => {
         // Every await below may outlive the session: nothing is written for
         // `me` once another account is open.
         const stillMine = () => $userPQ.currentUserHash === me;
-        const { rows, pointer } = await withDialogCollections(dialogHash, async (colls) => {
+        const { rows, readable, pointer } = await withDialogCollections(dialogHash, async (colls) => {
             const read = await admittedRowsOf(dialogHash, colls, stillMine);
-            if (!read) return { rows: [], pointer: stored };
+            if (!read) return { rows: [], readable: false, pointer: stored };
             const { rows: loaded, admitted } = read;
             const isAdmitted = (r) => isRowAdmitted(dialogHash, r);
-            return { rows: admitted, pointer: await findLatestCheckpoint(dialogHash, loaded, stored, colls, isAdmitted, me) };
+            const found = await findLatestCheckpoint(dialogHash, loaded, stored, colls, isAdmitted, me);
+            // A dialog that did not load reads as empty, and an empty dialog
+            // differs from every checkpoint. The checkpoint's own message
+            // missing is either that or a removal, and only a live shape
+            // tells the two apart.
+            const readable = !found.checkpoint
+                || loaded.some((r) => r.message_id === found.checkpoint.messageId)
+                || await liveWithinBudget(colls.messages);
+            return { rows: admitted, readable, pointer: found };
         });
         if (!stillMine()) return null;
         if (pointer.scannedTo !== stored.scannedTo || pointer.checkpoint !== stored.checkpoint) {
@@ -1419,6 +1431,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             checkpointAlerts.value.delete(peerHash);
             return null;
         }
+        if (!readable) throw new Error('the dialog could not be read');
 
         const alert = {
             changed: viewMoved(rows, pointer.checkpoint.viewRoot, pointer.checkpoint.messageId),
@@ -1452,15 +1465,12 @@ export const useDialogsStore = defineStore('dialogs', () => {
             // that is hundreds of strangers. An alert is only possible where
             // this account has a checkpoint pointer, and those dialogs are
             // indexed; everything else is skipped without opening a shape.
-            const indexed = await pointerDialogs($userPQ.currentUserHash);
+            const peers = await checkpointPeers(peerHashes);
             // null = the index could not be read (locked storage, transient
             // failure). Skipping the tick keeps the 30s retry alive; treating
             // it as "empty" would silently disable every alert for the session.
-            if (indexed === null) return;
-            for (const peerHash of peerHashes) {
-                if (!peerHash || peerHash === $userPQ.currentUserHash) continue;
-                const dialogHash = getDialogHash(peerHash);
-                if (!dialogHash || !indexed.has(dialogHash)) continue;
+            if (peers === null) return;
+            for (const peerHash of peers) {
                 try {
                     await withBudget(refreshCheckpointAlert(peerHash), REFRESH_BUDGET_MS, 'refresh');
                 } catch (e) {
@@ -1469,6 +1479,44 @@ export const useDialogsStore = defineStore('dialogs', () => {
             }
         })().finally(() => { scanInFlight = null; });
         return scanInFlight;
+    };
+
+    /**
+     * Those of `peerHashes` whose dialog holds a checkpoint pointer on this
+     * device — the dialogs an alert is possible in, for the Checkpoints
+     * screen. Null when the pointer index could not be read: "could not
+     * tell", not "none".
+     */
+    const checkpointPeers = async (peerHashes) => {
+        const me = $userPQ.currentUserHash;
+        const indexed = await pointerDialogs(me);
+        if (indexed === null || $userPQ.currentUserHash !== me) return null;
+        return peerHashes.filter((peerHash) => {
+            if (!peerHash || peerHash === me) return false;
+            const dialogHash = getDialogHash(peerHash);
+            return !!dialogHash && indexed.has(dialogHash);
+        });
+    };
+
+    /**
+     * The checkpoint part this user signed in the message `messageId` of the
+     * dialog with `peerHash` — the part an alert's pointer names, for
+     * comparing the dialog with it. Read from an admitted, decrypted row of
+     * this user's own, like the scan that found it; null when there is none.
+     */
+    const readCheckpointPart = async (peerHash, messageId) => {
+        const me = $userPQ.currentUserHash;
+        const dialogHash = getDialogHash(peerHash);
+        if (!dialogHash || !messageId) return null;
+        const stillMine = () => $userPQ.currentUserHash === me;
+        return withDialogCollections(dialogHash, async (colls) => {
+            const read = await admittedRowsOf(dialogHash, colls, stillMine);
+            const row = read?.admitted.find((r) => r.message_id === messageId);
+            if (!row || row.sender_hash !== me || row.deleted_flag || !row.content_b64) return null;
+            const decoded = await decryptMessageRow(row, colls);
+            if (!decoded.decrypted || !stillMine()) return null;
+            return (decoded.parts || []).find((p) => p.kind === 'checkpoint') ?? null;
+        });
     };
 
     // ---------- a peer's parts, read in the background ----------
@@ -1852,18 +1900,17 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const diff = await diffDialogCheckpoint(peerHash, part);
         if (diff.status !== 'ok') return diff;
 
-        const pointerKey = feedOrderKey(pointerMessageId, part.createdAt);
         const past = [];
         const futureAdds = [];
         for (const c of diff.changes) {
             if (c.messageId === pointerMessageId) continue; // the pointer itself
-            if (c.type === 'MESSAGE_ADDED' && feedOrderKey(c.messageId, part.createdAt) >= pointerKey) {
+            if (c.type === 'MESSAGE_ADDED' && compareFeedOrder(c.messageId, part.createdAt, pointerMessageId, part.createdAt) > 0) {
                 futureAdds.push(c);
             } else {
                 past.push(c);
             }
         }
-        futureAdds.sort((a, b) => feedOrderKey(a.messageId, 0) - feedOrderKey(b.messageId, 0));
+        futureAdds.sort((a, b) => compareFeedOrder(a.messageId, 0, b.messageId, 0));
 
         const msgColl = getDialogCollections(dialogHash).messages;
         const changes = [];
@@ -2113,6 +2160,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         alertingPeers,
         scanCheckpointAlerts,
         refreshCheckpointAlert,
+        checkpointPeers,
+        readCheckpointPart,
         admitMessageRow,
         isMessageAdmitted,
         blockedByOf,

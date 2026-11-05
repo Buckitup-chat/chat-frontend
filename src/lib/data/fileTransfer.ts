@@ -13,6 +13,7 @@
 
 import { signFields, toBase64, fromBase64 } from '@buckitup/pq-client/signature';
 import { sha3_512 } from '@noble/hashes/sha3';
+import { concatBytes } from '@noble/hashes/utils';
 import {
 	CHUNK_SIZE,
 	chunkCountOf,
@@ -23,7 +24,7 @@ import {
 	newFileId,
 } from '@buckitup/pq-client/fileCrypto';
 import { sendMutationsAndAwaitShape } from './ingest';
-import { getCachedChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
+import { getCachedChunk, pinChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 import { bearerFor, openSession } from './readSession';
 import { assertChunkBytes, isRefusedFile, readChunkRows, readVerifiedFile } from './fileIntegrity';
 import type { SignPkeyResolver } from './rowVerification';
@@ -45,10 +46,16 @@ export interface UploadResult {
 }
 
 /**
- * Mints the identifiers an upload needs. The caller persists BOTH before the
- * first PUT (§4.1): file_id alone cannot resume — enc_secret is one random
- * value per file, and a fresh secret would make re-sent chunks undecryptable
- * next to the ones already stored.
+ * Mints the identifiers an upload needs. The caller keeps BOTH from before
+ * the first PUT for as long as the upload may resume: file_id alone cannot
+ * resume — enc_secret is one random value per file, and a fresh secret would
+ * make re-sent chunks undecryptable next to the ones already stored.
+ *
+ * pq_files §4.1 asks for a durable record, removed when the manifest commits,
+ * so an upload resumes after a reload. This client keeps the pair in memory
+ * (the transfer queue), so an upload resumes within the page's life only. A
+ * durable record holds the secret that opens the file: it goes through
+ * `secureStore`, never into plaintext storage (docs/invariants.md §1).
  */
 export const prepareUpload = (uuidV7: string) => ({
 	fileId: newFileId(uuidV7),
@@ -236,6 +243,58 @@ export const fileAvailability = async (
 	return { present: file.hashes.listedPresent(), total: file.manifest.chunkCount, unknown: false, deleted: file.manifest.deleted };
 };
 
+/**
+ * The uploader deleted the file (pq_files §7): its manifest is a tombstone
+ * with no chunk list, and the server reclaims the bytes. Not a network
+ * failure — another attempt gets the same answer.
+ */
+export class FileDeletedError extends Error {
+	constructor(readonly fileId: string) {
+		super(`file ${fileId} was deleted by its uploader`);
+		this.name = 'FileDeletedError';
+	}
+}
+
+export const isDeletedFile = (e: unknown): boolean => e instanceof FileDeletedError;
+
+/** The file's verified manifest and chunk rows, or why there is nothing to read. */
+const readLiveFile = async (fileId: string, uploaderHash: string, opts: { signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver }) => {
+	const file = await readVerifiedFile(fileId, uploaderHash, opts);
+	if (!file) throw new Error('file manifest not found');
+	if (file.manifest.deleted) throw new FileDeletedError(fileId);
+	return file;
+};
+
+/**
+ * Chunk `i` as the uploader signed it: from disk when this device holds it,
+ * from the network otherwise. Bytes fetched are held to `expected` before
+ * anything else sees them.
+ */
+const readChunk = async (fileId: string, i: number, expected: string, signal?: AbortSignal): Promise<{ encrypted: Uint8Array; fromCache: boolean }> => {
+	// Disk before network: chunks are immutable, so a cached one is
+	// exactly the one the device would serve — a reload or a lost uplink
+	// reassembles from here. The cache answers only for the signed hash; a
+	// copy stored under another is fetched again and overwritten.
+	const cached = await getCachedChunk(fileId, i, expected);
+	if (cached) return { encrypted: cached, fromCache: true };
+	const fetchChunk = () => {
+		const auth = bearerFor('file_chunk');
+		return fetch(`${ELECTRIC_API_URL}/file_chunk/${fileId}/${i}`, {
+			signal,
+			headers: auth ? { Authorization: auth } : undefined,
+		});
+	};
+	let r = await fetchChunk();
+	if (r.status === 401) {
+		await openSession('file_chunk');
+		r = await fetchChunk();
+	}
+	if (!r.ok) throw new Error(`chunk ${i} unavailable: HTTP ${r.status}`);
+	const encrypted = new Uint8Array(await r.arrayBuffer());
+	assertChunkBytes(fileId, i, expected, encrypted);
+	return { encrypted, fromCache: false };
+};
+
 export interface DownloadProgress {
 	fileId: string;
 	done: number;
@@ -264,53 +323,85 @@ export const downloadFile = async (opts: {
 	const { fileId, encSecretB64, onProgress, signal } = opts;
 	const secret = fromBase64(encSecretB64);
 
-	const file = await readVerifiedFile(fileId, opts.uploaderHash, { signal, resolveSignPkey: opts.resolveSignPkey });
-	if (!file) throw new Error('file manifest not found');
-	if (file.manifest.deleted) throw new Error('file was deleted by its uploader');
-	const { hashes } = file;
-	const total = file.manifest.chunkCount;
+	const { hashes, manifest } = await readLiveFile(fileId, opts.uploaderHash, { signal, resolveSignPkey: opts.resolveSignPkey });
+	const total = manifest.chunkCount;
 
 	requestPersistentStorage();
 	const parts: Uint8Array[] = [];
-	let size = 0;
 	for (let i = 0; i < total; i++) {
 		signal?.throwIfAborted();
 		const expected = await hashes.expected(i);
-		// Disk before network: chunks are immutable, so a cached one is
-		// exactly the one the device would serve — a reload or a lost uplink
-		// reassembles from here. The cache answers only for the signed hash; a
-		// copy stored under another is fetched again and overwritten.
-		let encrypted = await getCachedChunk(fileId, i, expected);
-		const fromCache = !!encrypted;
-		if (!encrypted) {
-			const fetchChunk = () => {
-				const auth = bearerFor('file_chunk');
-				return fetch(`${ELECTRIC_API_URL}/file_chunk/${fileId}/${i}`, {
-					signal,
-					headers: auth ? { Authorization: auth } : undefined,
-				});
-			};
-			let r = await fetchChunk();
-			if (r.status === 401) {
-				await openSession('file_chunk');
-				r = await fetchChunk();
-			}
-			if (!r.ok) throw new Error(`chunk ${i} unavailable: HTTP ${r.status}`);
-			encrypted = new Uint8Array(await r.arrayBuffer());
-			assertChunkBytes(fileId, i, expected, encrypted);
-		}
+		const { encrypted, fromCache } = await readChunk(fileId, i, expected, signal);
 		const plain = await decryptChunk(secret, encrypted);
 		// Cached only once it is the signed chunk and decrypts: a bad fetch
 		// must not poison future loads.
 		if (!fromCache) void putCachedChunk(fileId, i, encrypted, expected);
 		parts.push(plain);
-		size += plain.length;
 		opts.onChunk?.(i, plain);
 		onProgress?.({ fileId, done: i + 1, total });
 	}
+	return concatBytes(...parts);
+};
 
-	const out = new Uint8Array(size);
-	let off = 0;
-	for (const p of parts) { out.set(p, off); off += p.length; }
-	return out;
+/**
+ * Pins every chunk of a file for `owner` (keptFiles.ts), fetching the ones
+ * this device lacks first, and returns each chunk's signed data hash in index
+ * order — what opening the kept copy later checks the bytes against, with no
+ * manifest needed. Each chunk is verified as a download verifies it and must
+ * decrypt under `encSecretB64`, so what is kept is known to open. A failed
+ * pin throws (a full disk as QuotaExceededError); the chunks pinned before it
+ * stay pinned, and the caller releases them.
+ */
+export const pinFileChunks = async (opts: {
+	fileId: string;
+	uploaderHash: string;
+	encSecretB64: string;
+	owner: string;
+	onProgress?: (p: DownloadProgress) => void;
+	signal?: AbortSignal;
+	resolveSignPkey?: SignPkeyResolver;
+}): Promise<string[]> => {
+	const { fileId, owner, onProgress, signal } = opts;
+	const secret = fromBase64(opts.encSecretB64);
+	const { hashes, manifest } = await readLiveFile(fileId, opts.uploaderHash, { signal, resolveSignPkey: opts.resolveSignPkey });
+	const total = manifest.chunkCount;
+	requestPersistentStorage();
+	const dataHashes: string[] = [];
+	for (let i = 0; i < total; i++) {
+		signal?.throwIfAborted();
+		const expected = await hashes.expected(i);
+		const { encrypted } = await readChunk(fileId, i, expected, signal);
+		await decryptChunk(secret, encrypted);
+		await pinChunk(fileId, i, expected, owner, encrypted);
+		dataHashes.push(expected);
+		onProgress?.({ fileId, done: i + 1, total });
+	}
+	return dataHashes;
+};
+
+/**
+ * Reassembles a kept file from this device alone: chunk `i` must be on disk
+ * under `dataHashes[i]`, the hash its signed row gave when it was kept.
+ * Throws when one is missing — the browser may have cleared the origin's
+ * storage — so the caller can try the network.
+ */
+export const readKeptChunks = async (opts: {
+	fileId: string;
+	encSecretB64: string;
+	dataHashes: string[];
+	onProgress?: (p: DownloadProgress) => void;
+	signal?: AbortSignal;
+}): Promise<Uint8Array> => {
+	const { fileId, dataHashes, onProgress, signal } = opts;
+	const secret = fromBase64(opts.encSecretB64);
+	const total = dataHashes.length;
+	const parts: Uint8Array[] = [];
+	for (let i = 0; i < total; i++) {
+		signal?.throwIfAborted();
+		const encrypted = await getCachedChunk(fileId, i, dataHashes[i]);
+		if (!encrypted) throw new Error(`chunk ${i} of the kept copy of ${fileId} is not on this device`);
+		parts.push(await decryptChunk(secret, encrypted));
+		onProgress?.({ fileId, done: i + 1, total });
+	}
+	return concatBytes(...parts);
 };

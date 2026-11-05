@@ -273,7 +273,7 @@ const TEXTS = ['peer one', 'peer two', 'peer three'];
 
 const freshAccountOpensDialog = async () => {
 	const { store, $dialogs } = await startApp();
-	await store.registerNewUser({ name: 'Fresh' } as never);
+	await store.registerNewUser({ name: 'Fresh', lock: 'legacy' } as never);
 	expect(store.isAuthenticated).toBe(true);
 	const me = store.currentUserHash as unknown as string;
 
@@ -294,7 +294,7 @@ describe('fresh account: the card published before login', () => {
 	it('records the accepted own card once the account is unlocked, without a failed pre-login reconciliation', async () => {
 		const warn = vi.spyOn(console, 'warn');
 		const { store } = await startApp();
-		await store.registerNewUser({ name: 'Fresh' } as never);
+		await store.registerNewUser({ name: 'Fresh', lock: 'legacy' } as never);
 		const me = store.currentUserHash as unknown as string;
 
 		const { getAccepted } = await import('@/lib/data/acceptedSnapshot');

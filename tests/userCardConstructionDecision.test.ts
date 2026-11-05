@@ -17,6 +17,18 @@ let shape: FakeShape;
 vi.mock('@/lib/data/collections', () => ({
 	getUserCardsCollection: () => shape,
 }));
+let server: Map<string, unknown> | 'unreachable' | null = null;
+vi.mock('@/lib/data/shapeRead', async () => {
+	const actual = await vi.importActual<typeof import('@/lib/data/shapeRead')>('@/lib/data/shapeRead');
+	return {
+		...actual,
+		readShapeOnce: async (table: string, where: string) => {
+			if (server === 'unreachable') throw new TypeError('Failed to fetch');
+			const userHash = /user_hash='([^']+)'/.exec(where)?.[1];
+			return [...(server ?? shape.rows).values()].filter((r) => (r as { user_hash?: string }).user_hash === userHash);
+		},
+	};
+});
 
 const { createShapeLink, registerShapeLink, whenLive } = await import('@/lib/data/shapeLink');
 const {
@@ -94,6 +106,7 @@ const stillDeciding = async (decision: Promise<unknown>) => {
 
 beforeEach(() => {
 	shape = makeShape();
+	server = null;
 	intents = makeStorage();
 	outbox = makeStorage();
 	accepted = makeStorage();
@@ -324,6 +337,37 @@ describe('blocked: state that cannot be proven is never "no card"', () => {
 		expect(await decideCardConstruction(USER, 'sign-in')).toMatchObject({ kind: 'author-bootstrap' });
 		shape.fail();
 		expect(await decideCardConstruction(USER, 'sign-in')).toEqual({ kind: 'blocked', reason: 'shape_unavailable' });
+	});
+});
+
+describe('a bootstrap insert needs the server\'s word that no card exists', () => {
+	it('a live shape that has not caught up does not author over the server\'s card', async () => {
+		server = new Map([[USER, { ...cardRow(100), owner_timestamp: '100', deleted_flag: 'f' }]]);
+		await goLive();
+		for (const mode of ['import', 'sign-in'] as const) {
+			expect(await decideCardConstruction(USER, mode)).toEqual({ kind: 'proven' });
+		}
+	});
+
+	it('a failed read proves nothing: no insert', async () => {
+		server = 'unreachable';
+		await goLive();
+		for (const mode of ['import', 'sign-in'] as const) {
+			expect(await decideCardConstruction(USER, mode)).toEqual({ kind: 'blocked', reason: 'shape_unavailable' });
+		}
+	});
+
+	it('a deleted card on the server, or none, still lets the card be published', async () => {
+		server = new Map([[USER, { ...cardRow(100), deleted_flag: 't' }]]);
+		await goLive();
+		expect(await decideCardConstruction(USER, 'import')).toMatchObject({ kind: 'author-bootstrap' });
+		server = new Map();
+		expect(await decideCardConstruction(USER, 'sign-in')).toMatchObject({ kind: 'author-bootstrap' });
+	});
+
+	it('registration does not ask: the account is new', async () => {
+		server = 'unreachable';
+		expect(await decideCardConstruction(USER, 'register')).toMatchObject({ kind: 'author-bootstrap' });
 	});
 });
 

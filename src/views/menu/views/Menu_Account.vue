@@ -1,91 +1,140 @@
 <template>
-	<Account_Item_PQ :self="true" class="mb-2" />
-
-	<div class="border-bottom pt-1 mx-2 mb-2"></div>
-
-	<router-link :to="{ name: 'account_info' }" custom v-slot="{ isExactActive, navigate }">
-		<div class="_sub_menu_btn" :class="{ _active: isExactActive }" @click="select(navigate)">
-			<div class="_i_block">
-				<i class="_icon_profile" :class="{ _active: isExactActive }"></i>
-			</div>
-			<div>Identity</div>
+	<!-- On a phone the profile card is the Identity item; a desktop lists it as a row of its own. -->
+	<router-link v-if="$breakpoint.lt('md')" :to="{ name: 'account_info' }" class="_profile ui-card" @click="closeMenu()">
+		<div class="_avatar">
+			<img v-if="avatarSrc" :src="avatarSrc" alt="" />
+			<Avatar v-else-if="me.user_hash" :name="me.user_hash" variant="bauhaus" />
 		</div>
+		<div class="_who">
+			<div class="ui-title-sm _name">{{ me.name }}</div>
+			<div class="ui-small ui-secondary ui-mono">{{ shortId }}</div>
+		</div>
+		<i class="_icon_back _chevron"></i>
 	</router-link>
 
-	<router-link :to="{ name: 'account_backups' }" custom v-slot="{ isExactActive, navigate }">
-		<div class="_sub_menu_btn" :class="{ _active: isExactActive }" @click="select(navigate)">
-			<div class="_i_block">
-				<i class="_icon_backups" :class="{ _active: isExactActive }"></i>
-			</div>
-			<div>Backup Center</div>
+	<template v-for="group in groups" :key="group.label">
+		<div class="ui-group-label">{{ group.label }}</div>
+		<div class="_group" :class="{ 'ui-card': $breakpoint.lt('md') }">
+			<UiRow v-for="item in group.items" :key="item.title" v-bind="item" :bare="!$breakpoint.lt('md')"
+				:chevron="$breakpoint.lt('md')" :selected="!$breakpoint.lt('md') && isActive(item.to)"
+				@click="closeMenu()" />
 		</div>
-	</router-link>
+	</template>
 
-	<router-link :to="{ name: 'account_notifications' }" custom v-slot="{ isExactActive, navigate }">
-		<div class="_sub_menu_btn" :class="{ _active: isExactActive }" @click="select(navigate)">
-			<div class="_i_block">
-				<i class="_icon_notifications" :class="{ _active: isExactActive }"></i>
-			</div>
-			<div>Notifications</div>
-		</div>
-	</router-link>
-
-	<div v-if="canPrompt || needsManualInstall" class="_sub_menu_btn" @click="installApp">
-		<div class="_i_block">
-			<i class="_icon_buckup_devices"></i>
-		</div>
-		<div>Install app</div>
+	<div class="_logout" :class="{ 'ui-card': $breakpoint.lt('md') }">
+		<UiRow title="Log out" icon="logout" button :chevron="false" :bare="!$breakpoint.lt('md')"
+			@select="$mitt.emit('modal::open', { id: 'logout' })" />
 	</div>
-	<!--router-link :to="{ name: 'account_admin' }" custom v-slot="{ isExactActive, navigate }">
-		<div class="_sub_menu_btn" :class="{ _active: isExactActive }" @click="select(navigate)">
-			<div class="_i_block">
-				<i class="_icon_admin" :class="{ _active: isExactActive }"></i>
-			</div>
-			<div>Administration</div>
-		</div>
-	</router-link-->
 </template>
+
+<script setup>
+import { computed, inject } from 'vue';
+import Avatar from 'vue-boring-avatars';
+import UiRow from '@/components/ui/UiRow.vue';
+import { useMenu } from '@/composables/useMenu';
+import { useBreakpoint } from '@/composables/useBreakpoint';
+import { userPQStore } from '@/store/userPQ.store';
+import { useDialogsStore } from '@/store/dialogs.store';
+import { shortUserId } from '@/lib/shortUserId';
+
+const $route = inject('$route');
+const $dialogs = useDialogsStore();
+const $mitt = inject('$mitt');
+const $userPQ = userPQStore();
+const $breakpoint = useBreakpoint();
+const { close: closeMenu } = useMenu();
+
+const me = computed(() => $userPQ.currentUser ?? {});
+const avatarSrc = computed(() => (typeof me.value.avatar === 'string' ? me.value.avatar : ''));
+const shortId = computed(() => shortUserId(me.value.user_hash));
+
+const isActive = (to) => !!to && $route.name === to.name;
+
+const groups = computed(() => [
+	...($breakpoint.lt('md')
+		? []
+		: [{ label: 'You', items: [{ title: 'Identity', sub: 'Name, devices, ID', icon: 'profile', to: { name: 'account_info' } }] }]),
+	{
+		label: 'Security',
+		items: [{ title: 'Backup Center', sub: 'Backup file and guardians', icon: 'backups', to: { name: 'account_backups' } }],
+	},
+	{
+		label: 'App',
+		items: [
+			// The dot is what the dialogs list's sweep already found this session.
+			{
+				title: 'Checkpoints', sub: 'Changes in signed history', icon: 'checkpoint', to: { name: 'account_checkpoints' },
+				dot: $dialogs.alertingPeers.size ? 'accent' : '',
+			},
+			{ title: 'Notifications', sub: 'Alerts about recovery attempts', icon: 'notifications', to: { name: 'account_notifications' } },
+			{ title: 'Storage on this device', icon: 'info', to: { name: 'account_storage' } },
+			{ title: 'Install app', sub: 'On your phone or computer', icon: 'buckup_devices', to: { name: 'account_install' } },
+		],
+	},
+]);
+</script>
 
 <style lang="scss" scoped>
 @import '@/scss/variables.scss';
 @import '@/scss/breakpoints.scss';
 
-._account {
-	._avatar {
-		height: 3.2rem;
-		width: 3.2rem;
-		margin-right: 0.6rem;
-		margin-left: 0.2rem;
+._profile {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	padding: var(--space-4);
+	color: var(--color-text);
+	text-decoration: none;
+}
+
+._avatar {
+	flex-shrink: 0;
+	width: 52px;
+	height: 52px;
+	border-radius: 50%;
+	overflow: hidden;
+
+	img,
+	svg {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+}
+
+._who {
+	flex: 1;
+	min-width: 0;
+}
+
+._name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+._chevron {
+	width: 16px;
+	height: 16px;
+	transform: rotate(180deg);
+	background-color: var(--color-text-muted);
+}
+
+._group {
+	@include media-breakpoint-up(md) {
+		:deep(.ui-row) { min-height: 56px; padding: var(--space-2) var(--space-3); }
+		:deep(.ui-row + .ui-row::before) { display: none; }
+	}
+}
+
+._logout {
+	margin: var(--space-6) 0 var(--space-4);
+
+	@include media-breakpoint-up(md) {
+		margin-top: var(--space-4);
+		padding-top: var(--space-2);
+		border-top: 1px solid var(--color-border);
+		:deep(.ui-row) { min-height: 48px; padding: var(--space-2) var(--space-3); }
 	}
 }
 </style>
-
-<script setup>
-import { useMenu } from '@/composables/useMenu';
-
-// import Account_Item from '@/components/Account_Item.vue';
-import Account_Item_PQ from '@/components/Account_Item_PQ.vue';
-import { inject } from 'vue';
-import { useInstallPrompt } from '@/composables/useInstallPrompt';
-
-const { close: closeMenu } = useMenu();
-const $swal = inject('$swal');
-const { canPrompt, needsManualInstall, install } = useInstallPrompt();
-
-const select = (navigate) => {
-	closeMenu();
-	navigate();
-};
-
-const installApp = async () => {
-	if (canPrompt.value) {
-		await install();
-		return;
-	}
-	$swal.fire({
-		icon: 'info',
-		title: 'Install BuckitUp',
-		text: 'In Safari, tap Share, then "Add to Home Screen", and open BuckitUp from the new icon. It then works with no connection, and Safari no longer clears its data after a week without a visit.',
-	});
-};
-</script>

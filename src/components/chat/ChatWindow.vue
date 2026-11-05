@@ -7,6 +7,7 @@
     <!-- Header -->
     <div class="chat-header d-flex align-items-center justify-content-between px-3 py-2 border-bottom">
       <div class="d-flex align-items-center text-dark">
+        <UiBackToList />
         <!-- Avatar -->
         <!-- Tapping the peer's picture opens their photo gallery. -->
         <div
@@ -23,14 +24,11 @@
       <div class="d-flex align-items-center">
         <!-- Rooms mount this component too and bind no checkpoint handler;
              without a peer there is no dialog to attest. -->
-        <button v-if="peerHash" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Sign a checkpoint of this dialog's history"
-          :disabled="checkpointSigning" @click="emit('createCheckpoint')">🔏</button>
+        <button v-if="peerHash" type="button" class="checkpoint-btn me-2" title="Sign a checkpoint of this dialog's history"
+          :disabled="checkpointSigning" @click="emit('createCheckpoint')"><i class="_icon_checkpoint"></i>Checkpoint</button>
         <!-- Only a contact confirmed in person can be asked (pq_recovery_shares § Inviting). -->
         <button v-if="peerHash && canInvite" type="button" class="btn btn-light btn-sm rounded-pill me-2" title="Ask to be your guardian"
           :disabled="inviting" @click="emit('inviteGuardian')">🛡</button>
-        <div class="_toggler" @click="toggleMenu()" v-if="$breakpoint.lt('md')">
-          <div :class="{ _open: $menuOpened }"><span></span><span></span><span></span><span></span></div>
-        </div>
       </div>
     </div>
 
@@ -185,16 +183,30 @@
                   <template v-else-if="downloads[fileKey(f)]?.status === 'downloading'">
                     {{ fmtSize(f.size) }} · chunk {{ downloads[fileKey(f)].done }} of {{ downloads[fileKey(f)].total }}
                   </template>
+                  <template v-else-if="keeping[fileKey(f)]">
+                    {{ fmtSize(f.size) }} · keeping<template v-if="keeping[fileKey(f)].total">, chunk {{ keeping[fileKey(f)].done }} of {{ keeping[fileKey(f)].total }}</template>
+                  </template>
+                  <!-- Keep on this device: the copy and where else the file still is. -->
+                  <template v-else-if="kept[fileKey(f)] && msg._deleted">
+                    {{ fmtSize(f.size) }} · message deleted, copy kept on this device
+                  </template>
+                  <template v-else-if="kept[fileKey(f)] && deletedOnServer(f)">
+                    {{ fmtSize(f.size) }} · kept · deleted on the server, only this device has it
+                  </template>
+                  <template v-else-if="deletedOnServer(f)">
+                    {{ fmtSize(f.size) }} · deleted by the sender
+                  </template>
                   <template v-else-if="downloads[fileKey(f)]?.status === 'error'">
                     {{ fmtSize(f.size) }} · <span class="msg-file-err">download failed — tap to retry</span>
                   </template>
                   <template v-else-if="downloads[fileKey(f)]?.status === 'done'">
-                    {{ fmtSize(f.size) }} · saved
+                    {{ fmtSize(f.size) }} · saved<template v-if="kept[fileKey(f)]"> · kept on this device</template>
                   </template>
+                  <template v-else-if="kept[fileKey(f)]">{{ fmtSize(f.size) }} · kept on this device</template>
                   <template v-else>{{ fmtSize(f.size) }}</template>
                 </div>
               </div>
-              <template v-if="!refusedFile(f)">
+              <template v-if="!refusedFile(f) && (kept[fileKey(f)] || !deletedOnServer(f))">
                 <template v-if="playableAudioType(f)">
                   <span v-if="audios[fileKey(f)]?.status === 'loading'" class="msg-file-spinner" title="Loading audio"></span>
                   <button v-else-if="audios[fileKey(f)]?.status !== 'ready'" type="button"
@@ -266,7 +278,7 @@
                  Tap asks the page to verify + compare against current state. -->
             <button v-for="(cp, ci) in checkpointsOf(msg)" :key="'cp' + ci" type="button"
               class="msg-checkpoint" @click="emit('checkpointInfo', { part: cp, messageId: msg.id })">
-              🔏 History checkpoint · tap to compare
+              <i class="_icon_checkpoint"></i>History checkpoint · tap to compare
             </button>
             <RecoveryShareCard v-if="shares[msg.id] && shares[msg.id].kind !== 'holding'" :view="shares[msg.id]" :peer-name="title"
               :busy="givingBack" @give-back="(key) => emit('giveBackShare', key)" />
@@ -363,7 +375,7 @@
           <input ref="fileInput" type="file" multiple class="d-none" @change="onFilePicked" />
           <button type="button" class="btn btn-light rounded-circle me-2 d-flex align-items-center justify-content-center border-0 attach-btn"
             style="width: 40px; height: 40px; padding: 0; flex-shrink: 0;" title="Attach a file" @click="fileInput?.click()">
-            <i class="bi bi-paperclip"></i>
+            <i class="_icon_attach"></i>
           </button>
         </template>
         <input type="text" class="form-control me-2 rounded-pill px-3" v-model="newMessage"
@@ -392,27 +404,27 @@
       <div class="context-menu-divider"></div>
       <button v-if="contextMenuMsg && contextMenuMsg._raw && contextMenuMsg._raw.sign_hash && !contextMenuMsg._deleted"
         type="button" class="context-menu-action" @click="startReply(contextMenuMsg)">
-        <i class="bi bi-reply me-2"></i>Reply
+        <i class="_icon_reply icon-inline"></i>Reply
       </button>
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !isPhotoOnly(contextMenuMsg)" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
-        <i class="bi bi-pencil me-2"></i>Edit
+        <i class="_icon_edit_pen icon-inline"></i>Edit
       </button>
       <button v-if="canAcknowledge" type="button" class="context-menu-action"
         @click="acknowledgeFromContext">
-        <i class="bi bi-eye me-2"></i>Confirm read
+        <i class="_icon_eye icon-inline"></i>Confirm read
       </button>
       <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !contextMenuMsg._deleted"
         type="button" class="context-menu-action context-menu-danger" @click="deleteFromContext">
-        <i class="bi bi-trash me-2"></i>Delete
+        <i class="_icon_delete icon-inline"></i>Delete
       </button>
       <!-- §4.3 "!": rejected outright — the action is to discard the local copy -->
       <button v-if="contextMenuMsg && contextMenuMsg._optimistic && contextMenuMsg._syncStatus === 'error'"
         type="button" class="context-menu-action context-menu-danger" @click="discardFromContext">
-        <i class="bi bi-trash me-2"></i>Discard failed message
+        <i class="_icon_delete icon-inline"></i>Discard failed message
       </button>
       <button type="button" class="context-menu-action" @click="copyMessageText">
-        <i class="bi bi-clipboard me-2"></i>Copy text
+        <i class="_icon_copy icon-inline"></i>Copy text
       </button>
     </div>
   </div>
@@ -422,11 +434,10 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { fileKey } from '@/lib/data/fileKey';
 import { contentToText, quoteSnapshot } from '@buckitup/pq-client/content';
-import { useBreakpoint } from '@/composables/useBreakpoint';
+import UiBackToList from '@/components/ui/UiBackToList.vue';
 import RecoveryInviteCard from './RecoveryInviteCard.vue';
 import RecoveryShareCard from './RecoveryShareCard.vue';
 import RecoveryHoldingLine from './RecoveryHoldingLine.vue';
-import { useMenu } from '@/composables/useMenu';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/data/drafts';
 import { playableAudioType } from '@/composables/useAudioPlayback';
 import Avatar from 'vue-boring-avatars';
@@ -434,8 +445,6 @@ import GalleryViewer from '@/components/GalleryViewer.vue';
 import { thumbDataUrl } from '@/lib/data/imageMeta';
 import { isAvatarPart, isControlPart } from '@buckitup/pq-client/content';
 
-const { isOpen: $menuOpened, toggle: toggleMenu } = useMenu();
-const $breakpoint = useBreakpoint();
 const defaultAvatar = '/img/profile.webp';
 
 const EMOJI_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '💯', '👀', '🎉', '👏', '🤔', '😎', '🚀', '✨', '💪'];
@@ -501,6 +510,21 @@ const props = defineProps({
     default: () => ({})
   },
   availability: {
+    type: Object,
+    default: () => ({})
+  },
+  /** fileKey → the entry of a file this account keeps on this device (keptFiles.ts). */
+  kept: {
+    type: Object,
+    default: () => ({})
+  },
+  /** fileKey → { done, total } while a file is being kept. */
+  keeping: {
+    type: Object,
+    default: () => ({})
+  },
+  /** message id → kept entries of the files it carried: a deleted message still shows them. */
+  keptByMessage: {
     type: Object,
     default: () => ({})
   },
@@ -685,7 +709,12 @@ const toggleQuoteChain = (msg, qi) => {
   else next.add(key);
   expandedQuotes.value = next;
 };
-const filesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'file');
+// A deleted message carries no parts; the copies this account kept of its
+// files stand in for them, as file rows that open from this device (a kept
+// entry is a file part with more fields).
+const filesOf = (msg) => (msg._deleted
+  ? props.keptByMessage[msg.id] || []
+  : (msg.parts || []).filter((p) => p.kind === 'file'));
 
 const audioElements = new Map();
 const playWhenReady = new Set();
@@ -748,12 +777,15 @@ const checkpointsOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'check
  *  needs no explanation, and an unknown manifest is not a claim to make. */
 const partial = (part) => {
   const a = props.availability[fileKey(part)];
-  if (!a || a.unknown || a.deleted || !a.total) return null;
+  // A kept file is whole on this device, whatever the node holds.
+  if (!a || a.unknown || a.deleted || !a.total || props.kept[fileKey(part)]) return null;
   return a.present < a.total ? a : null;
 };
 /** A file whose manifest or chunks contradict the uploader's signatures:
  *  refused, so no download button — another attempt gets the same answer. */
 const refusedFile = (part) => !!props.refused[fileKey(part)];
+/** The uploader deleted the file: its manifest says so (a download answered so is recorded there too). */
+const deletedOnServer = (part) => !!props.availability[fileKey(part)]?.deleted;
 const imagesOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'image');
 const videosOf = (msg) => (msg.parts || []).filter((p) => p.kind === 'video');
 
@@ -1154,7 +1186,7 @@ watch(() => props.messages, () => {
   pointer-events: none;
 }
 .drop-notice { margin: 0 4px 6px; font-size: 12px; color: #a15c00; }
-.attach-btn .bi { font-size: 18px; color: #5a5a5a; }
+.attach-btn ._icon_attach { width: 1.5rem; height: 1.5rem; background-color: #5a5a5a; }
 
 .chat-header {
   background-color: #ffffff;
@@ -1324,10 +1356,6 @@ watch(() => props.messages, () => {
   &:hover {
     background: rgba(0, 0, 0, 0.06);
   }
-
-  i {
-    font-size: 1rem;
-  }
 }
 
 .chat-footer {
@@ -1348,70 +1376,6 @@ watch(() => props.messages, () => {
   border-radius: 3px;
 }
 
-._toggler {
-  border: none;
-  padding: 0.75rem 1rem;
-  cursor: pointer;
-
-  div {
-    width: 22px;
-    height: 20px;
-    position: relative;
-    transform: rotate(0deg);
-    transition: 0.5s ease-in-out;
-    cursor: pointer;
-
-    span {
-      display: block;
-      position: absolute;
-      height: 3px;
-      width: 100%;
-      background: $dark;
-      border-radius: 2px;
-      opacity: 1;
-      left: 0;
-      transform: rotate(0deg);
-      transition: 0.25s ease-in-out;
-
-      &:nth-child(1) {
-        top: 0px;
-      }
-
-      &:nth-child(2),
-      &:nth-child(3) {
-        top: 8px;
-      }
-
-      &:nth-child(4) {
-        top: 16px;
-      }
-    }
-
-    &._open {
-      span {
-        &:nth-child(1) {
-          top: 8px;
-          width: 0%;
-          left: 50%;
-        }
-
-        &:nth-child(2) {
-          transform: rotate(45deg);
-        }
-
-        &:nth-child(3) {
-          transform: rotate(-45deg);
-        }
-
-        &:nth-child(4) {
-          top: 16px;
-          width: 0%;
-          left: 50%;
-        }
-      }
-    }
-  }
-}
 
 /* ---------- design board: quotes (§1.2) ---------- */
 .msg-quote {
@@ -1473,14 +1437,39 @@ watch(() => props.messages, () => {
 .message-unplaced { opacity: .72; }
 .msg-unplaced-note { margin-top: 2px; font-size: 10px; line-height: 1.3; color: #9a9c9d; }
 .msg-checkpoint {
-  display: block;
-  border: 1px dashed #8e2b77;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  border: 1px dashed var(--color-accent);
   background: rgba(142, 43, 119, .06);
-  color: #8e2b77;
+  color: var(--color-accent);
   border-radius: 10px;
   font-size: 12px;
   padding: 4px 10px;
   margin: 2px 0;
+
+  i { flex-shrink: 0; width: 14px; height: 14px; background-color: currentColor; }
+}
+/* the header's "sign a checkpoint" pill */
+.checkpoint-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+
+  i { width: 16px; height: 16px; background-color: currentColor; }
+  &:hover { background: var(--color-border); }
+  &:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+  &:disabled { opacity: .4; pointer-events: none; }
 }
 
 .context-menu-danger { color: #dc3545; }

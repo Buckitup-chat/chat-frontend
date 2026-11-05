@@ -33,6 +33,8 @@
 					After installation, enable passkey support in the application settings
 					and the browser extension — then passkeys will work almost like on Windows or macOS.
 				</p>
+
+				<PasskeyRestoreButton button-class="btn" note="Already have a passkey with recovery turned on?" />
 			</div>
 		</div>
 	</div>
@@ -74,6 +76,10 @@
 			<button class="btn btn-outline-light w-100" data-test="recover-with-friends" @click="setMode('friends')">Recover with friends</button>
 		</div>
 
+		<div class="px-3 w-100 mb-3">
+			<PasskeyRestoreButton />
+		</div>
+
 		<div class="px-3 w-100 mb-3 opacity-50">
 			<button class="btn btn-outline-light w-100" @click="wipe()">Wipe all</button>
 		</div>
@@ -107,7 +113,6 @@
 	color: #e0d4ff;
 	max-width: 720px;
 	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
-	font-family: system-ui, -apple-system, sans-serif;
 	position: relative;
 	overflow: hidden;
 
@@ -232,6 +237,7 @@ import { userStore } from '@/store/user.store';
 
 
 import Account_Selector from '@/components/Account_Selector.vue';
+import PasskeyRestoreButton from '@/components/recovery/PasskeyRestoreButton.vue';
 import { computed, inject, ref, onMounted, onUnmounted } from 'vue';
 import { useRecoveryRestoreStore } from '@/store/recoveryRestore.store';
 import * as $enigma from '@/libs/enigma';
