@@ -121,7 +121,7 @@ describe('acceptance arriving after the owner logged out mid-request', () => {
 		startLeaderElection(B, () => {});
 		ambientUserHash = B;
 		const sendMustNotFire = async () => { throw new Error('transport must not be called again'); };
-		const drainUnderB = await drainOutbox(A, sendMustNotFire, reconcileAccepted);
+		const drainUnderB = await drainOutbox(A, sendMustNotFire, (mutations, result) => reconcileAccepted(mutations, result));
 		expect(drainUnderB.sent).toBe(0);
 		expect(sent).toHaveLength(1);
 
@@ -134,7 +134,7 @@ describe('acceptance arriving after the owner logged out mid-request', () => {
 		ambientUserHash = null;
 		startLeaderElection(A, () => {});
 		ambientUserHash = A;
-		const finalDrain = await drainOutbox(A, sendMustNotFire, reconcileAccepted);
+		const finalDrain = await drainOutbox(A, sendMustNotFire, (mutations, result) => reconcileAccepted(mutations, result));
 		expect(finalDrain.sent).toBe(0);
 		expect(sent).toHaveLength(1);
 

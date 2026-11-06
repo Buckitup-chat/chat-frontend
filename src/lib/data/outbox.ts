@@ -28,8 +28,9 @@
 import { WebLocksLeader } from '@tanstack/offline-transactions';
 import { IndexedDbStore } from './indexedDbStore';
 import { IngestError } from './ingest';
-import { shapeOfTable } from './writeContracts';
+import { ownerOf, shapeOfTable } from './writeContracts';
 import { VaultLockedError, AccountMismatchError } from './keyCustody';
+import { isDerivedSigner, type DerivedSigner } from './sessionIdentities';
 import { createSecureStore, DecryptFailedError, type StringStore } from './secureStore';
 
 const DB_NAME = 'buckitup-outbox';
@@ -39,8 +40,13 @@ const SEND_LOCK_NAME = 'buckitup-outbox-send';
 
 export interface OutboxEntry {
 	id: string;
-	/** The account that signed these mutations; only it may replay them. */
+	/**
+	 * The account these mutations belong to; only its session may replay them.
+	 * They are signed by it, or by `signer`.
+	 */
 	userHash: string;
+	/** An identity derived from the account that signed these mutations (sessionIdentities.ts). */
+	signer?: DerivedSigner;
 	relation: string;
 	mutations: unknown[];
 	createdAt: number;
@@ -80,6 +86,11 @@ export interface ApprovalHold {
 	shape: string;
 	heldAt: number;
 }
+
+/** Sends one entry's mutations; `entry` says who signed them. */
+export type SendEntry = (mutations: unknown[], entry?: OutboxEntry) => Promise<unknown>;
+/** Reconciles an accepted entry's mutations with local state. */
+export type ReconcileEntry = (mutations: unknown[], result?: unknown, entry?: OutboxEntry) => Promise<void>;
 
 export const AWAITING_APPROVAL_MESSAGE = 'it waits for approval by the device owner';
 
@@ -708,6 +719,7 @@ export interface EnqueueOptions {
 	discoveryBlocked?: DependencyDiscoveryBlock;
 	observeAttempt?: boolean;
 	fileIds?: string[];
+	signer?: DerivedSigner;
 }
 
 export async function enqueue(mutations: unknown[], userHash: string, opts: EnqueueOptions = {}): Promise<string | null> {
@@ -736,6 +748,7 @@ export async function enqueue(mutations: unknown[], userHash: string, opts: Enqu
 			...(opts.sourceIntentId ? { sourceIntentId: opts.sourceIntentId } : {}),
 			...(opts.discoveryBlocked ? { discoveryBlocked: opts.discoveryBlocked } : {}),
 			...(opts.fileIds?.length ? { fileIds: opts.fileIds } : {}),
+			...(opts.signer ? { signer: opts.signer } : {}),
 		};
 		if (entry.discoveryBlocked) delete entry.dependsOn;
 		if (opts.observeAttempt) preRegisteredAttempts.set(entry.id, observeAttempt(userHash, entry.id));
@@ -954,6 +967,7 @@ function invalidEntryReason(value: unknown, key: string): string | null {
 	}
 	if (e.fileIds !== undefined && !(Array.isArray(e.fileIds) && e.fileIds.every(isNonEmptyString))) return 'fileIds is not a list of ids';
 	if (e.sourceIntentId !== undefined && !isNonEmptyString(e.sourceIntentId)) return 'sourceIntentId is not an id';
+	if (e.signer !== undefined && !isDerivedSigner(e.signer)) return 'signer is malformed';
 	if (TERMINAL_STATUSES.has(status) && e.mutations.length > 0) return `status ${status} still carries mutations`;
 	if (!TERMINAL_STATUSES.has(status) && e.mutations.length === 0) return 'mutations is empty';
 	for (let i = 0; i < e.mutations.length; i++) {
@@ -1572,7 +1586,7 @@ export async function approvalProbeCandidate(userHash: string, shape: string): P
 export async function sendApprovalProbe(
 	userHash: string,
 	outboxId: string,
-	send: (mutations: unknown[]) => Promise<unknown>,
+	send: SendEntry,
 	hooks: DrainHooks = {},
 ): Promise<SenderAttempt | null> {
 	probingEntryIds.add(outboxId);
@@ -1759,7 +1773,15 @@ export async function pendingCardWrites(userHash: string): Promise<OutboxEntry[]
 	if (scan.unavailable.size || scan.missing.size || ownedCorrupt(scan, userHash).length) {
 		throw new Error('pendingCardWrites: a record of this account cannot be read — refusing to assume it holds no card write');
 	}
-	return scan.entries.filter((e) => e.relation === 'user_cards' && e.status !== 'accepted' && e.status !== 'discarded');
+	// A card whose owner cannot be read counts as the account's: the answer
+	// stays on the safe side.
+	return scan.entries.filter((e) => e.relation === 'user_cards' && (cardOf(e) ?? userHash) === userHash
+		&& e.status !== 'accepted' && e.status !== 'discarded');
+}
+
+/** Whose card a user_cards entry writes: an account's queue may hold the cards of identities derived from it too. */
+export function cardOf(entry: OutboxEntry): string | null {
+	return entry.relation === 'user_cards' ? ownerOf(entry.mutations) || null : null;
 }
 
 export async function readableOwnEntries(userHash: string): Promise<OutboxEntry[]> {
@@ -2040,10 +2062,10 @@ function waitForAttempt(userHash: string, id: string, expose: (finish: (attempt:
  * only keep the user's message undelivered for seconds after the network came
  * back.
  */
-async function reconcileStuckEntries(userHash: string, reconcile: (mutations: unknown[]) => Promise<void>): Promise<void> {
+async function reconcileStuckEntries(userHash: string, reconcile: ReconcileEntry): Promise<void> {
 	for (const entry of await pendingReconciliation(userHash)) {
 		try {
-			await reconcile(entry.mutations);
+			await reconcile(entry.mutations, undefined, entry);
 			await markReconciled(entry.id);
 			await resolveEntry(entry.id);
 		} catch (e) {
@@ -2072,8 +2094,8 @@ let activeRun: { userHash: string; isCurrent: () => boolean; wake: () => void } 
 
 export async function drainOutbox(
 	userHash: string,
-	send: (mutations: unknown[]) => Promise<unknown>,
-	reconcile?: (mutations: unknown[], result?: unknown) => Promise<void>,
+	send: SendEntry,
+	reconcile?: ReconcileEntry,
 	isCurrent?: () => boolean,
 	rediscover?: (entry: OutboxEntry) => Promise<DiscoveryOutcome>,
 	only?: string,
@@ -2095,7 +2117,7 @@ export async function drainOutbox(
 		const processEntry = async (entry: OutboxEntry): Promise<void> => {
 			let attempt: SenderAttempt;
 			try {
-				const result = await send(entry.mutations);
+				const result = await send(entry.mutations, entry);
 				const recorded = await markServerAccepted(entry.id);
 				sent++;
 				if (recorded && entry.approvalHeld) await releaseApprovalHeld(userHash, entry.approvalHeld.shape);
@@ -2107,7 +2129,7 @@ export async function drainOutbox(
 				}
 
 				try {
-					if (reconcile) await reconcile(entry.mutations, result);
+					if (reconcile) await reconcile(entry.mutations, result, entry);
 					await markReconciled(entry.id);
 					await resolveEntry(entry.id);
 				} catch (e) {
@@ -2220,7 +2242,7 @@ const nextDelay = (): number => {
  */
 export function ensureDrainLoop(
 	userHash: string,
-	send: (mutations: unknown[]) => Promise<unknown>,
+	send: SendEntry,
 	opts: { releaseNetworkBackoffs?: boolean } & DrainHooks = {},
 ): void {
 	stopDrainLoop(); // also bumps loopGeneration, invalidating any in-flight chain from a previous call
@@ -2235,11 +2257,11 @@ export function ensureDrainLoop(
 }
 
 export interface DrainHooks {
-	reconcile?: (mutations: unknown[], result?: unknown) => Promise<void>;
+	reconcile?: ReconcileEntry;
 	rediscover?: (entry: OutboxEntry) => Promise<DiscoveryOutcome>;
 }
 
-let loopChain: { userHash: string; send: (mutations: unknown[]) => Promise<unknown>; hooks: DrainHooks; generation: number } | null = null;
+let loopChain: { userHash: string; send: SendEntry; hooks: DrainHooks; generation: number } | null = null;
 let loopRunning: number | null = null;
 let wakeRequested = false;
 
@@ -2249,7 +2271,7 @@ let wakeRequested = false;
  * is started. Nothing is stopped or restarted, and the loop's state is kept:
  * readiness, dependencies and schedules are the pool's, read as always.
  */
-export function wakeAccountSender(userHash: string, send: (mutations: unknown[]) => Promise<unknown>, hooks: DrainHooks = {}): boolean {
+export function wakeAccountSender(userHash: string, send: SendEntry, hooks: DrainHooks = {}): boolean {
 	if (activeRun?.userHash === userHash && activeRun.isCurrent()) {
 		activeRun.wake();
 		wakeRequested = true;
@@ -2287,7 +2309,7 @@ export interface SenderSubmission {
 export async function submitEntryToSender(
 	userHash: string,
 	outboxId: string,
-	send: (mutations: unknown[]) => Promise<unknown>,
+	send: SendEntry,
 	hooks: DrainHooks = {},
 	opts: { targeted?: boolean } = {},
 ): Promise<SenderSubmission> {
@@ -2331,7 +2353,7 @@ export async function submitEntryToSender(
 }
 
 function sendTargeted(
-	userHash: string, outboxId: string, send: (mutations: unknown[]) => Promise<unknown>, hooks: DrainHooks, observed: ObservedAttempt,
+	userHash: string, outboxId: string, send: SendEntry, hooks: DrainHooks, observed: ObservedAttempt,
 ): void {
 	const token = currentSessionToken();
 	const settleUnattempted = () => { if (observed.settled === null) observed.defer(); };
@@ -2372,7 +2394,7 @@ export async function _drainLoopSettledForTests(): Promise<void> {
 
 function runLoopOnce(
 	userHash: string,
-	send: (mutations: unknown[]) => Promise<unknown>,
+	send: SendEntry,
 	hooks: DrainHooks,
 	generation: number,
 ): Promise<void> {
@@ -2385,7 +2407,7 @@ function runLoopOnce(
 
 async function runLoopOnceUntracked(
 	userHash: string,
-	send: (mutations: unknown[]) => Promise<unknown>,
+	send: SendEntry,
 	hooks: DrainHooks,
 	generation: number,
 ): Promise<void> {
