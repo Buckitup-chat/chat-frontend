@@ -179,32 +179,32 @@
                 <div class="msg-file-name">{{ f.name }}</div>
                 <div class="msg-file-meta">
                   <template v-if="refusedFile(f)">
-                    {{ fmtSize(f.size) }} · <span class="msg-file-err">This file could not be verified</span>
+                    {{ fileSize(f.size) }} · <span class="msg-file-err">This file could not be verified</span>
                   </template>
                   <template v-else-if="downloads[fileKey(f)]?.status === 'downloading'">
-                    {{ fmtSize(f.size) }} · chunk {{ downloads[fileKey(f)].done }} of {{ downloads[fileKey(f)].total }}
+                    {{ fileSize(f.size) }} · chunk {{ downloads[fileKey(f)].done }} of {{ downloads[fileKey(f)].total }}
                   </template>
                   <template v-else-if="keeping[fileKey(f)]">
-                    {{ fmtSize(f.size) }} · keeping<template v-if="keeping[fileKey(f)].total">, chunk {{ keeping[fileKey(f)].done }} of {{ keeping[fileKey(f)].total }}</template>
+                    {{ fileSize(f.size) }} · keeping<template v-if="keeping[fileKey(f)].total">, chunk {{ keeping[fileKey(f)].done }} of {{ keeping[fileKey(f)].total }}</template>
                   </template>
                   <!-- Keep on this device: the copy and where else the file still is. -->
                   <template v-else-if="kept[fileKey(f)] && msg._deleted">
-                    {{ fmtSize(f.size) }} · message deleted, copy kept on this device
+                    {{ fileSize(f.size) }} · message deleted, copy kept on this device
                   </template>
                   <template v-else-if="kept[fileKey(f)] && deletedOnServer(f)">
-                    {{ fmtSize(f.size) }} · kept · deleted on the server, only this device has it
+                    {{ fileSize(f.size) }} · kept · deleted on the server, only this device has it
                   </template>
                   <template v-else-if="deletedOnServer(f)">
-                    {{ fmtSize(f.size) }} · deleted by the sender
+                    {{ fileSize(f.size) }} · deleted by the sender
                   </template>
                   <template v-else-if="downloads[fileKey(f)]?.status === 'error'">
-                    {{ fmtSize(f.size) }} · <span class="msg-file-err">download failed — tap to retry</span>
+                    {{ fileSize(f.size) }} · <span class="msg-file-err">download failed — tap to retry</span>
                   </template>
                   <template v-else-if="downloads[fileKey(f)]?.status === 'done'">
-                    {{ fmtSize(f.size) }} · saved<template v-if="kept[fileKey(f)]"> · kept on this device</template>
+                    {{ fileSize(f.size) }} · saved<template v-if="kept[fileKey(f)]"> · kept on this device</template>
                   </template>
-                  <template v-else-if="kept[fileKey(f)]">{{ fmtSize(f.size) }} · kept on this device</template>
-                  <template v-else>{{ fmtSize(f.size) }}</template>
+                  <template v-else-if="kept[fileKey(f)]">{{ fileSize(f.size) }} · kept on this device</template>
+                  <template v-else>{{ fileSize(f.size) }}</template>
                 </div>
               </div>
               <template v-if="!refusedFile(f) && (kept[fileKey(f)] || !deletedOnServer(f))">
@@ -434,6 +434,7 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { fileKey } from '@/lib/data/fileKey';
+import { fileSize } from '@/utils/formatBytes';
 import { contentToText, quoteSnapshot } from '@buckitup/pq-client/content';
 import UiBackToList from '@/components/ui/UiBackToList.vue';
 import RecoveryInviteCard from './RecoveryInviteCard.vue';
@@ -889,13 +890,6 @@ const isPhotoOnly = (msg) => {
 };
 const isControlOnly = (msg) => (msg.parts || []).length > 0 && msg.parts.every(isControlPart);
 const visibleMessages = computed(() => props.messages.filter((msg) => !isPhotoOnly(msg) && !isControlOnly(msg)));
-
-
-const fmtSize = (n) => {
-  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
-  return `${n} B`;
-};
 
 // Only a dialog takes files: a room mounts this window with no peer and no
 // handler, and a file sent there would vanish.

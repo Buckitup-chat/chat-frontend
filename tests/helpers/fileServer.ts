@@ -32,15 +32,20 @@ export interface PublishedFile {
 	part: { kind: string; fileId: string; uploaderHash: string; encSecretB64: string; name: string; size: number; mimeType: string; createdAt: number };
 }
 
-/** Uploads as uploadFile does: each chunk encrypted and its row signed, then the manifest over the rows' signatures. */
-export const publishFile = async (fileId: string, plains: string[]): Promise<PublishedFile> => {
+/**
+ * Uploads as uploadFile does: each chunk encrypted and its row signed, then
+ * the manifest over the rows' signatures. The chunks in `foreign` are
+ * encrypted under another secret, as a faulty uploader would.
+ */
+export const publishFile = async (fileId: string, plains: string[], foreign: number[] = []): Promise<PublishedFile> => {
 	const secret = generateEncSecret();
+	const otherSecret = generateEncSecret();
 	const ts = 1_800_000_000;
 	const bytes: Uint8Array[] = [];
 	const chunkRows: Row[] = [];
 	const signHashes: string[] = [];
 	for (const [i, text] of plains.entries()) {
-		const encrypted = await encryptChunk(secret, new TextEncoder().encode(text));
+		const encrypted = await encryptChunk(foreign.includes(i) ? otherSecret : secret, new TextEncoder().encode(text));
 		const fields = { chunk_index: i, data_hash: chunkDataHash(encrypted), file_id: fileId, owner_timestamp: ts, size: encrypted.length, uploader_hash: UPLOADER };
 		const s = sign(fields);
 		signHashes.push(toBase64(sha3_512(fromBase64(s))));

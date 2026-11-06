@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
 import {
-	getCachedChunk, putCachedChunk, pinChunk, unpinFile, unpinAllOf, pinnedBytesOf,
+	getCachedChunk, putCachedChunk, pinChunk, unpinFile, unpinAllOf, pinnedBytesOf, soleKeptBytesOf,
 	__resetChunkCacheForTests, __setChunkBudgetForTests,
 } from '@/lib/data/chunkCache';
 import { failWritesWithQuota } from './helpers/idbQuota';
@@ -98,6 +98,16 @@ describe('kept chunks', () => {
 		await unpinFile('f_shared', BOB);
 		for (const id of ['f_e', 'f_f', 'f_g']) { await tick(); await putCachedChunk(id, 0, KB(2), H); }
 		expect(await present('f_shared')).toBe(false);
+	});
+
+	it('counts as freed by an account leaving only the chunks no other account keeps', async () => {
+		await pinChunk('f_shared', 0, H, ALICE, KB(1));
+		await pinChunk('f_shared', 0, H, BOB, KB(1));
+		await pinChunk('f_own', 0, H, ALICE, new Uint8Array(2048));
+		expect(await pinnedBytesOf(ALICE)).toBe(3 * 1024);
+		expect(await soleKeptBytesOf(ALICE)).toBe(2 * 1024);
+		await unpinFile('f_shared', BOB);
+		expect(await soleKeptBytesOf(ALICE)).toBe(3 * 1024);
 	});
 
 	it('an account leaving drops its pins on every file, not another account\'s', async () => {

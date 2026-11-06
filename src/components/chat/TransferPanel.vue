@@ -61,6 +61,7 @@
 <script setup>
 import { ref, reactive, computed } from 'vue';
 import { useTransfersStore } from '@/store/transfers.store';
+import { fileSize } from '@/utils/formatBytes';
 
 const props = defineProps({
   /** Peer of the dialog the panel is shown in; rows going elsewhere dim. */
@@ -120,14 +121,11 @@ const onDrop = (toVisibleIndex) => {
 
 const percentOf = (it) => (it.total ? Math.round((it.done / it.total) * 100) : 0);
 
-const fmtSize = (n) => (n >= 1024 * 1024 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
-const fmtSpeed = (bps) => (bps >= 1048576 ? `${(bps / 1048576).toFixed(1)} MB/s` : `${Math.round(bps / 1024)} KB/s`);
-
 // The board's five states, worded like the board words them.
 const captionOf = (it) => {
   switch (it.status) {
     case 'active':
-      return `${percentOf(it)}% · chunk ${it.done} of ${it.total}` + (it.speed ? ` · ${fmtSpeed(it.speed)}` : '');
+      return `${percentOf(it)}% · chunk ${it.done} of ${it.total}` + (it.speed ? ` · ${fileSize(it.speed)}/s` : '');
     case 'paused':
       if (needsFile(it)) {
         return refused.has(it.id)
@@ -136,7 +134,7 @@ const captionOf = (it) => {
       }
       return `Paused · ${percentOf(it)}%` + (it.done ? ` · chunk ${it.done} of ${it.total}` : '');
     case 'waiting':
-      return `Waiting · ${fmtSize(it.size)}`;
+      return `Waiting · ${fileSize(it.size)}`;
     case 'error':
       return 'Interrupted — will retry on Start';
     case 'awaiting_approval':

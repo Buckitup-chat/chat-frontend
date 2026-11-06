@@ -10,11 +10,13 @@ const bob = { user_hash: 'u_bob', name: 'Bob' };
 const deleted = [];
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => ({ myLocalUsers: [alice, bob], currentUser: alice, pqUserCards: [], deleteAccount: async (hash) => { deleted.push(hash); } }) }));
 vi.mock('@/store/user.store', () => ({ userStore: () => ({}) }));
-vi.mock('@/lib/data/chunkCache', () => ({ pinnedBytesOf: async () => 0 }));
+// Bob keeps 2 KB of files on this device that no other account keeps.
+vi.mock('@/lib/data/chunkCache', () => ({ soleKeptBytesOf: vi.fn(async (hash) => (hash === bob.user_hash ? 2048 : 0)) }));
 vi.mock('@/components/Account_Item_PQ.vue', () => ({ default: { template: '<div />' } }));
 
 const { default: AccountSelector } = await import('@/components/Account_Selector.vue');
 const { default: DeleteAccount } = await import('@/components/swal/views/Swal_DeleteAccount.vue');
+const chunkCache = await import('@/lib/data/chunkCache');
 
 const harness = () => {
 	const emitted = [];
@@ -71,6 +73,17 @@ describe('the Backup button of the wipe dialog', () => {
 });
 
 describe('the wipe dialog', () => {
+	it('says how much of what the account keeps on this device goes with it', async () => {
+		const { global } = harness();
+		const w = wipeDialog(bob, global);
+		await flushPromises();
+		expect(w.text()).toContain('Files only this account keeps on this device (2 KB) will be removed too.');
+		const signedIn = wipeDialog(alice, global);
+		await flushPromises();
+		expect(chunkCache.soleKeptBytesOf).toHaveBeenLastCalledWith(alice.user_hash);
+		expect(signedIn.text()).not.toContain('keeps on this device');
+	});
+
 	// It read the account one level too high and wiped the signed-in one instead.
 	it('wipes the account it was opened for, not the signed-in one', async () => {
 		const { global } = harness();

@@ -24,7 +24,7 @@ import {
 	newFileId,
 } from '@buckitup/pq-client/fileCrypto';
 import { sendMutationsAndAwaitShape } from './ingest';
-import { getCachedChunk, pinChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
+import { getCachedChunk, pinCachedChunks, pinChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 import { bearerFor, openSession } from './readSession';
 import { assertChunkBytes, isRefusedFile, readChunkRows, readVerifiedFile } from './fileIntegrity';
 import type { SignPkeyResolver } from './rowVerification';
@@ -257,7 +257,7 @@ export class FileDeletedError extends Error {
 export const isDeletedFile = (e: unknown): boolean => e instanceof FileDeletedError;
 
 /** The file's verified manifest and chunk rows, or why there is nothing to read. */
-const readLiveFile = async (fileId: string, uploaderHash: string, opts: { signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver }) => {
+export const readLiveFile = async (fileId: string, uploaderHash: string, opts: { signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver }) => {
 	const file = await readVerifiedFile(fileId, uploaderHash, opts);
 	if (!file) throw new Error('file manifest not found');
 	if (file.manifest.deleted) throw new FileDeletedError(fileId);
@@ -342,14 +342,31 @@ export const downloadFile = async (opts: {
 	return concatBytes(...parts);
 };
 
+/** Rows verified between two yields: each signature check holds the main thread for milliseconds. */
+const VERIFY_BATCH = 8;
+
+/** Lets the page handle input; a message, unlike a chain of timers, is not throttled in a hidden tab. */
+const yieldToPage = (): Promise<void> =>
+	new Promise((resolve) => {
+		const { port1, port2 } = new MessageChannel();
+		port1.onmessage = () => {
+			port1.close();
+			resolve();
+		};
+		port2.postMessage(null);
+	});
+
 /**
  * Pins every chunk of a file for `owner` (keptFiles.ts), fetching the ones
  * this device lacks first, and returns each chunk's signed data hash in index
  * order — what opening the kept copy later checks the bytes against, with no
- * manifest needed. Each chunk is verified as a download verifies it and must
- * decrypt under `encSecretB64`, so what is kept is known to open. A failed
- * pin throws (a full disk as QuotaExceededError); the chunks pinned before it
- * stay pinned, and the caller releases them.
+ * manifest needed. Before anything is pinned the last chunk must decrypt
+ * under `encSecretB64`, so a secret that is not the file's fetches nothing
+ * more. The chunks already on disk under their signed hash are pinned as
+ * they are, not decrypted; each one fetched is verified as a download
+ * verifies it and must decrypt. A failed pin throws (a full disk as
+ * QuotaExceededError); the chunks pinned before it stay pinned, and the
+ * caller releases them.
  */
 export const pinFileChunks = async (opts: {
 	fileId: string;
@@ -367,13 +384,26 @@ export const pinFileChunks = async (opts: {
 	requestPersistentStorage();
 	const dataHashes: string[] = [];
 	for (let i = 0; i < total; i++) {
+		if (i % VERIFY_BATCH === VERIFY_BATCH - 1) await yieldToPage();
 		signal?.throwIfAborted();
-		const expected = await hashes.expected(i);
-		const { encrypted } = await readChunk(fileId, i, expected, signal);
-		await decryptChunk(secret, encrypted);
-		await pinChunk(fileId, i, expected, owner, encrypted);
-		dataHashes.push(expected);
-		onProgress?.({ fileId, done: i + 1, total });
+		dataHashes.push(await hashes.expected(i));
+	}
+	if (!total) return dataHashes;
+	const last = await readChunk(fileId, total - 1, dataHashes[total - 1], signal);
+	await decryptChunk(secret, last.encrypted);
+	const held = await pinCachedChunks(fileId, dataHashes, owner);
+	let done = held.size;
+	if (done) onProgress?.({ fileId, done, total });
+	for (let i = 0; i < total; i++) {
+		if (held.has(i)) continue;
+		signal?.throwIfAborted();
+		let encrypted = last.encrypted;
+		if (i < total - 1) {
+			encrypted = (await readChunk(fileId, i, dataHashes[i], signal)).encrypted;
+			await decryptChunk(secret, encrypted);
+		}
+		await pinChunk(fileId, i, dataHashes[i], owner, encrypted);
+		onProgress?.({ fileId, done: ++done, total });
 	}
 	return dataHashes;
 };

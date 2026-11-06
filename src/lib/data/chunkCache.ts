@@ -209,6 +209,16 @@ export class ChunkPinError extends Error {
 	}
 }
 
+/** The record with `owner` among its pins. */
+const withPin = (rec: ChunkRecord, owner: string): ChunkRecord =>
+	stored({ ...rec, pins: rec.pins?.includes(owner) ? rec.pins : [...(rec.pins ?? []), owner], lastUsed: Date.now() });
+
+const openDbForPins = async (): Promise<IDBDatabase> => {
+	const db = await openDb();
+	if (!db) throw new ChunkPinError('The local database is not available, so files cannot be kept on this device.');
+	return db;
+};
+
 /**
  * Marks chunk `index` of `fileId` as kept by `owner`, storing `bytes` if the
  * device does not hold the chunk. Unlike a cache write, a failure throws — a
@@ -217,16 +227,14 @@ export class ChunkPinError extends Error {
  * replaced.
  */
 export const pinChunk = async (fileId: string, index: number, dataHash: string, owner: string, bytes: Uint8Array): Promise<void> => {
-	const db = await openDb();
-	if (!db) throw new ChunkPinError('The local database is not available, so files cannot be kept on this device.');
+	const db = await openDbForPins();
 	const key = chunkKey(fileId, index);
 	await inTx<void>(db, 'readwrite', (store, _settle, fail) => {
 		const req = store.get(key);
 		req.onsuccess = () => {
 			const cur = req.result as ChunkRecord | undefined;
 			if (cur && cur.dataHash === dataHash) {
-				const pins = cur.pins?.includes(owner) ? cur.pins : [...(cur.pins ?? []), owner];
-				store.put(stored({ ...cur, pins, lastUsed: Date.now() }));
+				store.put(withPin(cur, owner));
 				return;
 			}
 			if (cur && isPinned(cur)) {
@@ -238,6 +246,44 @@ export const pinChunk = async (fileId: string, index: number, dataHash: string, 
 			}));
 		};
 	});
+};
+
+/**
+ * Chunks per transaction in pinCachedChunks: each is a whole record of up to
+ * 4 MiB written back, held until the transaction commits, and a long write
+ * holds up every other read of the cache.
+ */
+const PIN_BATCH = 4;
+
+/**
+ * Pins for `owner` the chunks of `fileId` this device already holds under
+ * their signed hash, `dataHashes[i]` for chunk i, a batch per transaction and
+ * without decrypting them: each was held to its hash when it was stored. Only
+ * the chunks on disk get a write. Returns the indexes pinned; a failure
+ * throws, as pinChunk does.
+ */
+export const pinCachedChunks = async (fileId: string, dataHashes: string[], owner: string): Promise<Set<number>> => {
+	const db = await openDbForPins();
+	const present = new Set(await inTx<globalThis.IDBValidKey[]>(db, 'readonly', (store, settle) => {
+		const req = store.getAllKeys(fileRange(fileId));
+		req.onsuccess = () => settle(req.result);
+	}));
+	const held = dataHashes.map((_, i) => i).filter((i) => present.has(chunkKey(fileId, i)));
+	const pinned = new Set<number>();
+	for (let from = 0; from < held.length; from += PIN_BATCH) {
+		await inTx<void>(db, 'readwrite', (store) => {
+			for (const i of held.slice(from, from + PIN_BATCH)) {
+				const req = store.get(chunkKey(fileId, i));
+				req.onsuccess = () => {
+					const rec = req.result as ChunkRecord | undefined;
+					if (rec?.dataHash !== dataHashes[i]) return;
+					if (!rec.pins?.includes(owner)) store.put(withPin(rec, owner));
+					pinned.add(i);
+				};
+			}
+		});
+	}
+	return pinned;
 };
 
 /** Drops `owner`'s pins from its chunks, those of one file when `fileId` is given; a chunk another account pins stays pinned. */
@@ -258,14 +304,31 @@ const unpinWhere = async (owner: string, fileId: string | null): Promise<void> =
 	await evictOverBudget(db).catch(() => {});
 };
 
+/** The files `owner` holds pins on, read from the pins index alone. */
+export const pinnedFileIdsOf = async (owner: string): Promise<Set<string>> => {
+	const db = await openDb();
+	if (!db) return new Set();
+	return inTx<Set<string>>(db, 'readonly', (store, settle) => {
+		const fileIds = new Set<string>();
+		settle(fileIds);
+		const req = store.index('pins').openKeyCursor(IDBKeyRange.only(owner));
+		req.onsuccess = () => {
+			const cursor = req.result;
+			if (!cursor) return;
+			const key = String(cursor.primaryKey);
+			fileIds.add(key.slice(0, key.lastIndexOf(':')));
+			cursor.continue();
+		};
+	});
+};
+
 /** `owner` no longer keeps `fileId`: its chunks stay as cache unless another account keeps them. */
 export const unpinFile = (fileId: string, owner: string): Promise<void> => unpinWhere(owner, fileId);
 
 /** `owner` leaves this device: every pin it holds goes. */
 export const unpinAllOf = (owner: string): Promise<void> => unpinWhere(owner, null);
 
-/** Bytes of the chunks `owner` keeps; a chunk shared with another account counts for both. */
-export const pinnedBytesOf = async (owner: string): Promise<number> => {
+const sumPinnedBy = async (owner: string, counts: (rec: ChunkRecord) => boolean): Promise<number> => {
 	const db = await openDb();
 	if (!db) return 0;
 	return inTx<number>(db, 'readonly', (store, settle) => {
@@ -274,11 +337,18 @@ export const pinnedBytesOf = async (owner: string): Promise<number> => {
 		req.onsuccess = () => {
 			const cursor = req.result;
 			if (!cursor) return settle(total);
-			total += (cursor.value as ChunkRecord).size;
+			const rec = cursor.value as ChunkRecord;
+			if (counts(rec)) total += rec.size;
 			cursor.continue();
 		};
 	});
 };
+
+/** Bytes of the chunks `owner` keeps; a chunk shared with another account counts for both. */
+export const pinnedBytesOf = (owner: string): Promise<number> => sumPinnedBy(owner, () => true);
+
+/** Bytes that stop being kept when `owner` leaves: its chunks no other account keeps. */
+export const soleKeptBytesOf = (owner: string): Promise<number> => sumPinnedBy(owner, (rec) => rec.pins?.length === 1);
 
 /**
  * Oldest-used unpinned chunks go first once the cache's byte budget is
