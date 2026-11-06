@@ -67,7 +67,7 @@ import { compareFeedOrder } from '@/lib/data/feedOrder';
 import { recordAvailability, backfillLog } from '@/lib/data/availabilityLog';
 import { isRefusedFile } from '@/lib/data/fileIntegrity';
 import { isDeletedFile } from '@/lib/data/fileTransfer';
-import { useKeptFiles } from '@/composables/useKeptFiles';
+import { useKeptFiles, askKeepNearQuota } from '@/composables/useKeptFiles';
 import { fileKey } from '@/lib/data/fileKey';
 import FileStateModal from '@/components/chat/FileStateModal.vue';
 import EditHistoryModal from '@/components/chat/EditHistoryModal.vue';
@@ -842,6 +842,7 @@ const handleFileStateAction = async () => {
 const keptFiles = useKeptFiles({
     owner: () => $userPQ.currentUserHash,
     onError: (message) => $swal.fire({ icon: 'error', title: 'File not kept', text: message }),
+    confirmNearQuota: askKeepNearQuota($swal, () => $router.push({ name: 'account_storage' })),
 });
 
 const handleKeepFile = async (on) => {
@@ -851,7 +852,7 @@ const handleKeepFile = async (on) => {
     // The only copy left: letting it go cannot be undone from here.
     const onlyCopy = !!st.msg?._deleted || !!availabilityByKey.value[key]?.deleted;
     if (!on && onlyCopy && !window.confirm('Only this device has this file. Remove it from this device?')) return;
-    await keptFiles.setKept(st.part, st.msg?.id || '', on);
+    await keptFiles.setKept(st.part, st.msg?.id || '', on, peerHash.value);
 };
 
 watch(() => decryptedMessages.value, (msgs) => {

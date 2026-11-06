@@ -25,6 +25,7 @@
 						<button class="btn btn-dark flex-fill" @click="copy" data-test="copy">Copy</button>
 					</div>
 				</template>
+				<KeptFilesManager class="mt-4" />
 			</div>
 		</template>
 	</FullContentBlock>
@@ -46,6 +47,7 @@ import { useStorageStatus, refreshCommunityBackup, probeRows, probeText } from '
 import copyToClipboard from '@/utils/copyToClipboard';
 
 import FullContentBlock from '@/components/FullContentBlock.vue';
+import KeptFilesManager from '@/components/storage/KeptFilesManager.vue';
 
 const $userPQ = userPQStore();
 const { probe, status, lastRequest, communityBackup, refresh, requestPersistence } = useStorageStatus(() => $userPQ.currentUserHash);

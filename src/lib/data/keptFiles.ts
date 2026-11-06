@@ -39,6 +39,7 @@ export interface KeptFile {
 	messageId: string;
 	/** Each chunk's signed data hash, in index order, as verified when the file was kept. */
 	chunkHashes: string[];
+	peerHash?: string;
 }
 
 /** By fileKey. */
@@ -115,7 +116,7 @@ export const keepFile = (
 	owner: string,
 	part: KeepablePart,
 	messageId: string,
-	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver } = {},
+	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver; peerHash?: string } = {},
 ): Promise<KeptFile> => underFileLock(owner, part.fileId, async () => {
 	const key = fileKey(part);
 	const index = await readIndex(owner);
@@ -126,8 +127,9 @@ export const keepFile = (
 		throw new Error('Another file with the same id is already kept on this device.');
 	}
 	try {
+		const { peerHash, ...transfer } = opts;
 		const chunkHashes = await pinFileChunks({
-			fileId: part.fileId, uploaderHash: part.uploaderHash, encSecretB64: part.encSecretB64, owner, ...opts,
+			fileId: part.fileId, uploaderHash: part.uploaderHash, encSecretB64: part.encSecretB64, owner, ...transfer,
 		});
 		const entry: KeptFile = {
 			fileKey: key,
@@ -141,6 +143,7 @@ export const keepFile = (
 			createdAt: part.createdAt ?? 0,
 			messageId,
 			chunkHashes,
+			...(peerHash ? { peerHash } : {}),
 		};
 		await underIndexLock(owner, async () => writeIndex(owner, { ...(await readIndex(owner)), [key]: entry }));
 		return entry;
@@ -177,6 +180,20 @@ export const openKeptFile = async (
 	return readKeptChunks({ fileId: entry.fileId, encSecretB64: entry.encSecretB64, dataHashes: entry.chunkHashes, ...opts });
 };
 
+export const readKeptCopy = async (
+	owner: string | null | undefined,
+	part: KeepablePart,
+	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal } = {},
+): Promise<Uint8Array | null> => {
+	if (!owner) return null;
+	try {
+		return await openKeptFile(owner, fileKey(part), opts);
+	} catch (e) {
+		console.warn('[keptFiles] the kept copy could not be read; downloading instead', e);
+		return null;
+	}
+};
+
 /**
  * A file's bytes for the chat: from the kept copy when `owner` keeps it,
  * otherwise — or when the kept copy cannot be read — downloaded.
@@ -185,17 +202,9 @@ export const openFile = async (
 	owner: string | null | undefined,
 	part: KeepablePart,
 	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal } = {},
-): Promise<Uint8Array> => {
-	if (owner) {
-		try {
-			const kept = await openKeptFile(owner, fileKey(part), opts);
-			if (kept) return kept;
-		} catch (e) {
-			console.warn('[keptFiles] the kept copy could not be read; downloading instead', e);
-		}
-	}
-	return downloadFile({ fileId: part.fileId, uploaderHash: part.uploaderHash, encSecretB64: part.encSecretB64, ...opts });
-};
+): Promise<Uint8Array> =>
+	(await readKeptCopy(owner, part, opts))
+	?? downloadFile({ fileId: part.fileId, uploaderHash: part.uploaderHash, encSecretB64: part.encSecretB64, ...opts });
 
 /** Removes everything `owner` keeps: called when the account leaves this device. */
 export const forgetAccountKeptFiles = async (owner: string): Promise<void> => {

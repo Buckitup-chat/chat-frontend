@@ -58,6 +58,7 @@
         <p v-else-if="keepError" class="fs-note fs-refused">{{ keepError }}</p>
         <p v-else-if="kept && messageDeleted" class="fs-note">The message was deleted. The copy kept on this device remains.</p>
         <p v-else-if="kept" class="fs-note">Kept on this device: it opens offline and stays if the sender deletes it. It is not copied to your other devices.</p>
+        <p v-if="kept" class="fs-note">The app's cache cleanup never removes it. Clearing this site's data removes it, and the browser may remove it when storage is low.</p>
         <button v-if="kept && !onServer" type="button" class="fs-btn" @click="emit('refresh')">Download</button>
       </template>
 

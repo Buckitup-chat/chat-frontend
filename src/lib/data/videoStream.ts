@@ -20,6 +20,7 @@ import { FileVerificationError, readVerifiedFile, type ChunkHashes } from './fil
 import { fileKey } from './fileKey';
 import { getCachedMedia, putCachedMedia } from './mediaCache';
 import { bearerFor, openSession } from './readSession';
+import { readKeptCopy } from './keptFiles';
 
 declare const ELECTRIC_API_URL: string;
 
@@ -148,8 +149,12 @@ export const openVideo = async (
 		 */
 		onFailed?: (e: unknown) => void;
 		signal?: AbortSignal;
+		owner?: string | null;
 	} = {},
 ): Promise<VideoSource> => {
+	const kept = await readKeptCopy(opts.owner, video, { onProgress: opts.onProgress, signal: opts.signal });
+	if (kept) return { url: putCachedMedia(fileKey(video), kept, video.mimeType || 'video/mp4'), streaming: false, release: () => {} };
+
 	if (await ensureWorker()) {
 		// The worker decrypts what it fetches but does not verify signatures:
 		// it holds each chunk to the hash verified here (fileIntegrity.ts),

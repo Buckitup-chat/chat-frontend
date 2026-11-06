@@ -123,6 +123,7 @@
                 <span v-if="!videos[fileKey(v)]?.url && v.durationSeconds" class="msg-video-duration">
                   {{ fmtDuration(v.durationSeconds) }}
                 </span>
+                <button type="button" class="msg-media-state" title="File state" @click.stop="emit('showFileState', v, msg)"><i class="_icon_info"></i></button>
               </div>
               <!-- ONE bar, one meaning: download progress. It appears on tap,
                    grows with the chunks regardless of playback (the player's
@@ -149,6 +150,7 @@
               <div v-else-if="images[fileKey(imagesOf(msg)[0])]?.status === 'error'" class="msg-image-progress _err">
                 image failed — tap to retry
               </div>
+              <button type="button" class="msg-media-state" title="File state" @click.stop="emit('showFileState', imagesOf(msg)[0], msg)"><i class="_icon_info"></i></button>
             </div>
 
             <!-- §1.6 grid: one bubble, 3px gutters, outer corners inherit the
@@ -161,6 +163,7 @@
                 <img v-if="thumbDataUrl(im)" class="msg-image-blur" :src="thumbDataUrl(im)" alt="" />
                 <img v-if="images[fileKey(im)]?.url" class="msg-image-full" :src="images[fileKey(im)].url" :alt="im.name" />
                 <div v-if="refusedFile(im)" class="msg-image-progress _err">could not be verified</div>
+                <button type="button" class="msg-media-state" title="File state" @click.stop="emit('showFileState', im, msg)"><i class="_icon_info"></i></button>
                 <div v-if="overflowCount(msg) && i === visibleImages(msg).length - 1" class="msg-gallery-more">
                   +{{ overflowCount(msg) }}
                 </div>
@@ -174,7 +177,11 @@
               <span class="msg-file-icon">📄</span>
               <!-- Screen 05 opens from the row body; the download button keeps
                    its own tap. -->
-              <div class="msg-file-body" role="button" @click="emit('showFileState', f, msg)">
+              <div class="msg-file-body" role="button" tabindex="0" title="File state"
+                :aria-label="`File state for ${f.name}`"
+                @click="emit('showFileState', f, msg)"
+                @keydown.enter.prevent="emit('showFileState', f, msg)"
+                @keydown.space.prevent="emit('showFileState', f, msg)">
                 <div class="msg-file-name">{{ f.name }}</div>
                 <div class="msg-file-meta">
                   <template v-if="refusedFile(f)">
@@ -200,10 +207,11 @@
                     {{ fmtSize(f.size) }} · <span class="msg-file-err">download failed — tap to retry</span>
                   </template>
                   <template v-else-if="downloads[fileKey(f)]?.status === 'done'">
-                    {{ fmtSize(f.size) }} · saved<template v-if="kept[fileKey(f)]"> · kept on this device</template>
+                    {{ fmtSize(f.size) }} · downloaded<template v-if="kept[fileKey(f)]"> · kept on this device</template>
                   </template>
                   <template v-else-if="kept[fileKey(f)]">{{ fmtSize(f.size) }} · kept on this device</template>
                   <template v-else>{{ fmtSize(f.size) }}</template>
+                  <span class="msg-file-state-marker" aria-hidden="true"><i class="_icon_info"></i></span>
                 </div>
               </div>
               <template v-if="!refusedFile(f) && (kept[fileKey(f)] || !deletedOnServer(f))">
@@ -216,7 +224,7 @@
                 </template>
                 <button v-if="downloads[fileKey(f)]?.status !== 'downloading'" type="button"
                   class="msg-file-action" @click="emit('downloadFile', f)"
-                  :title="downloads[fileKey(f)]?.status === 'done' ? 'Save again' : 'Download and decrypt'">⭳</button>
+                  :title="downloads[fileKey(f)]?.status === 'done' ? 'Download again' : 'Download and decrypt'">⭳</button>
                 <span v-else class="msg-file-spinner"></span>
               </template>
             </div>
@@ -1477,9 +1485,12 @@ watch(() => props.messages, () => {
 /* ---------- §1.5 / §2.1 files ---------- */
 .msg-file { display: flex; align-items: center; gap: 8px; background: rgba(36, 24, 36, .06); border-radius: 9px; padding: 6px 8px; margin-bottom: 6px; }
 .msg-file-icon { font-size: 18px; flex-shrink: 0; }
-.msg-file-body { min-width: 0; flex-grow: 1; }
+.msg-file-body { min-width: 0; flex-grow: 1; cursor: pointer; }
+.msg-file-body:focus-visible { outline: 2px solid #8e2b77; outline-offset: 2px; border-radius: 3px; }
 .msg-file-name { font-size: 12px; font-weight: 600; color: #241824; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .msg-file-meta { font-size: 10px; color: #6b6875; }
+.msg-file-state-marker { display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; width: 14px; height: 14px; margin-left: 4px; border-radius: 50%; background: rgba(23, 22, 26, .72); }
+.msg-file-state-marker i { width: 10px; height: 10px; background-color: #fff; }
 .msg-file-err { color: #dc3545; }
 .msg-file-action { border: none; background: #241824; color: #fff; border-radius: 999px; width: 26px; height: 26px; font-size: 13px; line-height: 1; flex-shrink: 0; }
 .msg-audio-toggle { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
@@ -1638,6 +1649,26 @@ watch(() => props.messages, () => {
   margin-top: 5px;
 }
 .msg-video-load-fill { height: 100%; background: #8e2b77; transition: width .3s ease; }
+.msg-media-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(23, 22, 26, .72);
+  flex-shrink: 0;
+
+  i { width: 16px; height: 16px; background-color: #fff; }
+}
+.msg-media-state {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+}
 .msg-video-duration {
   position: absolute;
   right: 6px;

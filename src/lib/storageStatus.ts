@@ -114,6 +114,8 @@ const readEstimate = async (env: StorageEnv): Promise<{ usage: number | null; qu
 	}
 };
 
+export const storageEstimate = (): Promise<{ usage: number | null; quota: number | null }> => readEstimate(browserEnv());
+
 /** The signals of a private window that need no quota; each entry says what was seen. */
 const refusalSignals = async (env: StorageEnv): Promise<string[]> => {
 	const signals: string[] = [];

@@ -37,8 +37,35 @@ const deletedOnServer = { [KEY]: { present: 0, total: 1, unknown: false, deleted
 const meta = (w) => w.find('.msg-file-meta').text();
 
 describe('a file kept on this device, in the chat', () => {
+	it('shows the File state marker in the meta line after an ordinary download', async () => {
+		const w = render({ downloads: { [KEY]: { status: 'done' } } });
+		expect(meta(w)).toContain('2 KB · downloaded');
+		expect(w.find('.msg-file-state').exists()).toBe(false);
+		const marker = w.find('.msg-file-meta .msg-file-state-marker');
+		expect(marker.exists()).toBe(true);
+		await marker.trigger('click');
+		expect(w.emitted('showFileState')?.[0]?.[0]).toEqual(FILE);
+		expect(w.emitted('downloadFile')).toBeUndefined();
+		await w.find('.msg-file-body').trigger('keydown.enter');
+		expect(w.emitted('showFileState')).toHaveLength(2);
+		await w.find('.msg-file-action').trigger('click');
+		expect(w.emitted('downloadFile')).toHaveLength(1);
+	});
+
+	it('uses the same meta-line marker for audio, and media buttons for images and video', () => {
+		const audio = render({}, message({ parts: [{ ...FILE, mimeType: 'audio/mpeg', name: 'voice.mp3' }] }));
+		expect(audio.find('.msg-file-meta .msg-file-state-marker').exists()).toBe(true);
+		for (const kind of ['image', 'video']) {
+			const media = render({}, message({ parts: [{ ...FILE, kind, name: `${kind}.bin` }] }));
+			expect(media.find('.msg-media-state').exists()).toBe(true);
+			expect(media.find('.msg-file-state-marker').exists()).toBe(false);
+		}
+	});
+
 	it('kept, on the server: a marker on the meta line', () => {
-		expect(meta(render({ kept: { [KEY]: ENTRY } }))).toBe('2 KB · kept on this device');
+		const w = render({ kept: { [KEY]: ENTRY } });
+		expect(meta(w)).toBe('2 KB · kept on this device');
+		expect(w.find('.msg-file-state-marker').exists()).toBe(true);
 	});
 
 	it('kept, while the node holds only part of it: whole on this device, so no "arrives later"', () => {
