@@ -2,7 +2,7 @@
 // clearing this origin's data, read through a fake navigator.storage and
 // matchMedia so every branch is reached without a real browser.
 import { describe, it, expect } from 'vitest';
-import { probeStorage, requestPersistence, isInstalled, probeRows, probeText, SMALL_QUOTA_BYTES, type StorageEnv } from '@/lib/storageStatus';
+import { probeStorage, requestPersistence, isInstalled, probeRows, probeText, storageStatusLine, STORAGE_STATUS_TEXT, SMALL_QUOTA_BYTES, type StorageEnv } from '@/lib/storageStatus';
 
 const GB = 1024 ** 3;
 
@@ -177,5 +177,22 @@ describe('the probe table', () => {
 			'User agent': 'TestBrowser/1.0',
 		});
 		expect(probeText(rows).split('\n')).toContain('Quota: 2.0 GB');
+	});
+});
+
+describe('the words for a status', () => {
+	it.each([
+		['persistent', 'This browser will not clear your data', 'Kept by this browser'],
+		['best-effort', 'This browser may clear your data: install the app or make a backup', 'Browser may clear data'],
+		['ephemeral', 'This window forgets everything when it closes', 'Gone when this window closes'],
+		['unknown', 'This browser does not say whether it may clear your data: a backup keeps the account safe', 'Browser does not say'],
+	] as const)('%s: the page line and the menu words', (status, line, short) => {
+		expect(STORAGE_STATUS_TEXT[status]).toEqual({ line, short });
+		expect(storageStatusLine({ status, installed: false })).toBe(line);
+	});
+
+	it('asks an installed app only for a backup when storage is best-effort', () => {
+		expect(storageStatusLine({ status: 'best-effort', installed: true })).toBe('This browser may clear your data when storage runs low: make a backup');
+		expect(storageStatusLine({ status: 'persistent', installed: true })).toBe('This browser will not clear your data');
 	});
 });

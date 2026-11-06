@@ -27,13 +27,20 @@ export const useStorageStatusStore = defineStore('storageStatus', () => {
 	/** Whose backup `backup` describes: an account switch must not show the previous account's. */
 	const backup = ref<{ owner: string; state: CommunityBackupState } | null>(null);
 	let generation = 0;
+	let reading: Promise<StorageProbe> | null = null;
 
-	/** Reads the storage state again; overlapping calls keep the newest answer. */
-	async function refresh(): Promise<StorageProbe> {
+	/** Reads the storage state again; a call while a read runs shares that read. */
+	function refresh(): Promise<StorageProbe> {
+		if (reading) return reading;
 		const current = ++generation;
-		const next = await probeStorage(env);
-		if (current === generation) probe.value = next;
-		return next;
+		const read = probeStorage(env).then((next) => {
+			if (current === generation) probe.value = next;
+			return next;
+		}).finally(() => {
+			if (reading === read) reading = null;
+		});
+		reading = read;
+		return read;
 	}
 
 	/** Whether the signed-in account has a finished community backup; a slot that does not decrypt leaves it unknown. */
@@ -63,10 +70,10 @@ export const useStorageStatusStore = defineStore('storageStatus', () => {
 	async function requestPersistence(): Promise<PersistRequest> {
 		const result = await askPersistence(env);
 		lastRequest.value = result;
+		generation += 1;
+		reading = null;
 		const p = probe.value;
 		if (p) {
-			// A read already running answers from before the request: it is dropped.
-			generation += 1;
 			probe.value = { ...p, persisted: result.after, status: statusOf(result.after, p.privateSignals) };
 		} else {
 			await refresh();

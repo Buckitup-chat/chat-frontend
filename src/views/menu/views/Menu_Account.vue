@@ -36,6 +36,7 @@ import { useBreakpoint } from '@/composables/useBreakpoint';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
 import { useStorageStatusStore } from '@/store/storageStatus.store';
+import { STORAGE_STATUS_TEXT } from '@/lib/storageStatus';
 import { shortUserId } from '@/lib/shortUserId';
 
 const $route = inject('$route');
@@ -47,12 +48,6 @@ const { close: closeMenu } = useMenu();
 const storage = useStorageStatusStore();
 
 // The storage page's status line in a few words; read each time the Account section opens.
-const STORAGE_SUBS = {
-	persistent: 'Kept by this browser',
-	'best-effort': 'Browser may clear data',
-	ephemeral: 'Gone when this window closes',
-	unknown: 'Browser does not say',
-};
 onMounted(() => storage.refresh());
 
 const me = computed(() => $userPQ.currentUser ?? {});
@@ -78,7 +73,7 @@ const groups = computed(() => [
 				dot: $dialogs.alertingPeers.size ? 'accent' : '',
 			},
 			{ title: 'Notifications', sub: 'Alerts about recovery attempts', icon: 'notifications', to: { name: 'account_notifications' } },
-			{ title: 'Storage on this device', sub: STORAGE_SUBS[storage.status] ?? 'Checking…', icon: 'info', to: { name: 'account_storage' } },
+			{ title: 'Storage on this device', sub: STORAGE_STATUS_TEXT[storage.status]?.short ?? 'Checking…', icon: 'info', to: { name: 'account_storage' } },
 			{ title: 'Install app', sub: 'On your phone or computer', icon: 'buckup_devices', to: { name: 'account_install' } },
 		],
 	},
