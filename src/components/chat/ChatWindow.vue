@@ -415,7 +415,7 @@
         type="button" class="context-menu-action" @click="startReply(contextMenuMsg)">
         <i class="_icon_reply icon-inline"></i>Reply
       </button>
-      <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !isPhotoOnly(contextMenuMsg)" type="button" class="context-menu-action"
+      <button v-if="contextMenuMsg && contextMenuMsg.isMine && contextMenuMsg._syncStatus === 'synced' && !isPhotoOnly(contextMenuMsg) && canEditText(contextMenuMsg.parts || [])" type="button" class="context-menu-action"
         @click="startEdit(contextMenuMsg)">
         <i class="_icon_edit_pen icon-inline"></i>Edit
       </button>
@@ -444,6 +444,7 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { fileKey } from '@/lib/data/fileKey';
 import { fileSize } from '@/utils/formatBytes';
 import { contentToText, quoteSnapshot } from '@buckitup/pq-client/content';
+import { canEditText } from '@/lib/editableParts';
 import UiBackToList from '@/components/ui/UiBackToList.vue';
 import RecoveryInviteCard from './RecoveryInviteCard.vue';
 import RecoveryShareCard from './RecoveryShareCard.vue';

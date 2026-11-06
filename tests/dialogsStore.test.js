@@ -10,6 +10,7 @@ import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import { clearLocalStorageKey } from '@/lib/data/localCrypto';
 import { enqueue, recordFailure, quarantinedEntries, discardEntry, _setStorageForTests, startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
 import { IngestError } from '@/lib/data/ingest';
+import { encodeContent, decodeContent } from '@buckitup/pq-client/content';
 
 // A shape-backed collection: preload() resolves, get() reads the map that the
 // ingest mock feeds. Real collections are Electric-driven; the point here is
@@ -45,7 +46,7 @@ const signedMessageRow = (author, fields) => {
 
 const GENESIS_ROW = signedMessageRow(myIdentity, {
 	message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
-	content_b64: 'enc(original)', deleted_flag: false, refs_map_b64: null,
+	content_b64: 'enc("original")', deleted_flag: false, refs_map_b64: null,
 	parent_sign_hash: null, owner_timestamp: 1000,
 });
 const SIGN_HASH = GENESIS_ROW.sign_hash;
@@ -1310,6 +1311,50 @@ describe('editMessage coalescing is durable, not just in-memory (§3.1 Target li
 		expect(contents.filter((c) => c.includes('edit A'))).toHaveLength(3);
 		expect(contents.filter((c) => c.includes('edit B'))).toHaveLength(3);
 		expect(createGenericMutationSpy).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe('editMessage replaces the text and keeps the other parts of the current revision', () => {
+	const QUOTE = { kind: 'quote', authorHash: PEER_HASH, messageId: 'dmsg_' + '5'.repeat(128), signHash: 'dms_' + '6'.repeat(128), snapshot: [{ kind: 'text', text: 'the question' }] };
+	const FILE = { kind: 'file', name: 'report.pdf', size: 2048, mimeType: 'application/pdf', createdAt: 1700000000, fileId: 'f'.repeat(32), encSecretB64: 'c2VjcmV0' };
+
+	const revisionWith = (parts) => signedMessageRow(myIdentity, {
+		message_id: MSG_ID, dialog_hash: DIALOG_HASH, sender_hash: MY_HASH,
+		content_b64: `enc(${encodeContent(parts)})`, deleted_flag: false, refs_map_b64: null,
+		parent_sign_hash: null, owner_timestamp: 1000,
+	});
+
+	const editedRevision = async (parts, text) => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
+		const current = revisionWith(parts);
+		collections.dialog.messages.rows.set(MSG_ID, current);
+		await store.editMessage(PEER_HASH, MSG_ID, text);
+		const signed = createGenericMutationSpy.mock.calls.filter((c) => c[0] === 'dialog_messages').at(-1)?.[1];
+		expect(signed?.parent_sign_hash).toBe(current.sign_hash);
+		return decodeContent(signed.content_b64.slice(4, -1));
+	};
+
+	it('editing the text of a reply keeps its quote', async () => {
+		expect(await editedRevision([QUOTE, { kind: 'text', text: 'my answer' }], 'my better answer'))
+			.toEqual([QUOTE, { kind: 'text', text: 'my better answer' }]);
+	});
+
+	it('editing the caption of a message with an attachment keeps the attachment', async () => {
+		expect(await editedRevision([FILE, { kind: 'text', text: 'see attached' }], 'see the attached report'))
+			.toEqual([FILE, { kind: 'text', text: 'see the attached report' }]);
+	});
+
+	it('adds the caption after the attachment when the message had none', async () => {
+		expect(await editedRevision([FILE], 'now with a caption')).toEqual([FILE, { kind: 'text', text: 'now with a caption' }]);
+	});
+
+	it('refuses to edit a message whose other parts an edit cannot keep, and writes nothing', async () => {
+		const store = useDialogsStore();
+		collections.dialog.keys.rows.set(`${DIALOG_HASH}|${MY_HASH}`, ownKeyRow());
+		collections.dialog.messages.rows.set(MSG_ID, revisionWith([{ kind: 'text', text: 'one' }, { kind: 'text', text: 'two' }]));
+		await expect(store.editMessage(PEER_HASH, MSG_ID, 'one and two')).rejects.toThrow(/cannot be edited/i);
+		expect(enqueueIntentSpy).not.toHaveBeenCalled();
 	});
 });
 
