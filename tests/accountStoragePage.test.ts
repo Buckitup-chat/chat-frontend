@@ -37,6 +37,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	},
 }));
 vi.mock('@/utils/copyToClipboard', () => ({ default: async (text: string) => (H.copied.push(text), true) }));
+vi.mock('@/components/storage/KeptFilesManager.vue', () => ({ default: { render: () => null } }));
 
 const { default: Page } = await import('@/views/account/Page_Account_Storage.vue');
 const { _useStorageEnvForTests, useStorageStatusStore } = await import('@/store/storageStatus.store');

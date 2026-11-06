@@ -1018,7 +1018,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
     };
 
     /** Playable source for a video part; streams when a worker is available. */
-    const openVideoSource = (part, opts) => openVideo(part, opts);
+    const openVideoSource = (part, opts) => openVideo(part, { ...opts, owner: $userPQ.currentUserHash });
 
     /** How much of an attachment this node can serve (§2.4). */
     const getFileAvailability = (part) => fileAvailability(part.fileId, part.uploaderHash);

@@ -221,15 +221,26 @@ const openDbForPins = async (): Promise<IDBDatabase> => {
 
 /**
  * Marks chunk `index` of `fileId` as kept by `owner`, storing `bytes` if the
- * device does not hold the chunk. Unlike a cache write, a failure throws — a
- * full disk rejects with the browser's QuotaExceededError — and nothing is
- * pinned. A chunk another account keeps under a different hash is not
- * replaced.
+ * device does not hold the chunk. A full disk first frees the oldest unpinned
+ * chunks, never a kept one, and the write is tried again; when no cache is
+ * left to free it rejects with the browser's QuotaExceededError. Unlike a
+ * cache write, a failure throws and nothing is pinned. A chunk another account
+ * keeps under a different hash is not replaced.
  */
 export const pinChunk = async (fileId: string, index: number, dataHash: string, owner: string, bytes: Uint8Array): Promise<void> => {
 	const db = await openDbForPins();
+	for (;;) {
+		try {
+			return await pinOnce(db, fileId, index, dataHash, owner, bytes);
+		} catch (e) {
+			if ((e as Error)?.name !== 'QuotaExceededError' || !(await evictUnpinned(db, (total) => total - bytes.byteLength))) throw e;
+		}
+	}
+};
+
+const pinOnce = (db: IDBDatabase, fileId: string, index: number, dataHash: string, owner: string, bytes: Uint8Array): Promise<void> => {
 	const key = chunkKey(fileId, index);
-	await inTx<void>(db, 'readwrite', (store, _settle, fail) => {
+	return inTx<void>(db, 'readwrite', (store, _settle, fail) => {
 		const req = store.get(key);
 		req.onsuccess = () => {
 			const cur = req.result as ChunkRecord | undefined;
@@ -357,10 +368,16 @@ export const soleKeptBytesOf = (owner: string): Promise<number> => sumPinnedBy(o
  * pushes a kept file out. One transaction, so a chunk pinned meanwhile is not
  * deleted.
  */
-const evictOverBudget = (db: IDBDatabase): Promise<void> =>
-	inTx<void>(db, 'readwrite', (store) => {
+const evictOverBudget = async (db: IDBDatabase): Promise<void> => {
+	await evictUnpinned(db, () => budgetBytes);
+};
+
+const evictUnpinned = (db: IDBDatabase, target: (total: number) => number): Promise<number> =>
+	inTx<number>(db, 'readwrite', (store, settle) => {
 		const index = store.index('evictable');
 		let total = 0;
+		let freed = 0;
+		settle(0);
 		const sum = index.openKeyCursor();
 		sum.onsuccess = () => {
 			const cursor = sum.result;
@@ -369,17 +386,41 @@ const evictOverBudget = (db: IDBDatabase): Promise<void> =>
 				cursor.continue();
 				return;
 			}
-			if (total <= budgetBytes) return;
+			const keep = target(total);
+			if (total <= keep) return;
 			const byAge = index.openKeyCursor();
 			byAge.onsuccess = () => {
 				const c = byAge.result;
-				if (!c || total <= budgetBytes) return;
+				if (!c || total <= keep) return;
 				store.delete(c.primaryKey);
-				total -= (c.key as [number, number])[1];
+				const size = (c.key as [number, number])[1];
+				total -= size;
+				freed += size;
+				settle(freed);
 				c.continue();
 			};
 		};
 	});
+
+export const cachedBytes = async (): Promise<number> => {
+	const db = await openDb();
+	if (!db) return 0;
+	return inTx<number>(db, 'readonly', (store, settle) => {
+		let total = 0;
+		const req = store.index('evictable').openKeyCursor();
+		req.onsuccess = () => {
+			const cursor = req.result;
+			if (!cursor) return settle(total);
+			total += (cursor.key as [number, number])[1];
+			cursor.continue();
+		};
+	});
+};
+
+export const clearChunkCache = async (): Promise<void> => {
+	const db = await openDb();
+	if (db) await evictUnpinned(db, () => 0);
+};
 
 /** Ask the browser not to evict our origin storage under pressure. */
 export const requestPersistentStorage = (): void => {

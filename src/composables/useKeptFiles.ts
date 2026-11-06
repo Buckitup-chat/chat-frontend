@@ -7,6 +7,7 @@ import { fileKey } from '@/lib/data/fileKey';
 import { keepFile, listKeptFiles, releaseKeptFile, type KeepablePart, type KeptFile, type KeptIndex } from '@/lib/data/keptFiles';
 import { isDeletedFile } from '@/lib/data/fileTransfer';
 import { isRefusedFile } from '@/lib/data/fileIntegrity';
+import { storageEstimate } from '@/lib/storageStatus';
 
 export interface KeepProgress {
 	done: number;
@@ -27,11 +28,41 @@ export const keepFailureMessage = (e: unknown): string => {
 	return `This file could not be kept on this device: ${text}`;
 };
 
+export const KEEP_WARNING_RATIO = 0.8;
+
+export interface NearQuota {
+	usage: number;
+	quota: number;
+	size: number;
+	ratio: number;
+}
+
+interface SwalLike {
+	fire: (options: Record<string, unknown>) => Promise<{ isConfirmed?: boolean; isDenied?: boolean }>;
+}
+
+export const askKeepNearQuota = (swal: SwalLike, openStorage: () => void) => async (info: NearQuota): Promise<boolean> => {
+	const result = await swal.fire({
+		icon: 'warning',
+		title: 'Storage is almost full',
+		text: `Keeping this file would bring this browser's storage to ${Math.round(info.ratio * 100)}% of what it allows. Storage on this device shows what takes the space and can clear the cache.`,
+		showCancelButton: true,
+		showDenyButton: true,
+		confirmButtonText: 'Keep anyway',
+		denyButtonText: 'Open Storage',
+		cancelButtonText: 'Cancel',
+	});
+	if (result.isDenied) openStorage();
+	return !!result.isConfirmed;
+};
+
 export function useKeptFiles(opts: {
 	/** The account whose kept files these are; watched. */
 	owner: () => string | null | undefined;
 	/** Told once per failure, beside the message the switch shows. */
 	onError?: (message: string, error: unknown) => void;
+	estimate?: () => Promise<{ usage: number | null; quota: number | null }>;
+	confirmNearQuota?: (info: NearQuota) => Promise<boolean>;
 }) {
 	const kept = ref<KeptIndex>({});
 	const keeping = ref<Record<string, KeepProgress>>({});
@@ -71,14 +102,25 @@ export function useKeptFiles(opts: {
 		opts.onError?.(message, e);
 	};
 
-	const keep = async (part: KeepablePart, messageId: string): Promise<void> => {
+	const fitsOrConfirmed = async (part: KeepablePart): Promise<boolean> => {
+		if (!opts.confirmNearQuota) return true;
+		const { usage, quota } = await (opts.estimate ?? storageEstimate)();
+		if (usage === null || !quota) return true;
+		const size = part.size ?? 0;
+		const ratio = (usage + size) / quota;
+		return ratio <= KEEP_WARNING_RATIO || opts.confirmNearQuota({ usage, quota, size, ratio });
+	};
+
+	const keep = async (part: KeepablePart, messageId: string, peerHash?: string): Promise<void> => {
 		const owner = opts.owner();
 		const key = fileKey(part);
 		if (!owner || kept.value[key] || keeping.value[key]) return;
 		errors.value = without(errors.value, key);
 		keeping.value = { ...keeping.value, [key]: { done: 0, total: 0 } };
 		try {
+			if (!(await fitsOrConfirmed(part))) return;
 			const entry = await keepFile(owner, part, messageId, {
+				peerHash,
 				onProgress: (p) => {
 					if (keeping.value[key]) keeping.value = { ...keeping.value, [key]: { done: p.done, total: p.total } };
 				},
@@ -104,8 +146,8 @@ export function useKeptFiles(opts: {
 	};
 
 	/** The switch: on keeps, off releases. */
-	const setKept = (part: KeepablePart, messageId: string, on: boolean): Promise<void> =>
-		on ? keep(part, messageId) : release(fileKey(part));
+	const setKept = (part: KeepablePart, messageId: string, on: boolean, peerHash?: string): Promise<void> =>
+		on ? keep(part, messageId, peerHash) : release(fileKey(part));
 
-	return { kept, keptByMessage, keeping, errors, setKept };
+	return { kept, keptByMessage, keeping, errors, setKept, release };
 }

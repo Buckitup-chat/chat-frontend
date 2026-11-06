@@ -25,6 +25,7 @@
 						<button class="btn btn-dark flex-fill" @click="copy" data-test="copy">Copy</button>
 					</div>
 				</template>
+				<KeptFilesManager class="mt-4" />
 			</div>
 		</template>
 	</FullContentBlock>
@@ -48,6 +49,7 @@ import { probeRows, probeText } from '@/lib/storageStatus';
 import copyToClipboard from '@/utils/copyToClipboard';
 
 import FullContentBlock from '@/components/FullContentBlock.vue';
+import KeptFilesManager from '@/components/storage/KeptFilesManager.vue';
 
 const $userPQ = userPQStore();
 const storage = useStorageStatusStore();

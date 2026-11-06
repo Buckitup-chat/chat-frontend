@@ -125,6 +125,8 @@ const readEstimate = async (env: StorageEnv): Promise<{ usage: number | null; qu
 	}
 };
 
+export const storageEstimate = (): Promise<{ usage: number | null; quota: number | null }> => readEstimate(browserEnv());
+
 /** The file system's refusal to open, a private-window signal; null when it opens or is missing. */
 const fileSystemRefusal = async (env: StorageEnv): Promise<string | null> => {
 	// Missing is not refusing: OPFS arrived in Safari 15.2 and Firefox 111.
