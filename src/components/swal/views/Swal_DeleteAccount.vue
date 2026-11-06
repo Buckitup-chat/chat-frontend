@@ -20,7 +20,7 @@
 		<button type="button" class="btn btn-outline-dark" @click="cancel()">
 			<trn k="tx_confirm.cancel"> Cancel </trn>
 		</button>
-		<button type="button" class="btn btn-dark ms-2" @click="backup()" v-if="$user.account">
+		<button type="button" class="btn btn-dark ms-2" @click="backup()" v-if="canBackUp">
 			<trn k="tx_confirm.cancel"> Backup </trn>
 		</button>
 		<button type="button" class="btn btn-danger ms-2 px-4" @click="confirm()" :disabled="!confirmed">
@@ -34,13 +34,14 @@ import { userStore } from '@/store/user.store';
 import { userPQStore } from '@/store/userPQ.store';
 
 
-import { inject, onMounted, ref } from 'vue';
+import { computed, inject, onMounted, ref } from 'vue';
 import errorMessage from '@/utils/errorMessage';
 
 const $user = userStore();
 const $userPQ = userPQStore();
 const $encryptionManager = inject('$encryptionManager');
 const $mitt = inject('$mitt');
+const $router = inject('$router');
 const $swal = inject('$swal');
 
 const confirmed = ref();
@@ -50,15 +51,19 @@ const { data } = defineProps({
 	data: { type: Object, required: true },
 });
 
+// The account to wipe: the one the dialog was opened for ({ id, data: account }), or the signed-in one.
+const targetHash = computed(() => data?.data?.user_hash || $userPQ.currentUser?.user_hash);
+// Only the signed-in account can be backed up: its keys are the open ones.
+const canBackUp = computed(() => !!targetHash.value && targetHash.value === $userPQ.currentUser?.user_hash);
+
 const fmtSize = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 // What "Keep on this device" holds for the account goes with it; the size is
 // read from the chunk pins, which need no key.
 onMounted(async () => {
-	const hash = data?.user_hash || $userPQ.currentUser?.user_hash;
-	if (!hash) return;
+	if (!targetHash.value) return;
 	try {
-		keptBytes.value = await (await import('@/lib/data/chunkCache')).pinnedBytesOf(hash);
+		keptBytes.value = await (await import('@/lib/data/chunkCache')).pinnedBytesOf(targetHash.value);
 	} catch (e) {
 		console.warn('Could not read the size of the account\'s kept files', e);
 	}
@@ -70,14 +75,16 @@ function cancel() {
 
 function backup() {
 	$mitt.emit('swal::close', false);
-	$mitt.emit('modal::open', { id: 'account_backup', showLocal: true });
+	$mitt.emit('modal::close');
+	$router.push({ name: 'account_backups' });
 }
 
 async function confirm() {
+	// Read before closing: the dialog drops what it was opened with as it closes.
+	const hash = targetHash.value;
 	$mitt.emit('swal::close', 'ok');
 	try {
-		if (data?.user_hash || $userPQ.currentUser?.user_hash) {
-			const hash = data?.user_hash || $userPQ.currentUser?.user_hash;
+		if (hash) {
 			await $userPQ.deleteAccount(hash);
 		} else {
 			await $encryptionManager.removeVault();
