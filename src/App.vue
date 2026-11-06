@@ -156,6 +156,7 @@ import { userPQStore } from '@/store/userPQ.store';
 import { useRecoveryHoldingsStore } from '@/store/recoveryHoldings.store';
 import { useRecoveryHelpStore } from '@/store/recoveryHelp.store';
 import { useAvatarsStore } from '@/store/avatars.store';
+import { useTransfersStore } from '@/store/transfers.store';
 import { initPersistence } from '@/lib/data/persistence';
 
 
@@ -184,6 +185,9 @@ const $restore = useRecoveryRestoreStore();
 // Created with the app, not with the first screen that shows a photo: it
 // sends the gallery into a dialog the first time this account writes there.
 useAvatarsStore();
+// Uploads a reload interrupted come back paused with the account they belong to.
+const $transfers = useTransfersStore();
+watch(() => $userPQ.currentUser?.user_hash, (owner) => void $transfers.signedIn(owner ?? null), { immediate: true });
 const $breakpoint = useBreakpoint();
 
 

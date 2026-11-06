@@ -2,7 +2,7 @@
 // Screen 10 rendered: header aggregate, the five row states in the board's
 // wording, the cut-off line, per-row actions and the quiet cancel.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mount } from '@vue/test-utils';
+import { mount, flushPromises } from '@vue/test-utils';
 import { setActivePinia, createPinia } from 'pinia';
 
 vi.mock('@/store/dialogs.store', () => ({
@@ -15,7 +15,7 @@ const TransferPanel = (await import('@/components/chat/TransferPanel.vue')).defa
 const row = (over = {}) => ({
 	id: over.id ?? `tr_${Math.random()}`,
 	batchId: 'b1', name: 'report.pdf', size: 2_400_000, mimeType: 'application/pdf',
-	createdAt: 0, blob: null, status: 'waiting', done: 0, total: 14, speed: 0,
+	createdAt: 0, blob: new Blob(['x']), status: 'waiting', done: 0, total: 14, speed: 0,
 	prepared: { fileId: 'f_x', encSecretB64: 'x' }, part: null, ...over,
 });
 
@@ -62,7 +62,7 @@ describe('transfer panel', () => {
 
 	it('pauses the active row and resumes a paused one', async () => {
 		const pause = vi.spyOn(store, 'pause');
-		const start = vi.spyOn(store, 'start');
+		const start = vi.spyOn(store, 'start').mockImplementation(() => {});
 		store.items = [row({ id: 'a', status: 'active' }), row({ id: 'b', status: 'paused' })];
 		const w = render();
 		// 'Start all' lives in the header; row actions follow it
@@ -72,6 +72,38 @@ describe('transfer panel', () => {
 		expect(pause).toHaveBeenCalledWith('a');
 		await buttons[1].trigger('click');
 		expect(start).toHaveBeenCalledWith('b');
+	});
+
+	it('asks for the file again on a row a reload paused, and says when it is another', async () => {
+		const repick = vi.spyOn(store, 'repick').mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+			.mockRejectedValueOnce(new DOMException('the file is gone', 'NotReadableError'));
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		store.items = [row({ id: 'r', status: 'paused', blob: null })];
+		const w = render();
+		expect(w.find('.transfer-caption').text()).toBe('Paused by a reload · pick the file again to resume');
+		expect(w.find('.transfer-head').text()).not.toContain('Start all');
+		const input = w.find('[data-test="repick"]');
+		const click = vi.spyOn(input.element, 'click');
+		const pick = async (file) => {
+			await w.find('.transfer-row .transfer-btn').trigger('click');
+			expect(click).toHaveBeenCalled();
+			Object.defineProperty(input.element, 'files', { value: [file], configurable: true });
+			await input.trigger('change');
+			await flushPromises();
+		};
+
+		expect(w.find('.transfer-row .transfer-btn').text()).toBe('Pick file');
+		const other = new File(['x'], 'other.pdf');
+		await pick(other);
+		expect(repick).toHaveBeenLastCalledWith('r', other);
+		expect(w.find('.transfer-caption').text()).toBe('Not the same file · pick the one you were sending, or cancel');
+
+		await pick(new File(['x'], 'report.pdf'));
+		expect(w.find('.transfer-caption').text()).toBe('Paused by a reload · pick the file again to resume');
+
+		await pick(new File(['x'], 'report.pdf'));
+		expect(w.find('.transfer-caption').text()).toBe('Not the same file · pick the one you were sending, or cancel');
+		warn.mockRestore();
 	});
 
 	it('cancels ONE row through the quiet cross', async () => {
