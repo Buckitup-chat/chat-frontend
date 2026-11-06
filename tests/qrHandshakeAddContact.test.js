@@ -4,7 +4,7 @@
 // not reported as added — the person is told what went wrong, and the modal
 // stays open on the contact, with no success message and no move to the
 // contact page.
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { defineComponent, h } from 'vue';
 import { mount, flushPromises } from '@vue/test-utils';
 
@@ -31,10 +31,13 @@ let swal;
 let mitt;
 let router;
 
+const mounted = [];
+
 const mountModal = async () => {
 	const wrapper = mount(Modal_QrHandshake, {
 		global: { provide: { $swal: swal, $mitt: mitt, $router: router } },
 	});
+	mounted.push(wrapper);
 	await flushPromises();
 	return wrapper;
 };
@@ -69,6 +72,13 @@ beforeEach(() => {
 		configurable: true,
 		value: { enumerateDevices: async () => [{ kind: 'videoinput' }] },
 	});
+});
+
+afterEach(() => {
+	vi.useRealTimers();
+	for (const wrapper of mounted.splice(0)) {
+		if (!wrapper.vm.$.isUnmounted) wrapper.unmount();
+	}
 });
 
 const expectErrorShownAndModalKept = (message) => {
@@ -197,6 +207,12 @@ describe('what the modal does with the handshake\'s result', () => {
 		expect(store.confirmContact).not.toHaveBeenCalled();
 		expect(store.saveContact).not.toHaveBeenCalled();
 		expect(swal.fire).toHaveBeenCalledWith(expect.objectContaining({ title: 'It`s your own account' }));
+	});
+
+	it('a modal opened by a slow test does not start the scanner during the next test', async () => {
+		await mountModal();
+		const blockedSince = Date.now();
+		while (Date.now() - blockedSince < 120);
 	});
 
 	it('starts scanning as it opens: both screens read each other, there is no button to press', async () => {
