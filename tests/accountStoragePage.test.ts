@@ -6,6 +6,7 @@ import { defineComponent, h, nextTick } from 'vue';
 import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import type { StorageEnv } from '@/lib/storageStatus';
+import { fakeStorageEnv as env } from './helpers/storageEnv';
 
 const H = await vi.hoisted(async () => {
 	// Reactive, as the real store is: the page and the store follow the signed-in account.
@@ -43,28 +44,6 @@ const { _useStorageEnvForTests, useStorageStatusStore } = await import('@/store/
 const FullContentBlock = defineComponent({
 	setup: (_, { slots }) => () => h('div', [slots.header?.(), slots.content?.()]),
 });
-
-const env = (o: { persisted?: boolean; quota?: number; noStorage?: boolean; grants?: boolean; installed?: boolean; localStorage?: Error } = {}): StorageEnv => {
-	let persisted = o.persisted ?? false;
-	return {
-		storage: o.noStorage
-			? undefined
-			: {
-					persisted: async () => persisted,
-					persist: async () => (o.grants ? (persisted = true) : persisted),
-					estimate: async () => ({ usage: 1024, quota: o.quota ?? 10 * 1024 ** 3 }),
-				},
-		matchMedia: () => ({ matches: o.installed === true }),
-		localStorage: () => ({
-			setItem: () => {
-				if (o.localStorage) throw o.localStorage;
-			},
-			removeItem: () => {},
-		}),
-		userAgent: 'TestBrowser/1.0',
-		platform: 'TestOS',
-	};
-};
 
 const render = async (fake: StorageEnv) => {
 	setActivePinia(createPinia());
