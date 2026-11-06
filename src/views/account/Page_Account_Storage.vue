@@ -45,7 +45,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
 import { storeToRefs } from 'pinia';
 import { useStorageStatusStore } from '@/store/storageStatus.store';
-import { probeRows, probeText } from '@/lib/storageStatus';
+import { probeRows, probeText, storageStatusLine } from '@/lib/storageStatus';
 import copyToClipboard from '@/utils/copyToClipboard';
 
 import FullContentBlock from '@/components/FullContentBlock.vue';
@@ -53,20 +53,9 @@ import KeptFilesManager from '@/components/storage/KeptFilesManager.vue';
 
 const $userPQ = userPQStore();
 const storage = useStorageStatusStore();
-const { probe, status, lastRequest, communityBackup } = storeToRefs(storage);
+const { probe, lastRequest, communityBackup } = storeToRefs(storage);
 
-const LINES = {
-	persistent: 'This browser will not clear your data',
-	'best-effort': 'This browser may clear your data: install the app or make a backup',
-	ephemeral: 'This window forgets everything when it closes',
-	unknown: 'This browser does not say whether it may clear your data: a backup keeps the account safe',
-};
-// Installed already: a backup is what is left to do.
-const line = computed(() => {
-	if (!status.value) return 'Checking…';
-	if (status.value === 'best-effort' && probe.value?.installed) return 'This browser may clear your data when storage runs low: make a backup';
-	return LINES[status.value];
-});
+const line = computed(() => (probe.value ? storageStatusLine(probe.value) : 'Checking…'));
 
 const rows = computed(() => (probe.value ? probeRows(probe.value, lastRequest.value, communityBackup.value) : []));
 

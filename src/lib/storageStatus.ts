@@ -41,6 +41,18 @@ export type StorageStatus = 'persistent' | 'best-effort' | 'ephemeral' | 'unknow
 /** Whether the account has a community backup, as far as this device can read (storageStatus.store.ts). */
 export type CommunityBackupState = 'yes' | 'not found' | 'unknown';
 
+export const STORAGE_STATUS_TEXT: Record<StorageStatus, { line: string; short: string }> = {
+	persistent: { line: 'This browser will not clear your data', short: 'Kept by this browser' },
+	'best-effort': { line: 'This browser may clear your data: install the app or make a backup', short: 'Browser may clear data' },
+	ephemeral: { line: 'This window forgets everything when it closes', short: 'Gone when this window closes' },
+	unknown: { line: 'This browser does not say whether it may clear your data: a backup keeps the account safe', short: 'Browser does not say' },
+};
+
+export const storageStatusLine = (probe: Pick<StorageProbe, 'status' | 'installed'>): string => {
+	if (probe.status === 'best-effort' && probe.installed) return 'This browser may clear your data when storage runs low: make a backup';
+	return STORAGE_STATUS_TEXT[probe.status].line;
+};
+
 /** Below this quota a window is suspected private. Normal profiles get a share of the free disk, gigabytes on most devices. */
 export const SMALL_QUOTA_BYTES = 120 * 1024 * 1024;
 
