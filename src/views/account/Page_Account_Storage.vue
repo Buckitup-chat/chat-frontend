@@ -40,15 +40,18 @@
 </style>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { userPQStore } from '@/store/userPQ.store';
-import { useStorageStatus, refreshCommunityBackup, probeRows, probeText } from '@/composables/useStorageStatus';
+import { storeToRefs } from 'pinia';
+import { useStorageStatusStore } from '@/store/storageStatus.store';
+import { probeRows, probeText } from '@/lib/storageStatus';
 import copyToClipboard from '@/utils/copyToClipboard';
 
 import FullContentBlock from '@/components/FullContentBlock.vue';
 
 const $userPQ = userPQStore();
-const { probe, status, lastRequest, communityBackup, refresh, requestPersistence } = useStorageStatus(() => $userPQ.currentUserHash);
+const storage = useStorageStatusStore();
+const { probe, status, lastRequest, communityBackup } = storeToRefs(storage);
 
 const LINES = {
 	persistent: 'This browser will not clear your data',
@@ -69,7 +72,7 @@ const requesting = ref(false);
 const request = async () => {
 	requesting.value = true;
 	try {
-		await requestPersistence();
+		await storage.requestPersistence();
 	} finally {
 		requesting.value = false;
 	}
@@ -78,8 +81,8 @@ const request = async () => {
 const copy = () => copyToClipboard(probeText(rows.value));
 
 onMounted(() => {
-	refresh();
-	const owner = $userPQ.currentUserHash;
-	if (owner) refreshCommunityBackup(owner);
+	storage.refresh();
 });
+// The backup is the signed-in account's: read again when another one signs in.
+watch(() => $userPQ.currentUserHash, () => storage.refreshCommunityBackup(), { immediate: true });
 </script>
