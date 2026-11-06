@@ -43,16 +43,17 @@
             'message-pending': msg._syncStatus && msg._syncStatus !== 'synced' && msg._syncStatus !== 'error',
             'message-error': msg._syncStatus === 'error',
             'message-unplaced': msg._verify === 'waiting' || msg._verify === 'blocked',
+            'message-editing': editingMessageId === msg.id,
           }]"
-          style="max-width: 75%; min-width: 150px;" @contextmenu.prevent="openContextMenu($event, msg)"
+          @contextmenu="openContextMenu($event, msg)"
           @touchstart="startLongPress($event, msg)" @touchend="cancelLongPress"
           @touchmove="cancelLongPress" @touchcancel="cancelLongPress">
           <div v-if="!msg.isMine && showAuthorName" class="fw-bold text-muted mb-1" style="font-size: 0.8rem;">
             {{ msg.authorName }}
           </div>
           <div v-if="editingMessageId === msg.id" class="message-edit">
-            <textarea ref="editTextarea" v-model="editingText" class="form-control form-control-sm mb-1" rows="2"
-              @keydown.enter.exact.prevent="saveEdit" @keydown.esc.prevent="cancelEdit"></textarea>
+            <textarea v-model="editingText" v-edit-box class="form-control form-control-sm mb-1" rows="2"
+              @input="fitEditTextarea($event.target)" @keydown.enter.exact.prevent="saveEdit" @keydown.esc.prevent="cancelEdit"></textarea>
             <div class="d-flex gap-1 justify-content-end">
               <button type="button" class="btn btn-sm btn-light" @click="cancelEdit">Cancel</button>
               <button type="button" class="btn btn-sm btn-primary" @click="saveEdit">Save</button>
@@ -568,7 +569,6 @@ const contextMenu = ref(null);
 const contextMenuRef = ref(null);
 const editingMessageId = ref(null);
 const editingText = ref('');
-const editTextarea = ref(null);
 
 const contextMenuMsg = computed(() => {
   if (!contextMenu.value) return null;
@@ -1031,6 +1031,8 @@ const clampContextMenuPosition = () => {
 };
 
 const openContextMenu = async (event, msg) => {
+  // The message being edited keeps the browser's own menu: spelling, paste, select all.
+  if (editingMessageId.value === msg.id) return;
   event.preventDefault();
   contextMenu.value = { msgId: msg.id, x: event.clientX, y: event.clientY };
   await nextTick();
@@ -1048,6 +1050,8 @@ const closeContextMenu = () => {
 let longPressTimer = null;
 const startLongPress = (event, msg) => {
   cancelLongPress();
+  // In the edit box a steady finger places the caret or selects.
+  if (editingMessageId.value === msg.id) return;
   const touch = event.touches?.[0];
   if (!touch) return;
   const at = { clientX: touch.clientX, clientY: touch.clientY };
@@ -1104,15 +1108,34 @@ const copyMessageText = async () => {
   closeContextMenu();
 };
 
-const startEdit = async (msg) => {
+const startEdit = (msg) => {
   editingMessageId.value = msg.id;
   editingText.value = msg.text;
   closeContextMenu();
-  await nextTick();
-  if (editTextarea.value) {
-    editTextarea.value.focus();
-    editTextarea.value.setSelectionRange(editTextarea.value.value.length, editTextarea.value.value.length);
-  }
+};
+
+/** Grows the edit box with its text; the CSS caps it at half the screen, and it scrolls beyond that. */
+const fitEditTextarea = (el) => {
+  // Collapsing the box to measure it shortens the chat, and the browser clamps the chat's scroll: it is put back.
+  const chat = messagesContainer.value;
+  const top = chat?.scrollTop;
+  // A scrollbar while measuring would narrow the text and overstate its height.
+  el.style.overflowY = 'hidden';
+  el.style.height = 'auto';
+  el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+  el.style.overflowY = '';
+  if (chat) chat.scrollTop = top;
+};
+
+// The edit box as it mounts: sized to its text and focused, with the caret after the text and in view.
+// A hook on the element itself, so switching the edit between messages focuses the box that appeared.
+const vEditBox = {
+  mounted(el) {
+    fitEditTextarea(el);
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+    el.scrollTop = el.scrollHeight;
+  },
 };
 
 const saveEdit = () => {
@@ -1163,12 +1186,15 @@ const scrollToBottom = async () => {
 };
 
 watch(() => props.messages, () => {
+  // A message arriving while one is edited does not carry the edit box out of view.
+  if (editingMessageId.value) return;
   scrollToBottom();
 }, { deep: true });
 </script>
 
 <style lang="scss" scoped>
 @import '@/scss/variables.scss';
+@import '@/scss/breakpoints.scss';
 
 .chat-window {
   background: transparent;
@@ -1194,6 +1220,8 @@ watch(() => props.messages, () => {
 
 .message-bubble {
   position: relative;
+  max-width: 75%;
+  min-width: 150px;
 }
 
 .message-mine {
@@ -1215,10 +1243,23 @@ watch(() => props.messages, () => {
   white-space: pre-wrap;
 }
 
+/* Editing keeps the bubble at its widest, so a long text is not squeezed into a column. */
+.message-editing {
+  width: 100%;
+
+  /* The phone layout (below md, as $breakpoint.lt('md')) edits across the whole width. */
+  @include media-breakpoint-down(md) {
+    max-width: none;
+  }
+}
+
 .message-edit textarea {
   resize: none;
   font-size: 0.95rem;
   line-height: 1.4;
+  max-height: 50vh;
+  /* the visible height, where the on-screen keyboard takes part of the screen */
+  max-height: 50dvh;
 }
 
 .message-time {
