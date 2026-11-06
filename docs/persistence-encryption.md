@@ -93,6 +93,28 @@ heuristics, and installing to the Home Screen is the reliable path there. The
 app calls `persist()` at startup (`src/main.js`) and on each chunk download
 (`src/lib/data/chunkCache.ts`).
 
+## Wiping the device
+
+**Wipe all** on the login page removes, once confirmed, everything stored for
+the app's origin in the browser: every IndexedDB database, the Origin Private
+File System and localStorage (`src/lib/wipeDevice.ts`). It ends the session
+and reloads, and the removal runs at the start of the next load, before
+anything opens a database: the page that asked holds connections it cannot
+close (idb-keyval keeps its connection to `keyval-store` and ignores
+`versionchange`), and each would block a delete until the page goes.
+
+- A connection in another tab of the app blocks a delete the same way. The app
+  then does not start, since its first open of that database would wait behind
+  the queued delete: it asks for the other tabs to be closed and tries again on
+  reload. A delete that stays silent for three seconds counts as blocked too.
+- When the browser refuses a removal, the person can try again or open the app
+  with what is left.
+- The request stays in localStorage until the wipe is done, so a tab of the
+  app that loads later finishes it even when the tab that asked was closed.
+  A tab other than the one that asked first asks whether to finish the wipe or
+  keep what is left. One tab wipes at a time (a Web Lock), and a tab that
+  waited finds the wipe done.
+
 ## The storage status
 
 `src/lib/storageStatus.ts` reads what the browser says about the origin's
