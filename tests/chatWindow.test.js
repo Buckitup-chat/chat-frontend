@@ -206,3 +206,22 @@ describe('read receipts are never sent implicitly', () => {
 		expect(marker.attributes('title')).toMatch(/confirmed reading/i);
 	});
 });
+
+describe('Edit in the message menu', () => {
+	const QUOTE = { kind: 'quote', authorHash: 'u_peer', messageId: 'dmsg_' + '5'.repeat(128), signHash: 'dms_' + '6'.repeat(128), snapshot: [{ kind: 'text', text: 'the question' }] };
+	const FILE = { kind: 'file', name: 'report.pdf', size: 2048, mimeType: 'application/pdf', createdAt: 1700000000, fileId: 'f'.repeat(32), encSecretB64: 'c2VjcmV0' };
+	const offersEdit = async (parts) => {
+		const menu = await openMenu(render([message({ isMine: true, _syncStatus: 'synced', parts, text: 'caption' })]));
+		return menu.findAll('.context-menu-action').some((b) => b.text() === 'Edit');
+	};
+
+	it('is offered for a reply and for an attachment with a caption', async () => {
+		expect(await offersEdit([QUOTE, { kind: 'text', text: 'caption' }])).toBe(true);
+		expect(await offersEdit([FILE, { kind: 'text', text: 'caption' }])).toBe(true);
+	});
+
+	it('is not offered when the text shown is not one text part', async () => {
+		expect(await offersEdit([{ kind: 'text', text: 'one' }, { kind: 'text', text: 'two' }])).toBe(false);
+		expect(await offersEdit([{ kind: 'unknown', type: 'poll', value: [] }, { kind: 'text', text: 'caption' }])).toBe(false);
+	});
+});

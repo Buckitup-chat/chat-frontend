@@ -26,6 +26,7 @@ import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyReplicatedRow } from '@/lib/data/rowVerification';
 import { projectionReplacement } from '@/lib/data/operationLifecycle';
 import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError, fileRefsOf } from '@buckitup/pq-client/content';
+import { withEditedText } from '@/lib/editableParts';
 import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
@@ -911,6 +912,13 @@ export const useDialogsStore = defineStore('dialogs', () => {
         return current;
     };
 
+    const currentPartsOf = async (row, token) => {
+        const decrypted = await decryptMessageRow(row);
+        assertSessionUnchanged(token, 'editMessage:afterContent');
+        if (!decrypted.decrypted) throw new Error('This message cannot be edited: its current content could not be read.');
+        return decrypted.parts;
+    };
+
     /**
      * Edit a message (owner only). Stored first — the new content and the
      * refs observed now; an edit not yet signed takes a newer one's content.
@@ -920,8 +928,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const token = pinActiveSession(myHash, 'editMessage:start');
         const dialogHash = getDialogHash(peerHash);
         carriesMemo.delete(`${myHash}|${dialogHash}`);
-        await ownMessageBase(dialogHash, messageId, myHash, token, 'editMessage');
-        const parts = typeof newText === 'string' ? [{ kind: 'text', text: newText }] : newText;
+        const current = await ownMessageBase(dialogHash, messageId, myHash, token, 'editMessage');
+        const parts = typeof newText === 'string' ? withEditedText(await currentPartsOf(current, token), newText) : newText;
         const chainKey = `msg:${messageId}`;
 
         const intentId = await serialized(captureLocks, chainKey, async () => {
