@@ -28,13 +28,14 @@
 </template>
 
 <script setup>
-import { computed, inject } from 'vue';
+import { computed, inject, onMounted } from 'vue';
 import Avatar from 'vue-boring-avatars';
 import UiRow from '@/components/ui/UiRow.vue';
 import { useMenu } from '@/composables/useMenu';
 import { useBreakpoint } from '@/composables/useBreakpoint';
 import { userPQStore } from '@/store/userPQ.store';
 import { useDialogsStore } from '@/store/dialogs.store';
+import { useStorageStatusStore } from '@/store/storageStatus.store';
 import { shortUserId } from '@/lib/shortUserId';
 
 const $route = inject('$route');
@@ -43,6 +44,16 @@ const $mitt = inject('$mitt');
 const $userPQ = userPQStore();
 const $breakpoint = useBreakpoint();
 const { close: closeMenu } = useMenu();
+const storage = useStorageStatusStore();
+
+// The storage page's status line in a few words; read each time the Account section opens.
+const STORAGE_SUBS = {
+	persistent: 'Kept by this browser',
+	'best-effort': 'Browser may clear data',
+	ephemeral: 'Gone when this window closes',
+	unknown: 'Browser does not say',
+};
+onMounted(() => storage.refresh());
 
 const me = computed(() => $userPQ.currentUser ?? {});
 const avatarSrc = computed(() => (typeof me.value.avatar === 'string' ? me.value.avatar : ''));
@@ -67,7 +78,7 @@ const groups = computed(() => [
 				dot: $dialogs.alertingPeers.size ? 'accent' : '',
 			},
 			{ title: 'Notifications', sub: 'Alerts about recovery attempts', icon: 'notifications', to: { name: 'account_notifications' } },
-			{ title: 'Storage on this device', icon: 'info', to: { name: 'account_storage' } },
+			{ title: 'Storage on this device', sub: STORAGE_SUBS[storage.status] ?? 'Checking…', icon: 'info', to: { name: 'account_storage' } },
 			{ title: 'Install app', sub: 'On your phone or computer', icon: 'buckup_devices', to: { name: 'account_install' } },
 		],
 	},

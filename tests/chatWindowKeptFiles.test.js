@@ -39,7 +39,7 @@ const meta = (w) => w.find('.msg-file-meta').text();
 describe('a file kept on this device, in the chat', () => {
 	it('shows the File state marker in the meta line after an ordinary download', async () => {
 		const w = render({ downloads: { [KEY]: { status: 'done' } } });
-		expect(meta(w)).toContain('2 KB · downloaded');
+		expect(meta(w)).toContain('2 KB · saved');
 		expect(w.find('.msg-file-state').exists()).toBe(false);
 		const marker = w.find('.msg-file-meta .msg-file-state-marker');
 		expect(marker.exists()).toBe(true);

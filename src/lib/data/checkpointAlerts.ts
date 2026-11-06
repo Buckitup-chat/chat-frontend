@@ -31,13 +31,14 @@ export interface CheckpointPointer {
 		createdAt: number;
 	} | null;
 	/**
-	 * Feed-order key of the newest message the scan has already decoded. Older
-	 * messages cannot hold a newer checkpoint, so the next scan skips them.
+	 * Id of the newest message the scan has already decoded; null before the
+	 * first scan. Older messages in feed order (compareFeedOrder) cannot hold
+	 * a newer checkpoint, so the next scan skips them.
 	 */
-	scannedTo: number;
+	scannedTo: string | null;
 }
 
-const EMPTY: CheckpointPointer = { sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: 0 };
+const EMPTY: CheckpointPointer = { sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: null };
 
 const key = (userHash: string, dialogHash: string) => `cpptr|${userHash}|${dialogHash}`;
 

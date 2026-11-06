@@ -47,7 +47,7 @@
 			</button>
 
 			<button type="button" class="btn btn-dark d-flex justify-content-center align-items-center ms-1"
-				@click="$mitt.emit('modal::open', { id: 'account_backup' })"
+				@click="openBackupCenter()"
 				v-if="selected.user_hash === $userPQ.currentUser?.user_hash" v-tooltip="'Backup account data'">
 				<i class="_icon_backups bg-white px-2"></i>
 			</button>
@@ -348,6 +348,12 @@ const signinPQ = async () => {
 	console.log('is loader next')
 
 	// $loader.hide();
+};
+
+// Every backup of the account is in Backup Center: the file, guardians, passkey recovery.
+const openBackupCenter = () => {
+	$mitt.emit('modal::close');
+	$router.push({ name: 'account_backups' });
 };
 
 const deleteAccount = async () => {

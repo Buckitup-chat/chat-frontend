@@ -83,7 +83,7 @@ const load = async () => {
 		keptFiles: await import('@/lib/data/keptFiles'),
 		chunkCache: await import('@/lib/data/chunkCache'),
 		useKeptFiles: (await import('@/composables/useKeptFiles')).useKeptFiles,
-		formatBytes: (await import('@/lib/storageStatus')).formatBytes,
+		formatBytes: (await import('@/utils/formatBytes')).formatBytes,
 		Manager: (await import('@/components/storage/KeptFilesManager.vue')).default,
 	};
 };

@@ -30,10 +30,14 @@ export const hkdfExpand = (prk: Uint8Array, info: string | Uint8Array, length = 
 		block.set(prev, 0);
 		block.set(infoBytes, prev.length);
 		block[prev.length + infoBytes.length] = i;
+		// Each block is key material: none is left behind but the output.
+		prev.fill(0);
 		prev = hmac(sha3_256, prk, block);
+		block.fill(0);
 		out.set(prev.subarray(0, Math.min(prev.length, length - filled)), filled);
 		filled += prev.length;
 	}
+	prev.fill(0);
 	return out;
 };
 

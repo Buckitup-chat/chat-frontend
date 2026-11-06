@@ -15,8 +15,8 @@
 
 import { fromBase64 } from '@buckitup/pq-client/signature';
 import { CHUNK_SIZE } from '@buckitup/pq-client/fileCrypto';
-import { downloadFile, FileDeletedError, type DownloadProgress } from './fileTransfer';
-import { FileVerificationError, readVerifiedFile, type ChunkHashes } from './fileIntegrity';
+import { downloadFile, readLiveFile, type DownloadProgress } from './fileTransfer';
+import { FileVerificationError, type ChunkHashes } from './fileIntegrity';
 import { fileKey } from './fileKey';
 import { getCachedMedia, putCachedMedia } from './mediaCache';
 import { bearerFor, openSession } from './readSession';
@@ -160,9 +160,7 @@ export const openVideo = async (
 		// it holds each chunk to the hash verified here (fileIntegrity.ts),
 		// asking for each as it plays. The manifest and the first chunk are
 		// verified now, so a refused file is refused at open.
-		const file = await readVerifiedFile(video.fileId, video.uploaderHash, { signal: opts.signal });
-		if (!file) throw new Error('file manifest not found');
-		if (file.manifest.deleted) throw new FileDeletedError(video.fileId);
+		const file = await readLiveFile(video.fileId, video.uploaderHash, { signal: opts.signal });
 		const first = await file.hashes.expected(0);
 		const sessionId = crypto.randomUUID();
 		const bearer = bearerFor('file_chunk');

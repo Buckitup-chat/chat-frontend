@@ -17,18 +17,13 @@ const uuidMs = (id: string | undefined): number | null => {
 };
 
 /**
- * Milliseconds of the message's creation. Falls back to the row timestamp
- * (seconds) for anything that is not a dmsg_ UUIDv7 id.
- */
-export const feedOrderKey = (id: string | undefined, fallbackTsSeconds: number): number =>
-	uuidMs(id) ?? (fallbackTsSeconds || 0) * 1000;
-
-/**
- * Comparator in feed order. Messages written within one millisecond share
- * the key; between two dmsg_ ids the full id breaks the tie, because a
- * UUIDv7 counts up inside the millisecond. Messages sent from one tab keep
- * the order they were written in, and every client resolves a tie the same
- * way. Any other tie stays 0, so a stable sort keeps the input order.
+ * Comparator in feed order: by the milliseconds of the message's creation,
+ * or by the row timestamp (seconds) for anything that is not a dmsg_ UUIDv7
+ * id. Messages written within one millisecond share that key; between two
+ * dmsg_ ids the full id breaks the tie, because a UUIDv7 counts up inside
+ * the millisecond. Messages sent from one tab keep the order they were
+ * written in, and every client resolves a tie the same way. Any other tie
+ * stays 0, so a stable sort keeps the input order.
  */
 export const compareFeedOrder = (aId: string | undefined, aTs: number, bId: string | undefined, bTs: number): number => {
 	const a = uuidMs(aId);

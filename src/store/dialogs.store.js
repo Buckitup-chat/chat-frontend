@@ -19,7 +19,7 @@ import {
     quarantinedEntries, discardEntry, currentSessionToken, sameSessionToken, pendingEntries, awaitServerAccepted, onOutboxChange,
     awaitingApprovalIds,
 } from '@/lib/data/outbox';
-import { compareFeedOrder, feedOrderKey } from '@/lib/data/feedOrder';
+import { compareFeedOrder } from '@/lib/data/feedOrder';
 import { serialized } from '@/lib/data/serialized';
 import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDialog } from '@/lib/data/checkpointAlerts';
 import { createDialogGate } from '@/lib/data/dialogGate';
@@ -967,7 +967,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
 
-        const digest = await uploadDigest(bytes);
+        // The transfer queue hashes the bytes already, to name them in its record.
+        const digest = fileMeta.digest ?? await uploadDigest(bytes);
         const existing = await reusableUpload(uploaderHash, digest, fileAvailability).catch((e) => {
             console.warn('[dialogs] upload reuse unavailable:', e);
             return null;
@@ -1344,19 +1345,21 @@ export const useDialogsStore = defineStore('dialogs', () => {
     // row is never decrypted for it and holds the watermark like an
     // undecrypted one, so it is looked at again once admitted.
     const findLatestCheckpoint = async (dialogHash, rows, pointer, colls = null, isAdmitted = () => false, me = $userPQ.currentUserHash) => {
+        // Only rows past the watermark, and past the known checkpoint: the
+        // pointer moves forward only, as an older checkpoint cannot replace it.
+        const past = (r, id) => !id || compareFeedOrder(r.message_id, r.owner_timestamp, id, 0) > 0;
         const mine = rows
             .filter((r) => r.sender_hash === me && !r.deleted_flag && r.content_b64)
-            .map((r) => ({ row: r, order: feedOrderKey(r.message_id, r.owner_timestamp) }))
-            .filter((e) => e.order > pointer.scannedTo)
-            .sort((a, b) => (b.order - a.order) || compareFeedOrder(b.row.message_id, b.row.owner_timestamp, a.row.message_id, a.row.owner_timestamp));
+            .filter((r) => past(r, pointer.scannedTo) && past(r, pointer.checkpoint?.messageId))
+            .sort((a, b) => compareFeedOrder(b.message_id, b.owner_timestamp, a.message_id, a.owner_timestamp));
 
         // The watermark advances only past rows that actually decrypted. A row
         // that failed (its dialog key has not arrived yet) must be rescanned,
-        // and `order > scannedTo` is the only thing that brings a row back —
+        // and being past `scannedTo` is the only thing that brings a row back —
         // advancing past a failure would blind this dialog's alerts for good.
         let sawUndecrypted = false;
         let found = null;
-        for (const { row } of mine) {
+        for (const row of mine) {
             if (!isAdmitted(row)) { sawUndecrypted = true; continue; }
             const decoded = await decryptMessageRow(row, colls);
             if (!decoded.decrypted) { sawUndecrypted = true; continue; }
@@ -1377,9 +1380,10 @@ export const useDialogsStore = defineStore('dialogs', () => {
             };
             break;
         }
+        // Every row in `mine` is past the old watermark, the first one most.
         const scannedTo = sawUndecrypted || !mine.length
             ? pointer.scannedTo
-            : Math.max(pointer.scannedTo, mine[0].order);
+            : mine[0].message_id;
         return { checkpoint: found ?? pointer.checkpoint, scannedTo };
     };
 
@@ -1548,9 +1552,8 @@ export const useDialogsStore = defineStore('dialogs', () => {
             if (!gated) return null;
             if (requireComplete && gated.rows.some((row) => row.sender_hash === peerHash
                 && !isRowAdmitted(dialogHash, row) && !isRevisionTerminal(dialogHash, row.message_id, row.sign_hash))) return null;
-            const floor = after ? feedOrderKey(after, 0) : -Infinity;
             const peerRows = gated.admitted.filter((row) => row.sender_hash === peerHash && !row.deleted_flag
-                && feedOrderKey(row.message_id, row.owner_timestamp) >= floor);
+                && (!after || compareFeedOrder(row.message_id, row.owner_timestamp, after, 0) >= 0));
             const messages = [];
             for (const row of newestMatch ? [...peerRows].reverse() : peerRows) {
                 const decrypted = await decryptMessageRow(row, colls);
@@ -1711,7 +1714,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         checkpointAlerts.value = new Map(checkpointAlerts.value).set(peerHash, { changed: false, createdAt: part.createdAt, messageId });
         await savePointer(ownerHash, dialogHash, {
             checkpoint: { messageId, viewRoot: part.viewRoot, frontierRoot: part.frontierRoot, createdAt: part.createdAt },
-            scannedTo: feedOrderKey(messageId, part.createdAt),
+            scannedTo: messageId,
         }).catch(() => { });
         return { messageId, part };
     };

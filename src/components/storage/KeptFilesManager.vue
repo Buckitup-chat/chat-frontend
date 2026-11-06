@@ -93,7 +93,8 @@ import { useKeptFiles } from '@/composables/useKeptFiles';
 import { openKeptFile, type KeptFile } from '@/lib/data/keptFiles';
 import { categoryOf, chatOf, filterKeptFiles, keptChats, UNKNOWN_CHAT, type KeptCategory, type KeptFilter } from '@/lib/data/keptFilesView';
 import { cachedBytes, clearChunkCache, pinnedBytesOf } from '@/lib/data/chunkCache';
-import { formatBytes, storageEstimate } from '@/lib/storageStatus';
+import { storageEstimate } from '@/lib/storageStatus';
+import { formatBytes } from '@/utils/formatBytes';
 import { shortUserId } from '@/lib/shortUserId';
 
 interface Person {

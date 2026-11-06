@@ -26,7 +26,6 @@ base('a backup downloaded from Identity restores the same account in a clean bro
 
 	await pageA.getByTitle('Download backup file').click();
 	await expect(pageA.getByRole('dialog', { name: /Local Backup/ })).toBeVisible();
-	await expect(pageA.getByText('BuckitUp network')).toHaveCount(0);
 	await typePassword(pageA);
 	const [download] = await Promise.all([
 		pageA.waitForEvent('download'),

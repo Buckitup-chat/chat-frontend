@@ -46,7 +46,9 @@ const bigFile = (name, size) => {
 	return f;
 };
 
-const finish = (name) => {
+// The row hashes its bytes before the first chunk: real time, even under fake timers.
+const finish = async (name) => {
+	await vi.waitFor(() => expect(uploads.has(name)).toBe(true));
 	const u = uploads.get(name);
 	u.resolve({ kind: 'file', name, fileId: 'f_' + name, size: 1, mimeType: 'x', createdAt: 0, encSecretB64: 'x' });
 	uploads.delete(name);
@@ -69,7 +71,7 @@ describe('transfer queue', () => {
 		await store.enqueueBatch('u_peer', [file('a'), file('b'), file('c')], '');
 		await tick();
 		expect(store.items.map((i) => i.status)).toEqual(['active', 'waiting', 'waiting']);
-		finish('a');
+		await finish('a');
 		await tick(); await tick();
 		expect(store.items.find((i) => i.name === 'b').status).toBe('active');
 	});
@@ -82,7 +84,7 @@ describe('transfer queue', () => {
 
 		await store.cancel(store.items.find((i) => i.name === 'a').id);
 		await tick();
-		finish('b');
+		await finish('b');
 		await tick(); await tick();
 
 		expect(sentMessages).toHaveLength(1);
@@ -99,7 +101,7 @@ describe('transfer queue', () => {
 		const store = useTransfersStore();
 		await store.enqueueBatch('u_peer', [file('a'), file('b')], '');
 		await tick();
-		finish('a');
+		await finish('a');
 		await tick(); await tick(); // a done, b active
 
 		await store.cancel(store.items.find((i) => i.name === 'b').id);
@@ -118,12 +120,11 @@ describe('transfer queue', () => {
 			const p = store.enqueueBatch('u_peer', [file('a'), file('b')], '');
 			await vi.advanceTimersByTimeAsync(0);
 			await p;
-			await vi.advanceTimersByTimeAsync(0);
-			finish('a');
+			await finish('a');
 			await vi.advanceTimersByTimeAsync(0);
 			await vi.advanceTimersByTimeAsync(3100); // a's row is gone now
 			expect(store.items.find((i) => i.name === 'a')).toBeUndefined();
-			finish('b');
+			await finish('b');
 			await vi.advanceTimersByTimeAsync(0);
 			await vi.advanceTimersByTimeAsync(0);
 
@@ -140,7 +141,7 @@ describe('transfer queue', () => {
 		const store = useTransfersStore();
 		await store.enqueueBatch('u_peer', [file('a'), file('b')], '');
 		await tick();
-		finish('a');
+		await finish('a');
 		await tick(); await tick(); // a done, b active
 
 		await store.cancelAll();
@@ -155,11 +156,11 @@ describe('transfer queue', () => {
 		const store = useTransfersStore();
 		await store.enqueueBatch('u_peer', [file('a'), file('b')], '');
 		await tick();
-		finish('a');
+		await finish('a');
 		await tick(); await tick();
 
 		await store.cancel(store.items.find((i) => i.name === 'a').id);
-		finish('b');
+		await finish('b');
 		await tick(); await tick();
 
 		expect(sentMessages).toHaveLength(1);
@@ -181,7 +182,7 @@ describe('transfer queue', () => {
 	it('pause aborts the active upload; resume re-enters with the same prepared pair', async () => {
 		const store = useTransfersStore();
 		await store.enqueueBatch('u_peer', [file('a')], '');
-		await tick();
+		await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(1));
 		const firstCall = uploadAttachment.mock.calls[0][1];
 		const preparedBefore = store.items[0].prepared;
 		// report some progress, then pause mid-flight
@@ -191,16 +192,32 @@ describe('transfer queue', () => {
 		expect(store.items[0].status).toBe('paused');
 
 		store.start(store.items[0].id);
-		await tick();
+		await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(2));
 		const secondCall = uploadAttachment.mock.calls[1][1];
 		expect(secondCall.prepared).toBe(preparedBefore);
 		expect(secondCall.resuming).toBe(true);
 	});
 
+	it('a file whose bytes changed while paused adds nothing to its upload', async () => {
+		const store = useTransfersStore();
+		const bytes = [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5, 6])];
+		const changing = { name: 'a', size: 3, type: 'x', lastModified: 0, arrayBuffer: async () => bytes.shift().buffer };
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		await store.enqueueBatch('u_peer', [changing], '');
+		await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(1));
+		store.pause(store.items[0].id);
+		await vi.waitFor(() => expect(store.items[0].status).toBe('paused'));
+
+		store.start(store.items[0].id);
+		await vi.waitFor(() => expect(store.items[0].status).toBe('error'));
+		expect(uploadAttachment).toHaveBeenCalledTimes(1);
+		errorSpy.mockRestore();
+	});
+
 	it('a failed row waits for Start instead of retrying itself', async () => {
 		const store = useTransfersStore();
 		await store.enqueueBatch('u_peer', [file('a')], '');
-		await tick();
+		await vi.waitFor(() => expect(uploads.has('a')).toBe(true));
 		uploads.get('a').reject(new Error('device unreachable'));
 		uploads.delete('a');
 		await tick();
@@ -217,9 +234,8 @@ describe('transfer queue', () => {
 		await store.enqueueBatch('u_peer', [file('a'), file('b'), file('c')], '');
 		await tick();
 		store.reorder(2, 1); // move c ahead of b
-		finish('a');
-		await tick(); await tick();
-		expect(store.items.find((i) => i.status === 'active').name).toBe('c');
+		await finish('a');
+		await vi.waitFor(() => expect(store.items.find((i) => i.status === 'active')?.name).toBe('c'));
 	});
 
 	it('sent rows leave the list after 3 seconds', async () => {
@@ -230,7 +246,7 @@ describe('transfer queue', () => {
 			await vi.advanceTimersByTimeAsync(0);
 			await p;
 			await vi.advanceTimersByTimeAsync(0);
-			finish('a');
+			await finish('a');
 			await vi.advanceTimersByTimeAsync(0);
 			expect(store.items[0].status).toBe('done');
 			await vi.advanceTimersByTimeAsync(3100);
@@ -243,7 +259,7 @@ describe('transfer queue', () => {
 	it('aggregates chunks for the header', async () => {
 		const store = useTransfersStore();
 		await store.enqueueBatch('u_peer', [bigFile('a', 8 * 1024 * 1024), bigFile('b', 4 * 1024 * 1024)], '');
-		await tick();
+		await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalled());
 		uploadAttachment.mock.calls[0][1].onProgress({ done: 1, total: 2 });
 		expect(store.stats.totalChunks).toBe(3);
 		expect(store.stats.doneChunks).toBe(1);
@@ -257,7 +273,7 @@ describe('transfer queue', () => {
 
 		await store.enqueueBatch('u_peer', [file('a')], '');
 		await tick();
-		finish('a');
+		await finish('a');
 		await tick(); await tick();
 
 		expect(captureMessageIntent).toHaveBeenCalledTimes(1);

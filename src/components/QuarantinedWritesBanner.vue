@@ -45,6 +45,8 @@ const labelFor = (entry) => {
 		const m = entry.mutations?.[0];
 		return RECEIPT_LABELS[(m?.modified ?? m?.changes)?.type] || 'A receipt';
 	}
+	// The account's queue also holds the cards of its notes (derived identities).
+	if (entry.relation === 'user_cards' && entry.signer) return 'A notes card';
 	return RELATION_LABELS[entry.relation] || 'A change';
 };
 

@@ -56,6 +56,37 @@ It can be turned off to debug a sync problem without the cache in the way:
 - at build time — `VITE_SHAPE_PERSISTENCE=0`;
 - on a deployed build — `localStorage.buckitup_shape_persistence = '0'`.
 
+## Uploads across a reload
+
+A message with attachments is composed in the transfer queue
+(`src/store/transfers.store.js`) and kept in `buckitup-pending-uploads` while
+a file of it is still uploading (`src/lib/data/pendingUploads.ts`, pq_files
+§4.1). The record holds the peer, the caption, the parts already uploaded, and
+for each file still uploading its `file_id`, `enc_secret`, chunk size and
+count, and the SHA-256 of its bytes. The digest and the key are written before
+the file's first chunk is sent; a file whose record cannot be written does not
+start, and one whose bytes changed since its upload began stops instead of
+resuming. The record holds file keys, so it is sealed with the account's key
+through `secureStore`.
+
+- At sign-in the queue brings the account's records back, and each unfinished
+  file shows paused. The browser keeps no file across a reload, so the person
+  picks it again. A file of the same size and digest resumes, and only the
+  chunks the device lacks are sent. Any other file is refused. A file that sent
+  nothing yet has no digest, and its size and name are checked instead.
+- The record goes once its last file lands or is cancelled. The message is then
+  sent from the tab that has it, or not at all: a record with nothing left to
+  upload could only send it a second time.
+- A record not written for 48 hours is dropped at the next sign-in. The server
+  drops an uncommitted upload's chunks 48 hours after the last one arrives
+  (pq_files §8), and the record is written as each file starts and as the
+  message changes, so a single file sending for longer than that loses its
+  record early. A file whose chunks the server already dropped is sent again in
+  full.
+- One tab drives a message (a Web Lock per batch). Another tab of the same
+  account does not bring back a message that a live tab is still sending, and
+  a message whose lock this tab could not take is sent without a record.
+
 ## When the browser deletes local data
 
 Everything above lives in the browser's storage for the app's origin, and part
@@ -66,6 +97,7 @@ of it exists nowhere else:
 | Secret keys (vault) | IndexedDB `keyval-store` (`@lo-fi/local-vault`) | No: only from a backup |
 | Unsent writes, captured actions | IndexedDB `buckitup-outbox`, `buckitup-intents` | No |
 | Own text before acceptance, drafts, unaccepted settings | IndexedDB `buckitup-message-projections`, `buckitup-local-store` | No |
+| Unfinished uploads: the message being composed and its files' keys | IndexedDB `buckitup-pending-uploads` | No: the files are sent again |
 | Collection cache | OPFS `buckitup-shapes` | Yes |
 | Encrypted file chunks (LRU, 512 MiB budget) | IndexedDB `buckitup-chunks` | Yes, while the file is on the server |
 | Card and dialog read caches | IndexedDB `user-synced-cache`, `dialog-synced-cache` | Yes |
@@ -93,11 +125,33 @@ heuristics, and installing to the Home Screen is the reliable path there. The
 app calls `persist()` at startup (`src/main.js`) and on each chunk download
 (`src/lib/data/chunkCache.ts`).
 
+## Wiping the device
+
+**Wipe all** on the login page removes, once confirmed, everything stored for
+the app's origin in the browser: every IndexedDB database, the Origin Private
+File System and localStorage (`src/lib/wipeDevice.ts`). It ends the session
+and reloads, and the removal runs at the start of the next load, before
+anything opens a database: the page that asked holds connections it cannot
+close (idb-keyval keeps its connection to `keyval-store` and ignores
+`versionchange`), and each would block a delete until the page goes.
+
+- A connection in another tab of the app blocks a delete the same way. The app
+  then does not start, since its first open of that database would wait behind
+  the queued delete: it asks for the other tabs to be closed and tries again on
+  reload. A delete that stays silent for three seconds counts as blocked too.
+- When the browser refuses a removal, the person can try again or open the app
+  with what is left.
+- The request stays in localStorage until the wipe is done, so a tab of the
+  app that loads later finishes it even when the tab that asked was closed.
+  A tab other than the one that asked first asks whether to finish the wipe or
+  keep what is left. One tab wipes at a time (a Web Lock), and a tab that
+  waited finds the wipe done.
+
 ## The storage status
 
 `src/lib/storageStatus.ts` reads what the browser says about the origin's
-storage; `src/composables/useStorageStatus.ts` keeps the answer, read whenever a
-screen asks. Reading asks for no permission: it calls `persisted()`,
+storage; the `storageStatus` store (`src/store/storageStatus.store.ts`) keeps
+the answer, read whenever a screen asks. Reading asks for no permission: it calls `persisted()`,
 `estimate()` and `getDirectory()`, and writes and removes one localStorage key.
 
 | Status | Meaning | Detection |
@@ -110,16 +164,19 @@ screen asks. Reading asks for no permission: it calls `persisted()`,
 A private window cannot be asked about directly, so the check collects signals:
 a quota from `estimate()` below 120 MiB, the Origin Private File System
 refusing to open (Firefox private windows reject `getDirectory()` with a
-SecurityError, Safari's with "unknown transient reason"), and localStorage
-refusing a write. Any one of them makes the status `ephemeral`, unless
-`persisted()` is true: browsers do not grant persistence to a private window.
+SecurityError, Safari's with "unknown transient reason"). Either one makes the
+status `ephemeral`, unless `persisted()` is true: browsers do not grant
+persistence to a private window. A refused localStorage write is shown on its
+own and is not a signal: storage blocked in the browser's settings or the
+origin's full localStorage area (a few MiB, whatever the free disk) refuses it
+too, and the private windows of current browsers take it.
 
 The heuristic misses and over-reports in known ways:
 
 - current Chromium incognito windows report a normal-looking quota and open
   OPFS, so they read as `best-effort`;
 - a nearly full disk shrinks the quota of a normal window, and a storage error
-  unrelated to privacy refuses OPFS or localStorage: both read as `ephemeral`.
+  unrelated to privacy refuses OPFS: both read as `ephemeral`.
 
 The status comes with whether the app runs installed (`display-mode:
 standalone`, or `navigator.standalone` on iOS) and the usage and quota from
@@ -127,16 +184,18 @@ standalone`, or `navigator.standalone` on iOS) and the usage and quota from
 
 Account → **Storage on this device** (`/account/storage`) shows the status as
 one plain line and, under Details, the probe table: `persisted()`, usage and
-quota, installed, the private-window signals, whether the account has a
-finished community backup, platform and user agent. Its **Request persistence**
-button calls `persist()` and shows `persisted()` before and after (Firefox
-shows its prompt), and **Copy** puts the table on the clipboard as text, for
-results from real devices.
+quota, installed, the private-window signals, whether localStorage takes a
+write, whether the account has a finished community backup, platform and user
+agent. Its **Request persistence** button calls `persist()` and shows
+`persisted()` before and after (Firefox shows its prompt), and **Copy** puts
+the table on the clipboard as text, for results from real devices. The page's
+row in the account menu says the status in a few words, read each time the
+Account section opens.
 
-Whether a backup exists is known only for the community backup: a finished,
-not revoked run in the account's `recovery_backup` slot, the record Backup
-Center shows. A file backup leaves no record — the file is handed to the
-browser's download — so the device cannot tell whether one was made.
+The backup shown is the community backup: a finished, not revoked run in the
+account's `recovery_backup` slot, the record Backup Center shows. A file
+backup is known only from this device's note that it saved one
+(`src/lib/backupFileRecord.ts`); a file saved elsewhere is not known here.
 
 ## A consequence of L2/L3 encryption: data is readable only after login
 

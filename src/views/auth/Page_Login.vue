@@ -241,6 +241,7 @@ import PasskeyRestoreButton from '@/components/recovery/PasskeyRestoreButton.vue
 import { computed, inject, ref, onMounted, onUnmounted } from 'vue';
 import { useRecoveryRestoreStore } from '@/store/recoveryRestore.store';
 import * as $enigma from '@/libs/enigma';
+import { requestWipe } from '@/lib/wipeDevice';
 
 const $mitt = inject('$mitt');
 const $user = userStore();
@@ -274,11 +275,27 @@ const updateData = async () => {
 	$user.vaults = await $encryptionManager.getVaults();
 };
 
+// The data goes on the next load, before anything opens a database
+// (src/lib/wipeDevice.ts), and none of it can be brought back.
 const wipe = async () => {
-	await $user.clearIndexedDB();
-	// clearIndexedDB does what its name says and no more, but this button says
-	// "all" — and it is the exit a person takes before handing the device on.
-	await $userPQ.endSession();
+	const { isConfirmed } = await $swal.fire({
+		icon: 'warning',
+		title: 'Wipe all data from this device?',
+		text: 'Every account on this device goes, with its keys, the messages not sent yet and the files kept here. An account without a backup cannot be restored.',
+		showConfirmButton: true,
+		confirmButtonText: 'Wipe all',
+		showCancelButton: true,
+		cancelButtonText: 'Cancel',
+	});
+	if (!isConfirmed) return;
+	try {
+		requestWipe();
+	} catch (e) {
+		$swal.fire({ icon: 'error', title: 'This device could not be wiped', text: e.message });
+		return;
+	}
+	// Logging out may open a database, so the session ends first; the wipe goes ahead either way.
+	await $userPQ.endSession().catch((e) => console.error('[wipe] the session did not end cleanly', e));
 	location.reload();
 };
 

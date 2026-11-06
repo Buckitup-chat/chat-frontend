@@ -53,13 +53,15 @@
           {{ expanded ? 'Collapse the list' : `${hiddenCount} more files` }}
         </div>
       </div>
+      <input ref="picker" type="file" class="d-none" data-test="repick" @change="onPicked" />
     </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, reactive, computed } from 'vue';
 import { useTransfersStore } from '@/store/transfers.store';
+import { fileSize } from '@/utils/formatBytes';
 
 const props = defineProps({
   /** Peer of the dialog the panel is shown in; rows going elsewhere dim. */
@@ -74,8 +76,30 @@ const expanded = ref(false);
 const visibleItems = computed(() =>
   expanded.value ? $transfers.items : $transfers.items.slice(0, MAX_ROWS));
 const hiddenCount = computed(() => Math.max(0, $transfers.items.length - MAX_ROWS));
-const hasStartable = computed(() =>
-  $transfers.items.some((it) => it.status === 'paused' || it.status === 'error'));
+const hasStartable = computed(() => $transfers.items.some($transfers.startable));
+
+const { needsFile } = $transfers;
+const picker = ref(null);
+const pickingId = ref(null);
+const refused = reactive(new Set()); // rows whose last pick was another file
+const pickFor = (it) => {
+  pickingId.value = it.id;
+  picker.value.value = '';
+  picker.value.click();
+};
+const onPicked = async (event) => {
+  const file = event.target.files?.[0];
+  const id = pickingId.value;
+  pickingId.value = null;
+  if (!file || !id) return;
+  // A file that cannot be read is not the one being sent either.
+  const same = await $transfers.repick(id, file).catch((e) => {
+    console.warn('[transfers] the picked file could not be read:', e);
+    return false;
+  });
+  if (same) refused.delete(id);
+  else refused.add(id);
+};
 
 const dragFrom = ref(null);
 // The full HTML5 recipe: without setData some engines cancel the drag on the
@@ -97,18 +121,20 @@ const onDrop = (toVisibleIndex) => {
 
 const percentOf = (it) => (it.total ? Math.round((it.done / it.total) * 100) : 0);
 
-const fmtSize = (n) => (n >= 1024 * 1024 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
-const fmtSpeed = (bps) => (bps >= 1048576 ? `${(bps / 1048576).toFixed(1)} MB/s` : `${Math.round(bps / 1024)} KB/s`);
-
 // The board's five states, worded like the board words them.
 const captionOf = (it) => {
   switch (it.status) {
     case 'active':
-      return `${percentOf(it)}% · chunk ${it.done} of ${it.total}` + (it.speed ? ` · ${fmtSpeed(it.speed)}` : '');
+      return `${percentOf(it)}% · chunk ${it.done} of ${it.total}` + (it.speed ? ` · ${fileSize(it.speed)}/s` : '');
     case 'paused':
+      if (needsFile(it)) {
+        return refused.has(it.id)
+          ? 'Not the same file · pick the one you were sending, or cancel'
+          : 'Paused by a reload · pick the file again to resume';
+      }
       return `Paused · ${percentOf(it)}%` + (it.done ? ` · chunk ${it.done} of ${it.total}` : '');
     case 'waiting':
-      return `Waiting · ${fmtSize(it.size)}`;
+      return `Waiting · ${fileSize(it.size)}`;
     case 'error':
       return 'Interrupted — will retry on Start';
     case 'awaiting_approval':
@@ -122,9 +148,10 @@ const captionOf = (it) => {
   }
 };
 
-const actionOf = (it) => ({ active: 'Pause', paused: 'Resume', error: 'Retry', waiting: null, awaiting_approval: null, rejected: null, done: null }[it.status]);
+const actionOf = (it) => (needsFile(it) ? 'Pick file' : { active: 'Pause', paused: 'Resume', error: 'Retry', waiting: null, awaiting_approval: null, rejected: null, done: null }[it.status]);
 const applyAction = (it) => {
-  if (it.status === 'active') $transfers.pause(it.id);
+  if (needsFile(it)) pickFor(it);
+  else if (it.status === 'active') $transfers.pause(it.id);
   else $transfers.start(it.id);
 };
 </script>

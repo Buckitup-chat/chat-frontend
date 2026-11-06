@@ -18,18 +18,26 @@
 // of ONE composed message, sent when the last live row lands. Cancelling a
 // row removes that attachment and the rest still send; cancelling everything
 // sends nothing.
+//
+// A batch outlives a reload (pq_files §4.1): while its message is open it is
+// kept in a sealed record (pendingUploads.ts), and the next sign-in brings it
+// back with its unfinished files paused. The browser keeps no file across a
+// reload, so such a row resumes only from the same file picked again.
 
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { prepareUpload } from '@/lib/data/fileTransfer';
 import { CHUNK_SIZE, chunkCountOf } from '@buckitup/pq-client/fileCrypto';
+import { uploadDigest } from '@/lib/data/uploadReuse';
+import { forgetPendingBatch, pendingBatches, savePendingBatch } from '@/lib/data/pendingUploads';
+import { serialized } from '@/lib/data/serialized';
 import { useDialogsStore } from '@/store/dialogs.store';
 
 let seq = 0;
 
 export const useTransfersStore = defineStore('transfers', () => {
 	const items = ref([]);   // ordered; the worker takes the first 'waiting'
-	const batches = ref(new Map()); // batchId -> { peerHash, caption, status }
+	const batches = ref(new Map()); // batchId -> { owner, kept (has a record), peerHash, caption, status, parts }
 	const collapsed = ref(false);
 
 	const aborts = new Map();      // itemId -> AbortController
@@ -45,39 +53,42 @@ export const useTransfersStore = defineStore('transfers', () => {
 	};
 	const byId = (id) => items.value.find((it) => it.id === id);
 
+	// A row of a batch; `blob` is null for one a reload brought back.
+	const newRow = (batchId, peerHash, fields) => ({
+		id: `tr_${++seq}`, batchId, peerHash, status: 'waiting', done: 0, speed: 0, digest: null, part: null, ...fields,
+	});
+
 	// ---------- queueing ----------
 
 	const enqueueBatch = async (peerHash, files, caption = '') => {
-		const batchId = `batch_${++seq}`;
+		const { v7 } = await import('uuid');
+		// Unique beyond this page: it names the batch's record and lock.
+		const batchId = `batch_${v7()}`;
+		// Kept across a reload only if this tab holds it: another could restore it.
+		const kept = !!owner && await hold(batchId);
 		// parts live ON the batch, not derived from the row list: rows leave
 		// the list on their own 3s after finishing, and a batch whose slowest
 		// upload lands later than that must still send every finished part.
-		batches.value = new Map(batches.value).set(batchId, { peerHash, caption, status: 'open', parts: [] });
+		batches.value = new Map(batches.value).set(batchId, { owner, kept, peerHash, caption, status: 'open', parts: [] });
 
 		const newItems = [];
 		for (const file of files) {
-			newItems.push({
-				id: `tr_${++seq}`,
+			newItems.push(newRow(batchId, peerHash, {
 				order: newItems.length, // compose order, stable across reorder/removal
-				batchId,
-				peerHash,
 				name: file.name,
 				size: file.size,
 				mimeType: file.type,
 				createdAt: Math.floor((file.lastModified || Date.now()) / 1000),
 				blob: file,
-				status: 'waiting',
-				done: 0,
 				total: chunkCountOf(file.size),
-				speed: 0,
 				// Minted before the first PUT and kept for the row's whole
 				// life (§4.1): pause/resume and retry must re-enter with the
 				// same pair or the re-sent chunks join nothing.
-				prepared: prepareUpload((await import('uuid')).v7()),
-				part: null,
-			});
+				prepared: prepareUpload(v7()),
+			}));
 		}
 		items.value = [...items.value, ...newItems];
+		void syncRecord(batchId);
 		drain();
 		return batchId;
 	};
@@ -115,16 +126,25 @@ export const useTransfersStore = defineStore('transfers', () => {
 		let manifestAccepted = null;
 		try {
 			const bytes = new Uint8Array(await item.blob.arrayBuffer());
+			// The record names these bytes before the first chunk PUT, and only
+			// the same bytes may add chunks under this file_id: a file changed
+			// since, or a record not written, stops the upload here.
+			const digest = await uploadDigest(bytes);
+			if (item.digest && item.digest !== digest) throw new Error('the file changed since its upload began');
+			patch(id, { digest });
+			await writeRecord(item.batchId);
 			const part = await dialogs.uploadAttachment({
 				name: item.name,
 				mimeType: item.mimeType,
 				bytes,
 				blob: item.blob,
 				createdAt: item.createdAt,
+				digest,
 			}, {
 				prepared: item.prepared,
-				// Anything may already be on the device from before a pause.
-				resuming: item.done > 0,
+				// No chunk goes out before a record with the digest is written, so a
+				// row without one (fresh, or restored from such a record) sent nothing.
+				resuming: !!item.digest,
 				signal: ctrl.signal,
 				onProgress: (p) => {
 					const now = Date.now();
@@ -178,8 +198,11 @@ export const useTransfersStore = defineStore('transfers', () => {
 		}
 	};
 
-	const addPart = (item, part) =>
+	// The finished file leaves the record's uploads and joins its parts.
+	const addPart = (item, part) => {
 		patchBatch(item.batchId, (b) => ({ ...b, parts: [...b.parts, { order: item.order, part }] }));
+		void syncRecord(item.batchId);
+	};
 
 	const followManifest = (id, name, manifestAccepted) => {
 		manifestAccepted
@@ -221,6 +244,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 			return;
 		}
 
+		// Stored for sending: the intent outbox carries the message from here.
 		batches.value = new Map(batches.value).set(batchId, { ...batch, status: 'sending' });
 		await dialogs.dispatchMessageIntent(captured.intentId, captured.payload, captured.token, (status) => {
 			if (status === 'synced' || status === 'error' || status === 'awaiting_approval') {
@@ -242,16 +266,19 @@ export const useTransfersStore = defineStore('transfers', () => {
 		}
 	};
 
+	/** A row a reload brought back has no file until the same one is picked again (repick). */
+	const needsFile = (it) => !it.blob;
+	const startable = (it) => !needsFile(it) && (it.status === 'paused' || it.status === 'error');
+
 	const start = (id) => {
 		const item = byId(id);
-		if (!item || (item.status !== 'paused' && item.status !== 'error')) return;
+		if (!item || !startable(item)) return;
 		patch(id, { status: 'waiting' });
 		drain();
 	};
 
 	const startAll = () => {
-		items.value = items.value.map((it) =>
-			it.status === 'paused' || it.status === 'error' ? { ...it, status: 'waiting' } : it);
+		items.value = items.value.map((it) => (startable(it) ? { ...it, status: 'waiting' } : it));
 		drain();
 	};
 
@@ -268,6 +295,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 		}
 		if (item.status === 'done') {
 			patchBatch(item.batchId, (b) => ({ ...b, parts: b.parts.filter((p) => p.order !== item.order) }));
+			void syncRecord(item.batchId);
 		}
 		removeItem(id);
 		await maybeSendBatch(item.batchId);
@@ -288,7 +316,10 @@ export const useTransfersStore = defineStore('transfers', () => {
 	};
 
 	const removeItem = (id) => {
+		const item = byId(id);
 		items.value = items.value.filter((it) => it.id !== id);
+		// A settled row is in the record as a part, if at all, not as an upload.
+		if (item && !SETTLED.has(item.status)) void syncRecord(item.batchId);
 	};
 
 	/** Sent rows leave on their own after 3s (§2.1). */
@@ -296,6 +327,152 @@ export const useTransfersStore = defineStore('transfers', () => {
 		setTimeout(() => {
 			if (byId(id)?.status === 'done') removeItem(id);
 		}, 3000);
+	};
+
+	// ---------- surviving a reload (pq_files §4.1) ----------
+
+	let owner = null; // the signed-in account: the queue and its records are its
+	const writes = new Map(); // batchId -> the tail of its record writes (serialized)
+	const releases = new Map(); // batchId -> lets go of this tab's hold on it
+
+	// One tab drives a batch: the one that composed it, or the first to bring
+	// it back after a reload. Without Web Locks every tab may.
+	const hold = (batchId) => new Promise((held) => {
+		const locks = globalThis.navigator?.locks;
+		if (!locks) {
+			held(true);
+			return;
+		}
+		locks.request(`buckitup:transfers:${batchId}`, { ifAvailable: true }, (lock) => {
+			held(!!lock);
+			return lock ? new Promise((release) => releases.set(batchId, release)) : undefined;
+		}).catch(() => held(false));
+	});
+	const letGo = (batchId) => {
+		releases.get(batchId)?.();
+		releases.delete(batchId);
+	};
+
+	const recordOf = (batchId, batch) => ({
+		batchId,
+		peerHash: batch.peerHash,
+		caption: batch.caption,
+		parts: batch.parts,
+		files: liveOf(batchId).map((it) => ({
+			order: it.order,
+			name: it.name,
+			size: it.size,
+			mimeType: it.mimeType,
+			createdAt: it.createdAt,
+			fileId: it.prepared.fileId,
+			encSecretB64: it.prepared.encSecretB64,
+			chunkSize: CHUNK_SIZE,
+			chunkCount: it.total,
+			digest: it.digest ?? undefined,
+		})),
+		updatedAt: Date.now(),
+	});
+
+	/**
+	 * Brings the batch's record in line with the queue: kept while a file of its
+	 * open message is still uploading, removed (and the batch let go) once none
+	 * is, or the message is given up. With every file landed there is nothing to
+	 * resume: the message goes from this tab or not at all. A batch dropped from
+	 * this tab keeps its record. One batch's writes run in order, each from the
+	 * state at its turn.
+	 */
+	const writeRecord = (batchId) => {
+		const { kept, owner: who } = batches.value.get(batchId) ?? {};
+		if (!kept) return Promise.resolve();
+		const write = async () => {
+			const batch = batches.value.get(batchId);
+			if (!batch) return;
+			const record = recordOf(batchId, batch);
+			if (batch.status === 'open' && record.files.length) {
+				await savePendingBatch(who, record);
+				return;
+			}
+			try {
+				await forgetPendingBatch(who, batchId);
+			} finally {
+				letGo(batchId);
+			}
+		};
+		return serialized(writes, batchId, write);
+	};
+	const syncRecord = (batchId) => writeRecord(batchId)
+		.catch((e) => console.warn('[transfers] the record that resumes this upload after a reload was not updated:', e));
+
+	const restoredRow = (record, f) => newRow(record.batchId, record.peerHash, {
+		order: f.order,
+		name: f.name,
+		size: f.size,
+		mimeType: f.mimeType,
+		createdAt: f.createdAt,
+		blob: null,
+		status: 'paused',
+		total: f.chunkCount,
+		prepared: { fileId: f.fileId, encSecretB64: f.encSecretB64 },
+		digest: f.digest ?? null,
+	});
+
+	const restore = async (who) => {
+		let records;
+		try {
+			records = await pendingBatches(who);
+		} catch (e) {
+			console.warn('[transfers] unfinished uploads were not read:', e);
+			return;
+		}
+		for (const record of records) {
+			if (batches.value.has(record.batchId) || !(await hold(record.batchId))) continue;
+			if (owner !== who) {
+				letGo(record.batchId);
+				return;
+			}
+			batches.value = new Map(batches.value).set(record.batchId, {
+				owner: who, kept: true, peerHash: record.peerHash, caption: record.caption, status: 'open', parts: record.parts,
+			});
+			items.value = [...items.value, ...record.files.map((f) => restoredRow(record, f))];
+		}
+	};
+
+	/**
+	 * Called on each sign-in and sign-out (App.vue). The queue is the
+	 * signed-in account's: another account's rows stop and leave, their
+	 * records kept for that account, and this account's open batches come
+	 * back from their records, each unfinished file paused until picked again.
+	 */
+	const signedIn = async (next) => {
+		if (next === owner) return;
+		owner = next;
+		const gone = new Set([...batches.value].filter(([, b]) => b.owner !== next).map(([batchId]) => batchId));
+		if (gone.size) {
+			batches.value = new Map([...batches.value].filter(([batchId]) => !gone.has(batchId)));
+			for (const it of items.value) if (gone.has(it.batchId)) aborts.get(it.id)?.abort();
+			items.value = items.value.filter((it) => !gone.has(it.batchId));
+			for (const batchId of gone) letGo(batchId);
+		}
+		if (next) await restore(next);
+	};
+
+	/**
+	 * Gives a restored row its file back. Only the same file is taken: the
+	 * same size and, once a chunk may have gone out, the same bytes
+	 * (uploadDigest); before that, the same name. Any other resolves false,
+	 * and nothing is sent.
+	 */
+	const repick = async (id, file) => {
+		const item = byId(id);
+		if (!item || !needsFile(item) || file.size !== item.size) return false;
+		const same = item.digest
+			? (await uploadDigest(new Uint8Array(await file.arrayBuffer()))) === item.digest
+			: file.name === item.name;
+		const now = byId(id);
+		if (!same || !now || !needsFile(now) || now.status !== 'paused') return false;
+		patch(id, { blob: file, status: 'waiting' });
+		drain();
+		return true;
 	};
 
 	// ---------- ordering (the drag handle) ----------
@@ -343,6 +520,6 @@ export const useTransfersStore = defineStore('transfers', () => {
 
 	return {
 		items, stats, collapsed, transferPeers,
-		enqueueBatch, pause, start, startAll, cancel, cancelAll, reorder, toggleCollapsed,
+		enqueueBatch, pause, start, startAll, cancel, cancelAll, reorder, toggleCollapsed, signedIn, repick, startable, needsFile,
 	};
 });

@@ -77,7 +77,6 @@ vi.mock('@/lib/backupContents', async () => {
 const { fingerprintOf } = await import('@/lib/recovery/passkeyRecovery');
 const { default: Card } = await import('@/components/recovery/PasskeyRecoveryCard.vue');
 const { default: RestoreButton } = await import('@/components/recovery/PasskeyRestoreButton.vue');
-const { default: AccountBackup } = await import('@/components/Account_Backup.vue');
 const { default: Reminder } = await import('@/components/PasskeyRecoveryReminder.vue');
 const { _setStoreForTests } = await import('@/lib/data/localStore');
 const { markFileBackupMade, reminderDismissed, dismissReminder, announceBackupMade, announceBackupRemoved } = await import('@/lib/recovery/backupReminder');
@@ -497,48 +496,6 @@ describe('the Security & Recovery card', () => {
 		await vi.waitFor(() => expect(tombstoned).toEqual(['loc-1']));
 		await flushPromises();
 		expect(t(w, 'passkey-recovery-pending').exists()).toBe(false);
-	});
-});
-
-describe('the backup options reminder', () => {
-	let router: { push: Mock };
-	let closed: string[];
-	const render = () => {
-		router = { push: vi.fn() };
-		closed = [];
-		return mount(AccountBackup, { props: { showLocal: false }, global: { provide: { $swal: { fire: () => {} }, $mitt: { emit: (e: string) => closed.push(e) }, $router: router } } });
-	};
-	const offered = (w: VueWrapper) => w.find('[data-test="backup-option-passkey"]').exists();
-	it('points a PRF vault without recovery at Security & Recovery, where the trade-off is read', async () => {
-		const w = render();
-		await flushPromises();
-		expect(offered(w)).toBe(true);
-		await t(w, 'backup-open-passkey-recovery').trigger('click');
-		expect(closed).toEqual(['modal::close']);
-		expect(router.push).toHaveBeenCalledWith({ name: 'account_backups' });
-		expect(auth.calls).toEqual(['create']);
-		expect(published).toEqual([]);
-	});
-
-	it.each([
-		['a legacy vault', async () => { H.em = fakeManager({ prf: false }); }],
-		['a browser without PRF', async () => { browserPrf(false); }],
-		['recovery already on', async () => entryFor({})],
-		['a passkey known to stay on this device', async () => entryFor({ state: 'pending', eligible: false, synced: false })],
-	])('does not offer it for %s', async (_, arrange) => {
-		await arrange();
-		const w = render();
-		await flushPromises();
-		expect(offered(w)).toBe(false);
-	});
-
-	it('does not fail the reminder when the settings cannot be read', async () => {
-		const onlineScope = H.em.passkeyRecoveryScope;
-		H.em.passkeyRecoveryScope = () => ({ ...onlineScope(), vaultLock: async () => { throw new Error('offline'); }, readSlot: async () => null, passkeyFlags: async () => null });
-		const w = render();
-		await flushPromises();
-		expect(offered(w)).toBe(false);
-		expect(w.text()).toContain('Select your backup option');
 	});
 });
 

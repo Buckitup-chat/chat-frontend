@@ -5,12 +5,9 @@ import downloadFile from '@/utils/downloadFile';
 import { markFileBackupMade } from '@/lib/recovery/backupReminder';
 import { rememberBackupFileSaved } from '@/lib/backupFileRecord';
 
-// The password policy and the file naming live here rather than in each screen
-// that offers the export. Two screens offer it (Security & Recovery, and the
-// dashboard's modal), and while the rules were copied into both, the copies had
-// already drifted: one lost the empty-password guard and threw a TypeError out
-// of the Download handler — on the screen where a user saves their keys just
-// before deleting the account.
+// The password policy and the file naming live here rather than in the screen
+// that offers the export, so a second export screen cannot drift from them:
+// copies in two screens once did, and one lost the empty-password guard.
 const POLICY = [
 	[(pw) => pw.length >= 10, 'Must be at least 10 characters long.'],
 	[(pw) => /[A-Z]/.test(pw), 'Must contain an uppercase letter (A-Z).'],

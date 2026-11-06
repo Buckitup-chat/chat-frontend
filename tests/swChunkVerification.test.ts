@@ -108,12 +108,11 @@ describe('the page behind a video session', () => {
 	const pageSetup = async (expected: (index: number) => Promise<string>) => {
 		vi.resetModules();
 		vi.doMock('@/lib/data/readSession', () => ({ bearerFor: () => 'Bearer t', openSession: async () => 't' }));
-		vi.doMock('@/lib/data/fileTransfer', () => ({ downloadFile: async () => { throw new Error('fallback not expected'); } }));
-		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: () => null, putCachedMedia: () => '' }));
-		vi.doMock('@/lib/data/fileIntegrity', async (importOriginal) => ({
-			...(await importOriginal<typeof import('@/lib/data/fileIntegrity')>()),
-			readVerifiedFile: async () => ({ manifest: { fileId: FILE_ID, chunkCount: 2, deleted: false }, hashes: { expected } }),
+		vi.doMock('@/lib/data/fileTransfer', () => ({
+			downloadFile: async () => { throw new Error('fallback not expected'); },
+			readLiveFile: async () => ({ hashes: { expected } }),
 		}));
+		vi.doMock('@/lib/data/mediaCache', () => ({ getCachedMedia: () => null, putCachedMedia: () => '' }));
 		const listeners: Record<string, Array<(e: any) => void>> = {};
 		const toWorker: any[] = [];
 		vi.stubGlobal('window', { isSecureContext: true });
@@ -134,7 +133,7 @@ describe('the page behind a video session', () => {
 	const settle = () => new Promise((r) => setTimeout(r, 20));
 
 	afterEach(() => {
-		for (const m of ['readSession', 'fileTransfer', 'mediaCache', 'fileIntegrity']) vi.doUnmock(`@/lib/data/${m}`);
+		for (const m of ['readSession', 'fileTransfer', 'mediaCache']) vi.doUnmock(`@/lib/data/${m}`);
 	});
 
 	it('registers with chunk 0 verified, answers a later index, and reports a refused one', async () => {

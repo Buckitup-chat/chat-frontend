@@ -950,12 +950,8 @@ const handleDownloadFile = async (filePart) => {
         downloadsByKey.value = { ...downloadsByKey.value, [key]: { status: 'done' } };
     } catch (e) {
         console.error('Download failed:', e);
-        // Deleted by its uploader: a state of the file, as its manifest would
-        // say, not a failure to retry.
-        if (isDeletedFile(e)) {
-            const known = availabilityByKey.value[key];
-            availabilityByKey.value = { ...availabilityByKey.value, [key]: { present: known?.present ?? 0, total: known?.total ?? 0, unknown: false, deleted: true } };
-        }
+        // Deleted by its uploader: a state of the file, not a failure to retry;
+        // the manifest re-read below says so.
         downloadsByKey.value = { ...downloadsByKey.value, [key]: refuseOn(e, key) || isDeletedFile(e) ? {} : { status: 'error' } };
         // A failure usually means chunks are still travelling — re-read the
         // counts so the row can say how far along it is instead of just "failed".

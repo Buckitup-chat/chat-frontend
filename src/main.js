@@ -23,9 +23,44 @@ import * as $enigma from './libs/enigma';
 import { EncryptionManager } from './libs/EncryptionManager';
 import { EncryptionManagerPQ } from './libs/EncryptionManagerPQ';
 import { repairVaultStore } from './lib/vaultStore';
+import { finishPendingWipe } from './lib/wipeDevice';
 
 // The browser offers installation once, early; keep the offer for the menu.
 listenForInstallPrompt();
+
+// "Wipe all", asked for on an earlier load, runs before anything opens a database.
+const WIPE_PROMPTS = {
+	unfinished: {
+		title: 'Finish wiping this device?',
+		text: "Wiping this device was asked for in another tab and has not finished, so part of the app's data may already be gone.",
+		confirmButtonText: 'Wipe',
+		cancelButtonText: 'Keep what is left',
+	},
+	blocked: {
+		title: 'Close the other BuckitUp tabs',
+		text: "Part of the app's data is held open by another tab of the app, or is still being removed. Close the other tabs, then try again.",
+		confirmButtonText: 'Try again',
+	},
+	failed: {
+		title: 'This device could not be wiped',
+		text: "The browser refused to remove part of the app's data. Try again, remove the site's data in the browser's settings, or open the app with what is left.",
+		confirmButtonText: 'Try again',
+		cancelButtonText: 'Open the app',
+	},
+};
+await finishPendingWipe(async (kind) => {
+	const shown = WIPE_PROMPTS[kind];
+	const { isConfirmed } = await $swal.fire({
+		icon: 'warning',
+		...shown,
+		showConfirmButton: true,
+		showCancelButton: !!shown.cancelButtonText,
+		showCloseButton: false,
+		allowOutsideClick: false,
+		allowEscapeKey: false,
+	});
+	return isConfirmed;
+});
 
 // Before the first vault access: the stores and managers below make it.
 if (await repairVaultStore()) {

@@ -62,10 +62,10 @@ describe('pointer storage', () => {
 	const DIALOG = 'di_' + 'b'.repeat(128);
 
 	it('round-trips, and an unknown dialog reads as nothing scanned', async () => {
-		expect(await loadPointer(ME, DIALOG)).toEqual({ sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: 0 });
+		expect(await loadPointer(ME, DIALOG)).toEqual({ sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: null });
 		const pointer = {
 			checkpoint: { messageId: M1, viewRoot: rootOf(rows), frontierRoot: 'dfr_x', createdAt: 1788470000 },
-			scannedTo: 1788470000123,
+			scannedTo: M1,
 		};
 		await savePointer(ME, DIALOG, pointer);
 		expect(await loadPointer(ME, DIALOG)).toEqual({ ...pointer, sem: CHECKPOINT_SEMANTICS });
@@ -80,16 +80,9 @@ describe('pointer storage', () => {
 			checkpoint: { messageId: M1, viewRoot: 'dvr_old', frontierRoot: 'dfr_old', createdAt: 1 },
 			scannedTo: 999,
 		}));
-		// raw write above bypasses savePointer's stamping — emulate exactly
-		// what an older build left behind
-		_setStoreForTests({
-			async get(k) { const v = mem.get(k); return v ? JSON.parse(v as string) : null; },
-			async set(k, v) { mem.set(k, JSON.stringify(v)); },
-			async delete(k) { mem.delete(k); },
-			async keys() { return [...mem.keys()]; },
-			async clear() { mem.clear(); },
-		});
-		expect(await loadPointer(ME, DIALOG)).toEqual({ sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: 0 });
+		// The raw write above bypasses savePointer's stamping: it is what an
+		// older build left behind.
+		expect(await loadPointer(ME, DIALOG)).toEqual({ sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: null });
 	});
 
 	// Two dialogs indexed concurrently: the second read-modify-write must not
@@ -124,9 +117,9 @@ describe('pointer storage', () => {
 	});
 
 	it('is scoped per account and per dialog', async () => {
-		await savePointer(ME, DIALOG, { checkpoint: null, scannedTo: 42 });
-		expect((await loadPointer('u_' + 'c'.repeat(128), DIALOG)).scannedTo).toBe(0);
-		expect((await loadPointer(ME, 'di_' + 'd'.repeat(128))).scannedTo).toBe(0);
+		await savePointer(ME, DIALOG, { checkpoint: null, scannedTo: M1 });
+		expect((await loadPointer('u_' + 'c'.repeat(128), DIALOG)).scannedTo).toBe(null);
+		expect((await loadPointer(ME, 'di_' + 'd'.repeat(128))).scannedTo).toBe(null);
 	});
 
 	it('an unreadable record reads as nothing known instead of throwing', async () => {
@@ -134,7 +127,7 @@ describe('pointer storage', () => {
 			async get() { throw new Error('locked vault'); },
 			async set() {}, async delete() {}, async keys() { return []; }, async clear() {},
 		});
-		expect(await loadPointer(ME, DIALOG)).toEqual({ sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: 0 });
+		expect(await loadPointer(ME, DIALOG)).toEqual({ sem: CHECKPOINT_SEMANTICS, checkpoint: null, scannedTo: null });
 	});
 
 	// One unreadable READ must not become a write that replaces the whole

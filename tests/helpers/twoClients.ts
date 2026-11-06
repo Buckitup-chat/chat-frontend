@@ -3,6 +3,9 @@ import { vi, expect } from 'vitest';
 import { mount, type VueWrapper } from '@vue/test-utils';
 import { setActivePinia, createPinia } from 'pinia';
 import type { Mock } from 'vitest';
+import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
+import { toBytes } from '@buckitup/pq-client/signature';
+import { authorOf } from '@/lib/data/rowVerification';
 import type {
 	UserCardRow, UserStorageRow, DialogKeyRow, DialogMessageRow, DialogMessageVersionRow,
 	DialogMessageReactionRow, DialogMessageReceiptRow, IngestRowResult,
@@ -21,12 +24,15 @@ export type Relation = keyof RowOf;
 export type Row = RowOf[Relation];
 export type ApplyResult = Omit<IngestRowResult, 'index'> & { permanent422?: boolean };
 export type ServerPost = { relation: Relation; row: Row; result: ApplyResult };
+/** One ingest request's proof of possession and the key the server checks it against: its rows' author's. */
+export type ServerProof = { author: string; signature: string | null; signPkey: string | null };
 type FetchArgs = Parameters<typeof fetch>;
 export type RowListener = (relation: Relation, row: Row) => void;
 
 export interface Server {
 	tables: Map<Relation, Map<string, Row>>;
 	posts: ServerPost[];
+	proofs: ServerProof[];
 	listeners: Set<RowListener>;
 	held: Map<Relation, Set<string>>;
 	reject: ((relation: Relation, row: Row) => ApplyResult | null | undefined) | null;
@@ -91,11 +97,12 @@ export const net = (G.net ??= { mode: 'online' });
 export const server = (G.server ??= {
 	tables: new Map(),
 	posts: [],
+	proofs: [] as ServerProof[],
 	listeners: new Set(),
 	held: new Map(),
 	reject: null,
 	route: null,
-	reset() { this.tables = new Map(); this.posts = []; this.listeners = new Set(); this.held = new Map(); this.reject = null; this.route = null; },
+	reset() { this.tables = new Map(); this.posts = []; this.proofs = []; this.listeners = new Set(); this.held = new Map(); this.reject = null; this.route = null; },
 	hold(relation) { if (!this.held.has(relation)) this.held.set(relation, new Set()); },
 	release(relation) {
 		const keys = this.held.get(relation);
@@ -141,11 +148,32 @@ export const server = (G.server ??= {
 		if (routed) return routed;
 		if (url.endsWith('/challenge')) return Response.json({ challenge: 'c', challenge_id: 'id' });
 		if (!url.endsWith('/ingest_each')) throw new TypeError(`unexpected request ${url}`);
-		const { mutations } = JSON.parse(init!.body as string);
+		const { auth, mutations } = JSON.parse(init!.body as string);
+		server.proofs.push(proofOf(auth, mutations));
 		const results: (ApplyResult & { index: number })[] = mutations.map((m: { syncMetadata: { relation: Relation }; type: string; modified?: Row; changes: Row }, index: number) => ({ index, ...server.apply(m.syncMetadata.relation, m.type, m.modified ?? m.changes) }));
 		return Response.json({ results }, { status: results.some((r) => r.permanent422) ? 422 : 200 });
 	}),
 });
+
+// The server proves a request against the author of its rows (chat:
+// ingest_pop.ex): the card's own key for a card, the stored card's otherwise.
+// Recorded here, verified only by a test that asks (proofIsValid).
+function proofOf(auth: { signature?: string } | undefined, mutations: { syncMetadata: { relation: Relation }; type: string; modified?: Row; changes?: Row }[]): ServerProof {
+	const first = mutations[0];
+	const row = (first?.modified ?? first?.changes ?? {}) as Record<string, unknown>;
+	const author = (first && authorOf(first.syncMetadata.relation, row)) ?? '';
+	const card = first?.syncMetadata.relation === 'user_cards' ? row : server.table('user_cards').get(author) as Record<string, unknown> | undefined;
+	return { author, signature: auth?.signature ?? null, signPkey: card?.sign_pkey ? String(card.sign_pkey) : null };
+}
+
+/** Whether the request's proof verifies under its author's key, as the server checks it. */
+export const proofIsValid = (p: ServerProof): boolean => {
+	try {
+		return !!p.signature && !!p.signPkey && ml_dsa87.verify(toBytes(p.signature), new TextEncoder().encode('c'), toBytes(p.signPkey));
+	} catch {
+		return false;
+	}
+};
 
 const reconnects = (G.reconnects ??= new Set());
 export const goOnline = () => {

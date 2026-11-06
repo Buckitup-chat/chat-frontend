@@ -108,7 +108,6 @@ describe('Identity backup → .bukitup file → restore on a clean device', () =
 		const svcA = services();
 		const modal = await openBackupFromIdentity(svcA);
 
-		expect(modal.text()).not.toContain('BuckitUp network');
 		const password = modal.find('input#password');
 		expect(password.exists(), 'the export asks for a password').toBe(true);
 		const download = buttonWith(modal.findAll('button'), /download/i);
