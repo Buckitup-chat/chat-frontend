@@ -85,7 +85,7 @@ kilobytes.
 The app's relay is the chat backend's: a relay release on ProcessOne's `stun`
 library next to the chat release, with short-lived credentials from
 `POST /electric/v1/turn_credentials`
-(`chat/docs/pq/reqs/pq_turn_relay.proposed.md`). The sandbox takes any TURN
+(`chat/docs/pq/reqs/pq_turn_relay.done.md`). The sandbox takes any TURN
 server with a user and a password; a local one:
 
 ```
