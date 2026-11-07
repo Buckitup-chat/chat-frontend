@@ -1,5 +1,5 @@
 // Relay credentials for the optical handshake (docs/task-handshake-pq2.md §5a;
-// chat: docs/pq/reqs/pq_turn_relay.in_progress.md § Endpoint). Two phones on
+// chat: docs/pq/reqs/pq_turn_relay.done.md § Endpoint). Two phones on
 // mobile data share no network and reach each other only through our TURN
 // relay; on one network ICE still picks the direct path.
 //

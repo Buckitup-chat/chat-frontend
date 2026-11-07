@@ -7,7 +7,7 @@ sandbox.
 two phones, including through a TURN relay, and has unit tests and a Chromium
 check. Both come from the branch `sandbox-handshake-pq2` (PR: spec update plus
 sandbox).
-**Backend dependency:** `chat/docs/pq/reqs/pq_turn_relay.in_progress.md` — the
+**Backend dependency:** `chat/docs/pq/reqs/pq_turn_relay.done.md` — the
 relay credentials endpoint, and a relay release on ProcessOne's `stun` library
 next to the chat release. It is not built yet. Develop against any local TURN
 server (part 4) and switch when it lands.
