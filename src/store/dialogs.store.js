@@ -5,7 +5,8 @@ import { getDialogCollections, withDialogCollections } from '@/lib/data/collecti
 import { IngestError, DurabilityError } from '@/lib/data/ingest';
 import { enqueueIntent, updateIntent, getIntent, intentsOf, resolveIntent, onIntentChange, markIntentAwaitingUnlock } from '@/lib/data/intents';
 import { saveProjection, updateProjection, removeProjection, projectionsOf } from '@/lib/data/messageProjections';
-import { signAndDispatchIntent, isUnsignedDialogIntent, IntentChangedError, withIntentSigningLock } from '@/lib/data/intentRecovery';
+import { signAndDispatchIntent, isUnsignedDialogIntent, IntentChangedError, withIntentSigningLock, withIntentEntityLock, handOverEarlierOfEntity } from '@/lib/data/intentRecovery';
+import { signAndDispatchDurably } from '@/lib/data/storageIntent';
 import {
     materializeMessageIntent, ensureOwnDialogKeyPublished, ownSenderMsgKey, trustedRowBase,
     pinActiveSession, assertSessionUnchanged, SessionFencedError,
@@ -25,8 +26,7 @@ import { loadPointer, savePointer, viewMoved, pointerDialogs, rememberPointerDia
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { verifyReplicatedRow } from '@/lib/data/rowVerification';
 import { projectionReplacement } from '@/lib/data/operationLifecycle';
-import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError, fileRefsOf } from '@buckitup/pq-client/content';
-import { withEditedText } from '@/lib/editableParts';
+import { decodeContent, contentToText, previewText, isWireMessageId, ContentDecodeError, fileRefsOf, withEditedText } from '@buckitup/pq-client/content';
 import {
     CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION,
     deriveFrontierRoot, buildViewTree, diffViewTrees, classifyChanges,
@@ -42,7 +42,13 @@ import { mergeLiveWithCached } from '@/lib/data/readCache';
 import { readDialogRow, readDialogRows } from '@/lib/data/dialogCache';
 import { settled } from '@/lib/data/shapeLink';
 import { withBudget } from '@/lib/withBudget';
-import { DialogCrypto } from '@/libs/DialogCrypto';
+import {
+    dialogHash as computeDialogHash,
+    receiptHash as computeReceiptHash,
+    deriveSenderMsgKey,
+    unwrapSenderMsgKey,
+    decryptContent,
+} from '@buckitup/pq-client/dialogs';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
 
@@ -98,7 +104,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         if (!key) return null;
 
         try {
-            const json = await DialogCrypto.decryptContent(key, row.refs_map_b64);
+            const json = await decryptContent(key, row.refs_map_b64);
             const refs = json ? JSON.parse(json) : {};
             decryptedRefsCache.set(cacheKey, refs);
             return refs;
@@ -560,7 +566,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
 
     const getDialogHash = (peerHash) => {
         if (!$userPQ.currentUserHash) return null;
-        return DialogCrypto.computeDialogHash($userPQ.currentUserHash, peerHash);
+        return computeDialogHash($userPQ.currentUserHash, peerHash);
     };
 
     // In-flight guard for dialog-key creation. Keyed by the PK of the row
@@ -616,8 +622,24 @@ export const useDialogsStore = defineStore('dialogs', () => {
      */
     const pendingKeys = {};
 
+    const peerKeyRowSigns = {};
+
+    const peerKeyRowChanged = (dialogHash, authorHash, colls, cacheKey) => {
+        if (!(cacheKey in peerKeyRowSigns)) return false;
+        try {
+            const live = (colls ?? getDialogCollections(dialogHash)).keys.get(`${dialogHash}|${authorHash}`);
+            return !!live?.sign_b64 && live.sign_b64 !== peerKeyRowSigns[cacheKey];
+        } catch {
+            return false;
+        }
+    };
+
     const getSenderMsgKey = async (dialogHash, authorHash, colls = null) => {
         const cacheKey = `${dialogHash}_${authorHash}`;
+        if (senderMsgKeys.value[cacheKey] && peerKeyRowChanged(dialogHash, authorHash, colls, cacheKey)) {
+            delete senderMsgKeys.value[cacheKey];
+            delete peerKeyRowSigns[cacheKey];
+        }
         if (senderMsgKeys.value[cacheKey]) return senderMsgKeys.value[cacheKey];
         if (pendingKeys[cacheKey]) return pendingKeys[cacheKey];
 
@@ -650,9 +672,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 const signSkey = safeBase64Decode(keys.sign_skey, 'sign_skey');
                 const kemSkey = safeBase64Decode(keys.crypt_skey, 'crypt_skey');
 
-                const senderMsgKey = DialogCrypto.deriveSenderMsgKey(
-                    signSkey, kemSkey, keys.evm_skey, keyRow.peer_hash
-                );
+                const senderMsgKey = deriveSenderMsgKey(signSkey, kemSkey, keyRow.peer_hash);
                 senderMsgKeys.value[cacheKey] = senderMsgKey;
                 return senderMsgKey;
             }
@@ -663,13 +683,14 @@ export const useDialogsStore = defineStore('dialogs', () => {
             const keys = await em.exportVaultKeys();
             const cryptSkey = safeBase64Decode(keys.crypt_skey, 'crypt_skey');
 
-            const unwrapped = await DialogCrypto.unwrapSenderMsgKey(
+            const unwrapped = await unwrapSenderMsgKey(
                 cryptSkey,
                 keyRow.peer_kem_wrap_key_b64,
                 keyRow.peer_wrapped_msg_key_b64
             );
 
             senderMsgKeys.value[cacheKey] = unwrapped;
+            peerKeyRowSigns[cacheKey] = keyRow.sign_b64;
             return unwrapped;
         })();
 
@@ -758,20 +779,26 @@ export const useDialogsStore = defineStore('dialogs', () => {
         try {
             assertSessionUnchanged(token, 'dispatchMessageIntent:start');
             onStatus?.('syncing');
-            const readyRow = await materializeMessageIntent(payload, token);
-            assertSessionUnchanged(token, 'dispatchMessageIntent:beforeSigning');
-            const signSkey = await getSignSkeyBytes().catch((e) => {
-                throw new VaultLockedError(String(e?.message ?? e));
+            const { dispatchPromise } = await withIntentEntityLock(payload, async () => {
+                const readyRow = await materializeMessageIntent(payload, token);
+                assertSessionUnchanged(token, 'dispatchMessageIntent:beforeSigning');
+                const signSkey = await getSignSkeyBytes().catch((e) => {
+                    throw new VaultLockedError(String(e?.message ?? e));
+                });
+                assertSessionUnchanged(token, 'dispatchMessageIntent:afterSignSkey');
+                const { durable, dispatchPromise } = signAndDispatchDurably((onLinked) => signAndDispatchIntent(intentId, readyRow, signSkey, {
+                    token,
+                    onLinked,
+                    onDurable: (outboxId) => { durableOutboxId = outboxId; },
+                    onSigned: (mutation) => {
+                        const signHash = (mutation?.modified ?? mutation?.changes)?.sign_hash;
+                        if (signHash) setProjectionSignHash(payload.ownerHash, payload.messageId, signHash);
+                    },
+                }));
+                await durable;
+                return { dispatchPromise };
             });
-            assertSessionUnchanged(token, 'dispatchMessageIntent:afterSignSkey');
-            const handle = await signAndDispatchIntent(intentId, readyRow, signSkey, {
-                token,
-                onDurable: (outboxId) => { durableOutboxId = outboxId; },
-                onSigned: (mutation) => {
-                    const signHash = (mutation?.modified ?? mutation?.changes)?.sign_hash;
-                    if (signHash) setProjectionSignHash(payload.ownerHash, payload.messageId, signHash);
-                },
-            });
+            const handle = await dispatchPromise;
             if (handle.phase === 'accepted') {
                 try {
                     assertSessionUnchanged(token, 'dispatchMessageIntent:beforeAcceptedCallback');
@@ -846,13 +873,20 @@ export const useDialogsStore = defineStore('dialogs', () => {
             const stored = entry.intent;
             const unsigned = isUnsignedDialogIntent(stored);
             try {
-                const readyRow = unsigned ? await materializeMessageIntent(stored, token) : stored;
-                if (readyRow === null) {
-                    await resolveIntent(intentId, { outcome: 'noop' });
-                    return null;
-                }
-                const signSkey = await getSignSkeyBytes().catch((e) => { throw new VaultLockedError(String(e?.message ?? e)); });
-                return await signAndDispatchIntent(intentId, readyRow, signSkey, { token, onSigned, builtFrom: unsigned ? stored : undefined });
+                const dispatching = await withIntentEntityLock(stored, async () => {
+                    const signSkey = await getSignSkeyBytes().catch((e) => { throw new VaultLockedError(String(e?.message ?? e)); });
+                    await handOverEarlierOfEntity(intentId, stored, token, signSkey, materializeMessageIntent);
+                    const readyRow = unsigned ? await materializeMessageIntent(stored, token) : stored;
+                    if (readyRow === null) {
+                        await resolveIntent(intentId, { outcome: 'noop' });
+                        return null;
+                    }
+                    const { durable, dispatchPromise } = signAndDispatchDurably((onLinked) =>
+                        signAndDispatchIntent(intentId, readyRow, signSkey, { token, onSigned, onLinked, builtFrom: unsigned ? stored : undefined }));
+                    await durable;
+                    return { dispatchPromise };
+                });
+                return dispatching ? await dispatching.dispatchPromise : null;
             } catch (e) {
                 if (e instanceof IntentChangedError && attempt < 5) continue; // a later action changed it: build that
                 // Under the intent's lock: a toggle folded in meanwhile is not overwritten.
@@ -1144,7 +1178,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 for (const row of rows) {
                     if (row.deleted_flag) continue;
                     try {
-                        const json = await DialogCrypto.decryptContent(key, row.content_b64);
+                        const json = await decryptContent(key, row.content_b64);
                         if (json && carriesGrant(decodeContent(json), grant)) return true;
                     } catch {
                         unread = true;
@@ -1173,7 +1207,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             // Not a verdict: the key may still arrive.
             if (!key) return { ...row, decrypted: false, awaitingKey: true, text: "Waiting for keys..." };
 
-            const jsonStr = await DialogCrypto.decryptContent(key, row.content_b64);
+            const jsonStr = await decryptContent(key, row.content_b64);
             // Deletion tombstones carry empty content by design (07: an empty
             // content_b64 is only valid alongside deleted_flag) — not a format error.
             // A file is its sender's: its manifest and chunks must be signed by
@@ -1238,7 +1272,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             if (verdict.status === 'invalid') parts = [];
             else if (verdict.status === 'verified') {
                 const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
-                const json = key && row.content_b64 ? await DialogCrypto.decryptContent(key, row.content_b64).catch(() => null) : null;
+                const json = key && row.content_b64 ? await decryptContent(key, row.content_b64).catch(() => null) : null;
                 if (json) parts = decodeContent(json);
             }
             if (parts) {
@@ -1283,7 +1317,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
                 try {
                     const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
                     if (key) {
-                        const json = await DialogCrypto.decryptContent(key, row.content_b64);
+                        const json = await decryptContent(key, row.content_b64);
                         text = json ? contentToText(decodeContent(json)) : '';
                         decrypted = true;
                     }
@@ -1325,6 +1359,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
     watch(() => $userPQ.currentUserHash, () => {
         checkpointAlerts.value = new Map();
         senderMsgKeys.value = {};
+        for (const key of Object.keys(peerKeyRowSigns)) delete peerKeyRowSigns[key];
         decryptedRefsCache.clear();
         firstRevisions.clear();
         dialogGates.clear();
@@ -1590,7 +1625,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         }
     };
 
-    // ---------- signed DAG checkpoint (packages/pq-client/src/checkpoint.ts) ----------
+    // ---------- signed DAG checkpoint (@buckitup/pq-client/checkpoint) ----------
     //
     // A checkpoint attests "this device held this causally complete local
     // state and it materialized to this view". It rides an ordinary message
@@ -1887,7 +1922,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         try {
             const key = await getSenderMsgKey(row.dialog_hash, row.sender_hash);
             if (!key) return { text: 'Waiting for keys…', decrypted: false };
-            const json = await DialogCrypto.decryptContent(key, row.content_b64);
+            const json = await decryptContent(key, row.content_b64);
             return { text: json ? previewText(decodeContent(json)) : '', decrypted: true };
         } catch {
             return { text: 'Undecryptable content', decrypted: false };
@@ -2062,7 +2097,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             throw new Error('Cannot acknowledge: message revision is not synced yet');
         }
         const myHash = $userPQ.currentUserHash;
-        const receiptHash = DialogCrypto.computeReceiptHash(messageId, messageSignHash, myHash, type);
+        const receiptHash = computeReceiptHash(messageId, messageSignHash, myHash, type);
         const opKey = `${myHash}|${receiptHash}`;
         const inFlight = receiptOps.get(opKey);
         if (inFlight) return inFlight;
@@ -2124,7 +2159,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
     /** Revisions the current user has explicitly acknowledged. */
     const isRevisionAcknowledged = (dialogHash, messageId, messageSignHash) => {
         if (!messageSignHash) return false;
-        const receiptHash = DialogCrypto.computeReceiptHash(
+        const receiptHash = computeReceiptHash(
             messageId, messageSignHash, $userPQ.currentUserHash, 'read'
         );
         return !!getDialogCollections(dialogHash).receipts.get(receiptHash);
@@ -2135,7 +2170,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             const key = await getSenderMsgKey(dialogHash, row.reactor_hash);
             if (!key) return { ...row, decrypted: false, emoji: '?' };
 
-            const emoji = await DialogCrypto.decryptContent(key, row.type_b64);
+            const emoji = await decryptContent(key, row.type_b64);
             return { ...row, decrypted: true, emoji };
         } catch (e) {
             console.error("Decrypt reaction error", e);

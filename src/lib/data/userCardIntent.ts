@@ -7,11 +7,12 @@ import { pendingCardWrites, readCardClock, writeCardClock, withAccountLock, stor
 import { settled, isLiveNow } from './shapeLink';
 import { assertNever } from './storedRead';
 import type { ReadyRowIntent } from './intentRecovery';
-import type { UserCardRow } from './types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 import { verifyReplicatedRow } from './rowVerification';
 import { nextOwnerTimestamp } from './time';
 import { readShapeOnce } from './shapeRead';
 import { wireBool } from '@buckitup/pq-client/schema';
+import { toBase64, toBytes } from '@buckitup/pq-client/signature';
 
 export interface UserCardFields {
 	user_hash: string;
@@ -110,16 +111,17 @@ export async function storeCardIntentUnderLock(
 	const readyRow = {
 		kind: 'ready-row' as const,
 		relation: 'user_cards',
-		mutationType: bootstrap ? 'insert' : 'update',
+		mutationType: bootstrap ? 'insert' as const : 'update' as const,
 		...(bootstrap ? { purpose: BOOTSTRAP_CARD_PURPOSE } : {}),
 		row: {
 			user_hash: userHash,
 			name: card.name || 'User',
-			sign_pkey: card.sign_pkey,
-			contact_pkey: card.contact_pkey,
-			contact_cert: card.contact_cert,
-			crypt_pkey: card.crypt_pkey,
-			crypt_cert: card.crypt_cert,
+			sign_pkey: toBase64(toBytes(card.sign_pkey)),
+			contact_pkey: toBase64(toBytes(card.contact_pkey)),
+			contact_cert: toBase64(toBytes(card.contact_cert)),
+			crypt_pkey: toBase64(toBytes(card.crypt_pkey)),
+			crypt_cert: toBase64(toBytes(card.crypt_cert)),
+			deleted_flag: false,
 			owner_timestamp: decision.ownerTimestamp,
 		},
 	};

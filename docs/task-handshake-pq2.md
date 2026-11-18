@@ -1,5 +1,7 @@
 # Task: optical handshake v2 (`PQ2`)
 
+> The original task text is retained below. See [Implementation status](#implementation-status) for completed work, changed agreements and current code paths.
+
 The QR handshake that confirms a contact in person. This document is the
 specification to implement; it replaces the `PQ1` protocol in
 `src/components/engines/QRScannerEngine.vue` outright — no compatibility
@@ -395,3 +397,40 @@ deleted, to show it fails there (CLAUDE.md, verification standard).
   result carries everything a token needs; issuing it is that requirement's
   work.
 - Radio (NFC) transport of the same messages.
+
+## Implementation status
+
+The PQ2 protocol implementation and frontend integration described by this
+task are implemented. The original task text above is retained as the agreed
+starting point; the ownership and paths below describe the current code.
+
+### Completed work
+
+- PQ2 message encoding/parsing, transcript, session tag, optical signatures,
+  PQ confirmation and six-digit comparison code are implemented in
+  `@buckitup/pq-client/handshake`.
+- The frontend session engine, scanner and QWBP adapter use the installed SDK.
+  Camera handling, session cancellation, candidate selection and relay
+  credential lifecycle remain in the frontend.
+- The modal and contact store apply the result. `confirmContact` verifies the
+  identity/card/contact-key binding and stores confirmation; the contact policy
+  also issues device-access vouches and retracts them when a contact is deleted.
+- Protocol golden vectors and cryptographic tests are in the SDK. Frontend
+  candidate-selection, API-proof, camera/session and contact tests remain here.
+
+### Changes from the original agreement
+
+| Original plan | Current implementation | Reason |
+| --- | --- | --- |
+| Frontend workspace `packages/pq-client/src/handshake.ts` | Separate `Buckitup-chat/pq-library`, consumed as npm `@buckitup/pq-client@1.0.0` | Reuse the protocol across clients and give the SDK its own release lifecycle. |
+| Protocol and integration checks together in frontend `tests/handshake.test.ts` | Protocol checks in `pq-library/tests/handshake.test.ts`; app checks in frontend `tests/handshake.test.ts`, `tests/qrHandshakeEngine.test.js` and `tests/contactVouchTokens.test.ts` | Keep each suite with the code and behavior it owns. |
+| Vouch issuance handled by the separate access-gating task | Integrated through `userPQ.store.js`, `EncryptionManagerPQ.setContactAccess` and `contactVouches.ts` | Connect verified contact identity to the application's device-access policy. |
+
+The original protocol requirements and acceptance criteria remain the task's
+contract. The repository split changes implementation ownership, not the wire
+protocol or identity binding. This task stays here to retain the agreed UI and
+contact requirements; SDK protocol details are maintained with the library.
+
+Current protocol documentation: [SDK handshake task and contract](https://github.com/Buckitup-chat/pq-library/blob/main/docs/handshake.md).
+For the consumed `1.0.0` dependency, the immutable protocol reference is
+[revision 983f30e](https://github.com/Buckitup-chat/pq-library/blob/983f30ef06e1ff9ccd3252e35570c0b13ccda247/docs/handshake.md).

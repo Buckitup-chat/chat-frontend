@@ -3,9 +3,7 @@ import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import { defineComponent, h } from 'vue';
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { bytesToHex } from '@noble/hashes/utils';
-import { canonicalPayload, fromBase64 } from '@buckitup/pq-client/signature';
+import { verifyRow } from '@buckitup/pq-client/rows';
 import * as harness from './helpers/twoClients';
 import { makeTestIdentity, signRow } from './helpers/signedFixtures';
 import type { ApplyResult, Client, Relation, Row, ServerPost } from './helpers/twoClients';
@@ -59,22 +57,10 @@ const cardOf = (hash: string) => server.table('user_cards').get(hash)!;
 
 const VOUCH_COLUMNS = ['deleted_flag', 'issuer_hash', 'kind', 'owner_timestamp', 'sign_b64', 'subject_hash'];
 
-const VOUCH_SIGNED = ['deleted_flag', 'issuer_hash', 'kind', 'owner_timestamp', 'subject_hash'] as const;
-const vouchPayload = (row: Omit<VouchTokenRow, 'sign_b64'>) => {
-	const frames = VOUCH_SIGNED.map((field) => new TextEncoder().encode(String(row[field])));
-	const out = new Uint8Array(frames.reduce((n, f) => n + 4 + f.length, 0));
-	let at = 0;
-	for (const f of frames) {
-		new DataView(out.buffer).setUint32(at, f.length);
-		out.set(f, at + 4);
-		at += 4 + f.length;
-	}
-	return out;
-};
 const signedByIssuer = (row: VouchTokenRow) => {
 	const card = cardOf(row.issuer_hash);
 	try {
-		return !!card && ml_dsa87.verify(fromBase64(row.sign_b64), vouchPayload(row), fromBase64(card.sign_pkey as string));
+		return !!card && verifyRow('vouch_tokens', row, card.sign_pkey as string).status === 'ok';
 	} catch {
 		return false;
 	}
@@ -160,7 +146,7 @@ const vouchShape = (url: URL) => {
 	if (lagging) vouches.shapeLag--;
 	const rows = lagging ? [] : [...vouches.rows.values()].filter((r) =>
 		equals.every(([col, val]) => String((r as Record<string, unknown>)[col]) === val));
-	return Response.json(rows.map((r) => ({
+	return Response.json([...rows.map((r) => ({
 		headers: { operation: 'insert', relation: ['public', 'vouch_tokens'] },
 		key: `"public"."vouch_tokens"/"${r.kind}"/"${r.issuer_hash}"/"${r.subject_hash}"`,
 		value: {
@@ -168,7 +154,7 @@ const vouchShape = (url: URL) => {
 			owner_timestamp: String(r.owner_timestamp), deleted_flag: String(r.deleted_flag),
 			sign_b64: r.sign_b64.replace(/=+$/, ''),
 		},
-	})));
+	})), { headers: { control: 'up-to-date' } }]);
 };
 
 type Account = { user_hash: string; sign_pkey: string };
@@ -316,23 +302,6 @@ describe('the fake backend honours the vouch_tokens contract', () => {
 			...key, owner_timestamp: '1700000001', deleted_flag: 'true', sign_b64: revoke.sign_b64.replace(/=+$/, ''),
 		}]);
 	}, 120_000);
-});
-
-describe('the vouch signature payload is the backend\'s', () => {
-	const row = {
-		kind: 'device.Server_test_node.storage.read',
-		issuer_hash: 'u_' + 'a'.repeat(128),
-		subject_hash: 'u_' + 'b'.repeat(128),
-		owner_timestamp: 1_700_000_000,
-		deleted_flag: false,
-	};
-	const BACKEND_PAYLOAD_HEX =
-		'0000000566616c736500000082755f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161000000246465766963652e5365727665725f746573745f6e6f64652e73746f726167652e726561640000000a3137303030303030303000000082755f6262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262';
-
-	it('the bytes the fake verifies against, and the client\'s canonicalization of the same row, match the backend', () => {
-		expect(bytesToHex(vouchPayload(row))).toBe(BACKEND_PAYLOAD_HEX);
-		expect(bytesToHex(canonicalPayload(row))).toBe(BACKEND_PAYLOAD_HEX);
-	});
 });
 
 describe('FRON-23: the device owner confirms a contact through the QR handshake', () => {

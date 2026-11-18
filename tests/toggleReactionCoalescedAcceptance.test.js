@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { useMemoryLocalStore, markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { setActivePinia, createPinia } from 'pinia';
 import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import { recordAccepted, _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
@@ -76,16 +77,22 @@ vi.mock('@/lib/data/intents', () => {
 			store.set(id, { ...existing, intent });
 			return true;
 		},
-		resolveIntent: async () => true,
+		resolveIntent: async (id, outcome) => {
+			const existing = store.get(id);
+			if (existing) store.set(id, { ...existing, intent: { resolved: true, outcome: outcome.outcome, ref: outcome.ref ?? null } });
+			return true;
+		},
 		getIntent: async (id) => store.get(id) ?? null,
-		intentsOf: async (userHash) => ({ entries: [...store.values()].filter((e) => e.userHash === userHash), issues: [] }),
+		intentsOf: async (userHash) => ({ entries: [...store.values()].filter((e) => e.userHash === userHash && e.intent?.resolved !== true), issues: [] }),
 	};
 });
 
-vi.mock('@/api/client', () => ({
-	api: {
-		createGenericMutation: (relation, row, _skey, type) => ({ type, relation, row, syncMetadata: { relation } }),
-	},
+vi.mock('@/api/client', () => ({ api: {} }));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal()),
+	signRow: (_relation, row) => row,
+	rowMutation: (relation, row, type) => ({ type, relation, row, syncMetadata: { relation } }),
 }));
 
 vi.mock('@/libs/enigma', () => ({
@@ -100,17 +107,16 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	},
 }));
 
-vi.mock('@/libs/DialogCrypto', () => ({
-	DialogCrypto: {
-		computeDialogHash: () => DIALOG_HASH,
-		deriveSenderMsgKey: () => new Uint8Array(32),
-		wrapSenderMsgKey: async () => ({ peerKemWrapKeyB64: 'wrap', peerWrappedMsgKeyB64: 'wrapped' }),
-		computeReactionHash: (_k, messageId, reactor, emoji) => `dmr_${messageId}:${reactor}:${emoji}`,
-		encryptContent: async (_k, text) => `enc(${text})`,
-		decryptContent: async (_k, ciphertext) =>
-			typeof ciphertext === 'string' && ciphertext.startsWith('enc(') && ciphertext.endsWith(')')
-				? ciphertext.slice(4, -1) : null,
-	},
+vi.mock('@buckitup/pq-client/dialogs', async (importOriginal) => ({
+	...(await importOriginal()),
+	dialogHash: () => DIALOG_HASH,
+	deriveSenderMsgKey: () => new Uint8Array(32),
+	wrapSenderMsgKey: async () => ({ peer_kem_wrap_key_b64: 'wrap', peer_wrapped_msg_key_b64: 'wrapped' }),
+	reactionHash: (_k, messageId, reactor, emoji) => `dmr_${messageId}:${reactor}:${emoji}`,
+	encryptContent: async (_k, text) => `enc(${text})`,
+	decryptContent: async (_k, ciphertext) =>
+		typeof ciphertext === 'string' && ciphertext.startsWith('enc(') && ciphertext.endsWith(')')
+			? ciphertext.slice(4, -1) : null,
 }));
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
@@ -122,7 +128,9 @@ const flush = async () => {
 	}
 };
 
-beforeEach(() => {
+beforeEach(async () => {
+	await useMemoryLocalStore();
+	await markDialogKeyPublishedHere(MY_HASH, DIALOG_HASH);
 	setActivePinia(createPinia());
 	stopLeaderElection();
 	startLeaderElection(MY_HASH, () => {});

@@ -23,11 +23,11 @@ const myKemPublicKey = fromBase64(me.card.crypt_pkey as string);
 const cardsByHash = new Map([[me.userHash, me.card], [peer.userHash, peer.card]]);
 
 const peerKeyRow = async (msgKey: Uint8Array, ownerTimestamp: number) => {
-	const wrapped = await DialogCrypto.wrapSenderMsgKey(msgKey, myKemPublicKey);
+	const wrapped = await wrapSenderMsgKey(msgKey, myKemPublicKey);
 	return signedDialogKeyRow(peer, {
 		dialog_hash: DIALOG_HASH, peer_hash: MY_HASH,
-		peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64,
-		peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+		peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64,
+		peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 		deleted_flag: false, owner_timestamp: ownerTimestamp,
 	});
 };
@@ -65,7 +65,7 @@ const succeedingEmptyKeysCollection = () => ({
 });
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { wrapSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 
 beforeEach(async () => {
 	setActivePinia(createPinia());
@@ -79,7 +79,7 @@ describe('getSenderMsgKey / decryptMessageRow: dialog_keys disk fallback', () =>
 		await setDialogCacheRow('dialog_keys', `${DIALOG_HASH}|${PEER_HASH}`, await peerKeyRow(new Uint8Array(32).fill(7), 1000));
 
 		const store = useDialogsStore();
-		const contentB64 = await DialogCrypto.encryptContent(new Uint8Array(32).fill(7), encodeContent([{ kind: 'text', text: 'hello from cache' }]));
+		const contentB64 = await encryptContent(new Uint8Array(32).fill(7), encodeContent([{ kind: 'text', text: 'hello from cache' }]));
 		const row = {
 			message_id: 'dmsg_1', dialog_hash: DIALOG_HASH, sender_hash: PEER_HASH,
 			content_b64: contentB64, deleted_flag: false, refs_map_b64: null, owner_timestamp: 1000,
@@ -96,7 +96,7 @@ describe('getSenderMsgKey / decryptMessageRow: dialog_keys disk fallback', () =>
 		markTouched('dialog_keys', `${DIALOG_HASH}|${PEER_HASH}`);
 
 		const store = useDialogsStore();
-		const contentB64 = await DialogCrypto.encryptContent(new Uint8Array(32).fill(7), encodeContent([{ kind: 'text', text: 'should stay locked' }]));
+		const contentB64 = await encryptContent(new Uint8Array(32).fill(7), encodeContent([{ kind: 'text', text: 'should stay locked' }]));
 		const row = {
 			message_id: 'dmsg_2', dialog_hash: DIALOG_HASH, sender_hash: PEER_HASH,
 			content_b64: contentB64, deleted_flag: false, refs_map_b64: null, owner_timestamp: 1000,
@@ -113,7 +113,7 @@ describe('getSenderMsgKey / decryptMessageRow: dialog_keys disk fallback', () =>
 		await setDialogCacheRow('dialog_keys', `${DIALOG_HASH}|${PEER_HASH}`, await peerKeyRow(new Uint8Array(32).fill(7), 1000));
 
 		const store = useDialogsStore();
-		const contentB64 = await DialogCrypto.encryptContent(new Uint8Array(32).fill(7), encodeContent([{ kind: 'text', text: 'must not decrypt' }]));
+		const contentB64 = await encryptContent(new Uint8Array(32).fill(7), encodeContent([{ kind: 'text', text: 'must not decrypt' }]));
 		const row = {
 			message_id: 'dmsg_4', dialog_hash: DIALOG_HASH, sender_hash: PEER_HASH,
 			content_b64: contentB64, deleted_flag: false, refs_map_b64: null, owner_timestamp: 1000,
@@ -138,7 +138,7 @@ describe('getSenderMsgKey / decryptMessageRow: dialog_keys disk fallback', () =>
 		await setDialogCacheRow('dialog_keys', `${DIALOG_HASH}|${PEER_HASH}`, await peerKeyRow(new Uint8Array(32).fill(7), 1000));
 
 		const store = useDialogsStore();
-		const contentB64 = await DialogCrypto.encryptContent(new Uint8Array(32).fill(8), encodeContent([{ kind: 'text', text: 'from the warm live key' }]));
+		const contentB64 = await encryptContent(new Uint8Array(32).fill(8), encodeContent([{ kind: 'text', text: 'from the warm live key' }]));
 		const row = {
 			message_id: 'dmsg_5', dialog_hash: DIALOG_HASH, sender_hash: PEER_HASH,
 			content_b64: contentB64, deleted_flag: false, refs_map_b64: null, owner_timestamp: 1000,
@@ -163,7 +163,7 @@ describe('getSenderMsgKey / decryptMessageRow: dialog_keys disk fallback', () =>
 		await setDialogCacheRow('dialog_keys', `${DIALOG_HASH}|${PEER_HASH}`, await peerKeyRow(new Uint8Array(32).fill(7), 1000));
 
 		const store = useDialogsStore();
-		const contentB64 = await DialogCrypto.encryptContent(new Uint8Array(32).fill(8), encodeContent([{ kind: 'text', text: 'from the live key' }]));
+		const contentB64 = await encryptContent(new Uint8Array(32).fill(8), encodeContent([{ kind: 'text', text: 'from the live key' }]));
 		const row = {
 			message_id: 'dmsg_3', dialog_hash: DIALOG_HASH, sender_hash: PEER_HASH,
 			content_b64: contentB64, deleted_flag: false, refs_map_b64: null, owner_timestamp: 1000,
@@ -173,5 +173,28 @@ describe('getSenderMsgKey / decryptMessageRow: dialog_keys disk fallback', () =>
 
 		expect(decrypted.decrypted).toBe(true);
 		expect(decrypted.text).toBe('from the live key');
+	});
+
+	it('drops a cached peer key once the peer republishes its dialog_keys row with another key', async () => {
+		let live = await peerKeyRow(new Uint8Array(32).fill(7), 1000);
+		collections.dialog.keys = {
+			async preload() {},
+			get: (k) => (k === `${DIALOG_HASH}|${PEER_HASH}` ? live : undefined),
+			get toArray() { return [live]; },
+			subscribeChanges() { return { unsubscribe() {} }; },
+		};
+		const store = useDialogsStore();
+		const messageUnder = async (key: Uint8Array, id: string, text: string) => ({
+			message_id: id, dialog_hash: DIALOG_HASH, sender_hash: PEER_HASH,
+			content_b64: await encryptContent(key, encodeContent([{ kind: 'text', text }])),
+			deleted_flag: false, refs_map_b64: null, owner_timestamp: 1000,
+		});
+
+		expect((await store.decryptMessageRow(await messageUnder(new Uint8Array(32).fill(7), 'dmsg_5', 'old key'))).text).toBe('old key');
+
+		live = await peerKeyRow(new Uint8Array(32).fill(9), 1001);
+		const fresh = await store.decryptMessageRow(await messageUnder(new Uint8Array(32).fill(9), 'dmsg_6', 'new key'));
+		expect(fresh.decrypted).toBe(true);
+		expect(fresh.text).toBe('new key');
 	});
 });

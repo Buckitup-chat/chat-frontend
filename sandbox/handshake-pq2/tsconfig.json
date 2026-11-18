@@ -2,8 +2,18 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "baseUrl": ".",
-    "paths": { "@/*": ["../../src/*"], "@buckitup/pq-client/*": ["../../packages/pq-client/src/*"] },
-    "types": ["vite/client"]
+    "paths": {
+      "@/*": [
+        "../../src/*"
+      ]
+    },
+    "types": [
+      "vite/client"
+    ]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "vite.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "vite.config.ts"
+  ]
 }

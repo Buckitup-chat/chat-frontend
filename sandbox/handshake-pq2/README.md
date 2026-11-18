@@ -6,12 +6,12 @@ front cameras, a transcript signature, a WebRTC channel bootstrapped by QWBP,
 a post-quantum confirmation over it, and the six digits both screens show.
 It is not the app: no account, no server, no contacts. Each phone makes a
 test identity when the page loads (ML-DSA-87 identity key, secp256k1
-contact key, a self-signed card made by the app's own code). Its keys stay
+contact key, a self-signed card made by the installed SDK). Its keys stay
 in the page: a reload makes a new identity under the same name. The browser
 keeps only the settings and the card of the last phone confirmed.
 
-The protocol and the card check use the app's own crypto layer
-(`packages/pq-client/src`: card verification, signatures, HKDF), so a confirmation here
+The protocol and card checks use the installed `@buckitup/pq-client`
+package (card verification, signatures and HKDF), so a confirmation here
 is the one the app would make.
 
 ## Open it
@@ -123,7 +123,8 @@ channel is there to cover.
 
 ## Develop
 
-From the repository root (the page imports `packages/pq-client/src`, so it builds here):
+From the repository root (the page imports the installed `@buckitup/pq-client`
+package and helpers from the app's `src/`, both resolved from this repository):
 
 ```bash
 npx vite --config sandbox/handshake-pq2/vite.config.ts --host      # dev server
@@ -145,6 +146,6 @@ PQ2_CERT=/tmp/pq2-cert.pem PQ2_KEY=/tmp/pq2-key.pem npx vite --config sandbox/ha
 Then open `https://<the computer's address>:5173` on each phone.
 
 Code: the protocol (messages, transcript, signatures, the six digits, the
-confirmation check) is the app's own `packages/pq-client/src/handshake.ts`; `src/engine.ts` (the state machine, no DOM),
+confirmation check) is the SDK's `@buckitup/pq-client/handshake`, installed from npm; `src/engine.ts` (the state machine, no DOM),
 `src/channel.ts` (QWBP adapter, and the fake network the tests use),
 `src/identity.ts`, `src/main.ts` (camera, QR, settings).

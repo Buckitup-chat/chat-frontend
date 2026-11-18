@@ -12,7 +12,7 @@ import * as secp from '@noble/secp256k1';
 import { signFields, toBase64 } from '@buckitup/pq-client/signature';
 import { writeCachedCards } from './helpers/userCardsDiskCache';
 import type { VueWrapper } from '@vue/test-utils';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 import type { userPQStore } from '@/store/userPQ.store';
 import type { getUserCardsCollection } from '@/lib/data/collections';
 

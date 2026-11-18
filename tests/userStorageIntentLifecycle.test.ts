@@ -34,20 +34,6 @@ let signCallCount = 0;
 let sent: unknown[][] = [];
 vi.mock('@/api/client', () => ({
 	api: {
-		createStorageMutation: vi.fn((userHash: string, uuid: string, valueB64: string, _h: unknown, _v: unknown, ownerTimestamp: number, _sk: unknown, _d: unknown, deletedFlag: boolean, parentSignHash: string | null, _sh: unknown, _sb: unknown, mutationType: string) => {
-			signCallCount += 1;
-			const signHash = 'uss_' + String(signCallCount).padStart(128, '0');
-			const row = {
-				user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
-				owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
-				sign_hash: signHash, sign_b64: 'sig',
-			};
-			return {
-				type: mutationType,
-				[mutationType === 'insert' ? 'modified' : 'changes']: row,
-				syncMetadata: { relation: 'user_storage' },
-			};
-		}),
 		ingestWithAuthEach: vi.fn(async (mutations: unknown[]) => {
 			sent.push(mutations);
 			return {
@@ -56,6 +42,26 @@ vi.mock('@/api/client', () => ({
 			} as unknown as Response;
 		}),
 	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: vi.fn((_relation: string, signable: Record<string, unknown>, mutationType: string) => {
+		const { user_hash: userHash, uuid, value_b64: valueB64, owner_timestamp: ownerTimestamp, deleted_flag: deletedFlag, parent_sign_hash: parentSignHash } = signable as { user_hash: string; uuid: string; value_b64: string; owner_timestamp: number; deleted_flag: boolean; parent_sign_hash: string | null };
+		signCallCount += 1;
+		const signHash = 'uss_' + String(signCallCount).padStart(128, '0');
+		const row = {
+			user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
+			owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
+			sign_hash: signHash, sign_b64: 'sig',
+		};
+		return {
+			type: mutationType,
+			[mutationType === 'insert' ? 'modified' : 'changes']: row,
+			syncMetadata: { relation: 'user_storage' },
+		};
+	}),
 }));
 
 const { upsertStorageRow } = await import('@/lib/data/userStorage');
@@ -71,6 +77,7 @@ const {
 const { _setAcceptedSnapshotStorageForTests, getAccepted } = await import('@/lib/data/acceptedSnapshot');
 const { drainPendingWrites } = await import('@/lib/data/ingest');
 const { api } = await import('@/api/client');
+const { rowMutation } = await import('@buckitup/pq-client/rows');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -126,7 +133,7 @@ describe('durable intent precedes signing and network (§1)', () => {
 	it('a locked vault (no signing key) commits a durable intent without signing or sending anything', async () => {
 		const res = await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v1', hashB64: null, signSkey: null });
 
-		expect(api.createStorageMutation).not.toHaveBeenCalled();
+		expect(rowMutation).not.toHaveBeenCalled();
 		expect(api.ingestWithAuthEach).not.toHaveBeenCalled();
 		expect((await res.sync).status).toBe('awaiting-recovery');
 
@@ -147,13 +154,13 @@ describe('recovery resumes the exact durable intent after a key/base becomes ava
 
 		await recoverIntents(USER, signSkey, { materializeStorage: materializeStorageIntent });
 
-		expect(api.createStorageMutation).toHaveBeenCalledTimes(1);
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('insert');
+		expect(rowMutation).toHaveBeenCalledTimes(1);
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('insert');
 		await vi.waitFor(() => expect(sent).toHaveLength(1));
 		expect((await intentsOf(USER)).entries).toHaveLength(0);
 
 		await recoverIntents(USER, signSkey, { materializeStorage: materializeStorageIntent });
-		expect(api.createStorageMutation).toHaveBeenCalledTimes(1);
+		expect(rowMutation).toHaveBeenCalledTimes(1);
 		expect(sent).toHaveLength(1);
 	});
 
@@ -170,9 +177,9 @@ describe('recovery resumes the exact durable intent after a key/base becomes ava
 
 		await recoverIntents(USER, signSkey, { materializeStorage: materializeStorageIntent });
 
-		const call = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0];
+		const call = (rowMutation as ReturnType<typeof vi.fn>).mock.calls[0];
 		expect(call?.at(-1)).toBe('update');
-		expect(call?.[9]).toBe(otherDevice.sign_hash);
+		expect(call?.[1]?.parent_sign_hash).toBe(otherDevice.sign_hash);
 	});
 
 	it('does not touch a durable intent belonging to a different account', async () => {

@@ -88,7 +88,7 @@ current implementation that is a smart contract (Sepolia):
 | Relayer + indexer + notifications | Railway, live — `https://backitup-recovery-backend-production.up.railway.app` | serves v2 |
 | Nodes ×3 | Railway, live — `backitup-node-production`, `backitup-node-b-production`, `backitup-node-c-production` (`.up.railway.app`) | v2 protocol: a deposit and a release are signed over the node id and a single-use nonce, a deposit also over the share's digest; the threshold is chosen per backup |
 | E2E of the whole chain | `backitup-secret-recovery-sdk/harness` | against v2: 7 of 10 scenarios pass; S4 and S5 need six nodes, S6 needs the relayer's per-call gas cap at 6.5 M |
-| Client: sealed vault in `user_storage` under a wrap key, found by the key alone; Local File; the friends' half split with its commitments, the `recovery_share` codec, confirmed contacts; the key split by hand (dev builds) | `src/lib/recovery`, `packages/pq-client/src/vaultEnvelope.ts`, `packages/pq-client/src/content.ts`, `src/views/backup` | Phase 1 of the plan and the primitives of Phase 2; no screen issues a share or reaches the chain yet (Phase 7) |
+| Client: sealed vault in `user_storage` under a wrap key, found by the key alone; Local File; the friends' half split with its commitments, the `recovery_share` codec, confirmed contacts; the key split by hand (dev builds) | `src/lib/recovery`, `@buckitup/pq-client/vaultEnvelope`, `@buckitup/pq-client/content`, `src/views/backup` | Phase 1 of the plan and the primitives of Phase 2; no screen issues a share or reaches the chain yet (Phase 7) |
 | Threat model + hardening RFC SI-1…SI-6 | `backitup-smart-contracts/docs/security` | K-H1, SI-2, SI-4 implemented on `security/contracts-v2`; SI-1, SI-3, SI-5, SI-6 proposed |
 | Audit of every module | `docs/backup-recovery-audit-2026-09.md` | done: 3 critical, 11 high; crypto cores clean |
 
@@ -134,21 +134,11 @@ the relayer's shape: run your own, use ours, or attach several at once.
 Without a channel that actually reaches the owner the timelock is decorative,
 so this is part of the veto path, not a nicety.
 
-**The vault ciphertext lives in `user_storage`, addressed by the secret.**
-That table is public-read and authenticated-write (pq_user_storage §FR-3), so a
-client with no account can fetch a row; writing happens while the account is
-alive, so the asymmetry costs nothing. What a keyless client cannot do is
-*name* a row — the key is `(user_hash, uuid)` and `user_hash` derives from the
-signing key that was lost — so the locator comes from the secret instead:
-`uuid = uuidv8(HKDF(S, "buckitup/vault-locator/v1", "locator", 16))`. Gather
-shares, reconstruct S, compute the locator, fetch by uuid alone, and decrypt
-with a separate branch of the same secret —
-`HKDF(S, "buckitup/vault-seal/v1", "seal", 32)` — so the address, which becomes
-public the moment a share is handed out, says nothing about the key. No account
-appears anywhere in the chain, and the server can tell neither which row is a
-vault nor which accounts hold a backup. Durability is not this scheme's
-problem: account data is replicated across servers and swept into server-side
-backups like everything else on the platform.
+**Recovery vault storage uses the SDK envelope.** The frontend reconstructs
+the wrap key from the recovery flow, locates the stored vault and opens it
+through SDK primitives. Locator derivation and sealed encoding are defined in
+the [SDK envelope documentation](https://github.com/Buckitup-chat/pq-library/blob/main/docs/vault-envelope.md).
+The application owns publication, retrieval and recovery coordination.
 
 **A stuck recovery is restarted, not rescued.** If the ephemeral key is lost,
 the user mints a new one and runs the round again — no new authority, no

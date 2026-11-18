@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { useMemoryLocalStore, markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { setActivePinia, createPinia } from 'pinia';
 import type { SignableFields } from '@buckitup/pq-client/signature';
 import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
@@ -67,16 +68,21 @@ let httpImpl: (m: Mutation) => Promise<Response> | Response;
 
 vi.mock('@/api/client', () => ({
 	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string): Mutation =>
-			type === 'insert'
-				? { type, modified: row, syncMetadata: { relation } }
-				: { type, original: {}, changes: row, syncMetadata: { relation } },
 		ingestWithAuthEach: async (mutations: Mutation[]) => {
 			const m = mutations[0];
 			sent.push({ relation: m.syncMetadata.relation, type: m.type, row: rowOf(m) });
 			return httpImpl(m);
 		},
 	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: (relation: string, row: Record<string, unknown>, type: string): Mutation =>
+		type === 'insert'
+			? { type, modified: row, syncMetadata: { relation } }
+			: { type, original: {}, changes: row, syncMetadata: { relation } },
 }));
 
 vi.mock('@/lib/data/intents', () => {
@@ -113,17 +119,16 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	},
 }));
 
-vi.mock('@/libs/DialogCrypto', () => ({
-	DialogCrypto: {
-		computeDialogHash: () => DIALOG_HASH,
-		deriveSenderMsgKey: () => new Uint8Array(32),
-		wrapSenderMsgKey: async () => ({ peerKemWrapKeyB64: 'wrap', peerWrappedMsgKeyB64: 'wrapped' }),
-		computeReactionHash: (_k: unknown, messageId: string, reactor: string, emoji: string) => `dmr_${messageId}:${reactor}:${emoji}`,
-		encryptContent: async (_k: unknown, text: string) => `enc(${text})`,
-		decryptContent: async (_k: unknown, ciphertext: unknown) =>
-			typeof ciphertext === 'string' && ciphertext.startsWith('enc(') && ciphertext.endsWith(')')
-				? ciphertext.slice(4, -1) : null,
-	},
+vi.mock('@buckitup/pq-client/dialogs', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/dialogs')>()),
+	dialogHash: () => DIALOG_HASH,
+	deriveSenderMsgKey: () => new Uint8Array(32),
+	wrapSenderMsgKey: async () => ({ peer_kem_wrap_key_b64: 'wrap', peer_wrapped_msg_key_b64: 'wrapped' }),
+	reactionHash: (_k: unknown, messageId: string, reactor: string, emoji: string) => `dmr_${messageId}:${reactor}:${emoji}`,
+	encryptContent: async (_k: unknown, text: string) => `enc(${text})`,
+	decryptContent: async (_k: unknown, ciphertext: unknown) =>
+		typeof ciphertext === 'string' && ciphertext.startsWith('enc(') && ciphertext.endsWith(')')
+			? ciphertext.slice(4, -1) : null,
 }));
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
@@ -154,7 +159,9 @@ const liveReactionItem = (store: ReturnType<typeof useDialogsStore>, messageId =
 const seenActive = (store: ReturnType<typeof useDialogsStore>, messageId = MSG_ID): boolean =>
 	liveReactionItem(store, messageId)?.desiredActive ?? false;
 
-beforeEach(() => {
+beforeEach(async () => {
+	await useMemoryLocalStore();
+	await markDialogKeyPublishedHere(MY_HASH, DIALOG_HASH);
 	setActivePinia(createPinia());
 	sent = [];
 	httpImpl = (mutations) => ok([mutations] as unknown as Mutation[]);

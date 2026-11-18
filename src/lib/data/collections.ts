@@ -23,7 +23,7 @@ import type {
 	DialogMessageVersionRow,
 	DialogMessageReactionRow,
 	DialogMessageReceiptRow,
-} from './types';
+} from '@buckitup/pq-client/types';
 
 import { electricUrl } from './shapeRead';
 import { FetchError } from '@electric-sql/client';

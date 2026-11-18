@@ -36,7 +36,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 }));
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { receiptHash: computeReceiptHash, deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 const { encodeContent } = await import('@buckitup/pq-client/content');
 
 const me = makeTestIdentity(21);
@@ -53,9 +53,9 @@ describe('readPeerParts', () => {
 			message_id: id(n),
 			dialog_hash: dialogHash,
 			sender_hash: author.userHash,
-			content_b64: await DialogCrypto.encryptContent(key, encodeContent(parts)),
+			content_b64: await encryptContent(key, encodeContent(parts)),
 			deleted_flag: false,
-			refs_map_b64: await DialogCrypto.encryptContent(key, JSON.stringify({})),
+			refs_map_b64: await encryptContent(key, JSON.stringify({})),
 			parent_sign_hash: null,
 			owner_timestamp: 1_700_000_500 + n,
 			...tweak,
@@ -65,7 +65,7 @@ describe('readPeerParts', () => {
 	};
 	const seed = (...rows) => { for (const r of rows) collections.dialog.messages.rows.set(r.message_id, r); };
 	const receipt = (author, messageId, type, over = {}) => signRow(author, {
-		receipt_hash: DialogCrypto.computeReceiptHash(messageId, SIGN, author.userHash, type),
+		receipt_hash: computeReceiptHash(messageId, SIGN, author.userHash, type),
 		dialog_hash: dialogHash,
 		message_id: messageId,
 		peer_hash: author.userHash,
@@ -89,14 +89,14 @@ describe('readPeerParts', () => {
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash);
 		// The peer's key, wrapped for this account, as the peer publishes it.
-		peerKey = DialogCrypto.deriveSenderMsgKey(peer.signSkey, peer.kemSkey, bytesToHex(peer.contactSk), me.userHash);
-		const wrapped = await DialogCrypto.wrapSenderMsgKey(peerKey, fromBase64(me.card.crypt_pkey));
+		peerKey = deriveSenderMsgKey(peer.signSkey, peer.kemSkey, me.userHash);
+		const wrapped = await wrapSenderMsgKey(peerKey, fromBase64(me.card.crypt_pkey));
 		collections.dialog.keys.rows.set(`${dialogHash}|${peer.userHash}`, signRow(peer, {
 			dialog_hash: dialogHash, sender_hash: peer.userHash, peer_hash: me.userHash,
-			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+			peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 			deleted_flag: false, owner_timestamp: 1_700_000_000,
 		}));
-		myKey = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, bytesToHex(me.contactSk), peer.userHash);
+		myKey = deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 		collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, signRow(me, {
 			dialog_hash: dialogHash, sender_hash: me.userHash, peer_hash: peer.userHash,
 			peer_kem_wrap_key_b64: 'AQ', peer_wrapped_msg_key_b64: 'Ag', deleted_flag: false, owner_timestamp: 1_700_000_000,

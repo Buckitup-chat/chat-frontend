@@ -1,15 +1,8 @@
 import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
-import { verifyMessageRow, verifySideRow } from '@buckitup/pq-client/verifyDialogRow';
-import { verifyFields, deriveSignHash } from '@buckitup/pq-client/signature';
-import { signableFields } from '@buckitup/pq-client/schema';
+import { verifyRow, SIGN_HASH_PREFIX } from '@buckitup/pq-client/rows';
 import { VaultLockedError } from './keyCustody';
 import { OWNER_FIELD } from './writeContracts';
-import type {
-	DialogMessageRow,
-	DialogMessageReactionRow,
-	DialogMessageReceiptRow,
-	UserCardRow,
-} from './types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 export type RowInvalidReason =
 	| 'missing_signature'
@@ -29,11 +22,7 @@ export type RowVerification =
 
 export type SignPkeyResolver = (userHash: string) => Promise<string | null>;
 
-export const SIGN_HASH_PREFIX: Record<string, string> = {
-	user_storage: 'uss_',
-	dialog_messages: 'dms_',
-	dialog_messages_versions: 'dms_',
-};
+export { SIGN_HASH_PREFIX };
 
 const VERIFIABLE = new Set([
 	'user_cards',
@@ -63,16 +52,8 @@ const verifyCardRow = (row: Record<string, unknown>): RowVerification => {
 };
 
 const verifySignedFields = (relation: string, row: Record<string, unknown>, signPkey: string): RowVerification => {
-	const signB64 = row.sign_b64;
-	if (typeof signB64 !== 'string' || !signB64) return invalid('missing_signature');
-	const prefix = SIGN_HASH_PREFIX[relation];
-	if (prefix) {
-		if (typeof row.sign_hash !== 'string' || !row.sign_hash) return invalid('missing_sign_hash');
-		if (row.sign_hash !== deriveSignHash(prefix, signB64)) return invalid('sign_hash_mismatch');
-	}
-	const fields = signableFields(relation, row);
-	if (!fields) return invalid('missing_fields');
-	return verifyFields(fields as never, signB64, signPkey) ? VERIFIED : invalid('bad_signature');
+	const verdict = verifyRow(relation, row, signPkey);
+	return verdict.status === 'ok' ? VERIFIED : invalid(verdict.reason);
 };
 
 export function verifyRowWithKey(relation: string, row: Record<string, unknown>, authorSignPkey: string): RowVerification {
@@ -80,18 +61,9 @@ export function verifyRowWithKey(relation: string, row: Record<string, unknown>,
 		case 'user_cards':
 			return verifyCardRow(row);
 		case 'dialog_messages':
-		case 'dialog_messages_versions': {
-			if (typeof row.sign_hash !== 'string' || !row.sign_hash) {
-				return row.sign_b64 ? invalid('missing_sign_hash') : invalid('missing_signature');
-			}
-			const verdict = verifyMessageRow(row as unknown as DialogMessageRow, authorSignPkey);
-			return verdict.status === 'ok' ? VERIFIED : invalid(verdict.reason);
-		}
+		case 'dialog_messages_versions':
 		case 'dialog_message_reactions':
-		case 'dialog_message_receipts': {
-			const verdict = verifySideRow(row as unknown as DialogMessageReactionRow | DialogMessageReceiptRow, authorSignPkey);
-			return verdict.status === 'ok' ? VERIFIED : invalid(verdict.reason);
-		}
+		case 'dialog_message_receipts':
 		case 'user_storage':
 		case 'dialog_keys':
 		case 'files':

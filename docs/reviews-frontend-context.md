@@ -188,8 +188,8 @@ AES key exactly as our dialog keys do; only the domain string differs:
 | dialog key (we have it) | `buckitup/dialog-wrap/v1` | `wrap` |
 | rights envelope (needed) | `buckitup/review-right/v1` | `wrap` |
 
-So `DialogCrypto.wrapSenderMsgKey` / `unwrapSenderMsgKey` should be parameterised
-by the salt rather than rewritten. On the server the salt lives in
+So `wrapSenderMsgKey` / `unwrapSenderMsgKey` from `@buckitup/pq-client/dialogs`
+should be parameterised by the salt in the SDK rather than rewritten in the app. On the server the salt lives in
 `Chat.Data.ReviewRightEnvelope`, one place for everyone who wraps and unwraps; a
 divergence here means a guaranteed undecryptable envelope.
 

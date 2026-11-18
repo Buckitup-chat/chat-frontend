@@ -49,7 +49,7 @@
 // The optical handshake v2 (docs/task-handshake-pq2.md): the camera and the
 // QR code on screen; the result goes to the modal, which shows it. The
 // protocol is the engine's
-// (src/lib/handshake/engine.ts) and the module's (packages/pq-client/src/handshake.ts);
+// (src/lib/handshake/engine.ts) and the module's (@buckitup/pq-client/handshake);
 // this component runs one engine per session.
 //
 // A session id is checked after every await: a session restarted while the

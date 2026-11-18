@@ -34,19 +34,6 @@ let signCallCount = 0;
 let sent: unknown[][] = [];
 vi.mock('@/api/client', () => ({
 	api: {
-		createStorageMutation: vi.fn((userHash: string, uuid: string, valueB64: string, _h: unknown, _v: unknown, ownerTimestamp: number, _sk: unknown, _d: unknown, deletedFlag: boolean, parentSignHash: string | null, _sh: unknown, _sb: unknown, mutationType: string) => {
-			signCallCount += 1;
-			const row = {
-				user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
-				owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
-				sign_hash: 'uss_' + String(signCallCount).padStart(128, '0'), sign_b64: 'sig',
-			};
-			return {
-				type: mutationType,
-				...(mutationType === 'insert' ? { modified: row } : { original: {}, changes: row }),
-				syncMetadata: { relation: 'user_storage' },
-			};
-		}),
 		ingestWithAuthEach: vi.fn(async (mutations: unknown[]) => {
 			sent.push(mutations);
 			return {
@@ -55,6 +42,25 @@ vi.mock('@/api/client', () => ({
 			} as unknown as Response;
 		}),
 	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: vi.fn((_relation: string, signable: Record<string, unknown>, mutationType: string) => {
+		const { user_hash: userHash, uuid, value_b64: valueB64, owner_timestamp: ownerTimestamp, deleted_flag: deletedFlag, parent_sign_hash: parentSignHash } = signable as { user_hash: string; uuid: string; value_b64: string; owner_timestamp: number; deleted_flag: boolean; parent_sign_hash: string | null };
+		signCallCount += 1;
+		const row = {
+			user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
+			owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
+			sign_hash: 'uss_' + String(signCallCount).padStart(128, '0'), sign_b64: 'sig',
+		};
+		return {
+			type: mutationType,
+			...(mutationType === 'insert' ? { modified: row } : { original: {}, changes: row }),
+			syncMetadata: { relation: 'user_storage' },
+		};
+	}),
 }));
 
 const { createShapeLink, registerShapeLink, whenLive } = await import('@/lib/data/shapeLink');
@@ -72,6 +78,7 @@ const { _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/accepte
 const { VaultLockedError } = await import('@/lib/data/keyCustody');
 const { DecryptFailedError } = await import('@/lib/data/secureStore');
 const { api } = await import('@/api/client');
+const { rowMutation } = await import('@buckitup/pq-client/rows');
 
 const makeShape = (): FakeShape => {
 	const rows = new Map<string, unknown>();
@@ -138,11 +145,11 @@ let accepted: ReturnType<typeof makeStorage>;
 const acceptedKey = `user_storage:${USER}|${SLOT}`;
 const storeAccepted = (value: unknown) => accepted.map.set(acceptedKey, JSON.stringify(value));
 
-const signCalls = () => (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls;
+const signCalls = () => (rowMutation as ReturnType<typeof vi.fn>).mock.calls;
 const token = () => currentSessionToken()!;
 
 async function expectNothingBuilt(): Promise<void> {
-	expect(api.createStorageMutation).not.toHaveBeenCalled();
+	expect(rowMutation).not.toHaveBeenCalled();
 	expect(api.ingestWithAuthEach).not.toHaveBeenCalled();
 	expect(await pendingEntries(USER)).toHaveLength(0);
 	const { entries } = await intentsOf(USER);
@@ -441,7 +448,7 @@ describe('recovery builds the same intent once the base is provable', () => {
 
 		expect(signCalls()).toHaveLength(1);
 		expect(signCalls()[0].at(-1)).toBe('update');
-		expect(signCalls()[0][9]).toBe(hashOf('a'));
+		expect(signCalls()[0][1].parent_sign_hash).toBe(hashOf('a'));
 		await vi.waitFor(() => expect(sent).toHaveLength(1));
 		const all = (await intentsOf(USER, { includeResolved: true })).entries;
 		expect(all.map((e) => e.id)).toEqual([id]);
@@ -500,6 +507,6 @@ describe('session fencing', () => {
 		release();
 
 		await expect(call).rejects.toBeInstanceOf(SessionFencedError);
-		expect(api.createStorageMutation).not.toHaveBeenCalled();
+		expect(rowMutation).not.toHaveBeenCalled();
 	});
 });

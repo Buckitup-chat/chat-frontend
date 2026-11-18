@@ -443,8 +443,7 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { fileKey } from '@/lib/data/fileKey';
 import { fileSize } from '@/utils/formatBytes';
-import { contentToText, quoteSnapshot } from '@buckitup/pq-client/content';
-import { canEditText } from '@/lib/editableParts';
+import { contentToText, quoteSnapshot, canEditText } from '@buckitup/pq-client/content';
 import UiBackToList from '@/components/ui/UiBackToList.vue';
 import RecoveryInviteCard from './RecoveryInviteCard.vue';
 import RecoveryShareCard from './RecoveryShareCard.vue';

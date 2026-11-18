@@ -16,21 +16,6 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 
 vi.mock('@/api/client', () => ({
 	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => {
-			signatures++;
-			const signed = { ...row, sign_b64: `sig-${signatures}` };
-			return type === 'insert'
-				? { type, modified: signed, syncMetadata: { relation } }
-				: { type, original: {}, changes: signed, syncMetadata: { relation } };
-		},
-		createStorageMutation: (userHash: string, uuid: string, valueB64: string, _a: unknown, _b: unknown, ts: number,
-			_skey: unknown, _c: unknown, del: boolean, parent: string | null, _d: unknown, _e: unknown, type: string) => {
-			signatures++;
-			const changes = { user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: del, owner_timestamp: ts, parent_sign_hash: parent, sign_b64: `sig-${signatures}` };
-			return type === 'insert'
-				? { type, modified: changes, syncMetadata: { relation: 'user_storage' } }
-				: { type, original: { user_hash: userHash, uuid }, changes, syncMetadata: { relation: 'user_storage' } };
-		},
 		ingestWithAuthEach: async (mutations: unknown[]) => {
 			sent.push(mutations);
 			return {
@@ -40,6 +25,30 @@ vi.mock('@/api/client', () => ({
 		},
 	},
 }));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => {
+	const storageMutation = (_relation: string, signable: Record<string, unknown>, type: string) => {
+		const { user_hash: userHash, uuid, value_b64: valueB64, owner_timestamp: ts, deleted_flag: del, parent_sign_hash: parent } = signable as { user_hash: string; uuid: string; value_b64: string; owner_timestamp: number; deleted_flag: boolean; parent_sign_hash: string | null };
+		signatures++;
+		const changes = { user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: del, owner_timestamp: ts, parent_sign_hash: parent, sign_b64: `sig-${signatures}` };
+		return type === 'insert'
+			? { type, modified: changes, syncMetadata: { relation: 'user_storage' } }
+			: { type, original: { user_hash: userHash, uuid }, changes, syncMetadata: { relation: 'user_storage' } };
+	};
+	const genericMutation = (relation: string, row: Record<string, unknown>, type: string) => {
+		signatures++;
+		const signed = { ...row, sign_b64: `sig-${signatures}` };
+		return type === 'insert'
+			? { type, modified: signed, syncMetadata: { relation } }
+			: { type, original: {}, changes: signed, syncMetadata: { relation } };
+	};
+	return {
+		...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+		signRow: (_relation: string, row: Record<string, unknown>) => row,
+		rowMutation: (relation: string, row: Record<string, unknown>, type: string) =>
+			relation === 'user_storage' ? storageMutation(relation, row, type) : genericMutation(relation, row, type),
+	};
+});
 
 const { signAndDispatchIntent } = await import('@/lib/data/intentRecovery');
 const { enqueueIntent, getIntent, _setIntentStorageForTests } = await import('@/lib/data/intents');

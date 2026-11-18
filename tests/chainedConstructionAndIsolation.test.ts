@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { setActivePinia, createPinia } from 'pinia';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -59,7 +60,7 @@ const { AccountMismatchError } = await import('@/lib/data/keyCustody');
 const { SessionFencedError } = await import('@/lib/data/sessionGuard');
 const ingest = await import('@/lib/data/ingest');
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { deriveSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 const { encodeContent } = await import('@buckitup/pq-client/content');
 
 const memStore = () => {
@@ -117,11 +118,12 @@ beforeEach(async () => {
 	store = useDialogsStore();
 	dialogHash = store.getDialogHash(peer.userHash)!;
 	collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, signedDialogKeyRow(me, { dialog_hash: dialogHash, peer_hash: peer.userHash }));
-	myKey = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, me.vault.evm_skey, peer.userHash);
+	await markDialogKeyPublishedHere(me.userHash, dialogHash);
+	myKey = deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 	collections.dialog.messages.rows.set(MESSAGE_ID, signRow(me, {
 		message_id: MESSAGE_ID, dialog_hash: dialogHash, sender_hash: me.userHash,
-		content_b64: await DialogCrypto.encryptContent(myKey, encodeContent([{ kind: 'text', text: 'original' }])),
-		deleted_flag: false, refs_map_b64: await DialogCrypto.encryptContent(myKey, '{}'),
+		content_b64: await encryptContent(myKey, encodeContent([{ kind: 'text', text: 'original' }])),
+		deleted_flag: false, refs_map_b64: await encryptContent(myKey, '{}'),
 		parent_sign_hash: null, owner_timestamp: 1_700_000_100,
 	}, 'dms_'));
 });
@@ -251,12 +253,12 @@ describe('a switch of account during construction writes nothing', () => {
 	it('a checkpoint alert scan that outlives its session records nothing for the next', async () => {
 		const carrier = signRow(me, {
 			message_id: 'dmsg_0199dddd-0000-7000-8000-000000000009', dialog_hash: dialogHash, sender_hash: me.userHash,
-			content_b64: await DialogCrypto.encryptContent(myKey, encodeContent([{
+			content_b64: await encryptContent(myKey, encodeContent([{
 				kind: 'checkpoint', version: CHECKPOINT_VERSION, reducerVersion: REDUCER_VERSION, treeVersion: TREE_VERSION,
 				frontierRoot: deriveFrontierRoot({}), viewRoot: buildViewTree({ [MESSAGE_ID]: { signHash: original().sign_hash as string, deleted: false } }).root,
 				frontier: {}, createdAt: 1_700_000_400,
 			}] as never)),
-			deleted_flag: false, refs_map_b64: await DialogCrypto.encryptContent(myKey, '{}'), parent_sign_hash: null, owner_timestamp: 1_700_000_500,
+			deleted_flag: false, refs_map_b64: await encryptContent(myKey, '{}'), parent_sign_hash: null, owner_timestamp: 1_700_000_500,
 		}, 'dms_');
 		collections.dialog.messages.rows.set(carrier.message_id as string, carrier);
 		const write = deferred();

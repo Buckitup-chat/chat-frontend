@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { IngestRowResult } from '@/lib/data/types';
+import type { IngestRowResult } from '@buckitup/pq-client/types';
 
 let mockResults: unknown = null;
 let mockStatus = 200;

@@ -63,7 +63,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 
 const PageChat = (await import('@/views/chats/Page_Chat.vue')).default;
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 
 const makeIdentity = (seed) => {
 	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
@@ -95,7 +95,7 @@ describe('tombstone admission through the feed', () => {
 		const fields = {
 			message_id: mid, dialog_hash: dialogHash, sender_hash: signer.userHash,
 			content_b64: toBase64(new Uint8Array([5, 6, 7])), deleted_flag: false,
-			refs_map_b64: await DialogCrypto.encryptContent(key ?? senderKey, JSON.stringify(refs)),
+			refs_map_b64: await encryptContent(key ?? senderKey, JSON.stringify(refs)),
 			parent_sign_hash: null, owner_timestamp: 1_700_000_500, ...tweak,
 		};
 		const sign_b64 = signFields(fields, signer.sign.secretKey);
@@ -146,12 +146,12 @@ describe('tombstone admission through the feed', () => {
 		};
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peerId.userHash);
-		senderKey = DialogCrypto.deriveSenderMsgKey(author.sign.secretKey, author.kem.secretKey, bytesToHex(author.contactSk), peerId.userHash);
-		const ownWrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, peerId.kem.publicKey);
+		senderKey = deriveSenderMsgKey(author.sign.secretKey, author.kem.secretKey, peerId.userHash);
+		const ownWrapped = await wrapSenderMsgKey(senderKey, peerId.kem.publicKey);
 		collections.dialog.keys.rows.set(`${dialogHash}|${author.userHash}`, signedKeyRow(author, {
 			dialog_hash: dialogHash, sender_hash: author.userHash, peer_hash: peerId.userHash,
-			peer_kem_wrap_key_b64: ownWrapped.peerKemWrapKeyB64,
-			peer_wrapped_msg_key_b64: ownWrapped.peerWrappedMsgKeyB64,
+			peer_kem_wrap_key_b64: ownWrapped.peer_kem_wrap_key_b64,
+			peer_wrapped_msg_key_b64: ownWrapped.peer_wrapped_msg_key_b64,
 			deleted_flag: false, owner_timestamp: 1_700_000_000,
 		}));
 
@@ -159,12 +159,12 @@ describe('tombstone admission through the feed', () => {
 		// does it: wrapped to our ML-KEM public key in the peer's dialog_keys
 		// row. Without it the gate parks the peer's rows on "no key" and
 		// nothing downstream — including receipts — ever happens.
-		peerSenderKey = DialogCrypto.deriveSenderMsgKey(peerId.sign.secretKey, peerId.kem.secretKey, bytesToHex(peerId.contactSk), author.userHash);
-		const wrapped = await DialogCrypto.wrapSenderMsgKey(peerSenderKey, author.kem.publicKey);
+		peerSenderKey = deriveSenderMsgKey(peerId.sign.secretKey, peerId.kem.secretKey, author.userHash);
+		const wrapped = await wrapSenderMsgKey(peerSenderKey, author.kem.publicKey);
 		collections.dialog.keys.rows.set(`${dialogHash}|${peerId.userHash}`, signedKeyRow(peerId, {
 			dialog_hash: dialogHash, sender_hash: peerId.userHash, peer_hash: author.userHash,
-			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64,
-			peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+			peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64,
+			peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 			deleted_flag: false, owner_timestamp: 1_700_000_000,
 		}));
 		HOLDER.mutations.length = 0;

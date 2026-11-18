@@ -17,7 +17,7 @@ const read = async (locator: string, payload: unknown, status = 200) => {
 	let url = '';
 	globalThis.fetch = (async (requested: string) => {
 		url = String(requested);
-		return { ok: status === 200, status, json: async () => payload };
+		return { ok: status === 200, status, json: async () => (Array.isArray(payload) ? [...payload, { headers: { control: 'up-to-date' } }] : payload) };
 	}) as never;
 	try {
 		return { rows: await getPublicStorageRowsByUuid(locator), url };

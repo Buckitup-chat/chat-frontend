@@ -9,9 +9,6 @@ const sent: unknown[][] = [];
 import { vi } from 'vitest';
 vi.mock('@/api/client', () => ({
 	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => ({
-			type, modified: row, syncMetadata: { relation },
-		}),
 		ingestWithAuthEach: async (mutations: unknown[]) => {
 			sent.push(mutations);
 			await new Promise<void>((resolve) => { releaseNetwork = resolve; });
@@ -21,6 +18,14 @@ vi.mock('@/api/client', () => ({
 			} as unknown as Response;
 		},
 	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: (relation: string, row: Record<string, unknown>, type: string) => ({
+		type, modified: row, syncMetadata: { relation },
+	}),
 }));
 
 const { signAndDispatchIntent } = await import('@/lib/data/intentRecovery');

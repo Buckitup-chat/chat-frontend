@@ -4,10 +4,10 @@ import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
-import { signFields, deriveSignHash, toBase64, fromBase64 } from '@buckitup/pq-client/signature';
+import { signFields, deriveSignHash, toBase64 } from '@buckitup/pq-client/signature';
 import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
 import { createDialogGate, type MessageLike } from '@/lib/data/dialogGate';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 // Real crypto end to end: forged rows must fail because the math says so,
 // not because a mock was told to say so.
@@ -82,31 +82,6 @@ const gateWithShared = (gate: ReturnType<typeof gateWith>, ...more: ReturnType<t
 	for (const m of more) refsOf.set(m.row.sign_hash!, m.refs);
 	return gate;
 };
-
-describe('verifyUserCard — trust bootstrap', () => {
-	it('accepts an honest self-signed card', () => {
-		expect(verifyUserCard(alice.card).status).toBe('verified');
-	});
-
-	// user_hash is derived, never asserted: swapping in another key under the
-	// same hash is the basic identity forgery this check exists for.
-	it('rejects a card whose sign_pkey does not hash to its user_hash', () => {
-		const forged = { ...bob.card, user_hash: alice.userHash };
-		expect(verifyUserCard(forged)).toMatchObject({ status: 'invalid', reason: 'hash_mismatch' });
-	});
-
-	it('rejects a card whose signed field was altered', () => {
-		const renamed = { ...alice.card, name: 'Mallory' };
-		expect(verifyUserCard(renamed)).toMatchObject({ status: 'invalid', reason: 'bad_signature' });
-	});
-
-	// A broken cert would bind an attacker's KEM key to the victim's identity
-	// — everything encrypted "to alice" would open under the attacker's key.
-	it('rejects a card carrying a foreign crypt_cert', () => {
-		const swapped = { ...alice.card, crypt_cert: bob.card.crypt_cert };
-		expect(verifyUserCard(swapped)).toMatchObject({ status: 'invalid', reason: 'bad_signature' });
-	});
-});
 
 describe('dialog gate — signature admission (T-INTEGRITY)', () => {
 	it('admits an honest genesis message', async () => {
@@ -514,19 +489,6 @@ describe('dialog gate — bounded memory', () => {
 
 describe('author cards in a different binary encoding', () => {
 	const hexOf = (b: Uint8Array) => '\\x' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-
-	it('verifies a card whose binary columns arrived as postgres hex', () => {
-		const hexCard = {
-			...alice.card,
-			sign_pkey: hexOf(alice.sign.publicKey),
-			crypt_pkey: hexOf(fromBase64(alice.card.crypt_pkey as string)),
-			crypt_cert: hexOf(fromBase64(alice.card.crypt_cert as string)),
-			contact_pkey: hexOf(fromBase64(alice.card.contact_pkey as string)),
-			contact_cert: hexOf(fromBase64(alice.card.contact_cert as string)),
-			sign_b64: hexOf(fromBase64(alice.card.sign_b64 as string)),
-		};
-		expect(verifyUserCard(hexCard as never).status).toBe('verified');
-	});
 
 	it('admits a genesis message when the author card came back as hex', async () => {
 		const g = makeMessage(alice, {});

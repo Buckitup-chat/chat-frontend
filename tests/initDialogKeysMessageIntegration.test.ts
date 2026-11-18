@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { useMemoryLocalStore, markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { setActivePinia, createPinia } from 'pinia';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
@@ -68,10 +69,6 @@ let sent: Array<{ relation: string; row: Record<string, unknown> }>;
 let rejectKeyPermanently: boolean;
 vi.mock('@/api/client', () => ({
 	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string): Mutation =>
-			type === 'insert'
-				? { type, modified: row, syncMetadata: { relation } }
-				: { type, changes: row, syncMetadata: { relation } },
 		ingestWithAuthEach: async (mutations: Mutation[]) => {
 			const m = mutations[0];
 			const relation = m.syncMetadata.relation;
@@ -88,6 +85,15 @@ vi.mock('@/api/client', () => ({
 			} as unknown as Response;
 		},
 	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: (relation: string, row: Record<string, unknown>, type: string): Mutation =>
+		type === 'insert'
+			? { type, modified: row, syncMetadata: { relation } }
+			: { type, changes: row, syncMetadata: { relation } },
 }));
 
 vi.mock('@/lib/data/intents', () => {
@@ -124,13 +130,12 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	},
 }));
 
-vi.mock('@/libs/DialogCrypto', () => ({
-	DialogCrypto: {
-		computeDialogHash: () => DIALOG_HASH,
-		deriveSenderMsgKey: () => new Uint8Array(32),
-		wrapSenderMsgKey: async () => ({ peerKemWrapKeyB64: 'wrap', peerWrappedMsgKeyB64: 'wrapped' }),
-		encryptContent: async (_k: unknown, text: string) => `enc(${text})`,
-	},
+vi.mock('@buckitup/pq-client/dialogs', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/dialogs')>()),
+	dialogHash: () => DIALOG_HASH,
+	deriveSenderMsgKey: () => new Uint8Array(32),
+	wrapSenderMsgKey: async () => ({ peer_kem_wrap_key_b64: 'wrap', peer_wrapped_msg_key_b64: 'wrapped' }),
+	encryptContent: async (_k: unknown, text: string) => `enc(${text})`,
 }));
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
@@ -154,7 +159,8 @@ const makeMemoryStore = () => {
 	};
 };
 
-beforeEach(() => {
+beforeEach(async () => {
+	await useMemoryLocalStore();
 	setActivePinia(createPinia());
 	stopLeaderElection();
 	startLeaderElection(MY_HASH, () => {});

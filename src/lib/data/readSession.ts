@@ -1,28 +1,26 @@
 // Per-shape read session tokens for Electric access gating (trust mode).
 //
 // The server gates shape reads with Bearer tokens issued via POST /read_session
-// after a PoP challenge. This module owns the token lifecycle: lazy open on
-// first 401, deduplication of concurrent opens, renewal before expiry, and
-// the synchronous bearerFor() that Electric's header resolver calls on every
-// long-poll.
+// after a PoP challenge. The SDK owns lazy opening, concurrent-open
+// deduplication and renewal. This adapter binds it to the active account,
+// card recovery and approval UI, and exposes the synchronous bearerFor()
+// that Electric's header resolver calls on every long-poll.
 //
 // Tokens live in memory only — they are secrets (spec §7) and survive neither
 // reload nor logout. A server restart drops all sessions; a 401 on a locally
 // valid token triggers a fresh open.
 
+import {
+	createReadSessions,
+	type ReadSessionOpenContext,
+	type ReadSessionOutcome,
+	type ReadSessionResult,
+	type ReadSessions,
+} from '@buckitup/pq-client/transport';
 import { markShapeBlocked, markShapeUnblocked, isShapeBlocked } from './accessGate';
 import { transport } from './transport';
 
-interface ReadSessionEntry {
-	token: string;
-	shape: string;
-	expiresAt: number;
-	renewTimer: ReturnType<typeof setTimeout> | null;
-}
-
-const sessions = new Map<string, ReadSessionEntry>();
-const inflight = new Map<string, Promise<ReadSessionEntry | null>>();
-const tableShapes = new Map<string, string>();
+let current: ReadSessions | null = null;
 let generation = 0;
 
 type CardRecovery = 'accepted' | 'stale';
@@ -30,55 +28,39 @@ const cardRecoveries = new Map<string, Promise<CardRecovery>>();
 let cardRecoveryEpoch = 0;
 const cardRecoveryEnded = new Map<string, Error | null>();
 
-const RENEW_AHEAD_MS = 60_000;
 const FETCH_TIMEOUT_MS = 15_000;
+
+let encryptionManagerModule: Promise<typeof import('@/libs/EncryptionManagerPQ')> | null = null;
+const loadEncryptionManager = () => (encryptionManagerModule ??= import('@/libs/EncryptionManagerPQ'));
 
 // ---------- public API ----------
 
 export function bearerFor(shapeOrTable: string): string {
-	const entry = sessions.get(tableShapes.get(shapeOrTable) ?? shapeOrTable);
-	if (!entry || Date.now() >= entry.expiresAt) return '';
-	return `Bearer ${entry.token}`;
+	return current?.bearer(shapeOrTable) ?? '';
 }
 
 export function hasValidToken(shape: string): boolean {
-	const entry = sessions.get(shape);
-	return !!entry && Date.now() < entry.expiresAt;
+	return current?.hasValidToken(shape) ?? false;
 }
 
 export async function handleShapeAuth401(json: { error: string; shape: string }, table?: string): Promise<boolean> {
-	const { shape } = json;
-	if (table) tableShapes.set(table, shape);
-	invalidateSession(shape);
-	const entry = await openSession(shape);
-	return entry !== null;
+	const sessions = await signedInSessions();
+	if (!sessions) return false;
+	return tokenOf(json.shape, await sessions.reopen(json.shape, table)) !== null;
 }
 
 export async function openSession(shape: string): Promise<string | null> {
-	const existing = inflight.get(shape);
-	if (existing) {
-		const result = await existing;
-		return result?.token ?? null;
-	}
-
-	const promise = doOpen(shape, generation);
-	inflight.set(shape, promise);
-	try {
-		const result = await promise;
-		return result?.token ?? null;
-	} finally {
-		if (inflight.get(shape) === promise) inflight.delete(shape);
-	}
+	const sessions = await signedInSessions();
+	if (!sessions) return null;
+	return tokenOf(shape, await sessions.open(shape));
 }
 
 export function invalidateSession(shape: string): void {
-	const entry = sessions.get(shape);
-	if (entry?.renewTimer) clearTimeout(entry.renewTimer);
-	sessions.delete(shape);
+	current?.invalidate(shape);
 }
 
 export async function whenSignedIn(): Promise<void> {
-	const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
+	const { EncryptionManagerPQ } = await loadEncryptionManager();
 	const em = EncryptionManagerPQ.getInstance();
 	if (em.isAuth) return;
 	await new Promise<void>((resolve) => {
@@ -92,12 +74,8 @@ export async function whenSignedIn(): Promise<void> {
 }
 
 export function clearSessions(): void {
-	for (const entry of sessions.values()) {
-		if (entry.renewTimer) clearTimeout(entry.renewTimer);
-	}
-	sessions.clear();
-	inflight.clear();
-	tableShapes.clear();
+	current?.dispose();
+	current = null;
 	cardRecoveries.clear();
 	cardRecoveryEnded.clear();
 	generation++;
@@ -106,27 +84,53 @@ export function clearSessions(): void {
 // ---------- internals ----------
 
 type EncryptionManager = InstanceType<typeof import('@/libs/EncryptionManagerPQ').EncryptionManagerPQ>;
-const UNKNOWN_USER = Symbol('unknown_user');
-const STALE = Symbol('stale');
 
-async function doOpen(shape: string, gen: number): Promise<ReadSessionEntry | null> {
-	const stale = () => gen !== generation;
-	const { EncryptionManagerPQ } = await import('@/libs/EncryptionManagerPQ');
-	if (stale()) return null;
+function tokenOf(shape: string, result: ReadSessionResult): string | null {
+	if (result.kind === 'opened') return result.token;
+	if (result.kind === 'refused') throw new Error(`read_session for ${shape}: HTTP ${result.status}`);
+	return null;
+}
+
+async function signedInSessions(): Promise<ReadSessions | null> {
+	const gen = generation;
+	const { EncryptionManagerPQ } = await loadEncryptionManager();
+	if (gen !== generation) return null;
 	const em = EncryptionManagerPQ.getInstance();
 	if (!em.isAuth) return null;
-
 	const userHash = em.currentUserHash as string | null;
 	if (!userHash) return null;
-	const epoch = cardRecoveryEpoch;
-	const first = await requestSession(em, userHash, shape, stale);
-	if (first !== UNKNOWN_USER) return first;
+	if (current && current.userHash !== userHash) {
+		current.dispose();
+		current = null;
+	}
+	current ??= createReadSessions({
+		transport,
+		identity: { userHash, sign: (message) => em.signChallenge(message) },
+		timeoutMs: FETCH_TIMEOUT_MS,
+		openSession: (shape, context) => openWithCardRecovery(em, shape, context, gen),
+		onOutcome: noteOutcome,
+	});
+	return current;
+}
 
-	if (!(await recoverCard(em, userHash, epoch, stale)) || stale()) return null;
-	const retry = await requestSession(em, userHash, shape, stale);
-	if (retry !== UNKNOWN_USER) return retry;
-	if (!stale()) cardRecoveryEnded.set(userHash, null);
-	return null;
+function noteOutcome(shape: string, outcome: ReadSessionOutcome): void {
+	if (outcome.kind === 'opened' && isShapeBlocked(outcome.shape)) markShapeUnblocked(outcome.shape);
+	if (outcome.kind === 'not_in_trust_chain') markShapeBlocked(shape);
+}
+
+async function openWithCardRecovery(
+	em: EncryptionManager, shape: string, context: ReadSessionOpenContext, gen: number,
+): Promise<ReadSessionOutcome> {
+	const stale = () => gen !== generation;
+	const epoch = cardRecoveryEpoch;
+	const request = { signal: context.signal };
+	const first = await transport.openReadSession(context.userHash, shape, context.sign, request);
+	if (first.kind !== 'unknown_user') return first;
+
+	if (!(await recoverCard(em, context.userHash, epoch, stale)) || stale()) return first;
+	const retry = await transport.openReadSession(context.userHash, shape, context.sign, request);
+	if (retry.kind === 'unknown_user' && !stale()) cardRecoveryEnded.set(context.userHash, null);
+	return retry;
 }
 
 async function recoverCard(em: EncryptionManager, userHash: string, epoch: number, stale: () => boolean): Promise<boolean> {
@@ -152,52 +156,4 @@ async function recoverCard(em: EncryptionManager, userHash: string, epoch: numbe
 		if (stale()) return false;
 		throw e;
 	}
-}
-
-async function requestSession(
-	em: EncryptionManager, userHash: string, shape: string, stale: () => boolean,
-): Promise<ReadSessionEntry | null | typeof UNKNOWN_USER> {
-	// A session ended while the challenge was in flight signs nothing.
-	const sign = (message: Uint8Array) => {
-		if (stale()) throw STALE;
-		return em.signChallenge(message);
-	};
-	let outcome;
-	try {
-		outcome = await transport.openReadSession(userHash, shape, sign, { timeoutMs: FETCH_TIMEOUT_MS });
-	} catch (e) {
-		if (e === STALE) return null;
-		throw e;
-	}
-	if (stale()) return null;
-
-	switch (outcome.kind) {
-		case 'opened': {
-			const entry: ReadSessionEntry = { token: outcome.token, shape: outcome.shape, expiresAt: outcome.expiresAt, renewTimer: null };
-			sessions.set(outcome.shape, entry);
-			scheduleRenewal(entry);
-			if (isShapeBlocked(outcome.shape)) markShapeUnblocked(outcome.shape);
-			return entry;
-		}
-		case 'not_in_trust_chain':
-			markShapeBlocked(shape);
-			return null;
-		case 'unknown_user':
-			return UNKNOWN_USER;
-		case 'bad_proof':
-		case 'unknown_shape':
-			return null;
-		case 'refused':
-			throw new Error(`read_session for ${shape}: HTTP ${outcome.status}`);
-	}
-}
-
-function scheduleRenewal(entry: ReadSessionEntry): void {
-	if (entry.renewTimer) clearTimeout(entry.renewTimer);
-	const delay = Math.max(entry.expiresAt - Date.now() - RENEW_AHEAD_MS, 1000);
-	entry.renewTimer = setTimeout(() => {
-		entry.renewTimer = null;
-		if (!sessions.has(entry.shape)) return;
-		void openSession(entry.shape);
-	}, delay);
 }

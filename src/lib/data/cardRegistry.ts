@@ -12,7 +12,7 @@ import { getUserCardsCollection } from './collections';
 import { isTouched } from './readCache';
 import { readCachedCard } from './userCardsCache';
 import { settled } from './shapeLink';
-import type { UserCardRow } from './types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 const verified = new Map<string, string>(); // user_hash -> signPkeyB64 (padded)
 const rejected = new Map<string, string>(); // user_hash -> last invalid reason (diagnostics only)

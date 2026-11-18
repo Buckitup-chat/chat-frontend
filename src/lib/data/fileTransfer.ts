@@ -11,7 +11,8 @@
 // already holds through the file_chunks shape and re-PUT only the gaps.
 // Progress is reported in chunks, not guessed percentages (§2.1).
 
-import { signFields, toBase64, fromBase64 } from '@buckitup/pq-client/signature';
+import { toBase64, fromBase64 } from '@buckitup/pq-client/signature';
+import { rowMutation, signRow } from '@buckitup/pq-client/rows';
 import { sha3_512 } from '@noble/hashes/sha3';
 import { concatBytes } from '@noble/hashes/utils';
 import {
@@ -144,7 +145,8 @@ export const uploadFile = async (opts: {
 
 		// The signed payload is the chunk's manifest row (pq_files §1.2);
 		// canonicalPayload sorts the fields, so order here is cosmetic.
-		const signB64 = signFields(
+		const { sign_b64: signB64 } = signRow(
+			'file_chunks',
 			{
 				chunk_index: i,
 				data_hash: dataHash,
@@ -183,13 +185,8 @@ export const uploadFile = async (opts: {
 		total_size: bytes.length,
 		uploader_hash: uploaderHash,
 	};
-	const manifestSign = signFields(manifestFields as never, signSkey);
 	const manifestHandle = await sendMutationsAndAwaitShape(
-		[{
-			type: 'insert',
-			syncMetadata: { relation: 'files' },
-			modified: { ...manifestFields, sign_b64: manifestSign },
-		}],
+		[rowMutation('files', signRow('files', manifestFields, signSkey))],
 		signSkey,
 	);
 	const manifestAccepted = manifestHandle.acceptance.then((outcome) => {

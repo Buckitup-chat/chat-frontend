@@ -1,9 +1,4 @@
-export class VaultLockedError extends Error {
-	constructor(message: string, options?: { cause?: unknown }) {
-		super(message, options);
-		this.name = 'VaultLockedError';
-	}
-}
+export { VaultLockedError } from '@buckitup/pq-client/vault';
 
 export type SigningKeySource = Uint8Array | (() => Promise<Uint8Array>);
 

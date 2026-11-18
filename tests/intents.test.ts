@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DecryptFailedError } from '@/lib/data/secureStore';
 import {
 	enqueueIntent, getIntent, updateIntent, resolveIntent, intentsOf,
@@ -29,6 +29,17 @@ beforeEach(async () => {
 });
 
 describe('durable intent, before signing', () => {
+	it('lists intents captured in one millisecond in capture order across a base-36 counter rollover', async () => {
+		const clock = vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+		try {
+			for (let i = 0; i < 40; i++) await enqueueIntent({ n: i }, A, 'dialog_messages');
+			const listed = (await intentsOf(A)).entries.map((entry) => (entry.intent as { n: number }).n);
+			expect(listed).toEqual(Array.from({ length: 40 }, (_, i) => i));
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
 	it('persists the exact captured payload — reload does not refresh it to something newer', async () => {
 		const captured = { refs: ['tail-a', 'tail-b'], text: 'first draft' };
 		const id = await enqueueIntent(captured, A, 'dialog_messages');

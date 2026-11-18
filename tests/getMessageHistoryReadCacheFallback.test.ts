@@ -12,7 +12,7 @@ import { resetCardRegistry } from '@/lib/data/cardRegistry';
 import { _resetTouchedForTests } from '@/lib/data/readCache';
 import { setDialogCacheRow, clearDialogCacheDb } from './helpers/mainDialogCache';
 import type { SignableValue } from '@buckitup/pq-client/signature';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 const DIALOG_HASH = 'di_' + '6'.repeat(128);
 
@@ -66,9 +66,9 @@ const workingCardsCollection = () => ({
 });
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 
-let senderKey: ReturnType<typeof DialogCrypto.deriveSenderMsgKey>;
+let senderKey: ReturnType<typeof deriveSenderMsgKey>;
 let keysRowKey: string;
 
 beforeEach(async () => {
@@ -77,12 +77,12 @@ beforeEach(async () => {
 	await clearDialogCacheDb();
 	_resetTouchedForTests();
 
-	senderKey = DialogCrypto.deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, bytesToHex(peer.contactSk), me.userHash);
-	const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, me.kem.publicKey);
+	senderKey = deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, me.userHash);
+	const wrapped = await wrapSenderMsgKey(senderKey, me.kem.publicKey);
 	keysRowKey = `${DIALOG_HASH}|${peer.userHash}`;
 	const keyFields = {
 		dialog_hash: DIALOG_HASH, sender_hash: peer.userHash, peer_hash: me.userHash,
-		peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+		peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 		deleted_flag: false, owner_timestamp: 999,
 	};
 	const keyRow = { ...keyFields, sign_b64: signFields(keyFields, peer.sign.secretKey) };
@@ -106,7 +106,7 @@ beforeEach(async () => {
 const signedVersion = async (messageId: string, text: string, tweak: Record<string, SignableValue> = {}) => {
 	const fields = {
 		message_id: messageId, dialog_hash: DIALOG_HASH, sender_hash: peer.userHash,
-		content_b64: await DialogCrypto.encryptContent(senderKey, encodeContent([{ kind: 'text', text }])),
+		content_b64: await encryptContent(senderKey, encodeContent([{ kind: 'text', text }])),
 		deleted_flag: false, refs_map_b64: null, parent_sign_hash: null, owner_timestamp: 1_700_000_400, ...tweak,
 	};
 	const sign_b64 = signFields(fields, peer.sign.secretKey);
@@ -141,7 +141,7 @@ describe('getMessageHistory: dialog_messages_versions disk fallback', () => {
 	it('a forged cached version never displays as authentic history text', async () => {
 		const messageId = 'dmsg_' + 'b'.repeat(8) + '-0000-7000-8000-000000000000';
 		const honest = await signedVersion(messageId, 'authentic old text');
-		const forged = { ...honest, content_b64: await DialogCrypto.encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'forged old text' }])) };
+		const forged = { ...honest, content_b64: await encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'forged old text' }])) };
 		await setDialogCacheRow('dialog_messages_versions', `${forged.message_id}|${forged.sign_hash}`, forged);
 		collections.dialog.versions = flakyVersionsCollection();
 

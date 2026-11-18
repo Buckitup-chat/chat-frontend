@@ -11,13 +11,13 @@ import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64 } from '@buckitup/pq-client/signature';
 import { encodeContent } from '@buckitup/pq-client/content';
-import { DialogCrypto } from '@/libs/DialogCrypto';
-import type { UserCardRow } from '@/lib/data/types';
+import { dialogHash as computeDialogHash, receiptHash as computeReceiptHash, reactionHash as computeReactionHash, deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } from '@buckitup/pq-client/dialogs';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 import type { DialogCacheTable } from '@/lib/data/dialogCache';
 import type { App } from './helpers/twoClients';
 
 type Identity = ReturnType<typeof makeIdentity>;
-type SenderKey = ReturnType<typeof DialogCrypto.deriveSenderMsgKey>;
+type SenderKey = ReturnType<typeof deriveSenderMsgKey>;
 type Dialog = Awaited<ReturnType<typeof buildDialog>>;
 type DialogCacheModule = typeof import('@/lib/data/dialogCache');
 
@@ -97,14 +97,14 @@ vi.mock('vue-router', () => ({
 	useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
 }));
 
-const dialogHashOf = (me: Identity, peer: Identity) => DialogCrypto.computeDialogHash(me.userHash, peer.userHash);
-const senderKeyOf = (author: Identity, other: Identity) => DialogCrypto.deriveSenderMsgKey(author.sign.secretKey, author.kem.secretKey, bytesToHex(author.contactSk), other.userHash);
+const dialogHashOf = (me: Identity, peer: Identity) => computeDialogHash(me.userHash, peer.userHash);
+const senderKeyOf = (author: Identity, other: Identity) => deriveSenderMsgKey(author.sign.secretKey, author.kem.secretKey, other.userHash);
 
 const signedMessage = async (dialogHash: string, key: SenderKey, id: string, text: string, tweak: Record<string, unknown> = {}) => {
 	const fields = {
 		message_id: id, dialog_hash: dialogHash, sender_hash: PEER.userHash,
-		content_b64: await DialogCrypto.encryptContent(key, encodeContent([{ kind: 'text', text }])),
-		deleted_flag: false, refs_map_b64: await DialogCrypto.encryptContent(key, JSON.stringify({})),
+		content_b64: await encryptContent(key, encodeContent([{ kind: 'text', text }])),
+		deleted_flag: false, refs_map_b64: await encryptContent(key, JSON.stringify({})),
 		parent_sign_hash: null, owner_timestamp: 1_700_000_500, ...tweak,
 	};
 	const sign_b64 = signFields(fields as never, PEER.sign.secretKey);
@@ -114,20 +114,20 @@ const signedMessage = async (dialogHash: string, key: SenderKey, id: string, tex
 const buildDialog = async () => {
 	const dialogHash = dialogHashOf(A, PEER);
 	const key = senderKeyOf(PEER, A);
-	const wrapped = await DialogCrypto.wrapSenderMsgKey(key, A.kem.publicKey);
+	const wrapped = await wrapSenderMsgKey(key, A.kem.publicKey);
 	const keyFields = {
 		dialog_hash: dialogHash, sender_hash: PEER.userHash, peer_hash: A.userHash,
-		peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+		peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 		deleted_flag: false, owner_timestamp: 999,
 	};
 	const keysRow = { ...keyFields, sign_b64: signFields(keyFields as never, PEER.sign.secretKey) };
 
 	const original = await signedMessage(dialogHash, key, 'dmsg_' + '1'.repeat(8) + '-0000-7000-8000-000000000000', 'first version', { owner_timestamp: 1_700_000_400 });
 	const edited = await signedMessage(dialogHash, key, original.message_id, 'history from disk', {
-		refs_map_b64: await DialogCrypto.encryptContent(key, JSON.stringify({ [original.message_id]: original.sign_hash })),
+		refs_map_b64: await encryptContent(key, JSON.stringify({ [original.message_id]: original.sign_hash })),
 		parent_sign_hash: original.sign_hash, owner_timestamp: 1_700_000_900,
 	});
-	const citingEdited = await DialogCrypto.encryptContent(key, JSON.stringify({ [edited.message_id]: edited.sign_hash }));
+	const citingEdited = await encryptContent(key, JSON.stringify({ [edited.message_id]: edited.sign_hash }));
 	const tombstone = await signedMessage(dialogHash, key, 'dmsg_' + '2'.repeat(8) + '-0000-7000-8000-000000000000', '', {
 		deleted_flag: true, content_b64: '', refs_map_b64: citingEdited, owner_timestamp: 1_700_000_950,
 	});
@@ -138,19 +138,19 @@ const buildDialog = async () => {
 
 	const signedReaction = async (emoji: string) => {
 		const fields = {
-			reaction_hash: DialogCrypto.computeReactionHash(key, edited.message_id, PEER.userHash, emoji),
+			reaction_hash: computeReactionHash(key, edited.message_id, PEER.userHash, emoji),
 			dialog_hash: dialogHash, message_id: edited.message_id, message_sign_hash: edited.sign_hash,
-			reactor_hash: PEER.userHash, type_b64: await DialogCrypto.encryptContent(key, emoji),
+			reactor_hash: PEER.userHash, type_b64: await encryptContent(key, emoji),
 			deleted_flag: false, owner_timestamp: 1_700_001_000,
 		};
 		return { ...fields, sign_b64: signFields(fields as never, PEER.sign.secretKey) };
 	};
 	const goodReaction = await signedReaction('👍');
-	const forgedReaction = { ...(await signedReaction('🔥')), type_b64: await DialogCrypto.encryptContent(key, '💀') };
+	const forgedReaction = { ...(await signedReaction('🔥')), type_b64: await encryptContent(key, '💀') };
 
 	const receipt = (by: Identity, signer: Identity) => {
 		const fields = {
-			receipt_hash: DialogCrypto.computeReceiptHash(edited.message_id, edited.sign_hash, by.userHash, 'read'),
+			receipt_hash: computeReceiptHash(edited.message_id, edited.sign_hash, by.userHash, 'read'),
 			dialog_hash: dialogHash, message_id: edited.message_id, peer_hash: by.userHash, type: 'read',
 			message_sign_hash: edited.sign_hash, owner_timestamp: 1_700_001_100,
 		};

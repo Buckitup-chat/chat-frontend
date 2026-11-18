@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { setActivePinia, createPinia } from 'pinia';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { toBase64 } from '@buckitup/pq-client/signature';
 import { deriveFrontierRoot, buildViewTree, CHECKPOINT_VERSION, REDUCER_VERSION, TREE_VERSION } from '@buckitup/pq-client/checkpoint';
 import { makeFakeLockManager } from './helpers/fakeWebLocks';
@@ -59,7 +61,7 @@ const { ensureOwnDialogKeyPublished } = await import('@/lib/data/messageIntent')
 const { decideCardConstruction } = await import('@/lib/data/userCardIntent');
 const { verifiedCards } = await import('@/lib/data/userCardsLink');
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { dialogHash: computeDialogHash, deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 const { encodeContent } = await import('@buckitup/pq-client/content');
 const { rawViewState } = await import('@/lib/data/checkpointAlerts');
 const { registerShapeLink } = await import('@/lib/data/shapeLink');
@@ -177,12 +179,12 @@ describe('dialog_keys: only a verified key row gives a key', () => {
 		setActivePinia(createPinia());
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash)!;
-		peerSenderKey = DialogCrypto.deriveSenderMsgKey(peer.signSkey, peer.kemSkey, peer.vault.evm_skey, me.userHash);
+		peerSenderKey = deriveSenderMsgKey(peer.signSkey, peer.kemSkey, me.userHash);
 		const myCryptPkey = Uint8Array.from(atob(me.card.crypt_pkey as string), (c) => c.charCodeAt(0));
-		const wrapped = await DialogCrypto.wrapSenderMsgKey(peerSenderKey, myCryptPkey) as { peerKemWrapKeyB64: string; peerWrappedMsgKeyB64: string };
+		const wrapped = await wrapSenderMsgKey(peerSenderKey, myCryptPkey);
 		peerKeyRow = signedDialogKeyRow(peer, {
 			dialog_hash: dialogHash, peer_hash: me.userHash,
-			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+			peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 		});
 	});
 	const keyRowAt = (row: Row) => collections.dialog.keys.rows.set(`${dialogHash}|${row.sender_hash}`, row);
@@ -194,8 +196,8 @@ describe('dialog_keys: only a verified key row gives a key', () => {
 	});
 
 	it('a forged key row does not unwrap and is not cached; the honest row then does', async () => {
-		const otherWrap = await DialogCrypto.wrapSenderMsgKey(new Uint8Array(32).fill(7), Uint8Array.from(atob(me.card.crypt_pkey as string), (c) => c.charCodeAt(0))) as { peerKemWrapKeyB64: string; peerWrappedMsgKeyB64: string };
-		keyRowAt({ ...peerKeyRow, peer_kem_wrap_key_b64: otherWrap.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: otherWrap.peerWrappedMsgKeyB64 });
+		const otherWrap = await wrapSenderMsgKey(new Uint8Array(32).fill(7), Uint8Array.from(atob(me.card.crypt_pkey as string), (c) => c.charCodeAt(0)));
+		keyRowAt({ ...peerKeyRow, peer_kem_wrap_key_b64: otherWrap.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: otherWrap.peer_wrapped_msg_key_b64 });
 		expect(await store.getSenderMsgKey(dialogHash, peer.userHash)).toBeNull();
 		keyRowAt(peerKeyRow);
 		expect(sameBytes(await store.getSenderMsgKey(dialogHash, peer.userHash), peerSenderKey)).toBe(true);
@@ -219,18 +221,19 @@ describe('dialog_keys: only a verified key row gives a key', () => {
 		keyRowAt({ ...own, peer_hash: me.userHash });
 		expect(await store.getSenderMsgKey(dialogHash, me.userHash)).toBeNull();
 		keyRowAt(own);
-		const expected = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, me.vault.evm_skey, peer.userHash);
+		const expected = deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 		expect(sameBytes(await store.getSenderMsgKey(dialogHash, me.userHash), expected)).toBe(true);
 	});
 });
 
 describe('ensureOwnDialogKeyPublished: published only on verified or accepted evidence', () => {
-	const dialogHash = DialogCrypto.computeDialogHash(me.userHash, peer.userHash) as string;
+	const dialogHash = computeDialogHash(me.userHash, peer.userHash) as string;
 	const keyId = `${dialogHash}|${me.userHash}`;
 	const own = () => signedDialogKeyRow(me, { dialog_hash: dialogHash, peer_hash: peer.userHash });
 	const keyIntents = async () => (await intentsOf(me.userHash)).entries.filter((e) => e.relation === 'dialog_keys');
 
-	it('a verified own row is published: nothing written', async () => {
+	it('a verified own row this device published is kept: nothing written', async () => {
+		await markDialogKeyPublishedHere(me.userHash, dialogHash);
 		collections.dialog.keys.rows.set(keyId, own());
 		await ensureOwnDialogKeyPublished(peer.userHash, dialogHash, me.userHash, token());
 		expect(await keyIntents()).toHaveLength(0);
@@ -245,6 +248,7 @@ describe('ensureOwnDialogKeyPublished: published only on verified or accepted ev
 	});
 
 	it('the own accepted key write proves it without a shape echo — even beside an unverifiable row', async () => {
+		await markDialogKeyPublishedHere(me.userHash, dialogHash);
 		await recordAccepted('dialog_keys', keyId, own(), me.userHash);
 		await ensureOwnDialogKeyPublished(peer.userHash, dialogHash, me.userHash, token());
 		collections.dialog.keys.rows.set(keyId, own());
@@ -268,19 +272,20 @@ describe('checkpoints: read only from admitted revisions', () => {
 	let myKey: Uint8Array;
 	let seq = 0;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		setActivePinia(createPinia());
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash)!;
 		collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, signedDialogKeyRow(me, { dialog_hash: dialogHash, peer_hash: peer.userHash }));
-		myKey = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, me.vault.evm_skey, peer.userHash);
+		await markDialogKeyPublishedHere(me.userHash, dialogHash);
+		myKey = deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 	});
 	const message = async (parts: unknown[], refs: Record<string, string> = {}, ts = 1_700_000_500) => signRow(me, {
 		message_id: `dmsg_0199cccc-0000-7000-8000-${String(++seq).padStart(12, '0')}`,
 		dialog_hash: dialogHash, sender_hash: me.userHash,
-		content_b64: await DialogCrypto.encryptContent(myKey, encodeContent(parts as never)),
+		content_b64: await encryptContent(myKey, encodeContent(parts as never)),
 		deleted_flag: false,
-		refs_map_b64: await DialogCrypto.encryptContent(myKey, JSON.stringify(refs)),
+		refs_map_b64: await encryptContent(myKey, JSON.stringify(refs)),
 		parent_sign_hash: null, owner_timestamp: ts,
 	}, 'dms_');
 	const checkpointPart = () => ({
@@ -365,7 +370,7 @@ describe('user_cards: only verified cards are identities', () => {
 		const source = (path: string) => readFileSync(join(process.cwd(), path), 'utf8');
 		expect(source('src/store/userPQ.store.js')).toMatch(/const readCards = \(rows\) => verifiedCards\(rows\)/);
 		// A card a handshake peer sends is checked against the identity and key the codes showed, and never enters the store.
-		expect(source('packages/pq-client/src/handshake.ts')).toMatch(/contactKeyVouch\(card, bound\.userHash, toBase64\(bound\.contactPkey\)\)/);
+		expect(readFileSync(join(createRequire(import.meta.url).resolve('@buckitup/pq-client/package.json'), '..', 'dist', 'handshake.js'), 'utf8')).toMatch(/contactKeyVouch\(card, bound\.userHash, toBase64\(bound\.contactPkey\)\)/);
 		expect(source('src/components/engines/QRScannerEngine.vue')).not.toMatch(/allNetworkUsers\.(value\.)?push|allNetworkUsers(\.value)? =/);
 	});
 });

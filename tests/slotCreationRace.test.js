@@ -64,7 +64,7 @@ vi.mock('@/lib/data/userStorage', () => ({
 const WINNER_UUID = 'uuid-from-the-device-that-won-the-race';
 let resolvedUuid = null;
 
-vi.mock('@/lib/data/slots', () => ({
+vi.mock('@buckitup/pq-client/slots', () => ({
 	createSlotResolver: () => ({
 		getSlotUuid: async (name) => (name === 'contacts' ? resolvedUuid : null),
 		requireSlotUuid: async (name) => {

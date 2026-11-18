@@ -94,7 +94,7 @@ export const installFakeServer = (): FakeServer => {
 	globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 		if (server.offline) throw new TypeError('Failed to fetch');
 		const url = decodeURIComponent(typeof input === 'string' ? input : input.toString());
-		const shape = (rows: Row[]) => new Response(JSON.stringify(rows.map((value) => ({ value }))), { status: 200 });
+		const shape = (rows: Row[]) => new Response(JSON.stringify([...rows.map((value) => ({ value })), { headers: { control: 'up-to-date' } }]), { status: 200 });
 		const table = /\/shapes\?table=(\w+)&/.exec(url)?.[1];
 		const id = /file_id='([^']+)'/.exec(url)?.[1] ?? /\/file_chunk\/([^/]+)\//.exec(url)?.[1] ?? '';
 		const file = server.files.get(id);

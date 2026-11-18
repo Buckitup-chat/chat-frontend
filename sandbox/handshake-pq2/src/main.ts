@@ -11,7 +11,7 @@ import { QwbpChannel } from './channel';
 import { createIdentity, type Identity } from './identity';
 import { FRAME_DATA_CHARS, FRAME_PREFIX, type FrameSize } from './frames';
 import { PREFIX } from '@buckitup/pq-client/handshake';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const withCamera = !new URLSearchParams(location.search).has('nocamera');

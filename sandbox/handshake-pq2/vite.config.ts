@@ -1,6 +1,6 @@
 // The PQ2 handshake sandbox: its own page, build and tests, outside the app's
-// (the root configs cover src/ and tests/ only). It imports the app's crypto
-// layer (@buckitup/pq-client, from packages/pq-client/src) by alias, as the app does.
+// (the root configs cover src/ and tests/ only). Protocol code comes from the
+// installed @buckitup/pq-client package; @ resolves frontend UI helpers only.
 //
 //   npx vite --config sandbox/handshake-pq2/vite.config.ts            # dev server
 //   npx vite build --config sandbox/handshake-pq2/vite.config.ts      # → sandbox/handshake-pq2/dist
@@ -22,7 +22,6 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			'@': fileURLToPath(new URL('../../src', import.meta.url)),
-			'@buckitup/pq-client': fileURLToPath(new URL('../../packages/pq-client/src', import.meta.url)),
 		},
 	},
 	server: {

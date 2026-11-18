@@ -22,16 +22,16 @@ vi.mock('@/lib/data/collections', () => ({
 
 let wrapCalls = 0;
 let enqueueIntentCalls = 0;
+const enqueued: Array<{ row: Record<string, unknown>; mutationType: string }> = [];
 vi.mock('@/libs/enigma', () => ({
 	decodeHexOrBase64: (s: string) => (s ? new Uint8Array([1, 2, 3]) : null),
 }));
-vi.mock('@/libs/DialogCrypto', () => ({
-	DialogCrypto: {
-		deriveSenderMsgKey: () => new Uint8Array(32),
-		wrapSenderMsgKey: async () => {
-			wrapCalls++;
-			return { peerKemWrapKeyB64: 'wrap-' + wrapCalls, peerWrappedMsgKeyB64: 'wrapped-' + wrapCalls };
-		},
+vi.mock('@buckitup/pq-client/dialogs', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/dialogs')>()),
+	deriveSenderMsgKey: () => new Uint8Array(32),
+	wrapSenderMsgKey: async () => {
+		wrapCalls++;
+		return { peer_kem_wrap_key_b64: 'wrap-' + wrapCalls, peer_wrapped_msg_key_b64: 'wrapped-' + wrapCalls };
 	},
 }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
@@ -43,12 +43,18 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 }));
 vi.mock('@/lib/data/intents', () => ({
 	onIntentChange: () => () => {},
-	enqueueIntent: async () => { enqueueIntentCalls++; return 'intent-should-not-happen-after-acceptance'; },
+	enqueueIntent: async (intent: { row: Record<string, unknown>; mutationType: string }) => {
+		enqueueIntentCalls++;
+		enqueued.push(intent);
+		return 'intent-should-not-happen-after-acceptance';
+	},
 	intentsOf: async () => ({ entries: [], issues: [] }),
 }));
 
 const { ensureOwnDialogKeyPublished } = await import('@/lib/data/messageIntent');
 const { recordAccepted, _setAcceptedSnapshotStorageForTests } = await import('@/lib/data/acceptedSnapshot');
+const { kvGet, kvSet, _setStoreForTests } = await import('@/lib/data/localStore');
+const PUBLISHED_HERE = `dialog-key-published-here:${MY_HASH}|${DIALOG_HASH}`;
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -65,13 +71,16 @@ beforeEach(() => {
 	keysCollection.rows.clear();
 	wrapCalls = 0;
 	enqueueIntentCalls = 0;
+	enqueued.length = 0;
 	_setAcceptedSnapshotStorageForTests(makeStorage());
+	_setStoreForTests(makeStorage());
 	stopLeaderElection();
 	startLeaderElection(MY_HASH, () => {});
 });
 
 describe('ensureOwnDialogKeyPublished survives a reload between ACCEPTED and the shape echo', () => {
 	it('does not mint a second wrap when this device\'s own key was already accepted, even though the shape row is still empty (simulated reload)', async () => {
+		await kvSet(PUBLISHED_HERE, true, MY_HASH);
 		await recordAccepted('dialog_keys', `${DIALOG_HASH}|${MY_HASH}`, {
 			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH,
 			deleted_flag: false, owner_timestamp: 1000, sign_b64: 'sig-already-accepted',
@@ -89,5 +98,27 @@ describe('ensureOwnDialogKeyPublished survives a reload between ACCEPTED and the
 		enqueueIntentCalls = 0;
 		await ensureOwnDialogKeyPublished(PEER_HASH, DIALOG_HASH, MY_HASH, token).catch(() => {});
 		expect(wrapCalls).toBe(1);
+	});
+
+	it('republishes, as an update with a newer timestamp, a key row this device has not published under the current derivation', async () => {
+		await recordAccepted('dialog_keys', `${DIALOG_HASH}|${MY_HASH}`, {
+			dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH,
+			deleted_flag: false, owner_timestamp: 1000, sign_b64: 'sig-before-the-switch',
+		}, MY_HASH);
+		const token = pinActiveSession(MY_HASH, 'test:start');
+		await ensureOwnDialogKeyPublished(PEER_HASH, DIALOG_HASH, MY_HASH, token).catch(() => {});
+
+		expect(wrapCalls).toBe(1);
+		expect(enqueued).toHaveLength(1);
+		expect(enqueued[0].mutationType).toBe('update');
+		expect(Number(enqueued[0].row.owner_timestamp)).toBeGreaterThan(1000);
+		expect(enqueued[0].row).toMatchObject({ dialog_hash: DIALOG_HASH, sender_hash: MY_HASH, peer_hash: PEER_HASH, deleted_flag: false });
+	});
+
+	it('marks the key as published here only once the server accepted it', async () => {
+		const token = pinActiveSession(MY_HASH, 'test:start');
+		await ensureOwnDialogKeyPublished(PEER_HASH, DIALOG_HASH, MY_HASH, token).catch(() => {});
+		expect(wrapCalls).toBe(1);
+		expect(await kvGet(PUBLISHED_HERE)).toBeUndefined();
 	});
 });

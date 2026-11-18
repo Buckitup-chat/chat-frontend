@@ -8,7 +8,6 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			'@': fileURLToPath(new URL('./src', import.meta.url)),
-			'@buckitup/pq-client': fileURLToPath(new URL('./packages/pq-client/src', import.meta.url)),
 		},
 	},
 	define: {
@@ -17,6 +16,8 @@ export default defineConfig({
 		HANDSHAKE_DEV_TURN: 'null',
 	},
 	test: {
+		// Transform the installed ESM package so integration mocks of its dependencies apply.
+		server: { deps: { inline: ['@buckitup/pq-client'] } },
 		// Default stays node; component tests opt into jsdom with a
 		// `@vitest-environment jsdom` docblock, so the fast unit tests keep
 		// running without a DOM.

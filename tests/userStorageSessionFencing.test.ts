@@ -53,19 +53,6 @@ let httpStarted: (() => void) | null = null;
 
 vi.mock('@/api/client', () => ({
 	api: {
-		createStorageMutation: (
-			userHash: string, uuid: string, valueB64: string, _h: unknown, _v: unknown,
-			ownerTimestamp: number, _sk: unknown, _d: unknown, deletedFlag: boolean,
-			parentSignHash: string | null, _sh: unknown, _sb: unknown, mutationType: string
-		) => ({
-			type: mutationType,
-			[mutationType === 'insert' ? 'modified' : 'changes']: {
-				user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
-				owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
-				sign_hash: `uss_${String(ownerTimestamp).padStart(128, '0')}`, sign_b64: 'sig',
-			},
-			syncMetadata: { relation: 'user_storage' },
-		}),
 		ingestWithAuthEach: async (mutations: unknown[]) => {
 			sent.push(mutations);
 			if (deferHttp) {
@@ -86,6 +73,23 @@ vi.mock('@/api/client', () => ({
 				json: async () => ({ results: mutations.map((_, index) => ({ index, status: 'ok', txid: 100 + index })) }),
 			} as unknown as Response;
 		},
+	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: (_relation: string, signable: Record<string, unknown>, mutationType: string) => {
+		const { user_hash: userHash, uuid, value_b64: valueB64, owner_timestamp: ownerTimestamp, deleted_flag: deletedFlag, parent_sign_hash: parentSignHash } = signable as { user_hash: string; uuid: string; value_b64: string; owner_timestamp: number; deleted_flag: boolean; parent_sign_hash: string | null };
+		return ({
+		type: mutationType,
+		[mutationType === 'insert' ? 'modified' : 'changes']: {
+			user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
+			owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
+			sign_hash: `uss_${String(ownerTimestamp).padStart(128, '0')}`, sign_b64: 'sig',
+		},
+		syncMetadata: { relation: 'user_storage' },
+	});
 	},
 }));
 

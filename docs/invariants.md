@@ -130,58 +130,61 @@ two edits within one second — the second is silently rejected as "not newer".
 (`src/lib/data/time.ts::nextOwnerTimestamp`), and writes to one entity are
 serialised so that `previous` is read after the previous write's barrier.
 
-### 5. The HTTP → shape barrier before a dependent write
+### 5. Dependent writes use the required confirmation level
 
 **Since:** 2026-08-11 (review 3, finding 1)
 
-HTTP 200 from `/ingest_each` proves a commit in Postgres — **not** the row's
-delivery through Electric into a collection. A write whose successor reads the
-shape as its base (the next edit takes `parent_sign_hash`, a second message
-waits for the key row, the card is needed for `user_storage`) must await
-`awaitTxId` on the returned `txid`.
+A successful per-row ingest result proves server acceptance, not delivery
+through Electric or signature verification by the UI. A bare HTTP 200 is not
+sufficient evidence: inspect the SDK's classified per-row outcome.
 
-**Why.** Without the barrier every one of those scenarios signed a mutation
-against a stale base and was rejected — sometimes reproducibly, sometimes once
-in ten runs, which is worse.
+`src/lib/data/writeContracts.ts` selects `accepted` or `visible` confirmation
+for each operation. A prerequisite the server only needs to hold may proceed
+on exact server acceptance. A chained write can use its own durable pending
+row or accepted snapshot as a base; that is not a read of the shape.
 
-**Consequence.** The entry point for such writes is
-`sendMutationsAndAwaitShape`, not bare `sendMutations`. The barrier times out
-(10 s) and logs, but does not fail the write: the server has already accepted it.
+If the successor actually needs a row from replicated state, it must wait for
+that row's visibility. A shape timeout does not turn an accepted write into a
+failed write and must not trigger a second signature or a replacement insert.
+Rows used by the UI still require verification.
 
-### 5a. Base64: the signature carries padding, the shape does not
+**Why.** A write whose successor took its base from the shape right after an
+HTTP 200 (the next edit's `parent_sign_hash`, a second message waiting for the
+key row, the card needed for `user_storage`) signed against a stale base and
+was rejected — sometimes reproducibly, sometimes once in ten runs.
+
+Application writes use durable intents and the outbox/coordinator lifecycle.
+Calling the SDK transport directly does not provide those guarantees. See
+[the mutation lifecycle](adr-pq-mutation-lifecycle.md),
+`acceptedSnapshot.ts` and `operationLifecycle.ts`.
+
+### 5a. Use SDK binary normalization
 
 **Since:** 2026-08-26
 
-The same bytes arrive in two different encodings, and you can only confuse them
-once per debugging session — the signature simply does not verify, with no hint
-as to why.
+Use the installed SDK for row signing, verification and binary normalization.
+Do not compare raw Base64 strings from shapes with locally generated values;
+compare bytes or SDK-normalized values. The encoding contract is maintained in
+[SDK row encoding](https://github.com/Buckitup-chat/pq-library/blob/main/docs/row-encoding.md).
 
-| Where | Encoding | Source |
-|---|---|---|
-| signature payload | **with** padding (`=`) | `chat/lib/chat/data/integrity.ex:89,93` — `Base.encode64/1`, which is `padding: true` in Elixir |
-| binary columns from `/shapes` | **without** padding | `chat/lib/chat_web/plugs/hex_to_base64_adapter.ex:122,157` — `Base.encode64(bin, padding: false)` |
+**Why.** The signature payload carries Base64 with padding, while binary
+columns from `/shapes` arrive without it. A value taken from a shape and put
+into a payload as-is makes the signature fail to verify, with no hint as to
+why.
 
-**Consequence.** A value taken from a shape cannot go into a signature payload
-as-is — it has to be padded with `=` to a multiple of four. This applies to
-producing a signature and to checking one: when verifying a received row the
-payload is assembled from the padded form, or not a single row will verify.
-
-`encodeField` in `packages/pq-client/src/signature.ts` pads `_cert`, `_pkey` and `_b64`
-values and each element of a binary array (`files.chunk_sign_hashes`), so the
-payload is the same whether a row is being signed or verified.
-
-### 6. The server schema is the source of truth for the wire format
+### 6. Use schema-driven SDK mutations
 
 **Since:** 2026-08-12
 
-A mutation's fields come from the Ecto schema of the table in question
-(`chat/lib/chat/data/schemas/*.ex`), not from a neighbouring table by analogy.
-For example: `sign_hash` exists only on `dialog_messages` and
-`dialog_messages_versions`; sending it in `dialog_keys`, reactions or receipts is
-a field the schema cannot cast.
+Build wire rows through the installed SDK instead of maintaining local field
+lists or manually deriving sign_hash. The [SDK schema documentation](https://github.com/Buckitup-chat/pq-library/blob/main/docs/row-encoding.md#schema-ownership) describes generation from backend schemas.
+When investigating a backend-contract mismatch, check that source rather than
+inferring fields from a neighbouring relation.
 
-**Consequence.** Before adding a field to a mutation, grep the schema. Before
-accepting a review's claim about the backend, open the backend source.
+**Why.** A field copied from a neighbouring table by analogy (`sign_hash` sent
+in `dialog_keys`, reactions or receipts, where only `dialog_messages` and
+`dialog_messages_versions` have it) is a field the server schema cannot cast,
+and the write is refused.
 
 ### 6a. A row that fails its signature is refused, visibly
 

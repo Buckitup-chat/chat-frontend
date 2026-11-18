@@ -12,6 +12,7 @@
 //   maps once keys exist, i.e. as competing genesis claims the gate rightly
 //   rejects — and tails/closure logic degenerates to "every row is a tail".
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { setActivePinia, createPinia } from 'pinia';
 import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64 } from '@buckitup/pq-client/signature';
@@ -116,7 +117,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 }));
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { deriveSenderMsgKey, encryptContent, decryptContent } = await import('@buckitup/pq-client/dialogs');
 
 // The fake server: a write is readable through the collection once the send
 // resolves (the real path only resolves after the shape barrier).
@@ -151,7 +152,7 @@ const makeRow = async (mid, refs, tweak = {}) => {
 		sender_hash: author.userHash,
 		content_b64: toBase64(new Uint8Array([5, 6, 7])),
 		deleted_flag: false,
-		refs_map_b64: refs === null ? null : await DialogCrypto.encryptContent(senderKey, JSON.stringify(refs)),
+		refs_map_b64: refs === null ? null : await encryptContent(senderKey, JSON.stringify(refs)),
 		parent_sign_hash: null,
 		owner_timestamp: 1_700_000_500,
 		...tweak,
@@ -227,8 +228,9 @@ describe('checkpoint through the store', () => {
 		// Really signed: an unverifiable key row yields no key and proves no publish.
 		collections.dialog.keys.rows.set(`${dialogHash}|${author.userHash}`,
 			signedDialogKeyRow(author, { dialog_hash: dialogHash, peer_hash: peer }));
-		senderKey = DialogCrypto.deriveSenderMsgKey(
-			author.signSkey, author.kemSkey, bytesToHex(author.contactSk), peer,
+		await markDialogKeyPublishedHere(author.userHash, dialogHash);
+		senderKey = deriveSenderMsgKey(
+			author.signSkey, author.kemSkey, peer,
 		);
 	});
 
@@ -252,7 +254,7 @@ describe('checkpoint through the store', () => {
 		const r1 = await makeRow(M1, {});
 		// a blob is present but the harness encrypted it under a different key
 		const opaque = await makeRow(M2, null, {
-			refs_map_b64: await DialogCrypto.encryptContent(new Uint8Array(32).fill(1), '{}'),
+			refs_map_b64: await encryptContent(new Uint8Array(32).fill(1), '{}'),
 		});
 		seed(r1, opaque);
 		await expect(store.createDialogCheckpoint(peer)).rejects.toThrow('INCOMPLETE_CAUSAL_HISTORY');
@@ -630,7 +632,7 @@ describe('checkpoint through the store', () => {
 			expect(part.frontier).toEqual({ [M1]: r1.sign_hash });
 
 			const carrierRow = rowOf(sent.find((m) => rowOf(m)?.message_id === messageId));
-			const refs = JSON.parse(await DialogCrypto.decryptContent(senderKey, carrierRow.refs_map_b64));
+			const refs = JSON.parse(await decryptContent(senderKey, carrierRow.refs_map_b64));
 			expect(refs).toEqual({ [OWN_PENDING_ID]: ownPendingSignHash });
 		} finally {
 			unsettled.forEach((u) => u.resolve({ txids: [] }));
@@ -709,11 +711,11 @@ describe('checkpoint through the store', () => {
 			expect(carrierMutation).toBeTruthy();
 			const carrierRow = rowOf(carrierMutation);
 
-			const refs = JSON.parse(await DialogCrypto.decryptContent(senderKey, carrierRow.refs_map_b64));
+			const refs = JSON.parse(await decryptContent(senderKey, carrierRow.refs_map_b64));
 			expect(refs).toEqual(capturedObservedTails);
 			expect(refs).not.toHaveProperty(M2);
 
-			const [signedPart] = decodeContent(await DialogCrypto.decryptContent(senderKey, carrierRow.content_b64));
+			const [signedPart] = decodeContent(await decryptContent(senderKey, carrierRow.content_b64));
 			expect(signedPart.frontier).toEqual(capturedFrontier);
 			expect(signedPart.frontier).not.toHaveProperty(M2);
 		} finally {

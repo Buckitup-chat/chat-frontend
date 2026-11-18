@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { photoToWire, type ImagePart } from '@buckitup/pq-client/content';
 import { toBase64 } from '@buckitup/pq-client/signature';
 import { SessionFencedError } from '@/lib/data/sessionGuard';
-import type { UserStorageRow } from '@/lib/data/types';
+import type { UserStorageRow } from '@buckitup/pq-client/types';
 import { initialGalleryMapping, type GalleryMapping, type MappingResult } from '@/lib/avatars/galleryMapping';
 import {
 	readSharedGalleryRow, sealSharedGallery, galleryKeyFromB64, type GalleryRowRead,

@@ -9,7 +9,7 @@
 import { getDialogCollections, getUserCardsCollection, getUserStorageCollection } from './collections';
 import { toBytes } from '@buckitup/pq-client/signature';
 import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
-import type { UserCardRow } from './types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 export interface MutationLike {
 	type?: string;

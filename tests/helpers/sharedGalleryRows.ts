@@ -4,7 +4,7 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64, type SignableFields } from '@buckitup/pq-client/signature';
 import { signableFields } from '@buckitup/pq-client/schema';
 import { photoToWire, type ImagePart } from '@buckitup/pq-client/content';
-import type { UserStorageRow } from '@/lib/data/types';
+import type { UserStorageRow } from '@buckitup/pq-client/types';
 import type { SharedGalleryRecord } from '@/lib/avatars/sharedGallery';
 
 export const galleryAccount = (seed: number) => {

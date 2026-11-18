@@ -486,18 +486,7 @@ describe('IndexedDB claim(): committed only on tx.oncomplete, never on put.onsuc
 });
 
 describe('Web Locks: the transport gate is genuinely operation-scoped, not a leadership probe (§ correctness boundary 2)', () => {
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	const originalNavigator = (globalThis as any).navigator;
-
-	afterEach(() => {
-		if (originalNavigator === undefined) {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			delete (globalThis as any).navigator;
-		} else {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			(globalThis as any).navigator = originalNavigator;
-		}
-	});
+	afterEach(() => vi.unstubAllGlobals());
 
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	function makeFakeLockManager(): any {
@@ -528,8 +517,7 @@ describe('Web Locks: the transport gate is genuinely operation-scoped, not a lea
 
 	it('two tabs starting simultaneously under real navigator.locks semantics: exactly one operation-scoped transport call total', async () => {
 		const locks = makeFakeLockManager();
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		(globalThis as any).navigator = { locks };
+		vi.stubGlobal('navigator', { locks });
 
 		const sharedEntryStorage = makeEntryStorage();
 		const { outbox: tabA } = await freshTabInstance();
@@ -561,8 +549,7 @@ describe('Web Locks: the transport gate is genuinely operation-scoped, not a lea
 
 	it('HTTP already returned success, but markServerAccepted\'s durable write is still in flight: the lock stays held, so a second tab cannot replay or re-send the same entry (§ determinism 3)', async () => {
 		const locks = makeFakeLockManager();
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		(globalThis as any).navigator = { locks };
+		vi.stubGlobal('navigator', { locks });
 
 		const sharedStorage = makeDelayableEntryStorage();
 		const { outbox: tabA } = await freshTabInstance();

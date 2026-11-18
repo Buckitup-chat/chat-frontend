@@ -19,7 +19,7 @@ import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails
 import { _resetTouchedForTests } from '@/lib/data/readCache';
 import { setDialogCacheRow, clearDialogCacheDb } from './helpers/mainDialogCache';
 import type { SignableValue } from '@buckitup/pq-client/signature';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 const makeMemStringStore = () => {
 	const map = new Map();
@@ -62,7 +62,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 
 const PageChat = (await import('@/views/chats/Page_Chat.vue')).default;
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 
 const makeIdentity = (seed: number) => {
 	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
@@ -100,7 +100,7 @@ const makeCollection = (rows: Record<string, unknown> = {}) => ({
 });
 
 describe('IndexedDB read-cache fallback: real dialog gate through Page_Chat.vue when every dialog collection is unreachable', () => {
-	let me: ReturnType<typeof makeIdentity>, peer: ReturnType<typeof makeIdentity>, dialogHash: string, senderKey: ReturnType<typeof DialogCrypto.deriveSenderMsgKey>;
+	let me: ReturnType<typeof makeIdentity>, peer: ReturnType<typeof makeIdentity>, dialogHash: string, senderKey: ReturnType<typeof deriveSenderMsgKey>;
 
 	beforeEach(async () => {
 		setActivePinia(createPinia());
@@ -129,12 +129,12 @@ describe('IndexedDB read-cache fallback: real dialog gate through Page_Chat.vue 
 
 		const store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash)!;
-		senderKey = DialogCrypto.deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, bytesToHex(peer.contactSk), me.userHash);
+		senderKey = deriveSenderMsgKey(peer.sign.secretKey, peer.kem.secretKey, me.userHash);
 
-		const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, me.kem.publicKey);
+		const wrapped = await wrapSenderMsgKey(senderKey, me.kem.publicKey);
 		const keyFields = {
 			dialog_hash: dialogHash, sender_hash: peer.userHash, peer_hash: me.userHash,
-			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+			peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 			deleted_flag: false, owner_timestamp: 999,
 		};
 		await setDialogCacheRow('dialog_keys', `${dialogHash}|${peer.userHash}`, { ...keyFields, sign_b64: signFields(keyFields as never, peer.sign.secretKey) });
@@ -154,8 +154,8 @@ describe('IndexedDB read-cache fallback: real dialog gate through Page_Chat.vue 
 	const signedMessage = async (messageId: string, text: string, tweak: Record<string, SignableValue> = {}) => {
 		const fields = {
 			message_id: messageId, dialog_hash: dialogHash, sender_hash: peer.userHash,
-			content_b64: await DialogCrypto.encryptContent(senderKey, encodeContent([{ kind: 'text', text }])),
-			deleted_flag: false, refs_map_b64: await DialogCrypto.encryptContent(senderKey, JSON.stringify({})),
+			content_b64: await encryptContent(senderKey, encodeContent([{ kind: 'text', text }])),
+			deleted_flag: false, refs_map_b64: await encryptContent(senderKey, JSON.stringify({})),
 			parent_sign_hash: null, owner_timestamp: 1_700_000_500, ...tweak,
 		};
 		const sign_b64 = signFields(fields, peer.sign.secretKey);
@@ -188,7 +188,7 @@ describe('IndexedDB read-cache fallback: real dialog gate through Page_Chat.vue 
 
 	it('an invalid-signature cached message never renders as its (attacker-supplied) content — including a forged tombstone', async () => {
 		const forged0 = await signedMessage('dmsg_' + 'c'.repeat(8) + '-0000-7000-8000-000000000000', 'authentic');
-		const forged = { ...forged0, content_b64: await DialogCrypto.encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'forged content' }])) };
+		const forged = { ...forged0, content_b64: await encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'forged content' }])) };
 		await setDialogCacheRow('dialog_messages', forged.message_id, forged);
 
 		const genuineTombstone = await signedMessage('dmsg_' + 'd'.repeat(8) + '-0000-7000-8000-000000000000', 'irrelevant');
@@ -249,17 +249,17 @@ describe('IndexedDB read-cache fallback: real dialog gate through Page_Chat.vue 
 
 		const current = await signedMessage(
 			validVersion.message_id, 'current text',
-			{ refs_map_b64: await DialogCrypto.encryptContent(senderKey, JSON.stringify({ [validVersion.message_id]: validVersion.sign_hash })),
+			{ refs_map_b64: await encryptContent(senderKey, JSON.stringify({ [validVersion.message_id]: validVersion.sign_hash })),
 				parent_sign_hash: validVersion.sign_hash, owner_timestamp: 1_700_000_950 }
 		);
 		await setDialogCacheRow('dialog_messages', current.message_id, current);
 
 		const forgedVersion0 = await signedMessage(
 			validVersion.message_id, 'irrelevant',
-			{ refs_map_b64: await DialogCrypto.encryptContent(senderKey, JSON.stringify({ [validVersion.message_id]: validVersion.sign_hash })),
+			{ refs_map_b64: await encryptContent(senderKey, JSON.stringify({ [validVersion.message_id]: validVersion.sign_hash })),
 				owner_timestamp: 1_700_000_300 }
 		);
-		const forgedVersion = { ...forgedVersion0, content_b64: await DialogCrypto.encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'tampered' }])) };
+		const forgedVersion = { ...forgedVersion0, content_b64: await encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'tampered' }])) };
 		await setDialogCacheRow('dialog_messages_versions', `${forgedVersion.message_id}|${forgedVersion.sign_hash}`, forgedVersion);
 
 		const wrapper = mountChat();

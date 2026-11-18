@@ -7,7 +7,7 @@
 import { bytesToHex } from '@noble/hashes/utils';
 import { equalBytes } from '@noble/post-quantum/utils.js';
 import { toBytes } from '@buckitup/pq-client/signature';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 import { signPq, type Identity } from './identity';
 import {
 	checkProof, decodeProof, encodeFrame, encodeProof, fromBase45, nameBytesOf, parseFrame, proofMessage, senderTag,

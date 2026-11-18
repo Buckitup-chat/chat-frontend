@@ -1,3 +1,5 @@
+import { toBase64, fromBase64 } from '@buckitup/pq-client/rows';
+
 // Encryption wrapper for any string key-value storage.
 //
 // Hiding metadata on the client is not a requirement (access control for it
@@ -52,15 +54,6 @@ export interface SecureStoreOptions {
 export class DecryptFailedError extends Error {}
 
 const IV_BYTES = 12;
-
-const toBase64 = (bytes: Uint8Array): string => {
-	let binary = '';
-	for (const b of bytes) binary += String.fromCharCode(b);
-	return btoa(binary);
-};
-
-const fromBase64 = (value: string): Uint8Array =>
-	Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
 
 const toHex = (bytes: Uint8Array): string =>
 	Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');

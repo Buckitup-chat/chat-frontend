@@ -1,5 +1,5 @@
 // Full user-flow E2E against the live staging backend, driven through the
-// same modules the browser runs — DialogCrypto, the content codec, the
+// same modules the browser runs — the dialog cryptography, the content codec, the
 // signature module, the file transport, and the verification gate. Gated
 // behind E2E=1 so CI never talks to the network:
 //
@@ -32,7 +32,7 @@ import { encodeContent, decodeContent, contentToText, type ContentPart } from '@
 import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
 import { createDialogGate } from '@/lib/data/dialogGate';
 import { uploadFile, downloadFile, prepareUpload } from '@/lib/data/fileTransfer';
-import { DialogCrypto } from '@/libs/DialogCrypto';
+import { dialogHash as computeDialogHash, deriveSenderMsgKey, wrapSenderMsgKey, unwrapSenderMsgKey, encryptContent, decryptContent } from '@buckitup/pq-client/dialogs';
 import { sendMutationsAndAwaitShape, sendMutationsWithRetry, type SendResult } from '@/lib/data/ingest';
 import {
 	_setStorageForTests as _setOutboxStorageForTests, _setLeaderForTests, enqueue, drainOutbox,
@@ -390,8 +390,8 @@ const sendDialogMessage = async (
 	const messageId = overrides.message_id ?? 'dmsg_' + uuidv7();
 	const contentB64 = overrides.content !== undefined
 		? overrides.content
-		: await DialogCrypto.encryptContent(msgKey, encodeContent(parts));
-	const refsMapB64 = await DialogCrypto.encryptContent(msgKey, JSON.stringify(refs));
+		: await encryptContent(msgKey, encodeContent(parts));
+	const refsMapB64 = await encryptContent(msgKey, JSON.stringify(refs));
 	const fields = {
 		message_id: messageId,
 		dialog_hash: dialogHash,
@@ -441,15 +441,15 @@ async function runE2E() {
 		expect(verifyUserCard(aliceCardRow as never).status).toBe('verified');
 
 		// ---- 2. Alice derives her key and wraps it for Bob ----
-		const dialogHash = DialogCrypto.computeDialogHash(alice.userHash, bob.userHash);
-		const aliceKey = DialogCrypto.deriveSenderMsgKey(
-			alice.sign.secretKey, alice.kem.secretKey, alice.contactSkey, bob.userHash);
-		const wrapped = await DialogCrypto.wrapSenderMsgKey(aliceKey, bob.kem.publicKey);
+		const dialogHash = computeDialogHash(alice.userHash, bob.userHash);
+		const aliceKey = deriveSenderMsgKey(
+			alice.sign.secretKey, alice.kem.secretKey, bob.userHash);
+		const wrapped = await wrapSenderMsgKey(aliceKey, bob.kem.publicKey);
 
 		const keyFields = {
 			dialog_hash: dialogHash, sender_hash: alice.userHash, peer_hash: bob.userHash,
-			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64,
-			peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+			peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64,
+			peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 			owner_timestamp: Math.floor(Date.now() / 1000), deleted_flag: false,
 		};
 		await ensureDialogKeysStream(dialogHash).ready;
@@ -463,12 +463,12 @@ async function runE2E() {
 			[{ kind: 'text', text: 'Скинь, пожалуйста, схему' }], {});
 
 		const keyRow = (await waitRows('dialog_keys', `dialog_hash='${dialogHash}'`, (r) => r.length >= 1))[0];
-		const bobsViewOfAliceKey = await DialogCrypto.unwrapSenderMsgKey(
+		const bobsViewOfAliceKey = await unwrapSenderMsgKey(
 			bob.kem.secretKey, keyRow.peer_kem_wrap_key_b64, keyRow.peer_wrapped_msg_key_b64);
 
 		const m1row = (await waitRows('dialog_messages', `dialog_hash='${dialogHash}'`, (r) => r.length >= 1))[0];
 		const m1text = contentToText(decodeContent(
-			await DialogCrypto.decryptContent(bobsViewOfAliceKey, m1row.content_b64)));
+			await decryptContent(bobsViewOfAliceKey, m1row.content_b64)));
 		expect(m1text).toBe('Скинь, пожалуйста, схему');
 
 		expect(m1.sendResult.results).toMatchObject([{ status: 'ok' }]);
@@ -500,7 +500,7 @@ async function runE2E() {
 			},
 			decryptRefs: async (row) => {
 				try {
-					const json = await DialogCrypto.decryptContent(bobsViewOfAliceKey, row.refs_map_b64);
+					const json = await decryptContent(bobsViewOfAliceKey, row.refs_map_b64);
 					return json ? JSON.parse(json) : {};
 				} catch { return 'no_key'; }
 			},
@@ -509,13 +509,13 @@ async function runE2E() {
 		expect(verdict.status).toBe('verified');
 
 		// ---- 5. Bob replies with a quote (his own key, wrapped for Alice) ----
-		const bobKey = DialogCrypto.deriveSenderMsgKey(
-			bob.sign.secretKey, bob.kem.secretKey, bob.contactSkey, alice.userHash);
-		const wrappedForAlice = await DialogCrypto.wrapSenderMsgKey(bobKey, alice.kem.publicKey);
+		const bobKey = deriveSenderMsgKey(
+			bob.sign.secretKey, bob.kem.secretKey, alice.userHash);
+		const wrappedForAlice = await wrapSenderMsgKey(bobKey, alice.kem.publicKey);
 		const bobKeyFields = {
 			dialog_hash: dialogHash, sender_hash: bob.userHash, peer_hash: alice.userHash,
-			peer_kem_wrap_key_b64: wrappedForAlice.peerKemWrapKeyB64,
-			peer_wrapped_msg_key_b64: wrappedForAlice.peerWrappedMsgKeyB64,
+			peer_kem_wrap_key_b64: wrappedForAlice.peer_kem_wrap_key_b64,
+			peer_wrapped_msg_key_b64: wrappedForAlice.peer_wrapped_msg_key_b64,
 			owner_timestamp: Math.floor(Date.now() / 1000), deleted_flag: false,
 		};
 		await ensureDialogKeysStream(dialogHash).ready;
@@ -531,13 +531,13 @@ async function runE2E() {
 		], { [m1.message_id]: m1.sign_hash });
 
 		// Alice reads the reply and sees the intact quote snapshot
-		const aliceUnwrap = await DialogCrypto.unwrapSenderMsgKey(
-			alice.kem.secretKey, wrappedForAlice.peerKemWrapKeyB64, wrappedForAlice.peerWrappedMsgKeyB64);
+		const aliceUnwrap = await unwrapSenderMsgKey(
+			alice.kem.secretKey, wrappedForAlice.peer_kem_wrap_key_b64, wrappedForAlice.peer_wrapped_msg_key_b64);
 		console.log('step: reply visible?');
 		const replyRows = await waitRows('dialog_messages', `dialog_hash='${dialogHash}'`,
 			(rs) => rs.some((r) => r.message_id === reply.message_id));
 		const replyRow = replyRows.find((r) => r.message_id === reply.message_id)!;
-		const replyParts = decodeContent(await DialogCrypto.decryptContent(aliceUnwrap, replyRow.content_b64));
+		const replyParts = decodeContent(await decryptContent(aliceUnwrap, replyRow.content_b64));
 		expect(replyParts[0]).toMatchObject({ kind: 'quote', messageId: m1.message_id });
 		expect(contentToText((replyParts[0] as { snapshot: ContentPart[] }).snapshot)).toBe(m1text);
 
@@ -578,7 +578,7 @@ async function runE2E() {
 		let filePart: ContentPart | undefined;
 		for (const fm of fileMsg) {
 			try {
-				const parts = decodeContent(await DialogCrypto.decryptContent(bobsViewOfAliceKey, fm.r.content_b64));
+				const parts = decodeContent(await decryptContent(bobsViewOfAliceKey, fm.r.content_b64));
 				filePart = parts.find((p) => p.kind === 'file') ?? filePart;
 			} catch { /* bob's own rows decrypt with his key; skip */ }
 		}

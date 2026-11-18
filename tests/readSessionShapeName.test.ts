@@ -50,7 +50,7 @@ const installServer = (table: string, shape: string) => {
 			return json(200, { token: `tok-${shape}`, shape, expires_in: 300 });
 		}
 		if (url.includes(`/shapes?table=${table}`)) {
-			if (headers.get('authorization') === `Bearer tok-${shape}`) return json(200, []);
+			if (headers.get('authorization') === `Bearer tok-${shape}`) return json(200, [{ headers: { control: 'up-to-date' } }]);
 			return json(401, { error: 'read_session_required', shape });
 		}
 		throw new Error(`unexpected fetch ${url}`);

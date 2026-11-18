@@ -74,14 +74,16 @@ vi.mock('@/lib/data/ingest', async (importActual) => {
 	};
 });
 
-vi.mock('@/api/client', () => ({
-	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => {
-			const signed = { ...row, sign_hash: `sign_hash(${row.message_id})` };
-			return type === 'insert'
-				? { type, relation, row, modified: signed, syncMetadata: { relation } }
-				: { type, relation, row, original: {}, changes: signed, syncMetadata: { relation } };
-		},
+vi.mock('@/api/client', () => ({ api: {} }));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: (relation: string, row: Record<string, unknown>, type: string) => {
+		const signed = { ...row, sign_hash: `sign_hash(${row.message_id})` };
+		return type === 'insert'
+			? { type, relation, row, modified: signed, syncMetadata: { relation } }
+			: { type, relation, row, original: {}, changes: signed, syncMetadata: { relation } };
 	},
 }));
 
@@ -102,17 +104,16 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	},
 }));
 
-vi.mock('@/libs/DialogCrypto', () => ({
-	DialogCrypto: {
-		computeDialogHash: () => DIALOG_HASH,
-		deriveSenderMsgKey: () => new Uint8Array(32),
-		wrapSenderMsgKey: async () => ({ peerKemWrapKeyB64: 'wrap', peerWrappedMsgKeyB64: 'wrapped' }),
-		encryptContent: async (_k: unknown, text: string) => `enc(${text})`,
-		// The inverse of encryptContent above; anything else does not decrypt.
-		decryptContent: async (_k: unknown, s: string) => {
-			if (!s?.startsWith('enc(')) throw new Error('does not decrypt');
-			return s.slice(4, -1);
-		},
+vi.mock('@buckitup/pq-client/dialogs', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/dialogs')>()),
+	dialogHash: () => DIALOG_HASH,
+	deriveSenderMsgKey: () => new Uint8Array(32),
+	wrapSenderMsgKey: async () => ({ peer_kem_wrap_key_b64: 'wrap', peer_wrapped_msg_key_b64: 'wrapped' }),
+	encryptContent: async (_k: unknown, text: string) => `enc(${text})`,
+	// The inverse of encryptContent above; anything else does not decrypt.
+	decryptContent: async (_k: unknown, s: string) => {
+		if (!s?.startsWith('enc(')) throw new Error('does not decrypt');
+		return s.slice(4, -1);
 	},
 }));
 

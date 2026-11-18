@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { useMemoryLocalStore, markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
+import { sha3_512 } from '@noble/hashes/sha3';
+import { bytesToHex } from '@noble/hashes/utils';
 import { setActivePinia, createPinia } from 'pinia';
 import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import type { SignableFields } from '@buckitup/pq-client/signature';
@@ -18,8 +21,8 @@ const peer = makeTestIdentity(2);
 const MY_HASH = me.userHash;
 const PEER_HASH = peer.userHash;
 const DIALOG_HASH = 'di_' + '3'.repeat(128);
-const MSG_ID = 'dmsg_' + '4'.repeat(128);
-const OTHER_MSG_ID = 'dmsg_' + '5'.repeat(128);
+const MSG_ID = 'dmsg_01924444-4444-7444-8444-444444444444';
+const OTHER_MSG_ID = 'dmsg_01925555-5555-7555-8555-555555555555';
 const EMOJI = '\u{1F44D}';
 
 const signedMessageRow = (fields: SignableFields) =>
@@ -63,10 +66,6 @@ let refuseFiles: boolean;
 
 vi.mock('@/api/client', () => ({
 	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string): Mutation =>
-			type === 'insert'
-				? { type, modified: row, syncMetadata: { relation } }
-				: { type, original: {}, changes: row, syncMetadata: { relation } },
 		ingestWithAuthEach: async (mutations: Mutation[]) => {
 			const results = mutations.map((m, index) => {
 				if (!grants.has(shapeOf(m.syncMetadata.relation))) return { index, status: 'error', error: 'not_in_trust_chain', max_depth: 7 };
@@ -80,19 +79,37 @@ vi.mock('@/api/client', () => ({
 	},
 }));
 
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('@buckitup/pq-client/rows')>();
+	const fileRelations = new Set(['files', 'file_chunks']);
+	return {
+		...actual,
+		signRow: (relation: string, row: Record<string, unknown>, signSkey: Uint8Array) =>
+			fileRelations.has(relation) ? actual.signRow(relation, row, signSkey) : row,
+		rowMutation: (relation: string, row: Record<string, unknown>, type: 'insert' | 'update'): Mutation => {
+			if (fileRelations.has(relation)) return actual.rowMutation(relation, row, type) as unknown as Mutation;
+			const signed = relation === 'dialog_messages'
+				? { ...row, sign_hash: 'dms_' + bytesToHex(sha3_512(new TextEncoder().encode(JSON.stringify(row)))) }
+				: row;
+			return type === 'insert'
+				? { type, modified: signed, syncMetadata: { relation } }
+				: { type, original: {}, changes: signed, syncMetadata: { relation } };
+		},
+	};
+});
+
 vi.mock('@/libs/enigma', () => ({ decodeHexOrBase64: (s: string) => (s ? new Uint8Array(Buffer.from(s, 'base64')) : null) }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: { getInstance: () => ({ currentUserHash: MY_HASH, exportVaultKeys: async () => me.vault }) },
 }));
-vi.mock('@/libs/DialogCrypto', () => ({
-	DialogCrypto: {
-		computeDialogHash: () => DIALOG_HASH,
-		deriveSenderMsgKey: () => new Uint8Array(32),
-		wrapSenderMsgKey: async () => ({ peerKemWrapKeyB64: 'wrap', peerWrappedMsgKeyB64: 'wrapped' }),
-		computeReactionHash: (_k: unknown, messageId: string, reactor: string, emoji: string) => `dmr_${messageId}:${reactor}:${emoji}`,
-		encryptContent: async (_k: unknown, text: string) => `enc(${typeof text === 'string' ? text : JSON.stringify(text)})`,
-		decryptContent: async () => null,
-	},
+vi.mock('@buckitup/pq-client/dialogs', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/dialogs')>()),
+	dialogHash: () => DIALOG_HASH,
+	deriveSenderMsgKey: () => new Uint8Array(32),
+	wrapSenderMsgKey: async () => ({ peer_kem_wrap_key_b64: 'wrap', peer_wrapped_msg_key_b64: 'wrapped' }),
+	reactionHash: (_k: unknown, messageId: string, reactor: string, emoji: string) => `dmr_${messageId}:${reactor}:${emoji}`,
+	encryptContent: async (_k: unknown, text: string) => `enc(${typeof text === 'string' ? text : JSON.stringify(text)})`,
+	decryptContent: async () => null,
 }));
 
 const chunkCache = new Map<string, Uint8Array>();
@@ -114,7 +131,9 @@ const signIn = () => {
 	drainPendingWrites(MY_HASH, new Uint8Array(32));
 };
 
-beforeEach(() => {
+beforeEach(async () => {
+	await useMemoryLocalStore();
+	await markDialogKeyPublishedHere(MY_HASH, DIALOG_HASH);
 	setActivePinia(createPinia());
 	grants.clear();
 	grants.add('dialog_keys');

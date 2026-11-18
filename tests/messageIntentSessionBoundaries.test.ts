@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { useMemoryLocalStore, markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { startLeaderElection, stopLeaderElection, currentSessionToken, SessionFencedError } from '@/lib/data/outbox';
 import { makeTestIdentity } from './helpers/signedFixtures';
 
@@ -36,13 +37,12 @@ vi.mock('@/libs/enigma', () => ({
 	decodeHexOrBase64: (s: string) => (s ? new Uint8Array([1, 2, 3]) : null),
 }));
 
-vi.mock('@/libs/DialogCrypto', () => ({
-	DialogCrypto: {
-		deriveSenderMsgKey: () => new Uint8Array(32),
-		wrapSenderMsgKey: async () => {
-			wrapSenderMsgKeyCalls++;
-			return { peerKemWrapKeyB64: 'wrap', peerWrappedMsgKeyB64: 'wrapped' };
-		},
+vi.mock('@buckitup/pq-client/dialogs', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/dialogs')>()),
+	deriveSenderMsgKey: () => new Uint8Array(32),
+	wrapSenderMsgKey: async () => {
+		wrapSenderMsgKeyCalls++;
+		return { peer_kem_wrap_key_b64: 'wrap', peer_wrapped_msg_key_b64: 'wrapped' };
 	},
 }));
 
@@ -86,7 +86,8 @@ const memoryStore = () => {
 	};
 };
 
-beforeEach(() => {
+beforeEach(async () => {
+	await useMemoryLocalStore();
 	_setAcceptedSnapshotStorageForTests(memoryStore());
 	keysCollection.rows.clear();
 	vaultExportDeferred = false;

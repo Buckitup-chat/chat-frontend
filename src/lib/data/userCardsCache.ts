@@ -1,5 +1,5 @@
 import { markTouched } from './readCache';
-import type { UserCardRow } from './types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 const DB_NAME = 'user-synced-cache';
 const DB_VERSION = 1;

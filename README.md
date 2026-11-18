@@ -13,7 +13,7 @@ Privacy-focused, end-to-end encrypted messenger. This repository contains the Vu
 
 ## Requirements
 
-- Node.js >= 20
+- Node.js >= 22.14 (`package.json` engines); CI uses 22.23.1
 - npm (the repo is npm-only; `package-lock.json` is the single lockfile)
 
 ## Getting started
@@ -48,7 +48,7 @@ src/
   api/          HTTP / IPFS / socket clients
   components/   Reusable Vue components (chat, modals, engines, providers)
   composables/  Vue composables (useMenu, useLoader, ...)
-  libs/         Crypto & infrastructure modules (EncryptionManagerPQ, DialogCrypto, p2p, ...)
+  libs/         Account adapters & infrastructure (EncryptionManagerPQ, accountVault, p2p, ...)
   router/       vue-router config
   store/        Pinia stores (user, dialogs, ...)
   lib/data/     Typed Electric/TanStack data layer (collections, ingest, local KV)
@@ -57,6 +57,51 @@ src/
 docs/           Architecture notes, invariants (docs/invariants.md), backlog, reports
 netlify/        Netlify redirect function for SPA preview hosting
 ```
+
+## Protocol SDK
+
+The application installs [`@buckitup/pq-client@1.0.0`](https://www.npmjs.com/package/@buckitup/pq-client)
+from npm, pinned with registry integrity in `package-lock.json`. The SDK is
+developed and released from [pq-library](https://github.com/Buckitup-chat/pq-library).
+A separate SDK checkout is not needed. Install locked dependencies with
+`npm ci --legacy-peer-deps`.
+
+To upgrade the SDK:
+
+```sh
+npm install --save-exact --legacy-peer-deps @buckitup/pq-client@VERSION
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+Commit the manifest and lockfile together. Import installed module entry points
+without source aliases or workspace links.
+
+The SDK owns protocol types, signing, verification, cryptographic derivations,
+transport, read sessions and identity/vault primitives. The frontend owns
+Vue/Pinia state, Electric/TanStack collections, durable intents, outbox, accepted
+snapshots, offline recovery and application policies. App storage writes retain
+that lifecycle rather than using SDK direct writes.
+
+`sender_msg_key` is derived by SDK `deriveSenderMsgKey` from `sign_skey`,
+`crypt_skey` and the peer's `user_hash`, without `evm_skey`. Before sending,
+the app checks a device-local publication marker and verified or accepted key
+evidence. Without that marker it publishes the key, updating a visible own row.
+The marker is stored only after acceptance and successful cleanup of superseded
+quarantined key writes. If cleanup fails, a later send can repeat publication.
+If an existing server key has not reached the local view, the insert can return
+`exists` and fail that send; a later send can update the key once it is visible.
+
+SDK protocol tests run in pq-library; frontend tests cover application behavior
+against the installed package. Test fixtures and shared helpers stay with their
+application tests. The handshake sandbox has its own test command and is outside
+the production build and root test suite.
+
+Protocol and API details live in the [SDK documentation](https://github.com/Buckitup-chat/pq-library/blob/main/docs/README.md).
+See [service compatibility](https://github.com/Buckitup-chat/pq-library/blob/main/docs/backend-dependencies.md)
+for storage concurrency limits and partner-server acceptance requirements.
 
 ## Account recovery
 

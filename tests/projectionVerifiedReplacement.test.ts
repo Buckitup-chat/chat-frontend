@@ -6,6 +6,7 @@
 // accepted snapshot are real; only the HTTP transport and the shape barrier's
 // answer are faked. Real ML-DSA signatures throughout.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { setActivePinia, createPinia } from 'pinia';
 import { mount, type VueWrapper } from '@vue/test-utils';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
@@ -92,7 +93,7 @@ const { readAcceptedOperation } = await import('@/lib/data/operationLifecycle');
 const { getVerifiedSignPkey } = await import('@/lib/data/cardRegistry');
 const PageChat = (await import('@/views/chats/Page_Chat.vue')).default;
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 
 const memStore = () => {
 	const map = new Map<string, string>();
@@ -136,7 +137,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
 
 let store: ReturnType<typeof useDialogsStore>;
 let dialogHash: string;
-let senderKey: ReturnType<typeof DialogCrypto.deriveSenderMsgKey>;
+let senderKey: ReturnType<typeof deriveSenderMsgKey>;
 let projections: ReturnType<typeof memStore>;
 let wrapper: VueWrapper | null = null;
 
@@ -171,7 +172,7 @@ const sendAccepted = async (text: string) => {
 const revisionOf = async (row: Row, text: string, ownerTimestamp: number): Promise<Row> => {
 	const fields = {
 		message_id: row.message_id, dialog_hash: row.dialog_hash, sender_hash: me.userHash,
-		content_b64: await DialogCrypto.encryptContent(senderKey, encodeContent([{ kind: 'text', text }])),
+		content_b64: await encryptContent(senderKey, encodeContent([{ kind: 'text', text }])),
 		deleted_flag: false, refs_map_b64: row.refs_map_b64, parent_sign_hash: null, owner_timestamp: ownerTimestamp,
 	};
 	const sign_b64 = signFields(fields as never, me.sign.secretKey);
@@ -210,14 +211,15 @@ beforeEach(async () => {
 	await waitUntil(() => outbox.isLeader());
 	store = useDialogsStore();
 	dialogHash = store.getDialogHash(peer.userHash)!;
-	senderKey = DialogCrypto.deriveSenderMsgKey(me.sign.secretKey, me.kem.secretKey, bytesToHex(me.contactSk), peer.userHash);
-	const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, peer.kem.publicKey);
+	senderKey = deriveSenderMsgKey(me.sign.secretKey, me.kem.secretKey, peer.userHash);
+	const wrapped = await wrapSenderMsgKey(senderKey, peer.kem.publicKey);
 	const keyFields = {
 		dialog_hash: dialogHash, sender_hash: me.userHash, peer_hash: peer.userHash,
-		peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+		peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 		deleted_flag: false, owner_timestamp: 1_700_000_000,
 	};
 	collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, { ...keyFields, sign_b64: signFields(keyFields as never, me.sign.secretKey) });
+	await markDialogKeyPublishedHere(me.userHash, dialogHash);
 	mountChat();
 });
 
@@ -292,7 +294,7 @@ describe('the exact row replaces it only once it verifies', () => {
 
 	it('exact row with a bad signature: kept and never canonical; the honest row later replaces it', async () => {
 		const { id, row } = await sendAccepted('the honest text');
-		const forged = { ...row, content_b64: await DialogCrypto.encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'forged text' }])) };
+		const forged = { ...row, content_b64: await encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'forged text' }])) };
 		deliverShape(forged);
 		await settle();
 		expect(hasProjection(id)).toBe(true);

@@ -1,5 +1,6 @@
-import { signFields, type SignableFields } from '@buckitup/pq-client/signature';
-import { signableFields, wireBool } from '@buckitup/pq-client/schema';
+import { wireBool } from '@buckitup/pq-client/schema';
+import { signRow } from '@buckitup/pq-client/rows';
+import { storageScope } from '@buckitup/pq-client/vouch';
 import { getVerifiedSignPkey } from './cardRegistry';
 import { readDeviceIdentity } from './deviceOwner';
 import { IngestError, sendMutationsAndAwaitShape } from './ingest';
@@ -131,10 +132,8 @@ async function supersedeQueued(issuerHash: string, keys: VouchKey[], into: Map<s
 	}
 }
 
-const signedRow = (fields: Omit<VouchRow, 'sign_b64'>, signSkey: Uint8Array): VouchRow => {
-	const signable = signableFields('vouch_tokens', fields) as SignableFields;
-	return { ...fields, sign_b64: signFields(signable, signSkey) };
-};
+const signedRow = (fields: Omit<VouchRow, 'sign_b64'>, signSkey: Uint8Array): VouchRow =>
+	signRow('vouch_tokens', fields, signSkey) as VouchRow;
 
 type Plan =
 	| { mutation: unknown; step: 'inserted' | 'updated' }
@@ -193,7 +192,7 @@ async function setContactVouches(request: ContactVouchRequest, granted: boolean,
 	}
 
 	const keys: VouchKey[] = SCOPES.map((scope) => ({
-		kind: `device.${identity.deviceId}.storage.${scope}`,
+		kind: storageScope(identity.deviceId, scope),
 		issuer_hash: issuerHash,
 		subject_hash: subjectHash,
 	}));

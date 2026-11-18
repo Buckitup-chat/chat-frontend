@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { setActivePinia, createPinia } from 'pinia';
 import { makeFakeLockManager } from './helpers/fakeWebLocks';
 import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
@@ -122,13 +123,13 @@ let dialogHash: string;
 let myKey: Uint8Array;
 let tip: Row;
 
-const DialogCrypto = async () => (await import('@/libs/DialogCrypto')).DialogCrypto;
+const dialogCrypto = () => import('@buckitup/pq-client/dialogs');
 const encodeContent = async () => (await import('@buckitup/pq-client/content')).encodeContent;
-const decrypt = async (b64: unknown) => (await DialogCrypto()).decryptContent(myKey, b64 as string);
+const decrypt = async (b64: unknown) => (await dialogCrypto()).decryptContent(myKey, b64 as string);
 const messageRevision = async (text: string, ts: number, parent: string | null) => signRow(me, {
 	message_id: MESSAGE_ID, dialog_hash: dialogHash, sender_hash: me.userHash,
-	content_b64: await (await DialogCrypto()).encryptContent(myKey, (await encodeContent())([{ kind: 'text', text }])),
-	deleted_flag: false, refs_map_b64: await (await DialogCrypto()).encryptContent(myKey, '{}'),
+	content_b64: await (await dialogCrypto()).encryptContent(myKey, (await encodeContent())([{ kind: 'text', text }])),
+	deleted_flag: false, refs_map_b64: await (await dialogCrypto()).encryptContent(myKey, '{}'),
 	parent_sign_hash: parent, owner_timestamp: ts,
 }, 'dms_');
 
@@ -150,7 +151,8 @@ beforeEach(async () => {
 	page = await boot();
 	dialogHash = page.store.getDialogHash(peer.userHash)!;
 	collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, signedDialogKeyRow(me, { dialog_hash: dialogHash, peer_hash: peer.userHash }));
-	myKey = (await DialogCrypto()).deriveSenderMsgKey(me.signSkey, me.kemSkey, me.vault.evm_skey, peer.userHash);
+	await markDialogKeyPublishedHere(me.userHash, dialogHash);
+	myKey = (await dialogCrypto()).deriveSenderMsgKey(me.signSkey, me.kemSkey, peer.userHash);
 	tip = await messageRevision('original', 1_700_000_100, null);
 	collections.dialog.messages.rows.set(MESSAGE_ID, tip);
 	await page.store.admitMessageRow(tip); // as the chat does when it renders the message

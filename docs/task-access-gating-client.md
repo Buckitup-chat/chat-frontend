@@ -5,51 +5,25 @@
 contract for this task) and `docs/pq/reqs/pq_vouch_tokens.in_progress.md`.
 **Frontend base:** `chat-frontend` `main` at `caa3a4b`.
 
-## Where things stand
+## Client integration
 
-**Backend (done):**
-- Owner bootstrap: the first ingested `user_card` becomes the device owner.
-- Gate mode in AdminDB: `open` / `guarded` / `trust`.
-- Write gate per shape (`Chat.Pq.WriteGate`).
-- Read sessions:
-  - `GET /electric/v1/challenge` → `POST /electric/v1/read_session`;
-  - 5-minute token per shape;
-  - `ElectricReadGate` on `/shapes`, `/file_chunk/…` and `/file_chunk_status`.
-- Server cards (`GET /electric/v1/server_card`, name `SyncBot_<device_id>`).
-- `vouch_tokens` (an Electric shape): schema, validation, chain distance by
-  recursive CTE.
-- An admin sandbox for switching modes and issuing vouches by hand.
+The installed SDK owns row schemas, signing, HTTP result classification and
+read-session primitives. This frontend owns the active account, tokens in
+memory, reactive collections, approval UI, durable blocked writes and contact
+policy:
 
-**Backend (pending):**
-- the `ElectricAccessGate` plug;
-- the `max_depth` setting (reads use the fixed default of 7);
-- the resolved chain cache.
+- `readSession.ts` obtains the active identity's sessions and wires their bearer
+  tokens into shape and chunk reads.
+- `accessGate.ts` tracks blocked shapes and schedules probes for the UI.
+- `ingest.ts` maps SDK outcomes into the application's durable delivery states.
+- `outbox.ts` retains writes held for approval and resumes them when access is
+  demonstrated; an access refusal is not a retryable network failure.
+- `contactVouches.ts` builds signed rows through the SDK while the contact
+  store decides when the account grants or retracts its vouches.
 
-None of these block the client work below.
-
-**Frontend, reads: in progress on branch `gated-reads`** (four commits on
-`8e877de`, 2026-10-05, not merged):
-- `src/lib/data/readSession.ts`: lazy open on `401`, one open per shape,
-  renewal 60 s before expiry, tokens in memory;
-- `src/lib/data/accessGate.ts` and `AccessGateBanner.vue`: blocked shapes,
-  probing from 15 s up to 5 minutes;
-- the wiring: Electric collections, `readShapeOnce`, chunk fetches, the
-  service worker's token, and the barrier skipping blocked shapes;
-- `EncryptionManagerPQ.signChallenge` signs the challenge's UTF-8 bytes, as
-  the server checks.
-
-Parts 3 and 4 below are the contract to review that branch against.
-
-**Frontend, the rest: not started.**
-- `src/lib/data/ingest.ts` treats any `422` as permanent and everything else,
-  `403` included, as transient. The spec forbids both for a blocked row.
-- *Awaiting approval* knows only blocked reads; blocked writes do not enter it.
-- No `vouch_tokens` in `packages/pq-client/src/schema.generated.ts`, and no client issues
-  or revokes a vouch.
-
-In `open` mode, the default, none of the gate responses occur, so the app works
-today. As soon as an owner switches a device to `guarded`, writes retry forever
-or get dropped.
+Service gate mode, trust-chain evaluation and peer-vouch freshness are service
+responsibilities. Client tests use an integration fake and do not prove the
+behavior of a deployed server.
 
 ## Scope
 
@@ -84,8 +58,8 @@ validation failures.
   accepts a `file` manifest only once every chunk is stored
   (`File.Validation.verify_file_chunks`, `:incomplete_chunks`), so today's
   order — chunks, then the manifest — stays. A blocked manifest stays pending
-  like any blocked row; its chunks wait on the device until approval. This
-  contradiction goes to the backend with the open questions below.
+  like any blocked row; its chunks wait on the device until approval. The
+  backend has to resolve this contradiction with the spec.
 
 ### 3. Reads (§ Reads)
 
@@ -96,8 +70,10 @@ validation failures.
   for a request about to be sent, from a table→shape map mirroring
   `Chat.Data.Shapes`. Keyed by table, `bearerFor('user_cards')` finds no token
   for `user_card`, and every long-poll pays a challenge and a signature until
-  Electric gives up. `gated-reads` keys by table today — the first thing to
-  check there.
+  Electric gives up. The SDK session manager (`createReadSessions`,
+  `@buckitup/pq-client/transport`) keys tokens by shape and records each
+  table's shape from the `401` body, so `bearerFor(table)` finds the shape's
+  token.
 - **A session manager**, held in memory only, per identity: `shape →
   {token, expires_at}`.
   - Sessions open lazily, on the first `401 {"error":"read_session_required",
@@ -127,9 +103,10 @@ validation failures.
     `need-session`), retries once, then fails the range.
 - **Tokens are secrets:** never in URLs, logs, IndexedDB or the outbox. After a
   reload, sessions open lazily again.
-- **Shape barriers:** a write waiting for its txid (`awaitTxId`,
-  `sendMutationsAndAwaitShape`) on a stream stopped for approval must not wait.
-  Treat the ingest `200` as the commit.
+- **Confirmation:** a stopped read stream does not revoke an exact per-row
+  server acceptance. Preserve that acceptance and its durable snapshot;
+  replicated visibility remains a separate state. Follow `writeContracts.ts`
+  and [the confirmation invariant](invariants.md#5-dependent-writes-use-the-required-confirmation-level).
 
 ### 4. Awaiting approval (§ Awaiting approval)
 
@@ -158,13 +135,9 @@ validation failures.
 handshake, the frontend issues the vouch on the owner's behalf.
 
 - **Schema and signing:**
-  - add `'vouch_token.ex'` to `SCHEMA_FILES` in `scripts/gen-pq-schema.mjs`
-    and regenerate `schema.generated.ts` — it is generated, and a hand edit
-    fails `tests/pqSchemaGen.test.ts` or is lost on the next run;
-  - fields: `kind`, `issuer_hash`, `subject_hash`, `owner_timestamp`,
-    `deleted_flag`, `sign_b64`;
-  - primary key: `(kind, issuer_hash, subject_hash)`;
-  - sign with the existing `signFields` canonicalization.
+  - use the installed SDK's schema and row-signing API through
+    `src/lib/data/contactVouches.ts`; schema generation and protocol tests
+    belong to [pq-library](https://github.com/Buckitup-chat/pq-library);
   - the client reads its own issued rows (`vouch_tokens` where `issuer_hash`
     is itself, the shape or a one-shot read). The backend takes only insert
     and update: the first grant is an insert, while a revoke and a re-grant are
@@ -175,42 +148,30 @@ handshake, the frontend issues the vouch on the owner's behalf.
     insert on an existing key comes back as a conflict.
 - **Issuing:**
   - **Where:** in `confirmContact` (`src/store/userPQ.store.js`), the only path
-    that sets `confirmed`. That way it works with today's PQ1 handshake and
-    with PQ2 when it lands.
+    that sets `confirmed`, after the PQ2 engine has verified the peer.
   - **Rows:** two vouches, `device.<sn>.storage.write` and
     `device.<sn>.storage.read`, subject = the confirmed contact. `<sn>` is the
     device the client talks to.
-- **Revoking:** removing a contact, or losing `confirmed`, tombstones both
-  vouches.
-- **Read-path verification:** add `vouch_tokens` to `VERIFIABLE` in
-  `src/lib/data/rowVerification.ts`; the client reads these rows (above).
+- **Revoking:** deleting a contact (`deleteContact`) tombstones both vouches.
+- **Read-path verification:** `src/lib/data/rowVerification.ts` verifies
+  `vouch_tokens` through the SDK before the app uses a replicated grant.
 
-**Open questions for the backend** (1–3 before part 5; parts 1–4 do not
-depend on them):
+## Device identity and contact policy
 
-1. **The device id.** How does a client learn `<sn>`? Parsing
-   `SyncBot_<device_id>` out of `/electric/v1/server_card` is fragile; an
-   explicit field or endpoint is better.
-2. **Non-owners.** Should a non-owner issue the vouch at all? The spec allows
-   transitive vouches "attenuated from voucher's own scope", but a client does
-   not know its own scope. Options: issue the same `device.<sn>.storage.*` and
-   let the CTE attenuate, or issue only as the owner. How does a client know it
-   is the owner?
-3. **Several devices.** A vouch is per device. Should a handshake vouch for
-   every device the user syncs with, or only the current one?
-4. **File upload order.** `pq_access_gating` § Writes asks for chunks only
-   after the `file` row is accepted; `File.Validation` accepts the row only
-   after every chunk. One of the two has to change; until then the client
-   keeps chunks first (part 2).
+`deviceOwner.ts` reads `GET /electric/v1/device_identity`; the client does not
+parse the device id out of a SyncBot name. Vouches target the server the app
+is currently connected to. The issuer must be its known owner or hold a
+verified device vouch; otherwise the app leaves the action for a later retry.
+The server evaluates the resulting chain and attenuation.
 
-## Order and acceptance
+Contact confirmation and retraction policy belong to the frontend.
+Changing a confirmed contact's key clears its confirmation but does not retract
+its device-access vouches; deletion is the retraction path.
+Partner one-time-code admission is a different consumer policy and is not
+implemented by this contact UI. File upload ordering likewise remains the app's existing
+manifest/chunk lifecycle, not a vouch or protocol-test responsibility.
 
-Build in this order:
-
-1. Parts 1 and 2: `guarded` mode works.
-2. Part 4 for blocked writes, on top of `gated-reads`' gate and banner.
-3. Part 3: review and finish `gated-reads` against it; `trust` mode works.
-4. Part 5.
+## Deployment acceptance
 
 **Acceptance**, on a local backend, using its admin sandbox to switch modes and
 issue or revoke vouches:
@@ -232,7 +193,8 @@ issue or revoke vouches:
   - removing the contact tombstones them;
   - the backend's chain distance for the contact is 1, and absent after the
     tombstone.
-- **Tests:** unit tests for the per-row classification, the session manager
-  (shared opens, renewal, retry once) and the probe schedule. Each regression
-  test must fail without its fix.
+- **Tests:** SDK result-classification and read-session unit tests run in
+  `pq-library`. Frontend tests cover their mapping to outbox states, account
+  fencing, shared session use, probe scheduling, contact UI and service-worker
+  token delivery. Each regression test must fail without its fix.
 - `npm test`, `npm run lint` and `npm run build` are green.

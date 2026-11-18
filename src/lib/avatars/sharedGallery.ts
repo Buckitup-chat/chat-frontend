@@ -3,7 +3,7 @@ import { isAvatarId, isGalleryKeyB64, isGalleryUuid, photoFromWire } from '@buck
 import { fromBase64, toBase64, toBytes } from '@buckitup/pq-client/signature';
 import { wireBool } from '@buckitup/pq-client/schema';
 import { verifyReplicatedRow, type RowInvalidReason, type SignPkeyResolver } from '@/lib/data/rowVerification';
-import type { UserStorageRow } from '@/lib/data/types';
+import type { UserStorageRow } from '@buckitup/pq-client/types';
 import { ALLOWED_IMAGE_TYPES, ownGalleryOf, type GalleryEntry } from './gallery';
 
 export const SHARED_GALLERY_VERSION = 1;

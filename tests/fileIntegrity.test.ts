@@ -85,7 +85,7 @@ beforeEach(() => {
 	shapeReads = {};
 	globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 		const url = decodeURIComponent(typeof input === 'string' ? input : input.toString());
-		const shape = (rows: Row[]) => new Response(JSON.stringify(rows.map((value) => ({ value }))), { status: 200 });
+		const shape = (rows: Row[]) => new Response(JSON.stringify([...rows.map((value) => ({ value })), { headers: { control: 'up-to-date' } }]), { status: 200 });
 		const table = /\/shapes\?table=(\w+)&/.exec(url)?.[1];
 		if (table) shapeReads[table] = (shapeReads[table] ?? 0) + 1;
 		if (table === 'files') return shape(server.manifest ? [onWire(server.manifest)] : []);

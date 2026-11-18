@@ -1,5 +1,7 @@
 # Task: ship the optical handshake v2 (PQ2) with the relay
 
+> The original task text is retained below. See [Implementation status](#implementation-status) for completed work, changed agreements and current code paths.
+
 **Spec:** `docs/task-handshake-pq2.md`. It is the contract; this task says
 how to get there. Read the spec's §5a first: it is what changed after the
 sandbox.
@@ -209,3 +211,31 @@ relay, and building from `main` alone builds the old design.
 - **The access-gating task** (`docs/task-access-gating-client.md`, part 5)
   issues vouch tokens in `confirmContact`. Whichever lands second builds on
   the other's `confirmContact`.
+
+## Implementation status
+
+The protocol module and frontend integration steps in this rollout task are
+implemented. The original plan above is retained; obsolete branch prerequisites
+and workspace paths describe that plan rather than current setup instructions.
+
+| Rollout area | Current implementation |
+| --- | --- |
+| Protocol module | Installed npm `@buckitup/pq-client@1.0.0`, maintained in `Buckitup-chat/pq-library`; no frontend workspace package or SDK source alias. |
+| Application engine and camera | `src/lib/handshake/engine.ts`, `src/components/engines/QRScannerEngine.vue` and `src/lib/handshake/qwbpChannel.ts`. |
+| Candidate selection and patched QWBP | `src/lib/data/handshakeAddresses.ts` and `patches/qwbp+0.1.0.patch`, applied by `patch-package`. |
+| Relay credentials | `src/lib/data/turnCredentials.ts` uses the backend challenge/credentials flow and caches credentials in memory. The static relay override remains available for local development; production builds receive no static override. |
+| Contact confirmation and vouches | `Modal_QrHandshake.vue`, `userPQ.store.js` and `contactVouches.ts` apply the verified identity and the app's device-access policy. |
+| Protocol tests | `pq-library/tests/handshake.test.ts` and `pq-library/tests/cardVouchesForContactKey.test.ts`. |
+| App tests | Frontend `tests/handshake.test.ts`, `tests/qrHandshakeEngine.test.js`, `tests/contactVouchTokens.test.ts` and `tests/qwbpSelectCandidates.test.ts`. |
+| Browser check tooling | `scripts/handshake-check/check.mjs`, invoked by `npm run test:handshake`. |
+
+The original first step was to create the protocol inside the frontend.
+The agreed standalone-library decision replaces that step with installing the
+npm release. Protocol implementation and unit tests are maintained with the
+SDK; the frontend keeps its integration tests and browser tools. The sandbox
+remains a separate development experiment, including animated QR, rather than
+the production protocol source.
+
+The rollout task remains the record of the agreed integration work and its
+acceptance criteria. Current SDK ownership and protocol status are documented
+in the [SDK handshake task](https://github.com/Buckitup-chat/pq-library/blob/main/docs/handshake.md#implementation-task-status).

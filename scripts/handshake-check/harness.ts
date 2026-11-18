@@ -11,11 +11,11 @@ import { bytesToHex, randomBytes } from '@noble/hashes/utils';
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import { api } from '@/api/client';
+import { signRow, toBase64 } from '@buckitup/pq-client/rows';
 import { HandshakeEngine, type Outcome, type HandshakeIdentity } from '@/lib/handshake/engine';
 import { signOptical } from '@buckitup/pq-client/handshake';
 import { QwbpChannel } from '@/lib/handshake/qwbpChannel';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 const params = new URLSearchParams(location.search);
 const logLines: string[] = [];
@@ -41,16 +41,17 @@ const createIdentity = (name: string) => {
 	const contactSkey = secp.utils.randomPrivateKey();
 	const contactPkey = secp.getPublicKey(contactSkey, true);
 	const userHash = 'u_' + bytesToHex(sha3_512(sign.publicKey));
-	const { mutation } = api.createUserCard(name, {
+	const card: UserCardRow = signRow('user_cards', {
 		user_hash: userHash,
-		sign_pkey: sign.publicKey,
-		sign_skey: sign.secretKey,
-		contact_pkey: contactPkey,
-		contact_cert: ml_dsa87.sign(contactPkey, sign.secretKey),
-		crypt_pkey: crypt.publicKey,
-		crypt_cert: ml_dsa87.sign(crypt.publicKey, sign.secretKey),
-	});
-	const card = (mutation as { modified: UserCardRow }).modified;
+		sign_pkey: toBase64(sign.publicKey),
+		contact_pkey: toBase64(contactPkey),
+		contact_cert: toBase64(ml_dsa87.sign(contactPkey, sign.secretKey)),
+		crypt_pkey: toBase64(crypt.publicKey),
+		crypt_cert: toBase64(ml_dsa87.sign(crypt.publicKey, sign.secretKey)),
+		name,
+		deleted_flag: false,
+		owner_timestamp: Math.floor(Date.now() / 1000),
+	}, sign.secretKey);
 	return { userHash, signSkey: sign.secretKey, contactPkey, contactSkey, card };
 };
 

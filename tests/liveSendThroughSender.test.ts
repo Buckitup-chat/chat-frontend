@@ -24,10 +24,6 @@ let signatures = 0;
 
 vi.mock('@/api/client', () => ({
 	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => {
-			signatures++;
-			return { type, ...(type === 'insert' ? { modified: { ...row } } : { original: {}, changes: { ...row } }), syncMetadata: { relation } };
-		},
 		ingestWithAuthEach: (mutations: Mutation[]) => new Promise((resolve, reject) => {
 			http.inFlight++;
 			http.maxInFlight = Math.max(http.maxInFlight, http.inFlight);
@@ -48,6 +44,21 @@ vi.mock('@/api/client', () => ({
 		}),
 	},
 }));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('@buckitup/pq-client/rows')>();
+	const fileRelations = new Set(['files', 'file_chunks']);
+	return {
+		...actual,
+		signRow: (relation: string, row: Record<string, unknown>, signSkey: Uint8Array) =>
+			fileRelations.has(relation) ? actual.signRow(relation, row, signSkey) : row,
+		rowMutation: (relation: string, row: Record<string, unknown>, type: 'insert' | 'update') => {
+			if (fileRelations.has(relation)) return actual.rowMutation(relation, row, type);
+			signatures++;
+			return { type, ...(type === 'insert' ? { modified: { ...row } } : { original: {}, changes: { ...row } }), syncMetadata: { relation } };
+		},
+	};
+});
 
 const { sendMutationsAndAwaitShape, IngestError, drainPendingWrites } = await import('@/lib/data/ingest');
 const { signAndDispatchIntent, recoverIntents } = await import('@/lib/data/intentRecovery');

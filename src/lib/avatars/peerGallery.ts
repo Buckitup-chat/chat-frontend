@@ -5,7 +5,7 @@ import { currentSessionToken, sameSessionToken, type SessionToken } from '@/lib/
 import type { SignPkeyResolver } from '@/lib/data/rowVerification';
 import { pinActiveSession, SessionFencedError } from '@/lib/data/sessionGuard';
 import { readShapeOnce } from '@/lib/data/shapeRead';
-import type { UserStorageRow } from '@/lib/data/types';
+import type { UserStorageRow } from '@buckitup/pq-client/types';
 import { shapeOfTable } from '@/lib/data/writeContracts';
 import {
 	galleryKeyFromB64, readSharedGalleryRow,

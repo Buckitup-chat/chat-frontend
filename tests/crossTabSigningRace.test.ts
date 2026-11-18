@@ -4,15 +4,17 @@ const MY_HASH = 'u_' + 'a'.repeat(128);
 const SKEY = new Uint8Array(32).fill(9);
 
 let signCount = 0;
-vi.mock('@/api/client', () => ({
-	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => {
-			signCount++;
-			const signed = { ...row, sign_hash: `sig_${signCount}` };
-			return type === 'insert'
-				? { type, relation, row, modified: signed, syncMetadata: { relation } }
-				: { type, relation, row, original: {}, changes: signed, syncMetadata: { relation } };
-		},
+vi.mock('@/api/client', () => ({ api: {} }));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: (relation: string, row: Record<string, unknown>, type: string) => {
+		signCount++;
+		const signed = { ...row, sign_hash: `sig_${signCount}` };
+		return type === 'insert'
+			? { type, relation, row, modified: signed, syncMetadata: { relation } }
+			: { type, relation, row, original: {}, changes: signed, syncMetadata: { relation } };
 	},
 }));
 

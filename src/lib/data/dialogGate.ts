@@ -18,7 +18,7 @@
 import { presentedRowFingerprint } from '@buckitup/pq-client/verifyDialogRow';
 import { verifyRowWithKey } from '@/lib/data/rowVerification';
 import { validateRefs, revisionKey, type RevisionRef } from '@buckitup/pq-client/dialogDag';
-import type { DialogMessageRow, DialogMessageVersionRow } from '@/lib/data/types';
+import type { DialogMessageRow, DialogMessageVersionRow } from '@buckitup/pq-client/types';
 
 export type MessageLike = DialogMessageRow | DialogMessageVersionRow;
 

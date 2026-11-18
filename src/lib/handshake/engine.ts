@@ -13,7 +13,7 @@ import {
 	checkConfirm, confirmMessage, encode, fingerprintOf, newNonce, parse, pqMessage, refusalMessage, sasOf, sessionTag,
 	transcript, verifyOptical, type Fingerprints, type Message, type Party, type RefusalCause,
 } from '@buckitup/pq-client/handshake';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 export interface ChannelLink {
 	send(text: string): void;

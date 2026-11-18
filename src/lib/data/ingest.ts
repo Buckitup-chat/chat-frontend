@@ -1,7 +1,7 @@
-// Transactional mutation transport: POST mutations to /ingest_each and
-// classify per-row outcomes. One logical write = one transaction; successful
-// rows return txids that TanStack DB collections await to reconcile
-// optimistic state.
+// Durable application writes over the SDK's /ingest_each transport and
+// per-row outcome classification. Each row is committed independently;
+// earlier accepted rows remain committed if a later row is refused. The app
+// retains outbox state and uses txids to reconcile optimistic collections.
 //
 // Idempotency: a unique-key conflict ("has already been taken") is NOT
 // success by itself — the server row may be a different revision, and
@@ -23,8 +23,11 @@ import {
 	type HeldReason, type DeliveryVerdict, type DiscoveryOutcome, type EntryOutcome, type OutboxEntry,
 } from './outbox';
 import { setWriteProber, syncBlockedWrites } from './accessGate';
-import type { IngestRowResult } from './types';
-import { checkResults, isNoAnswer, NOT_IN_TRUST_CHAIN, TransportError } from '@buckitup/pq-client/transport';
+import type { IngestRowResult } from '@buckitup/pq-client/types';
+import {
+	checkResults, classifyRowResult, isNoAnswer, NOT_IN_TRUST_CHAIN, TransportError, validationReasons,
+	type ValidationReason, type WriteRejection,
+} from '@buckitup/pq-client/transport';
 
 export class IngestError extends Error {
 	/** true when retrying can never succeed (server-side validation) */
@@ -68,22 +71,21 @@ export class IngestError extends Error {
 
 export { NOT_IN_TRUST_CHAIN };
 
-const isApprovalBlocked = (r: IngestRowResult): boolean => r.status === 'error' && r.error === NOT_IN_TRUST_CHAIN;
-
-const isUniqueConflict = (r: IngestRowResult): boolean => {
-	if (r.status === 'ok' || r.error !== 'validation_failed') return false;
-	return Object.values(r.details || {}).some(
-		(v) => Array.isArray(v) && v.some((msg) => /has already been taken/i.test(msg))
-	);
+const rejectionOf = (r: IngestRowResult): WriteRejection | null => {
+	const outcome = classifyRowResult(r);
+	return outcome.kind === 'rejected' ? outcome.rejection : null;
 };
 
-const isTimestampNotNewer = (r: IngestRowResult): boolean => {
-	if (r.status === 'ok' || r.error !== 'validation_failed') return false;
-	const field = r.details?.owner_timestamp;
-	return Array.isArray(field) && field.some((msg) => /timestamp not newer/i.test(msg));
-};
+const isApprovalBlocked = (r: IngestRowResult): boolean => rejectionOf(r)?.kind === 'gate';
 
-const isExistsConflict = (r: IngestRowResult): boolean => r.status === 'exists';
+const validationHas = (r: IngestRowResult, reason: ValidationReason): boolean =>
+	r.status === 'error' && r.error === 'validation_failed' && validationReasons(r.details).has(reason);
+
+const isUniqueConflict = (r: IngestRowResult): boolean => validationHas(r, 'unique_conflict');
+
+const isTimestampNotNewer = (r: IngestRowResult): boolean => validationHas(r, 'stale_timestamp');
+
+const isExistsConflict = (r: IngestRowResult): boolean => rejectionOf(r)?.kind === 'exists';
 
 function validateBatchResults(results: unknown, mutationCount: number, status: number): IngestRowResult[] {
 	try {
@@ -135,7 +137,10 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 	// response we never saw — and must be treated as success, not failure.
 	// `conflicted: true` is a genuine different-revision conflict and, like
 	// the text-matched fallback below, a final verdict worth retrying.
-	const isResolvedConflict = (r: IngestRowResult): boolean => r.status === 'exists' && r.conflicted === false;
+	const isResolvedConflict = (r: IngestRowResult): boolean => {
+		const rejection = rejectionOf(r);
+		return rejection?.kind === 'exists' && !rejection.conflicted;
+	};
 
 	const failed = results.filter((r) => r.status !== 'ok' && !isResolvedConflict(r));
 	const blockedIndexes = failed.filter(isApprovalBlocked).map((r) => r.index);

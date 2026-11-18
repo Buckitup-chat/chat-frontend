@@ -47,7 +47,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 }));
 
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { deriveSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 const { encodeContent } = await import('@buckitup/pq-client/content');
 
 const M1 = 'dmsg_0192aaaa-0000-7000-8000-000000000001';
@@ -62,9 +62,9 @@ describe('checkpoint alerts', () => {
 			message_id: messageId,
 			dialog_hash: dialogHash,
 			sender_hash: me.userHash,
-			content_b64: await DialogCrypto.encryptContent(key, encodeContent(contentParts)),
+			content_b64: await encryptContent(key, encodeContent(contentParts)),
 			deleted_flag: false,
-			refs_map_b64: await DialogCrypto.encryptContent(key, JSON.stringify(refs)),
+			refs_map_b64: await encryptContent(key, JSON.stringify(refs)),
 			parent_sign_hash: null,
 			owner_timestamp: 1_700_000_500,
 			...tweak,
@@ -127,7 +127,7 @@ describe('checkpoint alerts', () => {
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer);
 		seedKeyRow();
-		key = DialogCrypto.deriveSenderMsgKey(me.signSkey, me.kemSkey, bytesToHex(me.contactSk), peer);
+		key = deriveSenderMsgKey(me.signSkey, me.kemSkey, peer);
 	});
 
 	// The full pipeline on real rows: a signed checkpoint in the feed, the

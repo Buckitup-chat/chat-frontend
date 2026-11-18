@@ -73,6 +73,23 @@ const tabNonce = Math.random().toString(36).slice(2, 6).padStart(4, '0');
 let seq = 0;
 const nextId = (): string => `intent-${Date.now().toString(36)}-${(seq++).toString(36)}-${tabNonce}`;
 
+const ID_PARTS = /^intent-([0-9a-z]+)-([0-9a-z]+)-(.+)$/;
+
+/**
+ * Capture order where it is known — the time, then the counter of the tab
+ * that captured both — and a fixed tie-break where it is not: two tabs
+ * capturing in the same millisecond are ordered by tab, then counter.
+ */
+export function compareIntentIds(a: string, b: string): number {
+	const pa = ID_PARTS.exec(a);
+	const pb = ID_PARTS.exec(b);
+	if (!pa || !pb) return a < b ? -1 : a > b ? 1 : 0;
+	const byTime = parseInt(pa[1], 36) - parseInt(pb[1], 36);
+	if (byTime !== 0) return byTime;
+	if (pa[3] !== pb[3]) return pa[3] < pb[3] ? -1 : 1;
+	return parseInt(pa[2], 36) - parseInt(pb[2], 36);
+}
+
 const OWNER_KEY_PREFIX = 'owner|';
 const ownerKeyFor = (id: string): string => OWNER_KEY_PREFIX + id;
 
@@ -284,7 +301,7 @@ export async function intentsOf(userHash: string, opts: { includeResolved?: bool
 		}
 		if (opts.includeResolved || !isResolvedMarker(entry.intent)) entries.push(entry);
 	}
-	return { entries: entries.sort((a, b) => (a.id < b.id ? -1 : 1)), issues };
+	return { entries: entries.sort((a, b) => compareIntentIds(a.id, b.id)), issues };
 }
 
 export async function _clearIntentsForTests(): Promise<void> {

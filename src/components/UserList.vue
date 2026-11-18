@@ -6,7 +6,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, inject } from 'vue'
 import { userPQStore } from '@/store/userPQ.store'
 import { useDialogsStore } from '@/store/dialogs.store'
 import { useAccountSyncStatus } from '@/composables/useAccountSyncStatus'
-import type { UserCardRow } from '@/lib/data/types'
+import type { UserCardRow } from '@buckitup/pq-client/types'
 
 const emit = defineEmits<{ select: [address: string, opts?: { checkpoint?: boolean | string }] }>()
 

@@ -35,15 +35,16 @@ import { pinActiveSession, assertSessionUnchanged } from './sessionGuard';
 import { SessionFencedError, pendingEntries, awaitEntryOutcome, type EntryOutcome } from './outbox';
 import { IngestError, type DeliveryHandle } from './ingest';
 import { nextOwnerTimestamp } from './time';
-import type { UserStorageRow } from './types';
+import type { UserStorageRow } from '@buckitup/pq-client/types';
 import { readShapeOnce } from './shapeRead';
 import { verifyReplicatedRow } from './rowVerification';
 import { getVerifiedSignPkey } from './cardRegistry';
 import { wireBool } from '@buckitup/pq-client/schema';
 
 // Slot addresses are not constants here: reads are public, so a fixed uuid
-// per slot would be the same address on every account. See lib/pq/slotId for
-// the derived root address and lib/data/slots for the map of the rest.
+// per slot would be the same address on every account. The installed SDK
+// owns the root derivation (@buckitup/pq-client/slotId) and slot map
+// (@buckitup/pq-client/slots).
 
 /**
  * 'queued': signed and in the outbox, which delivers it — the connection was

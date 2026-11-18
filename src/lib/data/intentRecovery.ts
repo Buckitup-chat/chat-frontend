@@ -1,5 +1,4 @@
-import { api } from '@/api/client';
-import { decodeHexOrBase64 } from '@/libs/enigma';
+import { rowMutation, signRow } from '@buckitup/pq-client/rows';
 import { sendMutationsAndAwaitShape, DurabilityError, type DeliveryHandle } from './ingest';
 import { intentsOf, resolveIntent, getIntent, updateIntent, enqueueIntent, markIntentAwaitingUnlock, resumeIntentAfterUnlock, type IntentEntry } from './intents';
 import { VaultLockedError, resolveSigningKey, type SigningKeySource } from './keyCustody';
@@ -25,9 +24,10 @@ export interface ReadyRowIntent {
 	kind?: 'ready-row';
 	relation: string;
 	row: Record<string, unknown>;
-	mutationType?: string;
+	mutationType?: 'insert' | 'update';
 	purpose?: string;
 	fileIds?: string[];
+	entityKey?: string;
 }
 
 export interface MessageIntentPayload {
@@ -104,58 +104,67 @@ interface SignAndDispatchOptions {
 export async function withIntentSigningLock<T>(intentId: string, fn: () => Promise<T>): Promise<T> {
 	return withIntentLock(intentId, () => fn());
 }
-const intentQueues = new Map<string, Promise<void>>();
-async function withIntentLock<T>(intentId: string, fn: (locked: boolean) => Promise<T>): Promise<T> {
-	const previous = intentQueues.get(intentId) ?? Promise.resolve();
+async function queuedLock<T>(queues: Map<string, Promise<void>>, key: string, lockName: string, fn: (locked: boolean) => Promise<T>): Promise<T> {
+	const previous = queues.get(key) ?? Promise.resolve();
 	let release!: () => void;
 	const done = new Promise<void>((resolve) => { release = resolve; });
 	const turn = previous.then(() => done);
-	intentQueues.set(intentId, turn);
+	queues.set(key, turn);
 	await previous;
 	try {
 		const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
 		if (!locks?.request) return await fn(false);
-		return await locks.request(`buckitup-intent-sign:${intentId}`, () => fn(true));
+		return await locks.request(lockName, () => fn(true));
 	} finally {
 		release();
-		if (intentQueues.get(intentId) === turn) intentQueues.delete(intentId);
+		if (queues.get(key) === turn) queues.delete(key);
 	}
 }
 
+const intentQueues = new Map<string, Promise<void>>();
+function withIntentLock<T>(intentId: string, fn: (locked: boolean) => Promise<T>): Promise<T> {
+	return queuedLock(intentQueues, intentId, `buckitup-intent-sign:${intentId}`, fn);
+}
+
+export const intentEntityKey = (payload: unknown): string | null => {
+	const p = payload as { kind?: string; messageId?: string; ownerHash?: string; emoji?: string; row?: { receipt_hash?: unknown } } | null;
+	switch (p?.kind) {
+		case 'message':
+		case 'checkpoint':
+		case 'edit':
+		case 'delete':
+			return `dialog_messages:${p.messageId}`;
+		case 'reaction':
+			return `dialog_message_reactions:${p.ownerHash}|${p.messageId}|${p.emoji}`;
+		case 'receipt':
+			return `dialog_message_receipts:${String(p.row?.receipt_hash)}`;
+		case 'ready-row': {
+			const ready = payload as ReadyRowIntent;
+			if (typeof ready.entityKey === 'string') return ready.entityKey;
+			if (ready.relation === 'dialog_messages' && ready.row?.message_id) return `dialog_messages:${ready.row.message_id}`;
+			if (ready.relation === 'dialog_message_receipts' && ready.row?.receipt_hash) return `dialog_message_receipts:${ready.row.receipt_hash}`;
+			return null;
+		}
+		default:
+			return null;
+	}
+};
+
+const entityQueues = new Map<string, Promise<void>>();
+
+/**
+ * Builds and hands over the intents of one entity one at a time, whichever
+ * path runs them — the store's dispatch or recoverIntents — so each is built
+ * on the base the previous one left. Intents of other entities do not wait.
+ */
+export function withIntentEntityLock<T>(payload: unknown, fn: () => Promise<T>): Promise<T> {
+	const key = intentEntityKey(payload);
+	if (!key) return fn();
+	return queuedLock(entityQueues, key, `buckitup-intent-entity:${key}`, () => fn());
+}
+
 function buildSignedMutation(intent: ReadyRowIntent, signSkey: Uint8Array): SignedMutationRecord {
-	if (intent.relation === 'user_storage') {
-		const row = intent.row as {
-			user_hash: string;
-			uuid: string;
-			value_b64: string;
-			deleted_flag?: boolean;
-			owner_timestamp: number;
-			parent_sign_hash: string | null;
-		};
-		const createStorageMutation = api.createStorageMutation as (...args: unknown[]) => SignedMutationRecord;
-		return createStorageMutation(
-			row.user_hash, row.uuid, row.value_b64, null, 0, row.owner_timestamp,
-			signSkey, false, !!row.deleted_flag, row.parent_sign_hash ?? null, null, null,
-			intent.mutationType ?? 'insert'
-		);
-	}
-	if (intent.relation === 'user_cards') {
-		const row = intent.row as {
-			user_hash: string; name: string; owner_timestamp: number;
-			sign_pkey: string; contact_pkey: string; contact_cert: string; crypt_pkey: string; crypt_cert: string;
-		};
-		const createUserCard = api.createUserCard as (...args: unknown[]) => { mutation: SignedMutationRecord };
-		return createUserCard(row.name, {
-			user_hash: row.user_hash,
-			sign_pkey: decodeHexOrBase64(row.sign_pkey),
-			contact_pkey: decodeHexOrBase64(row.contact_pkey),
-			contact_cert: decodeHexOrBase64(row.contact_cert),
-			crypt_pkey: decodeHexOrBase64(row.crypt_pkey),
-			crypt_cert: decodeHexOrBase64(row.crypt_cert),
-			sign_skey: signSkey,
-		}, intent.mutationType ?? 'insert', row.owner_timestamp).mutation;
-	}
-	return api.createGenericMutation(intent.relation, intent.row, signSkey, intent.mutationType ?? 'insert') as SignedMutationRecord;
+	return rowMutation(intent.relation, signRow(intent.relation, intent.row, signSkey), intent.mutationType ?? 'insert');
 }
 
 const pendingSignAndDispatch = new Map<string, Promise<DeliveryHandle>>();
@@ -392,6 +401,39 @@ async function handOverDurably(intentId: string, readyRow: ReadyRowIntent, signS
 	await durable;
 }
 
+/**
+ * Inside withIntentEntityLock: builds and hands over, oldest first, the
+ * unsigned intents of the same entity captured before `intentId`, so a later
+ * action never goes out ahead of an earlier one whichever path runs it.
+ */
+export async function handOverEarlierOfEntity(
+	intentId: string,
+	payload: unknown,
+	token: SessionToken,
+	signSkey: Uint8Array,
+	materialize?: (payload: DialogIntentPayload, token: SessionToken) => Promise<ReadyRowIntent | null>,
+): Promise<void> {
+	const key = intentEntityKey(payload);
+	if (!key) return;
+	const { entries } = await intentsOf(token.userHash);
+	for (const earlier of entries) {
+		if (earlier.id === intentId) return;
+		if (intentEntityKey(earlier.intent) !== key) continue;
+		const stored = earlier.intent as Record<string, unknown>;
+		if (stored.signedMutation && stored.resolved !== true) {
+			await handOverDurably(earlier.id, stored as unknown as ReadyRowIntent, signSkey, token);
+			continue;
+		}
+		if (!materialize || !isUnsignedDialogIntent(earlier.intent)) continue;
+		const readyRow = await materialize(earlier.intent, token);
+		if (readyRow === null) {
+			await resolveIntent(earlier.id, { outcome: 'noop' });
+			continue;
+		}
+		await handOverDurably(earlier.id, readyRow, signSkey, token, earlier.intent);
+	}
+}
+
 export async function recoverIntents(
 	userHash: string,
 	signingKey: SigningKeySource,
@@ -459,25 +501,34 @@ export async function recoverIntents(
 					console.warn('[intents] no message materializer registered, will retry later:', entry.id);
 					continue;
 				}
-				let readyRow: ReadyRowIntent | null;
-				try {
-					readyRow = await opts.materializeMessage(stored as DialogIntentPayload, token);
-				} catch (e) {
-					if (e instanceof VaultLockedError) {
-						await awaitUnlock(entry, e);
-						continue;
+				const materialize = opts.materializeMessage;
+				const step = await withIntentEntityLock(stored, async (): Promise<'next' | 'abort'> => {
+					const fresh = await getIntent<Record<string, unknown>>(entry.id);
+					if (!fresh || fresh.intent?.resolved === true) return 'next';
+					const current = fresh.intent as unknown as StoredIntentPayload;
+					let readyRow: ReadyRowIntent | null;
+					try {
+						await handOverEarlierOfEntity(entry.id, current, token, signSkey, materialize);
+						readyRow = await materialize(current as DialogIntentPayload, token);
+					} catch (e) {
+						if (e instanceof VaultLockedError) {
+							await awaitUnlock(entry, e);
+							return 'next';
+						}
+						throw e;
 					}
-					throw e;
-				}
-				if (!sameSessionToken(token, currentSessionToken())) {
-					console.warn('[intents] recovery aborted after materialization — active session changed', entry.id);
-					return;
-				}
-				if (readyRow === null) {
-					await resolveIntent(entry.id, { outcome: 'noop' });
-					continue;
-				}
-				await handOverDurably(entry.id, readyRow, signSkey, token, isUnsignedDialogIntent(stored) ? stored : undefined);
+					if (!sameSessionToken(token, currentSessionToken())) {
+						console.warn('[intents] recovery aborted after materialization — active session changed', entry.id);
+						return 'abort';
+					}
+					if (readyRow === null) {
+						await resolveIntent(entry.id, { outcome: 'noop' });
+						return 'next';
+					}
+					await handOverDurably(entry.id, readyRow, signSkey, token, isUnsignedDialogIntent(current) ? current : undefined);
+					return 'next';
+				});
+				if (step === 'abort') return;
 			} else if (stored.kind === 'storage') {
 				if (!opts.materializeStorage) {
 					console.warn('[intents] no storage materializer registered, will retry later:', entry.id);
@@ -492,7 +543,12 @@ export async function recoverIntents(
 					console.warn('[intents] storage base unavailable during recovery, will retry later:', entry.id, result.message);
 				}
 			} else {
-				await handOverDurably(entry.id, stored as ReadyRowIntent, signSkey, token);
+				await withIntentEntityLock(stored, async () => {
+					const fresh = await getIntent<Record<string, unknown>>(entry.id);
+					if (!fresh || fresh.intent?.resolved === true) return;
+					await handOverEarlierOfEntity(entry.id, fresh.intent, token, signSkey, opts.materializeMessage);
+					await handOverDurably(entry.id, fresh.intent as unknown as ReadyRowIntent, signSkey, token);
+				});
 			}
 		} catch (e) {
 			console.warn('[intents] recovery failed for one intent, will retry later:', entry.id, e);

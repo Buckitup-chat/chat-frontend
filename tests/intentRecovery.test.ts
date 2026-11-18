@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { startLeaderElection, stopLeaderElection } from '@/lib/data/outbox';
+import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
+import { startLeaderElection, stopLeaderElection, _setStorageForTests } from '@/lib/data/outbox';
 
 let sendImpl: (mutations: unknown[]) => Promise<unknown>;
 const sentMutations: unknown[][] = [];
@@ -9,12 +10,14 @@ const { MockDurabilityError } = vi.hoisted(() => {
 	return { MockDurabilityError };
 });
 
-vi.mock('@/api/client', () => ({
-	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => ({
-			type, relation, row, syncMetadata: { relation },
-		}),
-	},
+vi.mock('@/api/client', () => ({ api: {} }));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: vi.fn((_relation: string, row: Record<string, unknown>) => row),
+	rowMutation: (relation: string, row: Record<string, unknown>, type: string) => ({
+		type, relation, row, syncMetadata: { relation },
+	}),
 }));
 
 let outboxIdSeq = 0;
@@ -29,6 +32,8 @@ vi.mock('@/lib/data/ingest', () => ({
 
 const { signAndDispatchIntent, recoverIntents } = await import('@/lib/data/intentRecovery');
 const { enqueueIntent, getIntent, intentsOf, _setIntentStorageForTests, _clearIntentsForTests } = await import('@/lib/data/intents');
+const { signRow } = await import('@buckitup/pq-client/rows');
+const realRows = await vi.importActual<typeof import('@buckitup/pq-client/rows')>('@buckitup/pq-client/rows');
 
 const A = 'u_' + 'a'.repeat(128);
 const B = 'u_' + 'b'.repeat(128);
@@ -50,6 +55,7 @@ beforeEach(async () => {
 	_setIntentStorageForTests(makeStorage());
 	await _clearIntentsForTests();
 	sentMutations.length = 0;
+	vi.mocked(signRow).mockClear();
 	sendImpl = async () => ({ txids: [1] });
 	stopLeaderElection();
 	startLeaderElection(A, () => {});
@@ -64,6 +70,26 @@ describe('signAndDispatchIntent', () => {
 
 		expect(sentMutations).toHaveLength(1);
 		expect((sentMutations[0][0] as { row: unknown }).row).toEqual(capturedRow);
+	});
+
+	it('sends a stored signed snapshot exactly as it was signed, without signing it again', async () => {
+		_setStorageForTests(makeStorage());
+		const author = ml_dsa87.keygen();
+		const row = {
+			user_hash: A, uuid: 'slot-1', value_b64: 'dmFsdWU=', deleted_flag: false,
+			parent_sign_hash: 'uss_' + 'c'.repeat(128), owner_timestamp: 1_700_000_100,
+		};
+		const signedMutation = realRows.rowMutation('user_storage', realRows.signRow('user_storage', row, author.secretKey), 'update');
+		const readyRow = { kind: 'ready-row' as const, relation: 'user_storage', row, mutationType: 'update' as const };
+		const id = await enqueueIntent({ ...readyRow, signedMutation }, A, 'user_storage');
+
+		await signAndDispatchIntent(id!, readyRow, ml_dsa87.keygen().secretKey);
+
+		expect(signRow).not.toHaveBeenCalled();
+		expect(sentMutations).toHaveLength(1);
+		expect(JSON.stringify(sentMutations[0][0])).toBe(JSON.stringify(signedMutation));
+		const sent = sentMutations[0][0] as { changes: Record<string, unknown> };
+		expect(realRows.verifyRow('user_storage', sent.changes, author.publicKey)).toEqual({ status: 'ok' });
 	});
 
 	it('leaves the intent claimed (not resolved) when the mock never proves durability — never fabricates a resolved marker without proof', async () => {

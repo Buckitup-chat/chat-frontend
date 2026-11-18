@@ -10,27 +10,25 @@ const SKEY = new Uint8Array(32).fill(3);
 const counts = { signatures: 0, http: 0 };
 const signed: Array<Record<string, unknown>> = [];
 
-vi.mock('@/api/client', () => {
-	const row = (type: string, r: Record<string, unknown>, relation: string) => {
+vi.mock('@/api/client', () => ({
+	api: {
+		ingestWithAuthEach: async (mutations: unknown[]) => {
+			counts.http++;
+			return { status: 200, json: async () => ({ results: mutations.map((_, index) => ({ index, status: 'ok', txid: 1 })) }) } as unknown as Response;
+		},
+	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: (relation: string, r: Record<string, unknown>, type: string) => {
 		counts.signatures++;
 		signed.push(r);
 		const withSig = { ...r, sign_b64: `sig${counts.signatures}`, sign_hash: `hash${counts.signatures}` };
 		return { type, ...(type === 'insert' ? { modified: withSig } : { original: {}, changes: withSig }), syncMetadata: { relation } };
-	};
-	return {
-		api: {
-			createGenericMutation: (relation: string, r: Record<string, unknown>, _k: unknown, type: string) => row(type, r, relation),
-			createStorageMutation: (user_hash: string, uuid: string, value_b64: string, _h: unknown, _v: unknown, owner_timestamp: number, _k: unknown, _i: unknown, deleted_flag: boolean, parent_sign_hash: string | null, _a: unknown, _b: unknown, type: string) =>
-				row(type, { user_hash, uuid, value_b64, owner_timestamp, deleted_flag, parent_sign_hash }, 'user_storage'),
-			createUserCard: (name: string, keys: { user_hash: string }, type: string, owner_timestamp: number) =>
-				({ mutation: row(type, { user_hash: keys.user_hash, name, owner_timestamp, deleted_flag: false }, 'user_cards') }),
-			ingestWithAuthEach: async (mutations: unknown[]) => {
-				counts.http++;
-				return { status: 200, json: async () => ({ results: mutations.map((_, index) => ({ index, status: 'ok', txid: 1 })) }) } as unknown as Response;
-			},
-		},
-	};
-});
+	},
+}));
 
 vi.mock('@/lib/data/collections', () => ({
 	getUserStorageCollection: () => ({ async preload() {}, get: () => undefined }),

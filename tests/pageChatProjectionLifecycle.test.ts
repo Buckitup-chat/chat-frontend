@@ -20,7 +20,7 @@ import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails
 import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import type { MockInstance } from 'vitest';
 import type { SignableValue } from '@buckitup/pq-client/signature';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 type ShapeRow = Record<string, SignableValue> & { message_id: string; sign_hash: string };
 type CapturedMutation = { modified: ShapeRow };
@@ -89,7 +89,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 
 const PageChat = (await import('@/views/chats/Page_Chat.vue')).default;
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { DialogCrypto } = await import('@/libs/DialogCrypto');
+const { deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
 
 const makeIdentity = (seed: number) => {
 	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
@@ -120,7 +120,7 @@ let seq = 0;
 const nextMessageId = () => `dmsg_0199proj${(seq++).toString().padStart(4, '0')}`;
 
 describe('message projection lifecycle: local → SERVER_ACCEPTED → verified canonical (main-tanstack-proposal-v3.md §445-463, §657-711)', () => {
-	let store: ReturnType<typeof useDialogsStore>, me: ReturnType<typeof makeIdentity>, peer: ReturnType<typeof makeIdentity>, dialogHash: string, senderKey: ReturnType<typeof DialogCrypto.deriveSenderMsgKey>, admitSpy: MockInstance<ReturnType<typeof useDialogsStore>['admitMessageRow']>;
+	let store: ReturnType<typeof useDialogsStore>, me: ReturnType<typeof makeIdentity>, peer: ReturnType<typeof makeIdentity>, dialogHash: string, senderKey: ReturnType<typeof deriveSenderMsgKey>, admitSpy: MockInstance<ReturnType<typeof useDialogsStore>['admitMessageRow']>;
 
 	beforeEach(async () => {
 		setActivePinia(createPinia());
@@ -146,11 +146,11 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 		startLeaderElection(me.userHash, () => {});
 		store = useDialogsStore();
 		dialogHash = store.getDialogHash(peer.userHash)!;
-		senderKey = DialogCrypto.deriveSenderMsgKey(me.sign.secretKey, me.kem.secretKey, bytesToHex(me.contactSk), peer.userHash);
-		const wrapped = await DialogCrypto.wrapSenderMsgKey(senderKey, peer.kem.publicKey);
+		senderKey = deriveSenderMsgKey(me.sign.secretKey, me.kem.secretKey, peer.userHash);
+		const wrapped = await wrapSenderMsgKey(senderKey, peer.kem.publicKey);
 		const keyFields = {
 			dialog_hash: dialogHash, sender_hash: me.userHash, peer_hash: peer.userHash,
-			peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+			peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 			deleted_flag: false, owner_timestamp: 1_700_000_000,
 		};
 		collections.dialog.keys.rows.set(`${dialogHash}|${me.userHash}`, { ...keyFields, sign_b64: signFields(keyFields as never, me.sign.secretKey) });
@@ -182,9 +182,9 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 	const signedRow = async (messageId: string, text: string, refs: Record<string, string>, tweak: Record<string, SignableValue> = {}) => {
 		const fields = {
 			message_id: messageId, dialog_hash: dialogHash, sender_hash: me.userHash,
-			content_b64: await DialogCrypto.encryptContent(senderKey, encodeContent([{ kind: 'text', text }])),
+			content_b64: await encryptContent(senderKey, encodeContent([{ kind: 'text', text }])),
 			deleted_flag: false,
-			refs_map_b64: await DialogCrypto.encryptContent(senderKey, JSON.stringify(refs)),
+			refs_map_b64: await encryptContent(senderKey, JSON.stringify(refs)),
 			parent_sign_hash: null, owner_timestamp: 1_700_000_500, ...tweak,
 		};
 		const sign_b64 = signFields(fields, me.sign.secretKey);
@@ -217,7 +217,7 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 
 			const dispatched = CAPTURE.mutations.at(-1)!.modified;
 			const unresolvedParent = { ['dmsg_never_' + 'a'.repeat(8)]: 'dms_' + 'f'.repeat(128) };
-			const waitingRefsB64 = await DialogCrypto.encryptContent(senderKey, JSON.stringify(unresolvedParent));
+			const waitingRefsB64 = await encryptContent(senderKey, JSON.stringify(unresolvedParent));
 			const waitingFields = { ...dispatched, refs_map_b64: waitingRefsB64 };
 			const waitingRow = { ...waitingFields, sign_b64: signFields(waitingFields, me.sign.secretKey) };
 			waitingRow.sign_hash = deriveSignHash('dms_', waitingRow.sign_b64);
@@ -271,7 +271,7 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 			await waitUntil(() => wrapper.text().includes('authentic draft'));
 
 			const honest = await signedRow(messageId, 'authentic draft', {});
-			const forged = { ...honest, content_b64: await DialogCrypto.encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'forged by tampering' }])) };
+			const forged = { ...honest, content_b64: await encryptContent(senderKey, encodeContent([{ kind: 'text', text: 'forged by tampering' }])) };
 			deliverShape(forged);
 			await new Promise((r) => setTimeout(r, 400));
 

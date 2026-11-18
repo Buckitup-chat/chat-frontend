@@ -22,26 +22,32 @@ vi.mock('../src/lib/data/collections', () => ({
 let signCallCount = 0;
 vi.mock('@/api/client', () => ({
 	api: {
-		createStorageMutation: vi.fn((userHash: string, uuid: string, valueB64: string, _h: unknown, _v: unknown, ownerTimestamp: number, _sk: unknown, _d: unknown, deletedFlag: boolean, parentSignHash: string | null, _sh: unknown, _sb: unknown, mutationType: string) => {
-			signCallCount += 1;
-			const signHash = 'uss_' + String(signCallCount).padStart(128, '0');
-			const row = {
-				user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
-				owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
-				sign_hash: signHash, sign_b64: 'sig',
-			};
-			return {
-				type: mutationType,
-				[mutationType === 'insert' ? 'modified' : 'changes']: row,
-				...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
-				syncMetadata: { relation: 'user_storage' },
-			};
-		}),
 		ingestWithAuthEach: vi.fn(async (mutations: unknown[]) => ({
 			status: 200,
 			json: async () => ({ results: mutations.map((_, index) => ({ index, status: 'ok', txid: 100 + index })) }),
 		})),
 	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: vi.fn((_relation: string, signable: Record<string, unknown>, mutationType: string) => {
+		const { user_hash: userHash, uuid, value_b64: valueB64, owner_timestamp: ownerTimestamp, deleted_flag: deletedFlag, parent_sign_hash: parentSignHash } = signable as { user_hash: string; uuid: string; value_b64: string; owner_timestamp: number; deleted_flag: boolean; parent_sign_hash: string | null };
+		signCallCount += 1;
+		const signHash = 'uss_' + String(signCallCount).padStart(128, '0');
+		const row = {
+			user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
+			owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
+			sign_hash: signHash, sign_b64: 'sig',
+		};
+		return {
+			type: mutationType,
+			[mutationType === 'insert' ? 'modified' : 'changes']: row,
+			...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
+			syncMetadata: { relation: 'user_storage' },
+		};
+	}),
 }));
 
 const { upsertStorageRow, getStorageSyncStatus } = await import('../src/lib/data/userStorage');
@@ -55,6 +61,7 @@ const { _setIntentStorageForTests, _clearIntentsForTests } = await import('../sr
 const { _setAcceptedSnapshotStorageForTests } = await import('../src/lib/data/acceptedSnapshot');
 const { drainPendingWrites } = await import('../src/lib/data/ingest');
 const { api } = await import('@/api/client');
+const { rowMutation } = await import('@buckitup/pq-client/rows');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -88,8 +95,8 @@ const makeLeaseStore = () => {
 	};
 };
 
-const mutationCalls = () => (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls;
-const mutationResult = (i: number) => (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.results[i].value;
+const mutationCalls = () => (rowMutation as ReturnType<typeof vi.fn>).mock.calls;
+const mutationResult = (i: number) => (rowMutation as ReturnType<typeof vi.fn>).mock.results[i].value;
 const signHashOf = (mutation: { modified?: { sign_hash: string }; changes?: { sign_hash: string } }) =>
 	(mutation.modified ?? mutation.changes)!.sign_hash;
 
@@ -156,7 +163,7 @@ describe('2. the second writer stays revision-correct against the in-flight firs
 		await vi.waitFor(() => expect(mutationCalls()).toHaveLength(2));
 
 		expect(mutationCalls()[1]?.at(-1)).toBe('update');
-		expect(mutationCalls()[1]?.[9]).toBe(signHashOf(mutationResult(0)));
+		expect(mutationCalls()[1]?.[1]?.parent_sign_hash).toBe(signHashOf(mutationResult(0)));
 
 		releaseA!();
 		await a;
@@ -251,7 +258,7 @@ describe('6. concurrent writers: construction serializes, HTTP does not', () => 
 		expect(mutationCalls()).toHaveLength(2);
 		expect(mutationCalls()[0]?.at(-1)).toBe('insert');
 		expect(mutationCalls()[1]?.at(-1)).toBe('update');
-		expect(mutationCalls()[1]?.[9]).toBe(signHashOf(mutationResult(0)));
+		expect(mutationCalls()[1]?.[1]?.parent_sign_hash).toBe(signHashOf(mutationResult(0)));
 		expect((await a.sync).status).toBe('synced');
 		expect((await b.sync).status).toBe('synced');
 	});

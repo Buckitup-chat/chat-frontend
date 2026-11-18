@@ -18,10 +18,12 @@ Phoenix / Ecto).
 
 1. **Read `docs/invariants.md`.** Every rule there came from a real failure.
    Do not violate one without a written, agreed exception.
-2. **The backend source is the contract**, not this repo's comments and not a
-   reviewer's claim. Wire fields come from `chat/lib/chat/data/schemas/*.ex`;
-   protocol from `chat/docs/reqs/pq_dialogs.md`. When a review says "the backend
-   does X", open the backend and check before fixing.
+2. **Use the released SDK contract for protocol operations.** Wire fields,
+   signing and normalization come from the installed SDK, not local field
+   lists. Verify compatibility against backend schemas and requirements when
+   investigating a mismatch; do not silently change the SDK contract in the
+   frontend. When a review says "the backend does X", open the backend and
+   check before fixing.
 3. **Branch discipline.** `main` is the only integration branch, and staging
    deploys from it. Every feature or fix branch starts from the current
    `origin/main`. Start every working session — and always before opening a
@@ -48,14 +50,16 @@ Phoenix / Ecto).
   opens content (a file's `enc_secret`, a dialog key, a private key) is
   content: never stored in the clear. `secureStore` exists for
   outbox/localStore; a new store needs it only if it holds such a key.
-- HTTP 200 from `/ingest_each` ≠ row visible in the shape. Writes whose
-  successor reads the shape must go through `sendMutationsAndAwaitShape`.
+- Per-row server acceptance is distinct from shape visibility and verification.
+  App writes use durable intents/outbox; `writeContracts.ts` selects accepted
+  or visible confirmation. Chained writes can use durable accepted snapshots;
+  a caller that needs replicated state must await visibility.
 - `owner_timestamp` must be strictly monotonic: use `nextOwnerTimestamp`, never
   bare `Date.now()/1000`.
-- Base64 padding differs by direction and this bites every time: the signature
-  payload is built with padding, the shape endpoint returns binary columns
-  without it. Re-pad a value taken from a shape before signing or verifying.
-- Only `dialog_messages` and `dialog_messages_versions` have `sign_hash`.
+- Use SDK normalization for shape binary columns; do not compare raw Base64
+  encodings. The encoding contract is in pq-library/docs/row-encoding.md.
+- Build mutation fields from the installed SDK schema, including sign_hash;
+  do not maintain a second relation/field list in the app.
 - `/shapes` is the sanctioned read endpoint; `/user_card`, `/user_storage`
   proxies are deprecated.
 - Read receipts are irreversible and must **never** be sent on render/scroll —
@@ -67,8 +71,8 @@ Phoenix / Ecto).
 
 ## Verification standard
 
-- `npm test` (vitest), `npm run lint`, `npm run build` — all green before a
-  commit is called done. CI runs the same three.
+- `npm run typecheck`, `npm test` (vitest), `npm run lint`, `npm run build` —
+  all green before a commit is called done. CI runs the same four.
 - A regression test must **fail without the fix**. Verify by temporarily
   reverting the fix; if the test stays green, it is not testing anything.
 - Prefer real dependencies over mocks where they run under node/jsdom
@@ -87,15 +91,14 @@ quick look at a small diff — they fan out subagents and cost real money.
 
 Facts reviewers cannot infer from the code:
 
-- Tests: `npm test` (vitest). If the sandbox has no network or registry
-  access, say so in the limitations — do not invent run results.
+- Tests: `npm test` runs the frontend integration and component suite. SDK
+  tests and releases live in `Buckitup-chat/pq-library`. The frontend consumes
+  an exact npm registry dependency; never restore an alias to SDK sources.
 - Compare a branch against the current `origin/main` (`git fetch origin`
   first): compute the merge-base with it and check the commit count against
   what the author claimed.
-- `packages/pq-client/src/` is the cryptographic layer: diffs touching it get their own
-  security axis and canonicalization checks by execution. Root derivations
-  are pinned byte-for-byte by golden vectors in `tests/pqCheckpoint.test.ts`
-  — a derivation change must bump the version constants and re-pin them.
+- SDK crypto changes are reviewed and tested in `Buckitup-chat/pq-library`.
+  App passkey recovery golden vectors remain in `tests/passkeyRecovery.test.ts`.
 - When reading eslint output, the total is the "N problems (X errors, …)"
   line; the "potentially fixable" line below it is not the error count.
 
@@ -106,12 +109,15 @@ Facts reviewers cannot infer from the code:
 - `src/store/dialogs.store.js` — dialog write path, optimistic state, reaction
   and receipt logic.
 - `src/libs/EncryptionManagerPQ.js` — vault, identity, user card publication.
-- `src/libs/DialogCrypto.js` — hash derivations (`dialog_hash`,
-  `reaction_hash`, `receipt_hash`), key wrapping, content encryption.
+- `@buckitup/pq-client/dialogs` — protocol hashes, key wrapping and content encryption, maintained in the SDK repository.
 - `docs/` — invariants, backlog, encryption layout, migration reports.
   Work notes go there or into the PR description, never the repo root.
 
 ## Documentation
+
+SDK protocol and API documentation live in `Buckitup-chat/pq-library/docs`.
+Keep frontend usage in the README's Protocol SDK section and link to SDK documents
+instead of duplicating their protocol definitions here.
 
 Documents meant to be read and shared — `README.md`, `docs/*.md`, specs, handover
 notes, exported reports — describe how things are **now**. The path that led there
@@ -130,6 +136,26 @@ able to tell which parts were edited.
 
 Exempt: logs, working notes, investigation and migration reports. Their subject
 *is* the past, and stripping it would empty them.
+
+Task and specification documents are current requirements unless explicitly
+marked as historical or superseded. A `task-` filename or completed
+implementation alone does not make a document historical. Update implementation
+paths, ownership and commands when code moves, while preserving requirements,
+security properties and acceptance criteria. Relocation does not authorize
+weakening them; a deliberate scope change must be stated explicitly.
+
+Exception to the no-history rule for tasks: retain a concise decision summary
+when the agreed implementation approach changes. Distinguish the original
+agreement, the replacement decision, why the task or requirement remains, and
+the current implementation. This is context for the task, not an edit log;
+outdated paths in that summary must be labelled as the original plan.
+
+Separate required behavior from verification evidence. An acceptance checklist
+does not mean those checks passed. Record the tested version, environment and
+results in a report or PR; identify device/deployment checks that remain required.
+When a specification delegates protocol details to an SDK, name the consumed
+package version and link to an immutable revision of its contract. A moving
+`main` link is navigation, not a versioned requirement.
 
 ## Environment notes
 

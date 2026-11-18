@@ -6,8 +6,8 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { fromBase64 } from '@buckitup/pq-client/signature';
 import { makeTestIdentity, signRow, signedDialogKeyRow } from './helpers/signedFixtures';
 import { encodeContent } from '@buckitup/pq-client/content';
-import { DialogCrypto } from '@/libs/DialogCrypto';
-import type { DialogMessageReceiptRow } from '@/lib/data/types';
+import { dialogHash as computeDialogHash, receiptHash as computeReceiptHash, deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } from '@buckitup/pq-client/dialogs';
+import type { DialogMessageReceiptRow } from '@buckitup/pq-client/types';
 import type { StringStore } from '@/lib/data/secureStore';
 import type { App, ApplyResult } from './helpers/twoClients';
 
@@ -18,14 +18,14 @@ type Mutation = { modified?: DialogMessageReceiptRow; changes: DialogMessageRece
 
 const ME = makeTestIdentity(50);
 const PEER = makeTestIdentity(51);
-const DIALOG = DialogCrypto.computeDialogHash(ME.userHash, PEER.userHash);
-const PEER_KEY = DialogCrypto.deriveSenderMsgKey(PEER.signSkey, PEER.kemSkey, bytesToHex(PEER.contactSk), ME.userHash);
+const DIALOG = computeDialogHash(ME.userHash, PEER.userHash);
+const PEER_KEY = deriveSenderMsgKey(PEER.signSkey, PEER.kemSkey, ME.userHash);
 
 const signedMessage = async (id: string, text: string, tweak: Record<string, unknown> = {}) => {
 	const fields = {
 		message_id: id, dialog_hash: DIALOG, sender_hash: PEER.userHash,
-		content_b64: await DialogCrypto.encryptContent(PEER_KEY, encodeContent([{ kind: 'text', text }])),
-		deleted_flag: false, refs_map_b64: await DialogCrypto.encryptContent(PEER_KEY, JSON.stringify({})),
+		content_b64: await encryptContent(PEER_KEY, encodeContent([{ kind: 'text', text }])),
+		deleted_flag: false, refs_map_b64: await encryptContent(PEER_KEY, JSON.stringify({})),
 		parent_sign_hash: null, owner_timestamp: 1_700_000_500, ...tweak,
 	};
 	return signRow(PEER, fields, 'dms_') as typeof fields & { sign_b64: string; sign_hash: string };
@@ -193,14 +193,14 @@ beforeEach(async () => {
 	vi.stubGlobal('fetch', server.fetch);
 
 	message = await signedMessage(MSG_ID, 'hello');
-	const wrapped = await DialogCrypto.wrapSenderMsgKey(PEER_KEY, fromBase64(ME.card.crypt_pkey as string));
+	const wrapped = await wrapSenderMsgKey(PEER_KEY, fromBase64(ME.card.crypt_pkey as string));
 	collections = {
 		cards: liveCollection({ [ME.userHash]: ME.card, [PEER.userHash]: PEER.card }),
 		dialog: {
 			keys: liveCollection({
 				[`${DIALOG}|${PEER.userHash}`]: signedDialogKeyRow(PEER, {
 					dialog_hash: DIALOG, peer_hash: ME.userHash,
-					peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+					peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 					owner_timestamp: 999,
 				}),
 				[`${DIALOG}|${ME.userHash}`]: signedDialogKeyRow(ME, { dialog_hash: DIALOG, peer_hash: PEER.userHash, owner_timestamp: 998 }),
@@ -220,8 +220,8 @@ afterEach(async () => {
 	vi.unstubAllGlobals();
 });
 
-const deliveredHash = (msg = message) => DialogCrypto.computeReceiptHash(msg.message_id, msg.sign_hash, ME.userHash, 'delivered');
-const readHash = (msg = message) => DialogCrypto.computeReceiptHash(msg.message_id, msg.sign_hash, ME.userHash, 'read');
+const deliveredHash = (msg = message) => computeReceiptHash(msg.message_id, msg.sign_hash, ME.userHash, 'delivered');
+const readHash = (msg = message) => computeReceiptHash(msg.message_id, msg.sign_hash, ME.userHash, 'read');
 
 describe('automatic delivered receipt: one logical identity, one signed snapshot', () => {
 	it('rebuilds, remounts and a reload while the receipt shape stays invisible never mint a second row', async () => {
@@ -314,7 +314,7 @@ describe('receipt identities stay distinct where they should', () => {
 
 		const edited = await signedMessage(MSG_ID, 'hello, edited', {
 			parent_sign_hash: message.sign_hash, owner_timestamp: 1_700_000_900,
-			refs_map_b64: await DialogCrypto.encryptContent(PEER_KEY, JSON.stringify({ [MSG_ID]: message.sign_hash })),
+			refs_map_b64: await encryptContent(PEER_KEY, JSON.stringify({ [MSG_ID]: message.sign_hash })),
 		});
 		await $dialogs.sendDeliveredReceipt(PEER.userHash, { messageId: MSG_ID, messageSignHash: edited.sign_hash });
 

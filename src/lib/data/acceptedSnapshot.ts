@@ -2,7 +2,7 @@ import { IndexedDbStore } from './indexedDbStore';
 import { createSecureStore, DecryptFailedError, type StringStore } from './secureStore';
 import { AccountMismatchError, VaultLockedError } from './keyCustody';
 import { assertNever, type StoredRead } from './storedRead';
-import type { UserCardRow, UserStorageRow } from './types';
+import type { UserCardRow, UserStorageRow } from '@buckitup/pq-client/types';
 
 const DB_NAME = 'buckitup-accepted-snapshot';
 

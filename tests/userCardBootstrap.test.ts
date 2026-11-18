@@ -120,18 +120,26 @@ vi.mock('@/lib/data/userStorage', () => ({
 	},
 }));
 
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('@buckitup/pq-client/rows')>();
+	return {
+		...actual,
+		signRow: (...args: Parameters<typeof actual.signRow>) => {
+			if (args[0] !== 'user_cards') return actual.signRow(...args);
+			if (signingFails) throw new Error('signing unavailable');
+			const signed = actual.signRow(...args);
+			cardSignatures++;
+			events.push('sign:user_cards');
+			return signed;
+		},
+	};
+});
+
 vi.mock('@/api/client', async () => {
 	const actual = await vi.importActual<typeof import('@/api/client')>('@/api/client');
 	return {
 		api: {
 			...actual.api,
-			createUserCard: (...args: Parameters<typeof actual.api.createUserCard>) => {
-				if (signingFails) throw new Error('signing unavailable');
-				const signed = actual.api.createUserCard(...args);
-				cardSignatures++;
-				events.push('sign:user_cards');
-				return signed;
-			},
 			ingestWithAuthEach: async (mutations: Mutation[]) => {
 				const registry = ((await rawStore.get('pq-vaults-registry')) ?? []) as Array<{ user_hash: string }>;
 				const owners = new Set(registry.map((identity) => identity.user_hash));

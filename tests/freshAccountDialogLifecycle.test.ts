@@ -11,9 +11,9 @@ import { sha3_512 } from '@noble/hashes/sha3';
 import { bytesToHex } from '@noble/hashes/utils';
 import { signFields, deriveSignHash, toBase64 } from '@buckitup/pq-client/signature';
 import { encodeContent } from '@buckitup/pq-client/content';
-import { DialogCrypto } from '@/libs/DialogCrypto';
+import { deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } from '@buckitup/pq-client/dialogs';
 import type { VueWrapper } from '@vue/test-utils';
-import type { UserCardRow, DialogKeyRow, DialogMessageRow, DialogMessageVersionRow, DialogMessageReceiptRow } from '@/lib/data/types';
+import type { UserCardRow, DialogKeyRow, DialogMessageRow, DialogMessageVersionRow, DialogMessageReceiptRow } from '@buckitup/pq-client/types';
 import type { App, ApplyResult, Relation, Row, RowOf, Server, ServerPost, VaultDisk, ViewChange } from './helpers/twoClients';
 
 type FetchArgs = Parameters<typeof fetch>;
@@ -205,13 +205,13 @@ const receiptsSettled = async (count: number) => {
 };
 
 const peerSends = async (dialogHash: string, texts: string[], firstTail: DialogMessageRow) => {
-	const key = DialogCrypto.deriveSenderMsgKey(PEER.sign.secretKey, PEER.kem.secretKey, bytesToHex(PEER.contactSk), app!.store.currentUserHash as unknown as string);
+	const key = deriveSenderMsgKey(PEER.sign.secretKey, PEER.kem.secretKey, app!.store.currentUserHash as unknown as string);
 	const myCard = server.table('user_cards').get(app!.store.currentUserHash as unknown as string)!;
 	const myKemPk = Uint8Array.from(atob(myCard.crypt_pkey!.padEnd(Math.ceil(myCard.crypt_pkey!.length / 4) * 4, '=')), (c) => c.charCodeAt(0));
-	const wrapped = await DialogCrypto.wrapSenderMsgKey(key, myKemPk);
+	const wrapped = await wrapSenderMsgKey(key, myKemPk);
 	const keyRow = {
 		dialog_hash: dialogHash, sender_hash: PEER.userHash, peer_hash: app!.store.currentUserHash,
-		peer_kem_wrap_key_b64: wrapped.peerKemWrapKeyB64, peer_wrapped_msg_key_b64: wrapped.peerWrappedMsgKeyB64,
+		peer_kem_wrap_key_b64: wrapped.peer_kem_wrap_key_b64, peer_wrapped_msg_key_b64: wrapped.peer_wrapped_msg_key_b64,
 		deleted_flag: false, owner_timestamp: 1_700_000_100,
 	} as DialogKeyRow;
 	keyRow.sign_b64 = signFields(keyRow as never, PEER.sign.secretKey);
@@ -221,8 +221,8 @@ const peerSends = async (dialogHash: string, texts: string[], firstTail: DialogM
 	for (const [i, text] of texts.entries()) {
 		const fields = {
 			message_id: `dmsg_${String(i + 1).repeat(8)}-0000-7000-8000-00000000000${i}`, dialog_hash: dialogHash, sender_hash: PEER.userHash,
-			content_b64: await DialogCrypto.encryptContent(key, encodeContent([{ kind: 'text', text }])),
-			deleted_flag: false, refs_map_b64: await DialogCrypto.encryptContent(key, JSON.stringify({ [tail.message_id]: tail.sign_hash })),
+			content_b64: await encryptContent(key, encodeContent([{ kind: 'text', text }])),
+			deleted_flag: false, refs_map_b64: await encryptContent(key, JSON.stringify({ [tail.message_id]: tail.sign_hash })),
 			parent_sign_hash: null, owner_timestamp: Math.floor(Date.now() / 1000) + 10 + i,
 		};
 		const sign_b64 = signFields(fields, PEER.sign.secretKey);

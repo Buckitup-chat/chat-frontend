@@ -32,21 +32,6 @@ let sent: unknown[][] = [];
 let signCallCount = 0;
 vi.mock('@/api/client', () => ({
 	api: {
-		createStorageMutation: vi.fn((userHash: string, uuid: string, valueB64: string, _h: unknown, _v: unknown, ownerTimestamp: number, _sk: unknown, _d: unknown, deletedFlag: boolean, parentSignHash: string | null, _sh: unknown, _sb: unknown, mutationType: string) => {
-			signCallCount += 1;
-			const signHash = 'uss_' + String(signCallCount).padStart(128, '0');
-			const row = {
-				user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
-				owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
-				sign_hash: signHash, sign_b64: 'sig',
-			};
-			return {
-				type: mutationType,
-				[mutationType === 'insert' ? 'modified' : 'changes']: row,
-				...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
-				syncMetadata: { relation: 'user_storage' },
-			};
-		}),
 		ingestWithAuthEach: vi.fn(async (mutations: unknown[]) => {
 			sent.push(mutations);
 			return {
@@ -55,6 +40,27 @@ vi.mock('@/api/client', () => ({
 			} as unknown as Response;
 		}),
 	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: vi.fn((_relation: string, signable: Record<string, unknown>, mutationType: string) => {
+		const { user_hash: userHash, uuid, value_b64: valueB64, owner_timestamp: ownerTimestamp, deleted_flag: deletedFlag, parent_sign_hash: parentSignHash } = signable as { user_hash: string; uuid: string; value_b64: string; owner_timestamp: number; deleted_flag: boolean; parent_sign_hash: string | null };
+		signCallCount += 1;
+		const signHash = 'uss_' + String(signCallCount).padStart(128, '0');
+		const row = {
+			user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
+			owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
+			sign_hash: signHash, sign_b64: 'sig',
+		};
+		return {
+			type: mutationType,
+			[mutationType === 'insert' ? 'modified' : 'changes']: row,
+			...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
+			syncMetadata: { relation: 'user_storage' },
+		};
+	}),
 }));
 
 const { upsertStorageRow, getStorageRow, putStorageRow } = await import('../src/lib/data/userStorage');
@@ -66,6 +72,7 @@ const { _setIntentStorageForTests, _clearIntentsForTests } = await import('../sr
 const { _setAcceptedSnapshotStorageForTests, getAccepted } = await import('../src/lib/data/acceptedSnapshot');
 const { drainPendingWrites } = await import('../src/lib/data/ingest');
 const { api } = await import('@/api/client');
+const { rowMutation } = await import('@buckitup/pq-client/rows');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -136,7 +143,7 @@ const serverRow = (ts: number, extra: Record<string, unknown> = {}) =>
 describe('upsertStorageRow: server base state', () => {
 	it('signs an insert only when the server is reachable and the row is absent', async () => {
 		const res = await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v1', hashB64: null, signSkey });
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('insert');
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('insert');
 		expect((await res.sync).status).toBe('synced');
 	});
 
@@ -144,16 +151,16 @@ describe('upsertStorageRow: server base state', () => {
 		const tip = serverRow(1000);
 		collection.rows.set(`${USER}|${SLOT}`, tip);
 		await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v2', hashB64: null, signSkey });
-		const call = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0];
+		const call = (rowMutation as ReturnType<typeof vi.fn>).mock.calls[0];
 		expect(call?.at(-1)).toBe('update');
-		expect(call?.[9]).toBe(tip.sign_hash); // parent_sign_hash = server tip
+		expect(call?.[1]?.parent_sign_hash).toBe(tip.sign_hash); // parent_sign_hash = server tip
 	});
 
 	// A tombstone still occupies the primary key — re-inserting it is rejected.
 	it('signs an update when the server row is a tombstone', async () => {
 		collection.rows.set(`${USER}|${SLOT}`, serverRow(1000, { deleted_flag: true }));
 		await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v2', hashB64: null, signSkey });
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('update');
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('update');
 	});
 
 	// "Unreachable" must never be read as "absent": signing an insert from an
@@ -164,7 +171,7 @@ describe('upsertStorageRow: server base state', () => {
 		collection.preloadError = new Error('node unreachable');
 		const res = await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v1', hashB64: null, signSkey });
 
-		expect(api.createStorageMutation).not.toHaveBeenCalled();
+		expect(rowMutation).not.toHaveBeenCalled();
 		expect(api.ingestWithAuthEach).not.toHaveBeenCalled();
 		expect((await res.sync).status).toBe('awaiting-recovery');
 		// the user's edit is still kept locally, visibly pending — not "failed"
@@ -173,16 +180,16 @@ describe('upsertStorageRow: server base state', () => {
 
 	it('signs an update against the accepted local base when the server is unavailable after a prior synced write', async () => {
 		await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v1', hashB64: null, signSkey });
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('insert');
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls[0]?.at(-1)).toBe('insert');
 		const accepted = await getAccepted('user_storage', `${USER}|${SLOT}`);
 		expect(accepted?.sign_hash).toBeTruthy();
 
 		collection.preloadError = new Error('node unreachable');
 		const res = await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'v2', hashB64: null, signSkey });
 
-		const call = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls[1];
+		const call = (rowMutation as ReturnType<typeof vi.fn>).mock.calls[1];
 		expect(call?.at(-1)).toBe('update');
-		expect(call?.[9]).toBe(accepted?.sign_hash);
+		expect(call?.[1]?.parent_sign_hash).toBe(accepted?.sign_hash);
 		expect((await res.sync).status).toBe('synced');
 	});
 });
@@ -288,10 +295,10 @@ describe('upsertStorageRow: per-slot ordering', () => {
 		const accepted = await getAccepted('user_storage', `${USER}|${SLOT}`);
 		await upsertStorageRow({ userHash: USER, uuid: SLOT, valueB64: 'B', hashB64: null, signSkey });
 
-		const calls = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls;
+		const calls = (rowMutation as ReturnType<typeof vi.fn>).mock.calls;
 		expect(calls[0]?.at(-1)).toBe('insert');
 		expect(calls[1]?.at(-1)).toBe('update');
-		expect(calls[1]?.[9]).toBe(accepted?.sign_hash);
+		expect(calls[1]?.[1]?.parent_sign_hash).toBe(accepted?.sign_hash);
 	});
 
 	it('does not let independent slots block each other', async () => {

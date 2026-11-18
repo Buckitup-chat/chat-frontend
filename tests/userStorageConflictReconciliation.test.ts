@@ -25,26 +25,32 @@ vi.mock('../src/lib/data/collections', () => ({
 let signCallCount = 0;
 vi.mock('@/api/client', () => ({
 	api: {
-		createStorageMutation: vi.fn((userHash: string, uuid: string, valueB64: string, _h: unknown, _v: unknown, ownerTimestamp: number, _sk: unknown, _d: unknown, deletedFlag: boolean, parentSignHash: string | null, _sh: unknown, _sb: unknown, mutationType: string) => {
-			signCallCount += 1;
-			const signHash = 'uss_' + String(signCallCount).padStart(128, '0');
-			const row = {
-				user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
-				owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
-				sign_hash: signHash, sign_b64: 'sig' + signCallCount,
-			};
-			return {
-				type: mutationType,
-				[mutationType === 'insert' ? 'modified' : 'changes']: row,
-				...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
-				syncMetadata: { relation: 'user_storage' },
-			};
-		}),
 		ingestWithAuthEach: vi.fn(async (mutations: unknown[]) => ({
 			status: 200,
 			json: async () => ({ results: mutations.map((_, index) => ({ index, status: 'ok', txid: 100 + index })) }),
 		})),
 	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: vi.fn((_relation: string, signable: Record<string, unknown>, mutationType: string) => {
+		const { user_hash: userHash, uuid, value_b64: valueB64, owner_timestamp: ownerTimestamp, deleted_flag: deletedFlag, parent_sign_hash: parentSignHash } = signable as { user_hash: string; uuid: string; value_b64: string; owner_timestamp: number; deleted_flag: boolean; parent_sign_hash: string | null };
+		signCallCount += 1;
+		const signHash = 'uss_' + String(signCallCount).padStart(128, '0');
+		const row = {
+			user_hash: userHash, uuid, value_b64: valueB64, deleted_flag: deletedFlag,
+			owner_timestamp: ownerTimestamp, parent_sign_hash: parentSignHash,
+			sign_hash: signHash, sign_b64: 'sig' + signCallCount,
+		};
+		return {
+			type: mutationType,
+			[mutationType === 'insert' ? 'modified' : 'changes']: row,
+			...(mutationType === 'insert' ? {} : { original: { user_hash: userHash, uuid } }),
+			syncMetadata: { relation: 'user_storage' },
+		};
+	}),
 }));
 
 const { upsertStorageRow, upsertStorageJsonPatch, getStorageSyncStatus } = await import('../src/lib/data/userStorage');
@@ -58,6 +64,7 @@ const { _setAcceptedSnapshotStorageForTests, getAccepted } = await import('../sr
 const { recoverIntents } = await import('../src/lib/data/intentRecovery');
 const { setStorageJsonCodec, materializeStorageIntent } = await import('../src/lib/data/storageIntent');
 const { api } = await import('@/api/client');
+const { rowMutation } = await import('@buckitup/pq-client/rows');
 
 const makeStorage = () => {
 	const map = new Map<string, string>();
@@ -135,9 +142,9 @@ describe('1&2. different-slot concurrent conflict (Case A) reconciles; the confl
 		const res = await upsertStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { slots: { alpha: 'A1' } }, signSkey });
 		expect((await res.sync).status).toBe('synced');
 
-		const calls = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls;
+		const calls = (rowMutation as ReturnType<typeof vi.fn>).mock.calls;
 		expect(calls).toHaveLength(2);
-		expect(calls[1]?.[9]).toBe(winner.sign_hash);
+		expect(calls[1]?.[1]?.parent_sign_hash).toBe(winner.sign_hash);
 		expect(JSON.parse(res.row.value_b64 as string).slots).toEqual({ alpha: 'A1', beta: 'B1' });
 	});
 
@@ -154,7 +161,7 @@ describe('1&2. different-slot concurrent conflict (Case A) reconciles; the confl
 
 		await upsertStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { slots: { alpha: 'A1' } }, signSkey });
 
-		const mutationResults = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.results;
+		const mutationResults = (rowMutation as ReturnType<typeof vi.fn>).mock.results;
 		const originalMutation = mutationResults[0].value;
 		const replacementMutation = mutationResults[1].value;
 
@@ -186,9 +193,9 @@ describe('3. same-slot conflict (Case B) follows the one documented policy, neve
 		const res = await upsertStorageRow({ userHash: USER, uuid: CONTACTS, valueB64: 'device-A-contacts', hashB64: null, signSkey });
 		expect((await res.sync).status).toBe('synced');
 
-		const calls = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls;
-		expect(calls[1]?.[2]).toBe('device-A-contacts');
-		expect(calls[1]?.[9]).toBe(winner.sign_hash);
+		const calls = (rowMutation as ReturnType<typeof vi.fn>).mock.calls;
+		expect(calls[1]?.[1]?.value_b64).toBe('device-A-contacts');
+		expect(calls[1]?.[1]?.parent_sign_hash).toBe(winner.sign_hash);
 		expect(res.row.value_b64).toBe('device-A-contacts');
 	});
 
@@ -221,7 +228,7 @@ describe('4. reconciliation is bounded — it never loops forever', () => {
 
 		const res = await upsertStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { slots: { alpha: 'A1' } }, signSkey });
 		expect((await res.sync).status).toBe('synced');
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(4);
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(4);
 	}, 10000);
 
 	it('a device that keeps losing the race gives up after the bounded number of attempts instead of retrying forever', async () => {
@@ -231,11 +238,11 @@ describe('4. reconciliation is bounded — it never loops forever', () => {
 		const res = await upsertStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { slots: { alpha: 'A1' } }, signSkey });
 		expect((await res.sync).status).toBe('failed');
 
-		const finalCallCount = (api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls.length;
+		const finalCallCount = (rowMutation as ReturnType<typeof vi.fn>).mock.calls.length;
 		expect(finalCallCount).toBe(4);
 
 		await new Promise((r) => setTimeout(r, 500));
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls.length).toBe(finalCallCount);
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls.length).toBe(finalCallCount);
 
 		const quarantined = await quarantinedEntries(USER);
 		expect(quarantined.length).toBe(4);
@@ -266,12 +273,12 @@ describe('5. reload during reconciliation resumes without losing intent or dupli
 
 		const res = await upsertStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { slots: { alpha: 'A1' } }, signSkey });
 		expect((await res.sync).status).toBe('synced');
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
 
 		failResolve = false;
 		await recoverIntents(USER, signSkey, { materializeStorage: materializeStorageIntent });
 
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
 		const accepted = await getAccepted('user_storage', entityKey);
 		expect(JSON.parse((accepted as { value_b64: string }).value_b64).slots).toEqual({ alpha: 'A1', beta: 'B1' });
 	});
@@ -333,7 +340,7 @@ describe('7. a lost response for the reconciled replacement resolves via the exi
 		} finally {
 			clock.mockRestore();
 		}
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
 		expect(api.ingestWithAuthEach).toHaveBeenCalledTimes(3);
 	}, 10000);
 });
@@ -357,10 +364,10 @@ describe('8. reconciliation serializes construct-sign-persist only, never the ne
 
 		const a = upsertStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { slots: { alpha: 'A1' } }, signSkey });
 		await vi.waitFor(() => expect(releaseReplacement).toBeTruthy());
-		expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
+		expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
 
 		const c = upsertStorageJsonPatch({ userHash: USER, uuid: ROOT, jsonPatch: { slots: { delta: 'D1' } }, signSkey });
-		await vi.waitFor(() => expect((api.createStorageMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(3));
+		await vi.waitFor(() => expect((rowMutation as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(3));
 		await vi.waitFor(async () => expect((await pendingEntries(USER)).length).toBeGreaterThanOrEqual(2));
 
 		releaseReplacement!();

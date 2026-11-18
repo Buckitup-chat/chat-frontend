@@ -1,6 +1,6 @@
 import { getUserStorageCollection } from './collections';
 import { settled } from './shapeLink';
-import type { UserStorageRow } from './types';
+import type { UserStorageRow } from '@buckitup/pq-client/types';
 
 /**
  * Server state for one slot. `absent` and `unavailable` are deliberately

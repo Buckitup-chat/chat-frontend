@@ -7,16 +7,20 @@ import { readCachedCard } from './userCardsCache';
 import { settled } from './shapeLink';
 import { verifyUserCard } from '@buckitup/pq-client/verifyCard';
 import { enqueueIntent } from './intents';
-import { signAndDispatchIntent, type DialogIntentPayload, type MessageIntentPayload, type ReadyRowIntent } from './intentRecovery';
+import { intentEntityKey, signAndDispatchIntent, type DialogIntentPayload, type MessageIntentPayload, type ReadyRowIntent } from './intentRecovery';
 import type { SessionToken } from './outbox';
 import { pinActiveSession, assertSessionUnchanged, SessionFencedError } from './sessionGuard';
 import { VaultLockedError } from './keyCustody';
 import { nextOwnerTimestamp } from './time';
-import type { UserCardRow } from './types';
-import { DialogCrypto } from '@/libs/DialogCrypto';
+import { kvGet, kvSet } from './localStore';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 import { EncryptionManagerPQ } from '@/libs/EncryptionManagerPQ';
 import { decodeHexOrBase64 } from '@/libs/enigma';
-import { encodeContent, fileRefsOf, type ContentPart } from '@buckitup/pq-client/content';
+import { fileRefsOf, type ContentPart } from '@buckitup/pq-client/content';
+import {
+	buildDialogKeyRow, buildMessageRow, buildRevisionRow, deriveSenderMsgKey, encryptContent, reactionHash as computeReactionHash, wrapSenderMsgKey,
+	type DialogRowCrypto,
+} from '@buckitup/pq-client/dialogs';
 
 function decode(str: string, fieldName: string): Uint8Array {
 	const result = decodeHexOrBase64(str);
@@ -51,10 +55,25 @@ export async function ownSenderMsgKey(peerHash: string): Promise<Uint8Array> {
 	const keys = await vaultKeys();
 	const signSkey = decode(keys.sign_skey, 'sign_skey');
 	const kemSkey = decode(keys.crypt_skey, 'crypt_skey');
-	return DialogCrypto.deriveSenderMsgKey(signSkey, kemSkey, keys.evm_skey, peerHash);
+	return deriveSenderMsgKey(signSkey, kemSkey, peerHash);
 }
 
 const pendingKeyPublish = new Map<string, Promise<void>>();
+
+const keyPublishedHereKey = (myHash: string, dialogHash: string) => `dialog-key-published-here:${myHash}|${dialogHash}`;
+
+async function keyPublishedHere(myHash: string, dialogHash: string): Promise<boolean> {
+	let mark: unknown;
+	try {
+		mark = await kvGet<boolean>(keyPublishedHereKey(myHash, dialogHash));
+	} catch (e) {
+		if (e instanceof VaultLockedError) {
+			throw new VaultLockedError('whether this device published its dialog key cannot be read while the account is locked', { cause: e });
+		}
+		throw new Error(`Whether this device published its dialog key cannot be read — the message waits for recovery: ${String((e as Error)?.message ?? e)}`, { cause: e });
+	}
+	return mark === true;
+}
 
 export async function ensureOwnDialogKeyPublished(
 	peerHash: string,
@@ -91,13 +110,16 @@ async function ensureOwnDialogKeyPublishedUnguarded(
 	const keysState = await settled(dialogColls.keys as unknown as Parameters<typeof settled>[0]);
 	const myKeyRow = (dialogColls.keys.get(keyId)
 		?? (keysState.state === 'failed' ? await readDialogRow('dialog_keys', keyId) : null)) as Record<string, unknown> | null | undefined;
-	const rowVerification = myKeyRow ? await verifyReplicatedRow('dialog_keys', myKeyRow, getVerifiedSignPkey) : null;
-	if (myKeyRow && rowVerification?.status === 'verified' && !myKeyRow.deleted_flag) return;
+	const [rowVerification, current] = await Promise.all([
+		myKeyRow ? verifyReplicatedRow('dialog_keys', myKeyRow, getVerifiedSignPkey) : null,
+		keyPublishedHere(myHash, dialogHash),
+	]);
+	if (current && myKeyRow && rowVerification?.status === 'verified' && !myKeyRow.deleted_flag) return;
 
 	const accepted = await readAcceptedEvidence('dialog_keys', keyId, myHash);
 	switch (accepted.kind) {
 		case 'present':
-			if (!accepted.row.deleted_flag) return;
+			if (current && !accepted.row.deleted_flag) return;
 			break;
 		case 'missing': break;
 		case 'locked': throw new VaultLockedError('the accepted dialog key cannot be read while the account is locked');
@@ -126,24 +148,18 @@ async function ensureOwnDialogKeyPublishedUnguarded(
 		throw new Error('Peer crypt_pkey not found');
 	}
 	const peerCryptPkey = decode(peerCard.crypt_pkey, 'peerCard.crypt_pkey');
-	const wrapped = (await DialogCrypto.wrapSenderMsgKey(senderMsgKey, peerCryptPkey)) as unknown as {
-		peerKemWrapKeyB64: string;
-		peerWrappedMsgKeyB64: string;
-	};
-	const { peerKemWrapKeyB64, peerWrappedMsgKeyB64 } = wrapped;
-
-	const keysRow = {
-		dialog_hash: dialogHash,
-		sender_hash: myHash,
-		peer_hash: peerHash,
-		peer_kem_wrap_key_b64: peerKemWrapKeyB64,
-		peer_wrapped_msg_key_b64: peerWrappedMsgKeyB64,
-		owner_timestamp: nextOwnerTimestamp(),
-		deleted_flag: false,
-		sign_b64: null,
-	};
+	const existing = (myKeyRow && rowVerification?.status === 'verified' ? myKeyRow : null)
+		?? (accepted.kind === 'present' ? (accepted.row as Record<string, unknown>) : null);
+	const keysRow = await buildDialogKeyRow({
+		senderHash: myHash,
+		peerHash,
+		dialogHash,
+		senderMsgKey,
+		peerCryptPkey,
+		ownerTimestamp: nextOwnerTimestamp(existing ? Number(existing.owner_timestamp) : null),
+	}, dialogRowCrypto);
 	assertSessionUnchanged(token, 'ensureOwnDialogKeyPublished:beforeKeyPublish');
-	const readyRow: ReadyRowIntent = { kind: 'ready-row', relation: 'dialog_keys', row: keysRow, mutationType: 'insert' };
+	const readyRow: ReadyRowIntent = { kind: 'ready-row', relation: 'dialog_keys', row: keysRow, mutationType: existing ? 'update' : 'insert' };
 	const intentId = await enqueueIntent(readyRow, myHash, 'dialog_keys');
 	if (intentId === null) {
 		throw new Error('This action could not be stored for sending. Nothing was sent — try again.');
@@ -157,9 +173,21 @@ async function ensureOwnDialogKeyPublishedUnguarded(
 		const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
 		throw new Error(`Dialog key creation was not accepted: ${reason}`);
 	}
+	await discardSupersededKeyWrites(keyId, myHash)
+		.then(() => kvSet(keyPublishedHereKey(myHash, dialogHash), true, myHash))
+		.catch(() => undefined);
 }
 
 type Row = Record<string, unknown>;
+
+async function discardSupersededKeyWrites(keyId: string, owner: string): Promise<void> {
+	const [{ quarantinedEntries, discardEntry }, { entityKeyOf }] = await Promise.all([import('./outbox'), import('./writeContracts')]);
+	for (const entry of await quarantinedEntries(owner)) {
+		if (entry.relation !== 'dialog_keys') continue;
+		const m = entry.mutations?.[0] as { modified?: Row; changes?: Row } | undefined;
+		if (entityKeyOf('dialog_keys', m?.modified ?? m?.changes) === keyId) await discardEntry(entry.id);
+	}
+}
 
 async function ownPendingRowOf(relation: string, entityKey: string, owner: string): Promise<Row | null> {
 	const [{ pendingEntries }, { entityKeyOf }, { freshestOf }] = await Promise.all([
@@ -191,10 +219,28 @@ export async function trustedRowBase(
 	return freshestOf(verified, own);
 }
 
+const dialogRowCrypto: DialogRowCrypto = { encrypt: encryptContent, wrap: wrapSenderMsgKey };
+
+const unsignedRow = (row: Row): Row => {
+	const copy = { ...row };
+	delete copy.sign_b64;
+	delete copy.sign_hash;
+	return copy;
+};
+
 const fileIdsOf = (parts: ContentPart[] | undefined): string[] =>
 	(parts ?? []).flatMap(fileRefsOf).map((ref) => ref.fileId).filter(Boolean);
 
 export async function materializeMessageIntent(
+	payload: DialogIntentPayload,
+	token: SessionToken
+): Promise<ReadyRowIntent | null> {
+	const readyRow = await materializeUnkeyed(payload, token);
+	const entityKey = intentEntityKey(payload);
+	return readyRow && entityKey ? { ...readyRow, entityKey } : readyRow;
+}
+
+async function materializeUnkeyed(
 	payload: DialogIntentPayload,
 	token: SessionToken
 ): Promise<ReadyRowIntent | null> {
@@ -216,10 +262,21 @@ export async function materializeMessageIntent(
 			if (!base || base.sender_hash !== payload.ownerHash) {
 				throw new Error(`materializeMessageIntent: no own revision of ${payload.messageId} to build on yet — the ${payload.kind} waits for recovery`);
 			}
-			const contentB64 = payload.kind === 'edit'
-				? await DialogCrypto.encryptContent(myKey, encodeContent(payload.parts ?? []))
-				: null;
-			const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(payload.observedTails));
+			const ownerTimestamp = nextOwnerTimestamp(Number(base.owner_timestamp));
+			const revision = await buildRevisionRow(
+				myKey,
+				{
+					message_id: payload.messageId,
+					dialog_hash: payload.dialogHash,
+					sender_hash: payload.ownerHash,
+					sign_hash: base.sign_hash as string | null,
+					owner_timestamp: base.owner_timestamp as number,
+				},
+				payload.kind === 'edit'
+					? { parts: payload.parts ?? [], refs: payload.observedTails, ownerTimestamp }
+					: { deleted: true, refs: payload.observedTails, ownerTimestamp },
+				dialogRowCrypto,
+			);
 			assertSessionUnchanged(token, 'materializeMessageIntent:afterEncrypt');
 			const fileIds = payload.kind === 'edit' ? fileIdsOf(payload.parts) : [];
 			return {
@@ -227,27 +284,18 @@ export async function materializeMessageIntent(
 				relation: 'dialog_messages',
 				mutationType: 'update',
 				...(fileIds.length ? { fileIds } : {}),
-				row: {
-					message_id: payload.messageId,
-					dialog_hash: payload.dialogHash,
-					sender_hash: payload.ownerHash,
-					content_b64: contentB64,
-					deleted_flag: payload.kind === 'delete',
-					refs_map_b64: refsMapB64,
-					parent_sign_hash: base.sign_hash,
-					owner_timestamp: nextOwnerTimestamp(Number(base.owner_timestamp)),
-				},
+				row: unsignedRow(revision),
 			};
 		}
 		case 'reaction': {
 			await ensureOwnDialogKeyPublished(payload.peerHash, payload.dialogHash, payload.ownerHash, token);
 			const myKey = await ownSenderMsgKey(payload.peerHash);
 			assertSessionUnchanged(token, 'materializeMessageIntent:afterKeyDerive');
-			const reactionHash = DialogCrypto.computeReactionHash(myKey, payload.messageId, payload.ownerHash, payload.emoji);
+			const reactionHash = computeReactionHash(myKey, payload.messageId, payload.ownerHash, payload.emoji);
 			const base = await trustedRowBase('dialog_message_reactions', reactionHash, payload.ownerHash, payload.dialogHash);
 			const baseActive = !!base && !base.deleted_flag && base.message_sign_hash === payload.messageSignHash;
 			if (baseActive === payload.desiredActive || (!base && !payload.desiredActive)) return null;
-			const typeB64 = await DialogCrypto.encryptContent(myKey, payload.desiredActive ? payload.emoji : '');
+			const typeB64 = await encryptContent(myKey, payload.desiredActive ? payload.emoji : '');
 			assertSessionUnchanged(token, 'materializeMessageIntent:afterEncrypt');
 			return {
 				kind: 'ready-row',
@@ -280,8 +328,14 @@ async function materializeNewMessage(
 	assertSessionUnchanged(token, 'materializeMessageIntent:afterKeyPublish');
 	const myKey = await ownSenderMsgKey(payload.peerHash);
 	assertSessionUnchanged(token, 'materializeMessageIntent:afterKeyDerive');
-	const contentB64 = await DialogCrypto.encryptContent(myKey, encodeContent(payload.parts));
-	const refsMapB64 = await DialogCrypto.encryptContent(myKey, JSON.stringify(payload.observedTails));
+	const message = await buildMessageRow(myKey, {
+		messageId: payload.messageId,
+		dialogHash: payload.dialogHash,
+		senderHash: payload.ownerHash,
+		parts: payload.parts,
+		refs: payload.observedTails,
+		ownerTimestamp: payload.ownerTimestamp,
+	}, dialogRowCrypto);
 	assertSessionUnchanged(token, 'materializeMessageIntent:afterEncrypt');
 	const fileIds = fileIdsOf(payload.parts);
 	return {
@@ -289,15 +343,6 @@ async function materializeNewMessage(
 		relation: 'dialog_messages',
 		mutationType: 'insert',
 		...(fileIds.length ? { fileIds } : {}),
-		row: {
-			message_id: payload.messageId,
-			dialog_hash: payload.dialogHash,
-			sender_hash: payload.ownerHash,
-			content_b64: contentB64,
-			deleted_flag: false,
-			refs_map_b64: refsMapB64,
-			parent_sign_hash: null,
-			owner_timestamp: payload.ownerTimestamp,
-		},
+		row: unsignedRow(message),
 	};
 }

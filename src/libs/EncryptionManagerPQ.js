@@ -5,10 +5,8 @@ import {
 import * as secp from '@noble/secp256k1';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
-import { sha3_512 } from '@noble/hashes/sha3';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
-import { randomBytes } from '@noble/post-quantum/utils.js';
 import { arrayToBase64, decodeHexOrBase64 } from './enigma';
 import { drainPendingWrites, resumePendingWrites, stopDrainLoop, deliverStoredWrite, IngestError, DurabilityError } from '@/lib/data/ingest';
 import {
@@ -19,6 +17,9 @@ import { VaultLockedError } from '@/lib/data/keyCustody';
 import { holdSessionIdentities, isDerivedSigner, releaseSessionIdentities } from '@/lib/data/sessionIdentities';
 import { accountNotes } from '@buckitup/pq-client/notes';
 import { signedUserCard, wipeIdentity } from '@buckitup/pq-client/derivedIdentity';
+import { generateIdentityKeys, cardKeyFields } from '@buckitup/pq-client/identity';
+import { writeIdentityKeys } from '@buckitup/pq-client/vault';
+import { deriveStorageKey, openJson, sealJson } from '@buckitup/pq-client/storage';
 import {
   startLeaderElection, stopLeaderElection, currentSessionUserHash, onOutboxWake, onOutboxChange, awaitServerAccepted, awaitDeliveryVerdict,
   currentSessionToken, sameSessionToken,
@@ -53,7 +54,7 @@ import { clearSessions } from '@/lib/data/readSession';
 import { clearRelayCredentials } from '@/lib/data/turnCredentials';
 import { resetGate } from '@/lib/data/accessGate';
 import { deriveRootSlotUuid, randomSlotUuid } from '@buckitup/pq-client/slotId';
-import { createSlotResolver } from '@/lib/data/slots';
+import { createSlotResolver } from '@buckitup/pq-client/slots';
 
 // Files the account kept on this device: its sealed index and its pins on the
 // chunks. Loaded on demand — the file layer imports far more than the vault needs.
@@ -393,29 +394,12 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   async #writeNewAccount(userVault, name) {
-    const seed = randomBytes(32);
-
-    const { publicKey: signPubKey, secretKey: signSkey } = ml_dsa87.keygen(seed);
-
-    const { publicKey: cryptPubKey, secretKey: cryptSkey } = ml_kem1024.keygen();
-
-    const contactPrivKey = secp.utils.randomPrivateKey();
-    const contactPubKey = secp.getPublicKey(contactPrivKey, true);
-
+    const keys = generateIdentityKeys();
     const evmPrivKey = secp.utils.randomPrivateKey();
+    const { user_hash: userHash, ...cardKeys } = cardKeyFields(keys);
 
-    const userHash = 'u_' + bytesToHex(sha3_512(signPubKey));
-
-    const cryptPubKeyB64 = arrayToBase64(cryptPubKey);
-    const cryptCert = arrayToBase64(ml_dsa87.sign(cryptPubKey, signSkey));
-
-    const contactPubKeyB64 = arrayToBase64(new Uint8Array(contactPubKey));
-    const contactCert = arrayToBase64(ml_dsa87.sign(contactPubKey, signSkey));
-
-    await userVault.set(`sign_skey`, signSkey);
-    await userVault.set(`crypt_skey`, cryptSkey);
+    await writeIdentityKeys(userVault, keys);
     await userVault.set(`evm_skey`, bytesToHex(evmPrivKey));
-    await userVault.set(`contact_skey`, bytesToHex(contactPrivKey));
     // The guardian meta seed is an account key like the others: made here, it
     // reaches every device the way they do (pq_recovery_shares § Inviting).
     await userVault.set(`meta_seed`, bytesToHex(newMetaSeed()));
@@ -425,11 +409,7 @@ export class EncryptionManagerPQ extends EventTarget {
       vaultId: userVault.id,
       vaultLock: isPrfVault(userVault) ? 'prf' : 'legacy',
       name,
-      sign_pkey: arrayToBase64(signPubKey),
-      crypt_pkey: cryptPubKeyB64,
-      crypt_cert: cryptCert,
-      contact_pkey: contactPubKeyB64,
-      contact_cert: contactCert,
+      ...cardKeys,
 
       userStorage: {}
     };
@@ -1484,27 +1464,15 @@ export class EncryptionManagerPQ extends EventTarget {
   }
 
   async #encryptJson(value) {
-    const data = new TextEncoder().encode(JSON.stringify(value));
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encrypted = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      await this.#deriveKeyFromCryptSkey(),
-      data
-    );
+    const valueB64 = await sealJson(await this.#deriveKeyFromCryptSkey(), value);
     return {
-      valueB64: arrayToBase64(new Uint8Array([...iv, ...new Uint8Array(encrypted)])),
-      hashB64: bytesToHex(sha256(new Uint8Array(encrypted))),
+      valueB64,
+      hashB64: bytesToHex(sha256(decodeHexOrBase64(valueB64).slice(12))),
     };
   }
 
   async #decryptJson(valueB64) {
-    const combined = decodeHexOrBase64(valueB64);
-    const decrypted = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: combined.slice(0, 12) },
-      await this.#deriveKeyFromCryptSkey(),
-      combined.slice(12)
-    );
-    return JSON.parse(new TextDecoder().decode(decrypted));
+    return openJson(await this.#deriveKeyFromCryptSkey(), valueB64);
   }
 
   /**
@@ -2148,25 +2116,6 @@ export class EncryptionManagerPQ extends EventTarget {
   // The key every storage slot's JSON is sealed with. The salt names the
   // first thing it sealed; it stays, or every stored slot stops opening.
   async #deriveKeyFromCryptSkey() {
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw',
-      this.#cryptSkey,
-      'PBKDF2',
-      false,
-      ['deriveKey']
-    );
-
-    return crypto.subtle.deriveKey(
-      {
-        name: 'PBKDF2',
-        salt: new TextEncoder().encode('avatar-encryption'),
-        iterations: 100000,
-        hash: 'SHA-256',
-      },
-      keyMaterial,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['encrypt', 'decrypt']
-    );
+    return deriveStorageKey(this.#cryptSkey);
   }
 }

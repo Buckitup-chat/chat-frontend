@@ -328,7 +328,7 @@ const gatedServer = (opts: { shapeReply?: (table: string, rec: Recorded) => Resp
 		if (custom) return custom;
 		const shape = SERVER_TABLE_SHAPES[table];
 		const token = rec.authorization?.replace(/^Bearer /, '') ?? '';
-		if (issued.get(token) === shape) return json(200, []);
+		if (issued.get(token) === shape) return json(200, [{ headers: { control: 'up-to-date' } }]);
 		return json(401, { error: 'read_session_required', shape });
 	};
 };

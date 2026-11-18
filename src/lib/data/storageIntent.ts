@@ -9,7 +9,7 @@ import { nextOwnerTimestamp } from './time';
 import { IngestError } from './ingest';
 import type { ReadyRowIntent } from './intentRecovery';
 import type { DeliveryHandle } from './ingest';
-import type { UserStorageRow } from './types';
+import type { UserStorageRow } from '@buckitup/pq-client/types';
 import { verifyReplicatedRow, type RowVerification } from './rowVerification';
 import { getVerifiedSignPkey } from './cardRegistry';
 import { withNamedLock } from './serialized';

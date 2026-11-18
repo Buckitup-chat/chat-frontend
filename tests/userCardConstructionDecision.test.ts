@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { makeTestIdentity, resignedCard } from './helpers/signedFixtures';
+import { bytesToHex } from '@noble/hashes/utils';
+import { fromBase64, rowMutation, signRow, verifyRow } from '@buckitup/pq-client/rows';
 
 const ME = makeTestIdentity(1, 'Me');
 const USER = ME.userHash;
@@ -219,6 +221,25 @@ describe('author-bootstrap: registration versus import', () => {
 		const { readyRow } = await storeCardIntentUnderLock(cardFields, decision as never);
 		expect(readyRow).toMatchObject({ mutationType: 'insert', purpose: BOOTSTRAP_CARD_PURPOSE });
 		expect(intentRecords()).toHaveLength(1);
+	});
+
+	it('stores the complete wire row: deleted_flag false and binary columns as padded base64, whatever encoding the local card holds', async () => {
+		const decision = await decideCardConstruction(USER, 'register');
+		const localCard = {
+			...cardFields,
+			sign_pkey: sign_pkey.replace(/=+$/, ''),
+			crypt_cert: '\\x' + bytesToHex(fromBase64(crypt_cert)),
+		};
+
+		const { readyRow } = await storeCardIntentUnderLock(localCard, decision as never);
+
+		expect(readyRow.row).toEqual({
+			user_hash, name, sign_pkey, contact_pkey, contact_cert, crypt_pkey, crypt_cert,
+			deleted_flag: false,
+			owner_timestamp: readyRow.row.owner_timestamp,
+		});
+		const mutation = rowMutation('user_cards', signRow('user_cards', readyRow.row, ME.signSkey), 'insert');
+		expect(mutation.type === 'insert' && verifyRow('user_cards', mutation.modified, sign_pkey)).toEqual({ status: 'ok' });
 	});
 
 	it('import with no accepted card and a shape that is not live: waits, and a stream failure blocks — no insert', async () => {

@@ -11,7 +11,7 @@ import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as secp from '@noble/secp256k1';
 import { signFields, toBase64 } from '@buckitup/pq-client/signature';
 import { cachedCardKeys, unpad } from './helpers/userCardsDiskCache';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 import type { userPQStore } from '@/store/userPQ.store';
 import type { getUserCardsCollection } from '@/lib/data/collections';
 

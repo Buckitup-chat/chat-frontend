@@ -19,15 +19,6 @@ let signatures = 0;
 
 vi.mock('@/api/client', () => ({
 	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) => {
-			signatures++;
-			return { type, ...(type === 'insert' ? { modified: { ...row, sign_b64: `sig${signatures}` } } : { original: {}, changes: { ...row, sign_b64: `sig${signatures}` } }), syncMetadata: { relation } };
-		},
-		createUserCard: (name: string, keys: { user_hash: string }, type: string, ownerTimestamp: number) => {
-			signatures++;
-			const row = { ...CARD_KEYS, user_hash: keys.user_hash, name, owner_timestamp: ownerTimestamp, deleted_flag: false, tag: 'card', sign_b64: `sig${signatures}` };
-			return { mutation: { type, ...(type === 'insert' ? { modified: row } : { original: {}, changes: row }), syncMetadata: { relation: 'user_cards' } } };
-		},
 		ingestWithAuthEach: (mutations: Mutation[]) => new Promise((resolve, reject) => {
 			const respond = (status = 200) => resolve({
 				status,
@@ -41,6 +32,16 @@ vi.mock('@/api/client', () => ({
 			else if (http.auto === 'unavailable') respond(503);
 			else if (http.auto === 'offline') reject(new TypeError('Failed to fetch'));
 		}),
+	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: (relation: string, row: Record<string, unknown>, type: string) => {
+		signatures++;
+		const signed = { ...row, ...(relation === 'user_cards' ? { tag: 'card' } : {}), sign_b64: `sig${signatures}` };
+		return { type, ...(type === 'insert' ? { modified: signed } : { original: {}, changes: signed }), syncMetadata: { relation } };
 	},
 }));
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { useMemoryLocalStore, markDialogKeyPublishedHere } from './helpers/dialogKeyPublished';
 import { startLeaderElection, stopLeaderElection, stopDrainLoop, _setLeaderForTests, _setStorageForTests } from '@/lib/data/outbox';
 import { pinActiveSession } from '@/lib/data/sessionGuard';
 import { makeTestIdentity } from './helpers/signedFixtures';
@@ -31,12 +32,11 @@ vi.mock('@/lib/data/collections', () => ({
 vi.mock('@/libs/enigma', () => ({
 	decodeHexOrBase64: (s: string) => (s ? new Uint8Array([1, 2, 3]) : null),
 }));
-vi.mock('@/libs/DialogCrypto', () => ({
-	DialogCrypto: {
-		deriveSenderMsgKey: () => new Uint8Array(32),
-		wrapSenderMsgKey: async () => ({ peerKemWrapKeyB64: 'wrap', peerWrappedMsgKeyB64: 'wrapped' }),
-		encryptContent: async (_key: unknown, text: string) => `enc(${text})`,
-	},
+vi.mock('@buckitup/pq-client/dialogs', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/dialogs')>()),
+	deriveSenderMsgKey: () => new Uint8Array(32),
+	wrapSenderMsgKey: async () => ({ peer_kem_wrap_key_b64: 'wrap', peer_wrapped_msg_key_b64: 'wrapped' }),
+	encryptContent: async (_key: unknown, text: string) => `enc(${text})`,
 }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
@@ -49,8 +49,6 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 let sent: Array<{ relation: string; txid: number }>;
 vi.mock('@/api/client', () => ({
 	api: {
-		createGenericMutation: (relation: string, row: Record<string, unknown>, _skey: unknown, type: string) =>
-			(type === 'insert' ? { type, modified: row, syncMetadata: { relation } } : { type, changes: row, syncMetadata: { relation } }),
 		ingestWithAuthEach: async (mutations: Array<{ syncMetadata: { relation: string } }>) => {
 			const relation = mutations[0].syncMetadata.relation;
 			const txid = 900 + sent.length;
@@ -61,6 +59,13 @@ vi.mock('@/api/client', () => ({
 			} as unknown as Response;
 		},
 	},
+}));
+
+vi.mock('@buckitup/pq-client/rows', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@buckitup/pq-client/rows')>()),
+	signRow: (_relation: string, row: Record<string, unknown>) => row,
+	rowMutation: (relation: string, row: Record<string, unknown>, type: string) =>
+		(type === 'insert' ? { type, modified: row, syncMetadata: { relation } } : { type, changes: row, syncMetadata: { relation } }),
 }));
 
 const { ensureOwnDialogKeyPublished, materializeMessageIntent } = await import('@/lib/data/messageIntent');
@@ -76,7 +81,8 @@ const makeMemoryStore = () => {
 	};
 };
 
-beforeEach(() => {
+beforeEach(async () => {
+	await useMemoryLocalStore();
 	keysCollection.rows.clear();
 	awaitTxIdSpy.mockClear();
 	sent = [];
@@ -116,7 +122,7 @@ describe('dialog_keys insert completes on SERVER_ACCEPTED, never on shape visibi
 			relation: 'dialog_messages',
 			peerHash: PEER_HASH,
 			dialogHash: DIALOG_HASH,
-			messageId: 'dmsg_test-1',
+			messageId: 'dmsg_01920000-0000-7000-8000-000000000001',
 			ownerHash: MY_HASH,
 			ownerTimestamp: 1,
 			parts: [{ kind: 'text', text: 'hello' }],

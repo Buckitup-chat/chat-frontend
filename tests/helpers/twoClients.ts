@@ -9,7 +9,7 @@ import { authorOf } from '@/lib/data/rowVerification';
 import type {
 	UserCardRow, UserStorageRow, DialogKeyRow, DialogMessageRow, DialogMessageVersionRow,
 	DialogMessageReactionRow, DialogMessageReceiptRow, IngestRowResult,
-} from '@/lib/data/types';
+} from '@buckitup/pq-client/types';
 
 export type RowOf = {
 	user_cards: UserCardRow;

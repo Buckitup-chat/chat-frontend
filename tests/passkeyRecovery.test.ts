@@ -11,7 +11,7 @@ import { SessionFencedError } from '@/lib/data/sessionGuard';
 import {
 	enablePasskeyRecovery, recoverWithPasskey, retirePasskeyRecovery, credentialKey, recoverySalt, recoveryWrapKey,
 	fingerprintOf, isCopyStale, detectPrfSupport, renewPasskeyRecoveryAtLogin,
-	PasskeyRecoveryError, type PasskeyEnvelopeEntry,
+	PasskeyRecoveryError, RECOVERY_PRF_LABEL, PRF_RECOVERY_SALT, type PasskeyEnvelopeEntry,
 } from '@/lib/recovery/passkeyRecovery';
 import type { BackupContents } from '@/lib/backupContents';
 import { prfAuthenticator } from './helpers/prfAuthenticator';
@@ -85,7 +85,7 @@ beforeEach(() => {
 		if (typeof answer === 'number') return new Response(JSON.stringify({ error: 'read_session_required', shape: 'user_storage' }), { status: answer });
 		const where = decodeURIComponent(new URL(url, 'http://localhost').searchParams.get('where') ?? '');
 		const uuid = /uuid='([^']+)'/.exec(where)?.[1];
-		return new Response(JSON.stringify(rows.filter((r) => r.uuid === uuid).map((value) => ({ value }))), { status: 200 });
+		return new Response(JSON.stringify([...rows.filter((r) => r.uuid === uuid).map((value) => ({ value })), { headers: { control: 'up-to-date' } }]), { status: 200 });
 	});
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -858,5 +858,22 @@ describe('withdrawing an envelope', () => {
 		const { key, entry } = await enabled();
 		await expect(retirePasskeyRecovery({ key, locator: entry.locator }, { ...deps(), tombstone: async () => { throw new Error('offline'); } })).rejects.toThrow('offline');
 		expect(slot[key]).toEqual(entry);
+	});
+});
+
+describe('golden passkey recovery (prf-recovery v1)', () => {
+	it('reproduces salt_r, R and the locator byte for byte', () => {
+		expect(RECOVERY_PRF_LABEL).toBe('buckitup/vault-recovery/v1');
+		expect(PRF_RECOVERY_SALT).toBe('buckitup/prf-recovery/v1');
+		expect(bytesToHex(recoverySalt())).toBe('c42a4e2e5ce6b0c2cebe466807d13ac9441808ffb29e8499030f9a6547093fef');
+		const prf = Uint8Array.from({ length: 32 }, (_, i) => i);
+		const wrapKey = recoveryWrapKey(prf);
+		expect(bytesToHex(wrapKey)).toBe('82afc365ebe350c69da870000996a9d84d8dd60675504ea62e2a28adbc79c460');
+		expect(deriveVaultLocator(wrapKey)).toBe('03820095-66e1-8484-abe9-840ab1680e20');
+	});
+
+	it('keys a credential by lowercase hex SHA3-256 of its raw ID, however the base64 is padded', () => {
+		expect(credentialKey('8PHy8/T19vf4+fr7/P3+/w==')).toBe('300f8660e7f42fa10f6bc25a36333ae9bf3c87595ee14ae4905863267682766c');
+		expect(credentialKey('8PHy8/T19vf4+fr7/P3+/w')).toBe('300f8660e7f42fa10f6bc25a36333ae9bf3c87595ee14ae4905863267682766c');
 	});
 });

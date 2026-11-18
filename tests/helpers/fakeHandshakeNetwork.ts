@@ -14,7 +14,7 @@ import { equalBytes } from '@noble/post-quantum/utils.js';
 import { fromBase64 } from '@buckitup/pq-client/signature';
 import { signOptical } from '@buckitup/pq-client/handshake';
 import type { ChannelAdapter, ChannelLink, HandshakeIdentity } from '@/lib/handshake/engine';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 import type { TestIdentity } from './signedFixtures';
 
 /** The engine's view of a test account: its keys sign, its card is the one it publishes. */

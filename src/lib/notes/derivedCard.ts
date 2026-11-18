@@ -14,7 +14,7 @@ import type { SigningKeySource } from '@/lib/data/keyCustody';
 import { cardOf, pendingEntries } from '@/lib/data/outbox';
 import { sessionAccount, type DerivedSigner } from '@/lib/data/sessionIdentities';
 import { nextOwnerTimestamp } from '@/lib/data/time';
-import type { UserCardRow } from '@/lib/data/types';
+import type { UserCardRow } from '@buckitup/pq-client/types';
 
 export interface DerivedCard {
 	signer: DerivedSigner;
