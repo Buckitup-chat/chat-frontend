@@ -23,6 +23,7 @@ import { StorageNotOnServerError } from '@/lib/data/userStorage';
 import { photoFromWire } from '@buckitup/pq-client/content';
 import { fromBase64 } from '@buckitup/pq-client/signature';
 import { peersWeWrote } from '@/lib/data/outboundDialogs';
+import { onNextCardsChange } from '@/lib/data/cardRegistry';
 import { cachedPhotoOf, contactAvatarChange, imageMime, inlineDataUrl } from '@/lib/avatars/display';
 import { thumbDataUrl } from '@/lib/data/imageMeta';
 import { getCachedMedia, putCachedMedia } from '@/lib/data/mediaCache';
@@ -394,6 +395,22 @@ export const useAvatarsStore = defineStore('avatars', () => {
 	// delivery still running after an account switch must not send the old
 	// account's grant from the new one.
 	const grantDeliveries = new Map();
+	// A dialog key row whose signature cannot be checked yet gets no grant;
+	// the next change to user_cards runs the delivery again. Armed before the
+	// rows are read, so a card that lands during the read is not missed.
+	const cardWaits = new Map();
+	const waitForCards = (owner) => {
+		if (cardWaits.has(owner)) return;
+		cardWaits.set(owner, onNextCardsChange(() => {
+			cardWaits.delete(owner);
+			if ($userPQ.currentUserHash !== owner) return;
+			void grantDeliveryFor(owner).grantAll().catch((e) => console.warn('[avatars] grants not sent:', e?.message ?? e));
+		}));
+	};
+	const stopWaitingForCards = (owner) => {
+		cardWaits.get(owner)?.();
+		cardWaits.delete(owner);
+	};
 	const grantDeliveryFor = (owner) => {
 		if (grantDeliveries.has(owner)) return grantDeliveries.get(owner);
 		const sameAccount = () => {
@@ -404,7 +421,13 @@ export const useAvatarsStore = defineStore('avatars', () => {
 				const mapping = $userPQ.currentUserHash === owner ? await ensureShared(owner) : null;
 				return mapping ? grantPartOf(mapping) : null;
 			},
-			peers: () => peersWeWrote(owner),
+			peers: async () => {
+				waitForCards(owner);
+				const { peers, waiting } = await peersWeWrote(owner);
+				if (waiting) waitForCards(owner);
+				else stopWaitingForCards(owner);
+				return peers;
+			},
 			isTarget: (peerHash) => peerHash !== owner,
 			granted: {
 				load: () => loadGranted(owner),

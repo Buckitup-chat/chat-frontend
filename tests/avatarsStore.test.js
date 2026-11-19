@@ -35,7 +35,7 @@ let peerRowReads;
 
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 vi.mock('@/store/dialogs.store', () => ({ useDialogsStore: () => dialogs }));
-vi.mock('@/lib/data/outboundDialogs', () => ({ peersWeWrote: async () => [...dialogs.messages.keys()] }));
+vi.mock('@/lib/data/outboundDialogs', () => ({ peersWeWrote: async () => ({ peers: [...dialogs.messages.keys()], waiting: false }) }));
 vi.mock('@/lib/avatars/peerGallery', () => ({
 	readPeerGallery: async (reader, grant) => {
 		peerRowReads.push({ reader, grant });
