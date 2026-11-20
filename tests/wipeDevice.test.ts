@@ -1,11 +1,12 @@
 // "Wipe all": the deletes are awaited until each one ends, a connection held by
-// another tab is reported rather than outlived by the page, and the wipe asked
-// for on one load runs at the start of the next, before anything opens a database.
+// another tab is reported rather than outlived by the page, the wipe asked for
+// on one load runs at the start of the next, before anything opens a database,
+// and the other tabs of the app are told to go.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { wipeDevice, finishPendingWipe, requestWipe, wipePending, APP_DATABASES, type WipeEnv } from '@/lib/wipeDevice';
+import { wipeDevice, finishPendingWipe, requestWipe, wipePending, leaveOnWipe, APP_DATABASES, type WipeEnv } from '@/lib/wipeDevice';
 
 const open = (factory: IDBFactory, name: string, version?: number) =>
 	new Promise<IDBDatabase>((resolve, reject) => {
@@ -79,7 +80,7 @@ describe('wiping the device', () => {
 		const held = await open(factory, 'keyval-store');
 		(await open(factory, 'buckitup-outbox')).close();
 
-		expect(await wipeDevice(env())).toBe('blocked');
+		expect(await wipeDevice(env({ waitMs: 50 }))).toBe('blocked');
 		expect(await names(factory)).toEqual(['keyval-store']);
 
 		held.close();
@@ -117,8 +118,17 @@ describe('wiping the device', () => {
 	it('reports a part held open over a part that failed', async () => {
 		const held = await open(factory, 'keyval-store');
 		const refused = fileSystem({ x: { removeError: 'SecurityError' } });
-		expect(await wipeDevice(env({ storage: refused.storage }))).toBe('blocked');
+		expect(await wipeDevice(env({ storage: refused.storage, waitMs: 50 }))).toBe('blocked');
 		held.close();
+	});
+
+	// A tab told to go closes the connections it holds as it unloads, a moment after the wipe began.
+	it('waits for a connection that goes', async () => {
+		const held = await open(factory, 'keyval-store');
+		setTimeout(() => held.close(), 50);
+
+		expect(await wipeDevice(env({ waitMs: 2000 }))).toBe('done');
+		expect(await names(factory)).toEqual([]);
 	});
 
 	// indexedDB.databases() is missing in Firefox before 126.
@@ -202,9 +212,10 @@ describe('the wipe on the next load', () => {
 		ask();
 		prompt.mockResolvedValue(false);
 
-		expect(await settled(finishPendingWipe(prompt, inTab(), reload))).toBe(false);
+		const finishing = finishPendingWipe(prompt, inTab({ waitMs: 20 }), reload);
+		await vi.waitFor(() => expect(reload).toHaveBeenCalled());
 		expect(prompt).toHaveBeenCalledWith('blocked');
-		expect(reload).toHaveBeenCalled();
+		expect(await settled(finishing)).toBe(false);
 		held.close();
 	});
 
@@ -214,7 +225,8 @@ describe('the wipe on the next load', () => {
 		const held = await open(factory, 'keyval-store');
 		local.setItem('device-label', 'Laptop');
 		ask();
-		await settled(finishPendingWipe(prompt, inTab(), reload));
+		void finishPendingWipe(prompt, inTab({ waitMs: 20 }), reload);
+		await vi.waitFor(() => expect(reload).toHaveBeenCalled());
 		expect(local.getItem('device-label')).toBeNull();
 		expect(wipePending(local)).toBe(true);
 
@@ -267,8 +279,73 @@ describe('the wipe on the next load', () => {
 		expect(wipePending(local)).toBe(false);
 	});
 
+	it('does not let a tab\'s mark outlive a wipe another tab finished', async () => {
+		(await open(factory, 'keyval-store')).close();
+		ask();
+		await finishPendingWipe(prompt, env({ sessionStorage: memoryStorage() }), reload);
+		expect(wipePending(local)).toBe(false);
+		await finishPendingWipe(prompt, inTab(), reload);
+		expect(tab.length).toBe(0);
+
+		// A later request, asked for elsewhere and left unfinished, is not this tab's to run unasked.
+		(await open(factory, 'keyval-store')).close();
+		requestWipe({ localStorage: local, sessionStorage: memoryStorage() });
+		prompt.mockClear().mockResolvedValueOnce(false);
+		await finishPendingWipe(prompt, inTab(), reload);
+		expect(prompt).toHaveBeenCalledWith('unfinished');
+		expect(await names(factory)).toEqual(['keyval-store']);
+	});
+
 	it('refuses to be asked for where nothing would run it', () => {
 		vi.stubGlobal('localStorage', undefined);
 		expect(() => requestWipe()).toThrow(/cannot wipe itself/);
+	});
+});
+
+describe('the other tabs', () => {
+	let channels: BroadcastChannel[] = [];
+	let channelName = '';
+	// Each tab has its own end of one channel, as each page of the app does.
+	const tabChannel = () => {
+		const channel = new BroadcastChannel(channelName);
+		channels.push(channel);
+		return channel;
+	};
+	beforeEach(() => {
+		channelName = `buckitup:wipe:test:${Math.random()}`;
+	});
+	afterEach(() => {
+		for (const channel of channels) channel.close();
+		channels = [];
+	});
+
+	it('end their sessions and reload when one tab asks, and finish the wipe without asking again', async () => {
+		(await open(factory, 'keyval-store')).close();
+		const asking = { sessionStorage: memoryStorage(), channel: tabChannel(), reload: vi.fn() };
+		// A page the worker controls tells it too: the one that asked may not be controlled (a hard reload).
+		const controller = { postMessage: vi.fn() };
+		const other = { sessionStorage: memoryStorage(), channel: tabChannel(), serviceWorker: { controller } as unknown as ServiceWorkerContainer };
+		const steps: string[] = [];
+		leaveOnWipe(async () => {}, env(asking), asking.reload);
+		leaveOnWipe(async () => { steps.push('session ended'); }, env(other), () => steps.push('reload'));
+
+		requestWipe({ localStorage: local, ...asking });
+		await vi.waitFor(() => expect(steps).toEqual(['session ended', 'reload']));
+		expect(asking.reload).not.toHaveBeenCalled();
+		expect(controller.postMessage).toHaveBeenCalledWith({ type: 'wipe' });
+
+		// The next load of the tab that was told to go.
+		const prompt = vi.fn(async () => true);
+		await finishPendingWipe(prompt, env({ sessionStorage: other.sessionStorage }), vi.fn());
+		expect(prompt).not.toHaveBeenCalled();
+		expect(await names(factory)).toEqual([]);
+		expect(wipePending(local)).toBe(false);
+	});
+
+	it('go even when the session does not end', async () => {
+		const reload = vi.fn();
+		leaveOnWipe(() => new Promise(() => {}), env({ sessionStorage: memoryStorage(), channel: tabChannel(), waitMs: 20 }), reload);
+		requestWipe({ localStorage: local, sessionStorage: memoryStorage(), channel: tabChannel() });
+		await vi.waitFor(() => expect(reload).toHaveBeenCalled());
 	});
 });
