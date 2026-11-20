@@ -1,0 +1,44 @@
+// How the app's stores open an IndexedDB database. A connection is opened once
+// and kept until something else needs the database: on `versionchange` (a
+// delete, as "Wipe all" does, or an upgrade, from this tab or another) it
+// closes and is forgotten, so it never blocks that request, and the next call
+// opens the database again. A failed open is not kept either.
+
+type Upgrade = (db: IDBDatabase) => void;
+
+// A connection belongs to the factory that opened it.
+const kept = new WeakMap<IDBFactory, Map<string, Promise<IDBDatabase>>>();
+
+export function openDatabase(name: string, version: number, upgrade: Upgrade): Promise<IDBDatabase> {
+	let factory: IDBFactory;
+	try {
+		factory = indexedDB;
+	} catch (e) {
+		return Promise.reject(e); // no IndexedDB here (node), or storage blocked in the browser's settings
+	}
+	let open = kept.get(factory);
+	if (!open) kept.set(factory, (open = new Map()));
+	const known = open.get(name);
+	if (known) return known;
+
+	const forget = () => {
+		if (open.get(name) === opening) open.delete(name);
+	};
+	const opening = new Promise<IDBDatabase>((resolve, reject) => {
+		const request = factory.open(name, version);
+		request.onupgradeneeded = () => upgrade(request.result);
+		request.onsuccess = () => {
+			const db = request.result;
+			db.onversionchange = () => {
+				db.close();
+				forget();
+			};
+			db.onclose = forget;
+			resolve(db);
+		};
+		request.onerror = () => reject(request.error ?? new Error(`IndexedDB: ${name} could not be opened`));
+	});
+	open.set(name, opening);
+	opening.catch(forget);
+	return opening;
+}

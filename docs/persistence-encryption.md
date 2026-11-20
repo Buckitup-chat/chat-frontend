@@ -133,7 +133,10 @@ File System and localStorage (`src/lib/wipeDevice.ts`). It ends the session
 and reloads, and the removal runs at the start of the next load, before
 anything opens a database: the page that asked holds connections it cannot
 close (idb-keyval keeps its connection to `keyval-store` and ignores
-`versionchange`), and each would block a delete until the page goes.
+`versionchange`), and each would block a delete until the page goes. The
+app's own stores never block it: they open their databases through
+`openDatabase` (`src/lib/data/openDatabase.ts`), which closes a connection on
+`versionchange` and opens it again on the next use.
 
 - A connection in another tab of the app blocks a delete the same way. The app
   then does not start, since its first open of that database would wait behind
