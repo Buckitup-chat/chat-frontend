@@ -62,17 +62,20 @@ const { useTransfersStore } = await import('@/store/transfers.store');
 let records;
 let failWrites;
 let failDeletes;
+let saves;
 const tabs = [];
 beforeEach(() => {
 	records = new Map();
 	failWrites = false;
 	failDeletes = false;
+	saves = 0;
 	manager.currentUserHash = OWNER;
 	_setPendingUploadsStoreForTests({
 		async get(key) { return records.get(key) ?? null; },
 		async set(key, value) {
 			if (failWrites) throw new DOMException('the origin is out of space', 'QuotaExceededError');
 			records.set(key, value);
+			saves += 1;
 		},
 		async delete(key) {
 			if (failDeletes) throw new DOMException('the page went', 'AbortError');
@@ -365,5 +368,44 @@ describe('the transfer queue across a reload', () => {
 		await closeTab(sending);
 		const later = await openTab();
 		expect(later.items.map((it) => it.name)).toEqual(['a.bin']);
+	});
+
+	describe('a file sending for long', () => {
+		const MINUTE = 60 * 1000;
+		const HOUR = 60 * MINUTE;
+		let now;
+		beforeEach(() => {
+			now = Date.now();
+			vi.spyOn(Date, 'now').mockImplementation(() => now);
+		});
+		afterEach(() => vi.mocked(Date.now).mockRestore());
+
+		it('keeps its record 48 hours from its last chunk, not from its start', async () => {
+			const tab = await composing([fileOf('a.bin', 'first file')]);
+			const { opts } = uploads.get('a.bin');
+			for (let hour = 1; hour <= 47; hour++) {
+				now += HOUR;
+				opts.onProgress({ done: 0, total: 1 }); // a chunk landed
+			}
+			await settle();
+			now += 2 * HOUR; // 49 hours since it started, 2 since its last chunk
+			await closeTab(tab);
+
+			const next = await openTab();
+			expect(next.items.map((it) => it.name)).toEqual(['a.bin']);
+		});
+
+		it('saves the record again at most every 10 minutes while chunks land', async () => {
+			await composing([fileOf('a.bin', 'first file')]);
+			const { opts } = uploads.get('a.bin');
+			await settle();
+			const before = saves;
+			for (let minute = 1; minute <= 30; minute++) {
+				now += MINUTE;
+				opts.onProgress({ done: 0, total: 1 });
+			}
+			await settle();
+			expect(saves - before).toBe(3);
+		});
 	});
 });

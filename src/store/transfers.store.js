@@ -171,6 +171,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 						total: p.total,
 						speed: prev ? prev * 0.6 + instant * 0.4 : instant,
 					});
+					refreshRecord(item.batchId, now);
 				},
 				onAwaitingApproval: (accepted) => { manifestAccepted = accepted; },
 			});
@@ -361,6 +362,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 	let owner = null; // the signed-in account: the queue and its records are its
 	const writes = new Map(); // batchId -> the tail of its record writes (serialized)
 	const releases = new Map(); // batchId -> lets go of this tab's hold on it
+	const savedAt = new Map(); // batchId -> when its record was last saved, or a save asked for
 
 	// One tab drives a batch: the one that composed it, or the first to bring
 	// it back after a reload. Without Web Locks every tab may.
@@ -420,18 +422,31 @@ export const useTransfersStore = defineStore('transfers', () => {
 			const record = recordOf(batchId, batch);
 			if (UNSENT.has(batch.status) && (record.files.length || record.parts.length)) {
 				await savePendingBatch(who, record);
+				savedAt.set(batchId, record.updatedAt);
 				return;
 			}
 			try {
 				await forgetPendingBatch(who, batchId);
 			} finally {
 				letGo(batchId);
+				savedAt.delete(batchId);
 			}
 		};
 		return serialized(writes, batchId, write);
 	};
 	const syncRecord = (batchId) => writeRecord(batchId)
 		.catch((e) => console.warn('[transfers] the record that resumes this upload after a reload was not updated:', e));
+
+	// The server drops an uncommitted upload's chunks 48 hours after the last
+	// one arrives (pq_files §8), and a record expires 48 hours after it was
+	// last saved: while chunks arrive it is saved again every RECORD_REFRESH_MS.
+	const RECORD_REFRESH_MS = 10 * 60 * 1000;
+	const refreshRecord = (batchId, now) => {
+		const last = savedAt.get(batchId);
+		if (last === undefined || now - last < RECORD_REFRESH_MS) return;
+		savedAt.set(batchId, now);
+		void syncRecord(batchId);
+	};
 
 	const restoredRow = (record, f) => newRow(record.batchId, record.peerHash, {
 		order: f.order,

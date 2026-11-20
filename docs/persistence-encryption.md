@@ -84,12 +84,12 @@ seal, in the clear.
   message does not send it twice.
 - A record not written for 48 hours is dropped at the next sign-in of any
   account on this device, so the records of an account that never signs in
-  here again do not outlive their use. The server
-  drops an uncommitted upload's chunks 48 hours after the last one arrives
-  (pq_files §8), and the record is written as each file starts and as the
-  message changes, so a single file sending for longer than that loses its
-  record early. A file whose chunks the server already dropped is sent again in
-  full.
+  here again do not outlive their use. The server drops an uncommitted upload's
+  chunks 48 hours after the last one arrives (pq_files §8). The record is
+  written as each file starts, as the message changes, and again every 10
+  minutes while chunks arrive, so it expires at most 10 minutes before the
+  server drops the chunks. A file whose chunks the server already dropped is
+  sent again in full.
 - One tab drives a message (a Web Lock per batch). Another tab of the same
   account does not bring back a message that a live tab is still sending, and
   a message whose lock this tab could not take is sent without a record.
