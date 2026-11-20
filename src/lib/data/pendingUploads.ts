@@ -6,8 +6,7 @@
 // The record holds keys that open content, so it is sealed with the account's
 // local key (docs/invariants.md §1).
 
-import { IndexedDbStore } from './indexedDbStore';
-import { createSecureStore, type StringStore } from './secureStore';
+import { accountSealedStore } from './accountSealedStore';
 import { CHUNK_SIZE } from '@buckitup/pq-client/fileCrypto';
 
 /** The server drops the chunks of an upload left uncommitted for 48 hours (pq_files §8). */
@@ -38,17 +37,9 @@ export interface PendingBatch {
 	updatedAt: number;
 }
 
-let raw: StringStore = new IndexedDbStore('buckitup-pending-uploads');
-let keyFor = async (owner: string): Promise<CryptoKey> =>
-	(await import('./localCrypto')).getLocalStorageKeyFor(owner);
+const store = accountSealedStore('buckitup-pending-uploads');
 
-export const _setPendingUploadsStoreForTests = (store: StringStore, key?: (owner: string) => Promise<CryptoKey>): void => {
-	raw = store;
-	if (key) keyFor = key;
-};
-
-const sealed = (owner: string): StringStore => createSecureStore(raw, { getKey: () => keyFor(owner) });
-const prefix = (owner: string) => `${owner}|`;
+export const _setPendingUploadsStoreForTests = store.setForTests;
 
 const isPendingFile = (f: PendingFile): boolean =>
 	[f?.fileId, f?.encSecretB64, f?.name, f?.mimeType].every((v) => typeof v === 'string')
@@ -64,9 +55,9 @@ const isPendingBatch = (b: PendingBatch): boolean =>
 	&& b.files.length > 0 && b.files.every(isPendingFile);
 
 export const savePendingBatch = (owner: string, batch: PendingBatch): Promise<void> =>
-	sealed(owner).set(prefix(owner) + batch.batchId, JSON.stringify(batch));
+	store.sealed(owner).set(store.keyOf(owner, batch.batchId), JSON.stringify(batch));
 
-export const forgetPendingBatch = (owner: string, batchId: string): Promise<void> => raw.delete(prefix(owner) + batchId);
+export const forgetPendingBatch = (owner: string, batchId: string): Promise<void> => store.raw.delete(store.keyOf(owner, batchId));
 
 /**
  * The owner's records still worth resuming. A malformed record or one past
@@ -75,11 +66,11 @@ export const forgetPendingBatch = (owner: string, batchId: string): Promise<void
  */
 export const pendingBatches = async (owner: string, now = Date.now()): Promise<PendingBatch[]> => {
 	const found: PendingBatch[] = [];
-	for (const key of await raw.keys()) {
-		if (!key.startsWith(prefix(owner))) continue;
+	for (const key of await store.raw.keys()) {
+		if (!store.isOwners(owner, key)) continue;
 		let stored: string | null;
 		try {
-			stored = await sealed(owner).get(key);
+			stored = await store.sealed(owner).get(key);
 		} catch (e) {
 			console.warn('[pendingUploads] a record did not open:', e);
 			continue;
@@ -89,11 +80,9 @@ export const pendingBatches = async (owner: string, now = Date.now()): Promise<P
 			batch = stored === null ? null : JSON.parse(stored);
 		} catch { /* malformed: removed below */ }
 		if (batch && isPendingBatch(batch) && now - batch.updatedAt <= PENDING_UPLOAD_TTL_MS) found.push(batch);
-		else await raw.delete(key);
+		else await store.raw.delete(key);
 	}
 	return found;
 };
 
-export const forgetAccountPendingUploads = async (owner: string): Promise<void> => {
-	for (const key of await raw.keys()) if (key.startsWith(prefix(owner))) await raw.delete(key);
-};
+export const forgetAccountPendingUploads = (owner: string): Promise<void> => store.forgetAccount(owner);
