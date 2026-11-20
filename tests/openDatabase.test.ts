@@ -4,10 +4,11 @@
 // next use.
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { openDatabase } from '@/lib/data/openDatabase';
+import { sourceFiles } from './helpers/sourceFiles';
 
 vi.mock('@/lib/data/localCrypto', async () => {
 	const { deriveLocalStorageKey } = await import('@/lib/data/secureStore');
@@ -75,6 +76,26 @@ describe('openDatabase', () => {
 		await expect(openDatabase('buckitup-test', 1, upgrade)).resolves.toBeTruthy();
 		vi.unstubAllGlobals();
 	});
+
+	it('keeps the refusal of a version a newer build raised: it opens nothing again', async () => {
+		const newer = await new Promise<IDBDatabase>((resolve, reject) => {
+			const request = indexedDB.open('buckitup-test', 2);
+			request.onupgradeneeded = () => upgrade(request.result);
+			request.onsuccess = () => resolve(request.result);
+			request.onerror = () => reject(request.error);
+		});
+		newer.close();
+		const open = vi.spyOn(indexedDB, 'open');
+		await expect(openDatabase('buckitup-test', 1, upgrade)).rejects.toMatchObject({ name: 'VersionError' });
+		await expect(openDatabase('buckitup-test', 1, upgrade)).rejects.toMatchObject({ name: 'VersionError' });
+		expect(open).toHaveBeenCalledTimes(1);
+	});
+
+	it('rejects where there is no IndexedDB', async () => {
+		vi.stubGlobal('indexedDB', undefined);
+		await expect(openDatabase('buckitup-test', 1, upgrade)).rejects.toThrow('IndexedDB is not available');
+		vi.unstubAllGlobals();
+	});
 });
 
 // Each store, after it has been used, as a wipe or another tab's upgrade finds it.
@@ -120,11 +141,6 @@ describe.each(stores)('%s', (_label, name, use) => {
 });
 
 describe('no store opens a database by hand', () => {
-	const sourceFiles = (dir: string): string[] => readdirSync(dir).flatMap((entry) => {
-		const path = join(dir, entry);
-		return statSync(path).isDirectory() ? sourceFiles(path) : /\.(ts|js|vue)$/.test(entry) ? [path] : [];
-	});
-
 	// The chunk cache works without its database while another tab holds an
 	// older version open, and the vault repair closes its connection at once.
 	it('only openDatabase, the chunk cache and the vault repair call indexedDB.open', () => {

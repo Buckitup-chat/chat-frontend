@@ -2,7 +2,8 @@
 // and kept until something else needs the database: on `versionchange` (a
 // delete, as "Wipe all" does, or an upgrade, from this tab or another) it
 // closes and is forgotten, so it never blocks that request, and the next call
-// opens the database again. A failed open is not kept either.
+// opens the database again. A failed open is not kept either, unless it is a
+// VersionError: a newer build has raised the version, and this one never opens it.
 
 type Upgrade = (db: IDBDatabase) => void;
 
@@ -13,6 +14,7 @@ export function openDatabase(name: string, version: number, upgrade: Upgrade): P
 	let factory: IDBFactory;
 	try {
 		factory = indexedDB;
+		if (!factory) throw new Error('IndexedDB is not available');
 	} catch (e) {
 		return Promise.reject(e); // no IndexedDB here (node), or storage blocked in the browser's settings
 	}
@@ -39,6 +41,8 @@ export function openDatabase(name: string, version: number, upgrade: Upgrade): P
 		request.onerror = () => reject(request.error ?? new Error(`IndexedDB: ${name} could not be opened`));
 	});
 	open.set(name, opening);
-	opening.catch(forget);
+	opening.catch((e) => {
+		if ((e as DOMException)?.name !== 'VersionError') forget();
+	});
 	return opening;
 }

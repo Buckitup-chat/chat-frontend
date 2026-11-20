@@ -4,8 +4,9 @@
 // and the other tabs of the app are told to go.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sourceFiles } from './helpers/sourceFiles';
 import { wipeDevice, finishPendingWipe, requestWipe, wipePending, leaveOnWipe, APP_DATABASES, type WipeEnv } from '@/lib/wipeDevice';
 
 const open = (factory: IDBFactory, name: string, version?: number) =>
@@ -141,10 +142,6 @@ describe('wiping the device', () => {
 	});
 
 	it('knows every database the app opens by name', () => {
-		const sourceFiles = (dir: string): string[] => readdirSync(dir).flatMap((entry) => {
-			const path = join(dir, entry);
-			return statSync(path).isDirectory() ? sourceFiles(path) : /\.(ts|js|vue)$/.test(entry) ? [path] : [];
-		});
 		const opened = new Set<string>();
 		for (const file of sourceFiles(join(process.cwd(), 'src'))) {
 			const text = readFileSync(file, 'utf8');
