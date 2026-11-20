@@ -45,6 +45,10 @@ export const useTransfersStore = defineStore('transfers', () => {
 
 	const aborts = new Map();      // itemId -> AbortController
 	const pauseRequested = new Set();
+	// The bytes and digest of a file repick has just read and checked, for the
+	// next upload if it is that file's, so a large file is not read twice; any
+	// other run drops them, so at most one file waits in memory.
+	let handedOver = null; // { id, blob, bytes, digest }
 
 	const patch = (id, changes) => {
 		items.value = items.value.map((it) => (it.id === id ? { ...it, ...changes } : it));
@@ -127,6 +131,8 @@ export const useTransfersStore = defineStore('transfers', () => {
 	const runOne = async (id) => {
 		const item = byId(id);
 		if (!item || item.status !== 'waiting') return;
+		const handed = handedOver?.id === id && handedOver.blob === item.blob ? handedOver : null;
+		handedOver = null;
 
 		const dialogs = useDialogsStore();
 		const ctrl = new AbortController();
@@ -138,11 +144,11 @@ export const useTransfersStore = defineStore('transfers', () => {
 
 		let manifestAccepted = null;
 		try {
-			const bytes = new Uint8Array(await item.blob.arrayBuffer());
+			const bytes = handed?.bytes ?? new Uint8Array(await item.blob.arrayBuffer());
 			// The record names these bytes before the first chunk PUT, and only
 			// the same bytes may add chunks under this file_id: a file changed
 			// since, or a record not written, stops the upload here.
-			const digest = await uploadDigest(bytes);
+			const digest = handed?.digest ?? await uploadDigest(bytes);
 			if (item.digest && item.digest !== digest) throw new Error('the file changed since its upload began');
 			patch(id, { digest });
 			await writeRecord(item.batchId);
@@ -346,6 +352,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 	const removeItem = (id) => {
 		const item = byId(id);
 		items.value = items.value.filter((it) => it.id !== id);
+		if (handedOver?.id === id) handedOver = null;
 		// A settled row is in the record as a part, if at all, not as an upload.
 		if (item && !SETTLED.has(item.status)) void syncRecord(item.batchId);
 	};
@@ -499,6 +506,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 			for (const it of items.value) if (gone.has(it.batchId)) aborts.get(it.id)?.abort();
 			items.value = items.value.filter((it) => !gone.has(it.batchId));
 			for (const batchId of gone) letGo(batchId);
+			handedOver = null;
 		}
 		if (next) await restore(next);
 	};
@@ -512,11 +520,18 @@ export const useTransfersStore = defineStore('transfers', () => {
 	const repick = async (id, file) => {
 		const item = byId(id);
 		if (!item || !needsFile(item) || file.size !== item.size) return false;
-		const same = item.digest
-			? (await uploadDigest(new Uint8Array(await file.arrayBuffer()))) === item.digest
-			: file.name === item.name;
+		let verified = null;
+		if (item.digest) {
+			const bytes = new Uint8Array(await file.arrayBuffer());
+			const digest = await uploadDigest(bytes);
+			if (digest !== item.digest) return false;
+			verified = { id, blob: file, bytes, digest };
+		} else if (file.name !== item.name) {
+			return false;
+		}
 		const now = byId(id);
-		if (!same || !now || !needsFile(now) || now.status !== 'paused') return false;
+		if (!now || !needsFile(now) || now.status !== 'paused') return false;
+		handedOver = verified;
 		patch(id, { blob: file, status: 'waiting' });
 		drain();
 		return true;

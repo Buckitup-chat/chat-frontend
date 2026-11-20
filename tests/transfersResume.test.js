@@ -194,6 +194,24 @@ describe('the transfer queue across a reload', () => {
 		expect(navigator.locks.held(lock)).toBe(false);
 	});
 
+	it('reads and hashes a file picked again once, for the check and the upload both', async () => {
+		await closeTab(await composing([fileOf('a.bin', 'first file')]));
+		const tab = await openTab();
+		uploadAttachment.mockClear();
+		const file = fileOf('a.bin', 'first file');
+		const reads = vi.spyOn(file, 'arrayBuffer');
+		const hashes = vi.spyOn(crypto.subtle, 'digest');
+		try {
+			expect(await tab.repick(tab.items[0].id, file)).toBe(true);
+			await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(1));
+			expect(new TextDecoder().decode(uploadAttachment.mock.calls[0][0].bytes)).toBe('first file');
+			expect(reads).toHaveBeenCalledTimes(1);
+			expect(hashes.mock.calls.filter(([algorithm]) => algorithm === 'SHA-256')).toHaveLength(1);
+		} finally {
+			hashes.mockRestore();
+		}
+	});
+
 	it('refuses another file, and sends nothing', async () => {
 		await closeTab(await composing([fileOf('a.bin', 'first file')])); // 10 bytes
 		const tab = await openTab();
