@@ -64,9 +64,15 @@ beforeEach(() => {
 	server.reset();
 	net.mode = 'online';
 	deviceAdmin = OWNER;
-	server.route = (url) => url.endsWith('/device_identity')
-		? Response.json({ device_id: 'BK-001', admin: deviceAdmin ? { user_hash: deviceAdmin } : null })
-		: undefined;
+	server.route = (url) => {
+		if (url.endsWith('/device_identity')) return Response.json({ device_id: 'BK-001', admin: deviceAdmin ? { user_hash: deviceAdmin } : null });
+		// a one-shot read of a card, answered from the server's table as Electric does
+		const where = /\/shapes\?table=user_cards&where=([^&]+)/.exec(url)?.[1];
+		if (!where) return undefined;
+		const hash = /user_hash='([^']+)'/.exec(decodeURIComponent(where))?.[1];
+		const row = hash ? server.table('user_cards').get(hash) : undefined;
+		return Response.json([...(row ? [{ key: hash, value: row, headers: { operation: 'insert' } }] : []), { headers: { control: 'up-to-date' } }]);
+	};
 	A = newClient('Alice');
 });
 afterEach(() => stopAll());
@@ -144,6 +150,46 @@ describe('a derived card', () => {
 		expect(await A.app.outbox.pendingEntries(A.hash)).toHaveLength(1);
 	});
 
+	it('asks the server for its owner each time: a node reset while the tab is open leaves the server with none', async () => {
+		await register(A);
+		const { em, publish } = await session();
+		await accepted(await publish(PEER));
+
+		deviceAdmin = null;
+		server.table('user_cards').clear();
+		await expect(publish(NOTES)).rejects.toThrow(/no owner/);
+		expect(server.table('user_cards').has(em.notesUserHash)).toBe(false);
+		expect(proofsBy(em.notesUserHash)).toEqual([]);
+	});
+
+	it('asks the server whether it holds the card: one this tab saw before a node reset does not stand in for it', async () => {
+		await register(A);
+		const { em, publish, notes } = await session();
+		// another device of the account published it, and this tab has seen it
+		server.table('user_cards').set(em.notesUserHash, signedUserCard((await notes()).identity, 1_700_000_000));
+		expect(await publish(NOTES)).toBe('present');
+
+		deviceAdmin = null;
+		server.table('user_cards').clear();
+		// a card queued while it was there goes out now
+		await expect(publish(NOTES, async () => null)).rejects.toThrow(/no owner/);
+		expect(server.table('user_cards').has(em.notesUserHash)).toBe(false);
+		expect(proofsBy(em.notesUserHash)).toEqual([]);
+	});
+
+	it.each([
+		['got no answer, as for the network', () => { throw new TypeError('Failed to fetch'); }, true],
+		['was refused, as for the server', () => new Response(null, { status: 500 }), false],
+	])('waits while the owner read %s', async (_, answer, network) => {
+		await register(A);
+		const { em, publish } = await session();
+		const device = server.route;
+		server.route = (url, init) => (url.endsWith('/device_identity') ? answer() : device?.(url, init));
+		expect(await publish(NOTES).catch((e) => e)).toMatchObject({ permanent: false, network, message: expect.stringMatching(/owner could not be read/) });
+		expect((await A.app.outbox.pendingEntries(A.hash))[0].lastErrorNetwork).toBe(network || undefined);
+		expect(proofsBy(em.notesUserHash)).toEqual([]);
+	});
+
 	it('that the server already holds settles even while the device has no owner: meeting it makes no one the owner', async () => {
 		await register(A);
 		const { em, publish, notes } = await session();
@@ -163,6 +209,28 @@ describe('a derived card', () => {
 		expect(await A.app.outbox.pendingEntries(A.hash)).toHaveLength(1);
 		// the account's card logic does not count it as one of the account's card writes
 		expect(await A.app.outbox.pendingCardWrites(A.hash)).toEqual([]);
+	});
+
+	it('refused by the server is not queued again: the one in the outbox waits for the user\'s Retry or Discard', async () => {
+		await register(A);
+		const { em, publish } = await session();
+		server.reject = (relation) => relation === 'user_cards'
+			? { status: 'error', error: 'validation_failed', details: { sign_b64: ['is invalid'] }, permanent422: true }
+			: null;
+		await expect(publish(NOTES)).rejects.toThrow();
+		expect(await A.app.outbox.quarantinedEntries(A.hash)).toHaveLength(1);
+
+		expect(await publish(NOTES)).toBe('queued');
+		expect(await publish(NOTES)).toBe('queued');
+		expect(await A.app.outbox.quarantinedEntries(A.hash)).toHaveLength(1);
+		expect(await A.app.outbox.pendingEntries(A.hash)).toEqual([]);
+		expect(proofsBy(em.notesUserHash)).toHaveLength(1);
+
+		// discarded, it no longer stands in the way of a new one
+		server.reject = null;
+		const [refused] = await A.app.outbox.quarantinedEntries(A.hash);
+		await A.app.outbox.discardEntry(refused.id);
+		await accepted(await publish(NOTES));
 	});
 
 	it('cannot be signed once its account is closed', async () => {

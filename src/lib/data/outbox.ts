@@ -1440,6 +1440,11 @@ export async function quarantinedEntries(userHash: string): Promise<OutboxEntry[
 	return (await entriesOf(userHash)).filter((e) => e.status === 'quarantined');
 }
 
+/** The entries still in the queue: waiting to be sent, or refused and kept for the user's Retry or Discard. */
+export async function unsettledEntries(userHash: string): Promise<OutboxEntry[]> {
+	return (await entriesOf(userHash)).filter((e) => e.status !== 'accepted' && e.status !== 'discarded');
+}
+
 /**
  * Back into the replay path — the caller believes the state this write failed
  * against has changed. History (attempts, last verdict) stays on the entry.
