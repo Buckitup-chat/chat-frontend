@@ -1785,7 +1785,7 @@ export async function pendingCardWrites(userHash: string, cardHash = userHash): 
 }
 
 /** Whose card a user_cards entry writes: an account's queue may hold the cards of identities derived from it too. */
-export function cardOf(entry: OutboxEntry): string | null {
+function cardOf(entry: OutboxEntry): string | null {
 	return entry.relation === 'user_cards' ? ownerOf(entry.mutations) || null : null;
 }
 
