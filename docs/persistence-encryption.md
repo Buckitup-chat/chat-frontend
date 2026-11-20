@@ -142,6 +142,9 @@ app's own stores never block it: they open their databases through
   then does not start, since its first open of that database would wait behind
   the queued delete: it asks for the other tabs to be closed and tries again on
   reload. A delete that stays silent for three seconds counts as blocked too.
+- Where the browser cannot list its databases (`indexedDB.databases()` is
+  missing in Firefox before 126), the app's databases are removed by name
+  (`APP_DATABASES`).
 - When the browser refuses a removal, the person can try again or open the app
   with what is left.
 - The request stays in localStorage until the wipe is done, so a tab of the

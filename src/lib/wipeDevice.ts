@@ -15,6 +15,29 @@ const FLAG = 'buckitup:wipe';
  */
 const DELETE_WAIT_MS = 3000;
 
+/**
+ * The app's databases, removed by name where the browser cannot list them
+ * (`indexedDB.databases()` is missing in Firefox before 126). A store that
+ * opens a new database adds its name here; tests/wipeDevice.test.ts checks.
+ */
+export const APP_DATABASES = [
+	'keyval-store', // the vault: idb-keyval's default store
+	'buckitup-local-store',
+	'buckitup-outbox',
+	'buckitup-outbox-leader-lease',
+	'buckitup-intents',
+	'buckitup-accepted-snapshot',
+	'buckitup-own-observed-tails',
+	'buckitup-message-projections',
+	'dialog-synced-cache',
+	'user-synced-cache',
+	'buckitup-chunks',
+	'buckitup-kept-files',
+	'buckitup-pending-uploads',
+	'buckitup-upload-reuse',
+	'buckitup-avatars',
+];
+
 export type WipeOutcome = 'done' | 'blocked' | 'failed';
 
 export type WipeEnv = {
@@ -83,7 +106,9 @@ const deleteDatabase = async (factory: IDBFactory, name: string, waitMs: number)
 };
 
 const databases = async (factory: IDBFactory, waitMs: number) => {
-	const names = (await factory.databases()).flatMap((db) => (db.name ? [db.name] : []));
+	const names = typeof factory.databases === 'function'
+		? (await factory.databases()).flatMap((db) => (db.name ? [db.name] : []))
+		: APP_DATABASES;
 	return worst(await Promise.all(names.map((name) => deleteDatabase(factory, name, waitMs))));
 };
 

@@ -3,7 +3,9 @@
 // for on one load runs at the start of the next, before anything opens a database.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
-import { wipeDevice, finishPendingWipe, requestWipe, wipePending, type WipeEnv } from '@/lib/wipeDevice';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { wipeDevice, finishPendingWipe, requestWipe, wipePending, APP_DATABASES, type WipeEnv } from '@/lib/wipeDevice';
 
 const open = (factory: IDBFactory, name: string, version?: number) =>
 	new Promise<IDBDatabase>((resolve, reject) => {
@@ -117,6 +119,33 @@ describe('wiping the device', () => {
 		const refused = fileSystem({ x: { removeError: 'SecurityError' } });
 		expect(await wipeDevice(env({ storage: refused.storage }))).toBe('blocked');
 		held.close();
+	});
+
+	// indexedDB.databases() is missing in Firefox before 126.
+	it('removes the app\'s databases by name where the browser cannot list them', async () => {
+		for (const name of ['keyval-store', 'buckitup-outbox', 'dialog-synced-cache']) (await open(factory, name)).close();
+		const unlisting = { deleteDatabase: (name: string) => factory.deleteDatabase(name) } as unknown as IDBFactory;
+
+		expect(await wipeDevice(env({ indexedDB: unlisting }))).toBe('done');
+		expect(await names(factory)).toEqual([]);
+	});
+
+	it('knows every database the app opens by name', () => {
+		const sourceFiles = (dir: string): string[] => readdirSync(dir).flatMap((entry) => {
+			const path = join(dir, entry);
+			return statSync(path).isDirectory() ? sourceFiles(path) : /\.(ts|js|vue)$/.test(entry) ? [path] : [];
+		});
+		const opened = new Set<string>();
+		for (const file of sourceFiles(join(process.cwd(), 'src'))) {
+			const text = readFileSync(file, 'utf8');
+			const opens = text.matchAll(/(?:\bopenDatabase|\bindexedDB\.open|new IndexedDbStore)\(\s*(?:'([^']+)'|([A-Z_]+)\b)/g);
+			for (const [, literal, constant] of opens) {
+				const name = literal ?? new RegExp(`const ${constant} = '([^']+)'`).exec(text)?.[1];
+				expect(name, `${file}: ${constant}`).toBeTruthy();
+				opened.add(name!);
+			}
+		}
+		expect([...opened].sort()).toEqual([...APP_DATABASES].sort());
 	});
 
 	it('takes a delete the browser refuses outright for a failure, not for another tab', async () => {
