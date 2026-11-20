@@ -1,4 +1,5 @@
 import { createSecureStore, DecryptFailedError, type StringStore } from './secureStore';
+import { openDatabase } from './openDatabase';
 
 const DB_NAME = 'buckitup-message-projections';
 const DB_VERSION = 1;
@@ -16,23 +17,11 @@ export interface MessageProjection {
 	signHash?: string | null;
 }
 
-let dbPromise: Promise<IDBDatabase> | null = null;
 const openDb = (): Promise<IDBDatabase> => {
-	if (dbPromise) return dbPromise;
-	dbPromise = new Promise((resolve, reject) => {
-		if (typeof indexedDB === 'undefined') {
-			reject(new Error('[projections] IndexedDB is not available'));
-			return;
-		}
-		const req = indexedDB.open(DB_NAME, DB_VERSION);
-		req.onupgradeneeded = () => {
-			if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE);
-		};
-		req.onsuccess = () => resolve(req.result);
-		req.onerror = () => reject(req.error);
+	if (typeof indexedDB === 'undefined') return Promise.reject(new Error('[projections] IndexedDB is not available'));
+	return openDatabase(DB_NAME, DB_VERSION, (db) => {
+		if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
 	});
-	dbPromise.catch(() => { dbPromise = null; });
-	return dbPromise;
 };
 
 const request = <T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> =>

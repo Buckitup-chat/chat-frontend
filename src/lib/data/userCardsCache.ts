@@ -1,4 +1,5 @@
 import { markTouched } from './readCache';
+import { openDatabase } from './openDatabase';
 import type { UserCardRow } from '@buckitup/pq-client/types';
 
 const DB_NAME = 'user-synced-cache';
@@ -6,26 +7,14 @@ const DB_VERSION = 1;
 const STORE = 'user_cards';
 const TABLE = 'user_cards';
 
-let dbPromise: Promise<IDBDatabase | null> | null = null;
-
 function openDb(): Promise<IDBDatabase | null> {
-	if (dbPromise) return dbPromise;
-	if (typeof indexedDB === 'undefined') {
-		dbPromise = Promise.resolve(null);
-		return dbPromise;
-	}
-	dbPromise = new Promise((resolve) => {
-		const req = indexedDB.open(DB_NAME, DB_VERSION);
-		req.onupgradeneeded = () => {
-			if (!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE, { keyPath: '__key' });
-		};
-		req.onsuccess = () => resolve(req.result);
-		req.onerror = () => {
-			console.warn('[userCardsCache] cannot open IndexedDB:', req.error);
-			resolve(null);
-		};
+	if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+	return openDatabase(DB_NAME, DB_VERSION, (db) => {
+		if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: '__key' });
+	}).catch((e) => {
+		console.warn('[userCardsCache] cannot open IndexedDB:', e);
+		return null;
 	});
-	return dbPromise;
 }
 
 function run<T>(mode: 'readonly' | 'readwrite', fn: (store: IDBObjectStore) => IDBRequest<T>): Promise<T | undefined> {
