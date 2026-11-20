@@ -180,9 +180,10 @@ async function setContactVouches(request: ContactVouchRequest, granted: boolean,
 	const { issuerHash, subjectHash, signingKey, stillCurrent } = request;
 	const fenced = () => new SessionFencedError('contact vouches: the account changed before the rows were sent');
 
-	const identity = await readDeviceIdentity();
+	const device = await readDeviceIdentity();
 	if (!stillCurrent()) throw fenced();
-	if (!identity) return { kind: 'skipped', reason: 'identity-unavailable' };
+	if (device.kind !== 'identity') return { kind: 'skipped', reason: 'identity-unavailable' };
+	const { identity } = device;
 	if (identity.adminHash === null) return { kind: 'skipped', reason: 'no-owner' };
 	if (!USER_HASH.test(subjectHash)) throw new Error('contact vouches: the subject is not a user hash');
 	if (granted && identity.adminHash !== issuerHash) {

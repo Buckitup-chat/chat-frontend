@@ -5,13 +5,13 @@
 // be verified: its dialog rows name it, and the dialog_keys foreign key needs
 // it. The card goes out through the account's outbox, proven by the derived
 // identity itself (sessionIdentities.ts), and only when no valid card exists
-// and none is queued yet: every device derives the same identity, and the
-// first card stands.
+// and none is in the queue yet: every device derives the same identity, and
+// the first card stands.
 // The sender holds it back from a device without an owner (ingest.ts).
 import { getVerifiedSignPkey } from '@/lib/data/cardRegistry';
 import { sendMutationsAndAwaitShape, type DeliveryHandle } from '@/lib/data/ingest';
 import type { SigningKeySource } from '@/lib/data/keyCustody';
-import { cardOf, pendingEntries } from '@/lib/data/outbox';
+import { pendingCardWrites } from '@/lib/data/outbox';
 import { sessionAccount, type DerivedSigner } from '@/lib/data/sessionIdentities';
 import { nextOwnerTimestamp } from '@/lib/data/time';
 import type { UserCardRow } from '@buckitup/pq-client/types';
@@ -25,10 +25,12 @@ export interface DerivedCard {
 /**
  * Makes sure a derived identity's card (EncryptionManagerPQ.derivedCard) is published:
  * - 'present': a valid one is already there;
- * - 'queued': one is already in the account's outbox (two calls at once may
- *   both queue one; the second meets the first on the server and settles as
+ * - 'queued': one is already in the account's outbox, waiting to be sent or,
+ *   refused, for the user's Retry or Discard (two calls at once may both
+ *   queue one; the second meets the first on the server and settles as
  *   applied, derivedRowAppliedOnServer);
  * - otherwise the delivery of a fresh one.
+ * Throws when a record of the account's queue does not read: it may hold the card.
  * `accountKey` is the account's signing key source, which the outbox needs to
  * run; the request itself is proven by the derived identity.
  */
@@ -38,7 +40,7 @@ export async function ensureDerivedCard(
 	verifiedCard: (userHash: string) => Promise<string | null> = getVerifiedSignPkey,
 ): Promise<'present' | 'queued' | DeliveryHandle> {
 	if (await verifiedCard(card.userHash)) return 'present';
-	if ((await pendingEntries(sessionAccount())).some((e) => cardOf(e) === card.userHash)) return 'queued';
+	if ((await pendingCardWrites(sessionAccount(), card.userHash)).length) return 'queued';
 	const modified = card.row(nextOwnerTimestamp());
 	return sendMutationsAndAwaitShape([{ type: 'insert', syncMetadata: { relation: 'user_cards' }, modified }], accountKey, { signer: card.signer });
 }
