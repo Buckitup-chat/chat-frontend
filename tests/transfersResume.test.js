@@ -36,10 +36,13 @@ const uploadAttachment = vi.fn((meta, opts) => new Promise((resolve, reject) => 
 	}
 	opts.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
 }));
-// As the real capture: the message is durable in the intent store once this resolves.
+// The account signed in to the manager, as uploadAttachment and captureMessageIntent read it.
+const manager = { currentUserHash: OWNER };
+// As the real capture: stored as the manager's account, durable in the intent store once this resolves.
 const captureMessageIntent = vi.fn(async (peerHash, parts, messageId = `dmsg_${crypto.randomUUID()}`) => {
-	const payload = { kind: 'message', relation: 'dialog_messages', peerHash, messageId, ownerHash: OWNER, parts };
-	const intentId = await enqueueIntent(payload, OWNER, 'dialog_messages');
+	const ownerHash = manager.currentUserHash;
+	const payload = { kind: 'message', relation: 'dialog_messages', peerHash, messageId, ownerHash, parts };
+	const intentId = await enqueueIntent(payload, ownerHash, 'dialog_messages');
 	if (!intentId) throw new Error('This action could not be stored for sending.');
 	return { intentId, payload };
 });
@@ -52,6 +55,7 @@ const dispatchMessageIntent = vi.fn((intentId, payload, token, onStatus) => {
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({ uploadAttachment, captureMessageIntent, dispatchMessageIntent }),
 }));
+vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => manager }));
 
 const { useTransfersStore } = await import('@/store/transfers.store');
 
@@ -63,6 +67,7 @@ beforeEach(() => {
 	records = new Map();
 	failWrites = false;
 	failDeletes = false;
+	manager.currentUserHash = OWNER;
 	_setPendingUploadsStoreForTests({
 		async get(key) { return records.get(key) ?? null; },
 		async set(key, value) {
@@ -317,6 +322,39 @@ describe('the transfer queue across a reload', () => {
 		expect(records.size).toBe(1);
 		await tab.signedIn(OWNER);
 		expect(tab.items).toEqual([expect.objectContaining({ name: 'a.bin', status: 'paused', blob: null })]);
+	});
+
+	// A sign-in with no sign-out first: the manager acts as the next account
+	// before the queue is told (App.vue watches currentUser, set after it).
+	describe('while the manager is signed in to another account, before the queue hears of it', () => {
+		it('stores no message of this account\'s batch as that account, and keeps it for this one', async () => {
+			const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const tab = await composing([fileOf('a.bin', 'first file')], 'caption');
+			manager.currentUserHash = 'u_other';
+			finish('a.bin');
+			await vi.waitFor(() => expect(errorSpy).toHaveBeenCalled());
+			await settle();
+			expect(captureMessageIntent).not.toHaveBeenCalled();
+			expect(sentMessages).toEqual([]);
+			await tab.signedIn('u_other');
+			await settle();
+
+			manager.currentUserHash = OWNER;
+			await tab.signedIn(OWNER);
+			await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
+			expect(sentMessages[0]).toMatchObject({ ownerHash: OWNER, parts: [{ name: 'a.bin' }, { kind: 'text', text: 'caption' }] });
+			errorSpy.mockRestore();
+		});
+
+		it('uploads no file of this account\'s batch as that account', async () => {
+			const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const tab = await composing([fileOf('a.bin', 'first file'), fileOf('b.bin', 'second')]);
+			manager.currentUserHash = 'u_other';
+			finish('a.bin');
+			await vi.waitFor(() => expect(rowOf(tab, 'b.bin').status).toBe('error'));
+			expect(uploadAttachment).toHaveBeenCalledTimes(1);
+			errorSpy.mockRestore();
+		});
 	});
 
 	it('does not bring back a message another tab is still sending', async () => {

@@ -34,6 +34,7 @@ import { forgetPendingBatch, pendingBatches, savePendingBatch } from '@/lib/data
 import { hasMessageIntent } from '@/lib/data/intents';
 import { serialized } from '@/lib/data/serialized';
 import { useDialogsStore } from '@/store/dialogs.store';
+import { userPQStore } from '@/store/userPQ.store';
 
 let seq = 0;
 
@@ -54,6 +55,16 @@ export const useTransfersStore = defineStore('transfers', () => {
 		batches.value = new Map(batches.value).set(id, fn(b));
 	};
 	const byId = (id) => items.value.find((it) => it.id === id);
+
+	// uploadAttachment and captureMessageIntent act as the account signed in
+	// to the manager, which a sign-in with no sign-out first changes before
+	// the queue hears of it (signedIn): a batch goes only as its own account.
+	// Checked right before each call, which reads that account at once.
+	const assertActsAsOwner = (batchId) => {
+		if (batches.value.get(batchId)?.owner !== userPQStore().currentUserHash) {
+			throw new Error('the batch belongs to another account than the one signed in');
+		}
+	};
 
 	// A row of a batch; `blob` is null for one a reload brought back.
 	const newRow = (batchId, peerHash, fields) => ({
@@ -135,6 +146,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 			if (item.digest && item.digest !== digest) throw new Error('the file changed since its upload began');
 			patch(id, { digest });
 			await writeRecord(item.batchId);
+			assertActsAsOwner(item.batchId);
 			const part = await dialogs.uploadAttachment({
 				name: item.name,
 				mimeType: item.mimeType,
@@ -248,6 +260,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 		try {
 			// Stored already by an earlier page: the intent outbox carries it.
 			if (!(await hasMessageIntent(batch.owner, messageId))) {
+				assertActsAsOwner(batchId);
 				captured = await dialogs.captureMessageIntent(batch.peerHash, parts, messageId);
 			}
 		} catch (e) {

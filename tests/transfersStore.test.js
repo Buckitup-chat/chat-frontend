@@ -33,6 +33,8 @@ const dispatchMessageIntent = vi.fn((intentId, payload, onStatus) => {
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({ uploadAttachment, captureMessageIntent, dispatchMessageIntent }),
 }));
+// The queue here is never told of a sign-in, and the manager has none either.
+vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => ({ currentUserHash: null }) }));
 
 const { useTransfersStore } = await import('@/store/transfers.store');
 const { _setIntentStorageForTests } = await import('@/lib/data/intents');
