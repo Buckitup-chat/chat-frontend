@@ -395,14 +395,16 @@ async function requireOwnerOrCard(cardHash: string): Promise<void> {
 
 /**
  * Whether the server holds a row of `userHash`'s card now, deleted or not: any
- * row means the insert only meets it. A read that fails tells nothing, and
+ * row means the insert only meets it. A read that got no answer is a fact
+ * about the connection, and throws as one; a refused read tells nothing, and
  * counts as no.
  */
 async function serverHoldsCard(userHash: string): Promise<boolean> {
 	try {
 		const rows = await readShapeOnce<{ user_hash?: unknown }>('user_cards', `user_hash='${userHash}'`);
 		return rows.some((r) => r.user_hash === userHash);
-	} catch {
+	} catch (e) {
+		if (unanswered(e)) throw new IngestError(`whether the server holds the card could not be read: a derived card waits for it (${e})`, { permanent: false, network: true });
 		return false;
 	}
 }

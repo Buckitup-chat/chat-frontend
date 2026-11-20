@@ -190,6 +190,20 @@ describe('a derived card', () => {
 		expect(proofsBy(em.notesUserHash)).toEqual([]);
 	});
 
+	it('waits as for the network when the read of the server\'s card gets no answer', async () => {
+		await register(A);
+		const { em, publish } = await session();
+		deviceAdmin = null;
+		const route = server.route;
+		server.route = (url, init) => {
+			if (url.includes('table=user_cards')) throw new TypeError('Failed to fetch');
+			return route?.(url, init);
+		};
+		expect(await publish(NOTES, async () => null).catch((e) => e)).toMatchObject({ permanent: false, network: true });
+		expect((await A.app.outbox.pendingEntries(A.hash))[0].lastErrorNetwork).toBe(true);
+		expect(proofsBy(em.notesUserHash)).toEqual([]);
+	});
+
 	it('that the server already holds settles even while the device has no owner: meeting it makes no one the owner', async () => {
 		await register(A);
 		const { em, publish, notes } = await session();

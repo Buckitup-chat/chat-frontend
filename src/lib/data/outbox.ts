@@ -1778,9 +1778,9 @@ export async function pendingCardWrites(userHash: string, cardHash = userHash): 
 	if (scan.unavailable.size || scan.missing.size || ownedCorrupt(scan, userHash).length) {
 		throw new Error('pendingCardWrites: a record of this account cannot be read — refusing to assume it holds no card write');
 	}
-	// A card whose owner cannot be read counts as the account's: the answer
-	// stays on the safe side.
-	return scan.entries.filter((e) => e.relation === 'user_cards' && (cardOf(e) ?? userHash) === cardHash
+	// A card whose owner cannot be read counts as the one asked about: the
+	// answer stays on the safe side.
+	return scan.entries.filter((e) => e.relation === 'user_cards' && (cardOf(e) ?? cardHash) === cardHash
 		&& e.status !== 'accepted' && e.status !== 'discarded');
 }
 
