@@ -40,15 +40,11 @@ let seq = 0;
 
 export const useTransfersStore = defineStore('transfers', () => {
 	const items = ref([]);   // ordered; the worker takes the first 'waiting'
-	const batches = ref(new Map()); // batchId -> { owner, kept (has a record), peerHash, caption, status, parts }
+	const batches = ref(new Map()); // batchId -> { owner, kept (has a record), restored (from a record), peerHash, caption, status, parts }
 	const collapsed = ref(false);
 
 	const aborts = new Map();      // itemId -> AbortController
 	const pauseRequested = new Set();
-	// The bytes and digest of a file repick has just read and checked, for the
-	// next upload if it is that file's, so a large file is not read twice; any
-	// other run drops them, so at most one file waits in memory.
-	let handedOver = null; // { id, blob, bytes, digest }
 
 	const patch = (id, changes) => {
 		items.value = items.value.map((it) => (it.id === id ? { ...it, ...changes } : it));
@@ -114,25 +110,27 @@ export const useTransfersStore = defineStore('transfers', () => {
 
 	let running = false;
 
-	const drain = async () => {
+	// `handed`: the bytes and digest of a file repick has just read and
+	// checked, so a large file is not read twice. Taken only by an idle
+	// worker, whose next row is that file; a busy one reads the file again.
+	const drain = async (handed = null) => {
 		if (running) return;
 		running = true;
 		try {
 			for (;;) {
 				const next = items.value.find((it) => it.status === 'waiting');
 				if (!next) break;
-				await runOne(next.id);
+				await runOne(next.id, handed?.id === next.id ? handed : null);
+				handed = null;
 			}
 		} finally {
 			running = false;
 		}
 	};
 
-	const runOne = async (id) => {
+	const runOne = async (id, handed) => {
 		const item = byId(id);
 		if (!item || item.status !== 'waiting') return;
-		const handed = handedOver?.id === id && handedOver.blob === item.blob ? handedOver : null;
-		handedOver = null;
 
 		const dialogs = useDialogsStore();
 		const ctrl = new AbortController();
@@ -265,8 +263,8 @@ export const useTransfersStore = defineStore('transfers', () => {
 		const messageId = messageIdOf(batchId);
 		let captured = null;
 		try {
-			// Stored already by an earlier page: the intent outbox carries it.
-			if (!(await hasMessageIntent(batch.owner, messageId))) {
+			// A restored batch's message may be stored by an earlier page already: the intent outbox carries it.
+			if (!batch.restored || !(await hasMessageIntent(batch.owner, messageId))) {
 				assertActsAsOwner(batchId);
 				captured = await dialogs.captureMessageIntent(batch.peerHash, parts, messageId);
 			}
@@ -352,7 +350,6 @@ export const useTransfersStore = defineStore('transfers', () => {
 	const removeItem = (id) => {
 		const item = byId(id);
 		items.value = items.value.filter((it) => it.id !== id);
-		if (handedOver?.id === id) handedOver = null;
 		// A settled row is in the record as a part, if at all, not as an upload.
 		if (item && !SETTLED.has(item.status)) void syncRecord(item.batchId);
 	};
@@ -483,7 +480,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 				return;
 			}
 			batches.value = new Map(batches.value).set(record.batchId, {
-				owner: who, kept: true, peerHash: record.peerHash, caption: record.caption, status: 'open', parts: record.parts,
+				owner: who, kept: true, restored: true, peerHash: record.peerHash, caption: record.caption, status: 'open', parts: record.parts,
 			});
 			items.value = [...items.value, ...record.files.map((f) => restoredRow(record, f))];
 			// Every file had landed: only the message is left to store.
@@ -506,7 +503,6 @@ export const useTransfersStore = defineStore('transfers', () => {
 			for (const it of items.value) if (gone.has(it.batchId)) aborts.get(it.id)?.abort();
 			items.value = items.value.filter((it) => !gone.has(it.batchId));
 			for (const batchId of gone) letGo(batchId);
-			handedOver = null;
 		}
 		if (next) await restore(next);
 	};
@@ -525,15 +521,14 @@ export const useTransfersStore = defineStore('transfers', () => {
 			const bytes = new Uint8Array(await file.arrayBuffer());
 			const digest = await uploadDigest(bytes);
 			if (digest !== item.digest) return false;
-			verified = { id, blob: file, bytes, digest };
+			verified = { id, bytes, digest };
 		} else if (file.name !== item.name) {
 			return false;
 		}
 		const now = byId(id);
 		if (!now || !needsFile(now) || now.status !== 'paused') return false;
-		handedOver = verified;
 		patch(id, { blob: file, status: 'waiting' });
-		drain();
+		drain(verified);
 		return true;
 	};
 

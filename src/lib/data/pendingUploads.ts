@@ -80,7 +80,7 @@ const isPendingFile = (f: PendingFile): boolean =>
 
 const isPendingBatch = (b: PendingBatch): boolean =>
 	typeof b?.batchId === 'string' && typeof b.peerHash === 'string' && typeof b.caption === 'string'
-	&& typeof b.updatedAt === 'number' && Array.isArray(b.parts) && Array.isArray(b.files)
+	&& Array.isArray(b.parts) && Array.isArray(b.files)
 	// A record is kept only while its message has something to send (transfers.store.js).
 	&& (b.files.length > 0 || b.parts.length > 0) && b.files.every(isPendingFile);
 
@@ -89,30 +89,25 @@ export const savePendingBatch = (owner: string, { updatedAt, ...content }: Pendi
 
 export const forgetPendingBatch = (owner: string, batchId: string): Promise<void> => store.raw.delete(store.keyOf(owner, batchId));
 
-/** Removes every account's records past PENDING_UPLOAD_TTL_MS and any not in the stored form, with no key. */
-const sweepExpired = async (now: number): Promise<void> => {
-	for (const key of await store.raw.keys()) {
-		const stored = storedOf(await store.raw.get(key));
-		if (!stored || now - stored.updatedAt > PENDING_UPLOAD_TTL_MS) await store.raw.delete(key);
-	}
-};
-
 /**
- * The owner's records still worth resuming. Every account's records past
- * PENDING_UPLOAD_TTL_MS go first; then a malformed record of the owner is
- * removed, and one that does not open is left alone and skipped, like every
- * sealed record (docs/persistence-encryption.md).
+ * The owner's records still worth resuming. Removes every account's records
+ * past PENDING_UPLOAD_TTL_MS or not in the stored form, with no key, and a
+ * malformed record of the owner; one that does not open is left alone and
+ * skipped, like every sealed record (docs/persistence-encryption.md).
  */
 export const pendingBatches = async (owner: string, now = Date.now()): Promise<PendingBatch[]> => {
-	await sweepExpired(now);
 	const found: PendingBatch[] = [];
 	for (const key of await store.raw.keys()) {
-		if (!store.isOwners(owner, key)) continue;
 		const stored = storedOf(await store.raw.get(key));
-		if (!stored) continue;
+		if (!stored || now - stored.updatedAt > PENDING_UPLOAD_TTL_MS) {
+			await store.raw.delete(key);
+			continue;
+		}
+		if (!store.isOwners(owner, key)) continue;
 		let content: string | null;
 		try {
-			content = await store.sealed(owner, enveloped()).get(key);
+			// The record read above, opened without reading it again.
+			content = await store.sealed(owner, { ...enveloped(), get: async () => stored.sealed }).get(key);
 		} catch (e) {
 			console.warn('[pendingUploads] a record did not open:', e);
 			continue;

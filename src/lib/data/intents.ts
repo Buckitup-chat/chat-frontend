@@ -148,14 +148,10 @@ export interface ResolvedIntentMarker {
 	messageId?: string;
 }
 
-const purposeOf = (intent: unknown): string | undefined => {
-	const purpose = (intent as { purpose?: unknown } | null)?.purpose;
-	return typeof purpose === 'string' && purpose ? purpose : undefined;
-};
-
-const messageIdOf = (intent: unknown): string | undefined => {
-	const messageId = (intent as { messageId?: unknown } | null)?.messageId;
-	return typeof messageId === 'string' && messageId ? messageId : undefined;
+/** The intent's `name` field when it is a non-empty string. */
+const stringField = (intent: unknown, name: 'purpose' | 'messageId'): string | undefined => {
+	const value = (intent as Record<string, unknown> | null)?.[name];
+	return typeof value === 'string' && value ? value : undefined;
 };
 
 const isResolvedMarker = (intent: unknown): intent is ResolvedIntentMarker =>
@@ -246,6 +242,8 @@ export async function resolveIntent(id: string, outcome: ResolvedIntentOutcome):
 	if (!existing) return true;
 	if (isResolvedMarker(existing.intent)) return true;
 
+	const purpose = stringField(existing.intent, 'purpose');
+	const messageId = stringField(existing.intent, 'messageId');
 	const marker: IntentEntry<ResolvedIntentMarker> = {
 		id: existing.id,
 		userHash: existing.userHash,
@@ -253,8 +251,8 @@ export async function resolveIntent(id: string, outcome: ResolvedIntentOutcome):
 		createdAt: existing.createdAt,
 		intent: {
 			resolved: true, outcome: outcome.outcome, ref: outcome.ref ?? null, resolvedAt: Date.now(),
-			...(purposeOf(existing.intent) ? { purpose: purposeOf(existing.intent) } : {}),
-			...(messageIdOf(existing.intent) ? { messageId: messageIdOf(existing.intent) } : {}),
+			...(purpose ? { purpose } : {}),
+			...(messageId ? { messageId } : {}),
 		},
 	};
 	try {
@@ -319,7 +317,7 @@ export async function intentsOf(userHash: string, opts: { includeResolved?: bool
  */
 export async function hasMessageIntent(userHash: string, messageId: string): Promise<boolean> {
 	const { entries, issues } = await intentsOf(userHash, { includeResolved: true });
-	if (entries.some((e) => e.relation === 'dialog_messages' && messageIdOf(e.intent) === messageId)) return true;
+	if (entries.some((e) => e.relation === 'dialog_messages' && stringField(e.intent, 'messageId') === messageId)) return true;
 	const unread = issues.find((i) => i.kind === 'unavailable' && i.owner !== 'other');
 	if (unread) throw new Error(`[intents] whether message ${messageId} was stored is unknown, an intent did not read: ${unread.error}`);
 	return false;

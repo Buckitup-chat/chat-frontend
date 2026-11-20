@@ -18,7 +18,6 @@ const { _setIntentStorageForTests, enqueueIntent, intentsOf, resolveIntent } = a
 const memoryStore = () => {
 	const map = new Map();
 	return {
-		map,
 		async get(key) { return map.get(key) ?? null; },
 		async set(key, value) { map.set(key, value); },
 		async delete(key) { map.delete(key); },
@@ -210,6 +209,22 @@ describe('the transfer queue across a reload', () => {
 		} finally {
 			hashes.mockRestore();
 		}
+	});
+
+	it('does not hold a file picked again while another uploads: its own upload reads it', async () => {
+		await closeTab(await composing([fileOf('a.bin', 'first file')]));
+		const tab = await openTab();
+		await tab.enqueueBatch('u_peer', [fileOf('x.bin', 'uploading')], '');
+		await vi.waitFor(() => expect(uploads.has('x.bin')).toBe(true));
+		const file = fileOf('a.bin', 'first file');
+		const reads = vi.spyOn(file, 'arrayBuffer');
+		expect(await tab.repick(rowOf(tab, 'a.bin').id, file)).toBe(true);
+		expect(reads).toHaveBeenCalledTimes(1);
+		uploads.delete('a.bin');
+		finish('x.bin');
+		await vi.waitFor(() => expect(uploads.has('a.bin')).toBe(true));
+		expect(new TextDecoder().decode(uploads.get('a.bin').meta.bytes)).toBe('first file');
+		expect(reads).toHaveBeenCalledTimes(2);
 	});
 
 	it('refuses another file, and sends nothing', async () => {
