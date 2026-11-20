@@ -23,8 +23,11 @@ beforeEach(() => {
 		async keys() { return [...records.keys()]; },
 		async clear() { records.clear(); },
 	};
-	_setPendingUploadsStoreForTests(storage, (account) =>
-		crypto.subtle.importKey('raw', new Uint8Array(32).fill(keyBytes.get(account) ?? 9), 'AES-GCM', false, ['encrypt', 'decrypt']));
+	_setPendingUploadsStoreForTests(storage, async (account) => {
+		const fill = keyBytes.get(account);
+		if (fill === undefined) throw new Error(`no key for ${account}: the account is not signed in`);
+		return crypto.subtle.importKey('raw', new Uint8Array(32).fill(fill), 'AES-GCM', false, ['encrypt', 'decrypt']);
+	});
 });
 
 const batch = (over: Partial<PendingBatch> = {}): PendingBatch => ({
@@ -57,6 +60,16 @@ describe('pending uploads', () => {
 		await savePendingBatch(owner, batch({ batchId: 'batch_new', updatedAt: now - PENDING_UPLOAD_TTL_MS + 60_000 }));
 		expect((await pendingBatches(owner, now)).map((b) => b.batchId)).toEqual(['batch_new']);
 		expect([...records.keys()]).toEqual([`${owner}|batch_new`]);
+	});
+
+	it('drops another account\'s record untouched for 48 hours at any sign-in, without that account\'s key', async () => {
+		const now = Date.now();
+		await savePendingBatch(other, batch({ batchId: 'batch_old', updatedAt: now - PENDING_UPLOAD_TTL_MS - 1 }));
+		await savePendingBatch(other, batch({ batchId: 'batch_new', updatedAt: now - 60_000 }));
+		expect(JSON.parse(records.get(`${other}|batch_old`)!)).toMatchObject({ updatedAt: now - PENDING_UPLOAD_TTL_MS - 1 });
+		keyBytes.delete(other); // the other account never signs in here again
+		expect(await pendingBatches(owner, now)).toEqual([]);
+		expect([...records.keys()]).toEqual([`${other}|batch_new`]);
 	});
 
 	it('drops a malformed record, one with no file left to upload, and one whose chunks were cut at another size', async () => {

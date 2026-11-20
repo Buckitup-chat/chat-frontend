@@ -7,6 +7,7 @@
 // local key (docs/invariants.md §1).
 
 import { accountSealedStore } from './accountSealedStore';
+import type { StringStore } from './secureStore';
 import { CHUNK_SIZE } from '@buckitup/pq-client/fileCrypto';
 
 /** The server drops the chunks of an upload left uncommitted for 48 hours (pq_files §8). */
@@ -41,6 +42,34 @@ const store = accountSealedStore('buckitup-pending-uploads');
 
 export const _setPendingUploadsStoreForTests = store.setForTests;
 
+// As stored, a record is its write time in the clear beside the sealed rest.
+// The time is not content; kept outside the seal, it lets any account's
+// sign-in remove the expired records of every account on this device,
+// including one that never signs in here again.
+interface Stored {
+	updatedAt: number;
+	sealed: string;
+}
+
+const storedOf = (value: string | null): Stored | null => {
+	if (value === null) return null;
+	try {
+		const stored = JSON.parse(value) as Stored;
+		return typeof stored?.updatedAt === 'number' && typeof stored.sealed === 'string' ? stored : null;
+	} catch {
+		return null;
+	}
+};
+
+/** The raw store seen through the envelope; what it writes carries `updatedAt`. */
+const enveloped = (updatedAt?: number): StringStore => ({
+	get: async (key) => storedOf(await store.raw.get(key))?.sealed ?? null,
+	set: (key, sealed) => store.raw.set(key, JSON.stringify({ updatedAt, sealed })),
+	delete: (key) => store.raw.delete(key),
+	keys: () => store.raw.keys(),
+	clear: () => store.raw.clear(),
+});
+
 const isPendingFile = (f: PendingFile): boolean =>
 	[f?.fileId, f?.encSecretB64, f?.name, f?.mimeType].every((v) => typeof v === 'string')
 	&& [f.order, f.size, f.chunkCount, f.createdAt].every(Number.isInteger)
@@ -54,32 +83,44 @@ const isPendingBatch = (b: PendingBatch): boolean =>
 	// A record is kept only while a file is still uploading (transfers.store.js).
 	&& b.files.length > 0 && b.files.every(isPendingFile);
 
-export const savePendingBatch = (owner: string, batch: PendingBatch): Promise<void> =>
-	store.sealed(owner).set(store.keyOf(owner, batch.batchId), JSON.stringify(batch));
+export const savePendingBatch = (owner: string, { updatedAt, ...content }: PendingBatch): Promise<void> =>
+	store.sealed(owner, enveloped(updatedAt)).set(store.keyOf(owner, content.batchId), JSON.stringify(content));
 
 export const forgetPendingBatch = (owner: string, batchId: string): Promise<void> => store.raw.delete(store.keyOf(owner, batchId));
 
+/** Removes every account's records past PENDING_UPLOAD_TTL_MS and any not in the stored form, with no key. */
+const sweepExpired = async (now: number): Promise<void> => {
+	for (const key of await store.raw.keys()) {
+		const stored = storedOf(await store.raw.get(key));
+		if (!stored || now - stored.updatedAt > PENDING_UPLOAD_TTL_MS) await store.raw.delete(key);
+	}
+};
+
 /**
- * The owner's records still worth resuming. A malformed record or one past
- * PENDING_UPLOAD_TTL_MS is removed; one that does not open is left alone and
- * skipped, like every sealed record (docs/persistence-encryption.md).
+ * The owner's records still worth resuming. Every account's records past
+ * PENDING_UPLOAD_TTL_MS go first; then a malformed record of the owner is
+ * removed, and one that does not open is left alone and skipped, like every
+ * sealed record (docs/persistence-encryption.md).
  */
 export const pendingBatches = async (owner: string, now = Date.now()): Promise<PendingBatch[]> => {
+	await sweepExpired(now);
 	const found: PendingBatch[] = [];
 	for (const key of await store.raw.keys()) {
 		if (!store.isOwners(owner, key)) continue;
-		let stored: string | null;
+		const stored = storedOf(await store.raw.get(key));
+		if (!stored) continue;
+		let content: string | null;
 		try {
-			stored = await store.sealed(owner).get(key);
+			content = await store.sealed(owner, enveloped()).get(key);
 		} catch (e) {
 			console.warn('[pendingUploads] a record did not open:', e);
 			continue;
 		}
 		let batch: PendingBatch | null = null;
 		try {
-			batch = stored === null ? null : JSON.parse(stored);
+			batch = content === null ? null : { ...JSON.parse(content), updatedAt: stored.updatedAt };
 		} catch { /* malformed: removed below */ }
-		if (batch && isPendingBatch(batch) && now - batch.updatedAt <= PENDING_UPLOAD_TTL_MS) found.push(batch);
+		if (batch && isPendingBatch(batch)) found.push(batch);
 		else await store.raw.delete(key);
 	}
 	return found;
