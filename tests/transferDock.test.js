@@ -7,6 +7,7 @@ import { setActivePinia, createPinia } from 'pinia';
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({ uploadAttachment: vi.fn(), sendMessage: vi.fn() }),
 }));
+vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => ({ currentUserHash: null }) }));
 
 const { useTransfersStore } = await import('@/store/transfers.store');
 const TransferDock = (await import('@/components/chat/TransferDock.vue')).default;

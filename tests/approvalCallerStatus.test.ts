@@ -9,6 +9,7 @@ import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot
 import { _setIntentStorageForTests } from '@/lib/data/intents';
 import { _setProjectionStorageForTests } from '@/lib/data/messageProjections';
 import { _setOwnObservedTailsStorageForTests } from '@/lib/data/ownObservedTails';
+import { _setPendingUploadsStoreForTests } from '@/lib/data/pendingUploads';
 import {
 	_setStorageForTests, _setLeaderForTests, stopDrainLoop as stopOutboxLoop, startLeaderElection, stopLeaderElection,
 	pendingEntries,
@@ -148,6 +149,7 @@ beforeEach(async () => {
 	projections = makeMemoryStore();
 	_setProjectionStorageForTests(projections);
 	_setOwnObservedTailsStorageForTests(makeMemoryStore());
+	_setPendingUploadsStoreForTests(makeMemoryStore(), () => crypto.subtle.importKey('raw', new Uint8Array(32).fill(7), 'AES-GCM', false, ['encrypt', 'decrypt']));
 	collections = {
 		cards: makeCollection({ [MY_HASH]: me.card, [PEER_HASH]: peer.card }),
 		dialog: {
@@ -252,6 +254,7 @@ describe('a file whose manifest is held', () => {
 		grants.add('dialog_messages');
 		const transfers = useTransfersStore();
 		const items = () => transfers.items as Row[];
+		await transfers.signedIn(MY_HASH); // as App.vue tells the queue
 		await transfers.enqueueBatch(PEER_HASH, [file('a.bin')], 'caption');
 		await vi.waitFor(() => expect(items()[0]?.status).toBe('awaiting_approval'));
 		await vi.waitFor(async () => expect((await pendingEntries(MY_HASH)).map((e) => e.relation)).toEqual(['files', 'dialog_messages']));
@@ -313,6 +316,7 @@ describe('a file whose manifest is held', () => {
 		grants.add('dialog_messages');
 		const transfers = useTransfersStore();
 		const items = () => transfers.items as Row[];
+		await transfers.signedIn(MY_HASH);
 		await transfers.enqueueBatch(PEER_HASH, [file('a.bin')], 'caption');
 
 		await vi.waitFor(() => expect(items()[0]?.status).toBe('awaiting_approval'));
@@ -335,6 +339,7 @@ describe('a file whose manifest is held', () => {
 		});
 		const transfers = useTransfersStore();
 		const items = () => transfers.items as Row[];
+		await transfers.signedIn(MY_HASH);
 		await transfers.enqueueBatch(PEER_HASH, [file('a.bin'), file('b.bin')], 'caption');
 		await vi.waitFor(() => expect(items().map((it) => it.status)).toEqual(['awaiting_approval', 'active']));
 		await vi.waitFor(() => expect(chunkPuts).toHaveBeenCalledTimes(2));
