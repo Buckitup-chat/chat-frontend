@@ -75,9 +75,13 @@ seal, in the clear.
   picks it again. A file of the same size and digest resumes, and only the
   chunks the device lacks are sent. Any other file is refused. A file that sent
   nothing yet has no digest, and its size and name are checked instead.
-- The record goes once its last file lands or is cancelled. The message is then
-  sent from the tab that has it, or not at all: a record with nothing left to
-  upload could only send it a second time.
+- The record goes once the message is stored for sending (the intent outbox
+  carries it from there) or nothing is left to send. A message whose files all
+  landed but which could not be stored, or whose page went first, stays in the
+  record, and the next sign-in stores it. Its `message_id` comes from the
+  batch, and a message already in the intent store, pending or resolved, is not
+  stored again: a record left by a page that went right after storing the
+  message does not send it twice.
 - A record not written for 48 hours is dropped at the next sign-in of any
   account on this device, so the records of an account that never signs in
   here again do not outlive their use. The server

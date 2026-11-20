@@ -20,9 +20,9 @@ const uploadAttachment = vi.fn((meta, opts) => new Promise((resolve, reject) => 
 	});
 }));
 
-const captureMessageIntent = vi.fn(async (peerHash, parts) => ({
+const captureMessageIntent = vi.fn(async (peerHash, parts, messageId) => ({
 	intentId: 'intent_x',
-	payload: { peerHash, parts, messageId: 'dmsg_x' },
+	payload: { peerHash, parts, messageId },
 }));
 const dispatchMessageIntent = vi.fn((intentId, payload, onStatus) => {
 	sentMessages.push({ peerHash: payload.peerHash, parts: payload.parts });
@@ -35,6 +35,18 @@ vi.mock('@/store/dialogs.store', () => ({
 }));
 
 const { useTransfersStore } = await import('@/store/transfers.store');
+const { _setIntentStorageForTests } = await import('@/lib/data/intents');
+
+const memoryStore = () => {
+	const map = new Map();
+	return {
+		async get(key) { return map.get(key) ?? null; },
+		async set(key, value) { map.set(key, value); },
+		async delete(key) { map.delete(key); },
+		async keys() { return [...map.keys()]; },
+		async clear() { map.clear(); },
+	};
+};
 
 const file = (name, size = 8 * 1024 * 1024) =>
 	new File([new Uint8Array(10)], name, { type: 'application/octet-stream' });
@@ -59,6 +71,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 describe('transfer queue', () => {
 	beforeEach(() => {
 		setActivePinia(createPinia());
+		_setIntentStorageForTests(memoryStore());
 		uploads.clear();
 		sentMessages = [];
 		uploadAttachment.mockClear();

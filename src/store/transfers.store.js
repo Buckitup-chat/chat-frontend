@@ -19,9 +19,10 @@
 // row removes that attachment and the rest still send; cancelling everything
 // sends nothing.
 //
-// A batch outlives a reload (pq_files §4.1): while its message is open it is
-// kept in a sealed record (pendingUploads.ts), and the next sign-in brings it
-// back with its unfinished files paused. The browser keeps no file across a
+// A batch outlives a reload (pq_files §4.1): until its message is stored for
+// sending it is kept in a sealed record (pendingUploads.ts), and the next
+// sign-in brings it back with its unfinished files paused, or stores the
+// message if every file had landed. The browser keeps no file across a
 // reload, so such a row resumes only from the same file picked again.
 
 import { defineStore } from 'pinia';
@@ -30,6 +31,7 @@ import { prepareUpload } from '@/lib/data/fileTransfer';
 import { CHUNK_SIZE, chunkCountOf } from '@buckitup/pq-client/fileCrypto';
 import { uploadDigest } from '@/lib/data/uploadReuse';
 import { forgetPendingBatch, pendingBatches, savePendingBatch } from '@/lib/data/pendingUploads';
+import { hasMessageIntent } from '@/lib/data/intents';
 import { serialized } from '@/lib/data/serialized';
 import { useDialogsStore } from '@/store/dialogs.store';
 
@@ -223,6 +225,11 @@ export const useTransfersStore = defineStore('transfers', () => {
 	const liveOf = (batchId) =>
 		items.value.filter((it) => it.batchId === batchId && !SETTLED.has(it.status));
 
+	// The message's id comes from its batch, so it is stored for sending once
+	// however often that is tried: a page closed after storing it, before its
+	// record went, leaves a record whose message the next try finds stored.
+	const messageIdOf = (batchId) => `dmsg_${batchId.slice('batch_'.length)}`;
+
 	const maybeSendBatch = async (batchId) => {
 		const batch = batches.value.get(batchId);
 		if (!batch || batch.status !== 'open') return;
@@ -234,18 +241,25 @@ export const useTransfersStore = defineStore('transfers', () => {
 			return;
 		}
 		if (batch.caption.trim()) parts.push({ kind: 'text', text: batch.caption.trim() });
+		patchBatch(batchId, (b) => ({ ...b, status: 'capturing' }));
 		const dialogs = useDialogsStore();
-		let captured;
+		const messageId = messageIdOf(batchId);
+		let captured = null;
 		try {
-			captured = await dialogs.captureMessageIntent(batch.peerHash, parts);
+			// Stored already by an earlier page: the intent outbox carries it.
+			if (!(await hasMessageIntent(batch.owner, messageId))) {
+				captured = await dialogs.captureMessageIntent(batch.peerHash, parts, messageId);
+			}
 		} catch (e) {
-			console.error('[transfers] could not store the composed message for sending:', e);
-			batches.value = new Map(batches.value).set(batchId, { ...batch, status: 'error' });
+			console.error('[transfers] could not store the composed message for sending; its record keeps it for the next sign-in:', e);
+			patchBatch(batchId, (b) => ({ ...b, status: 'unsent' }));
 			return;
 		}
 
 		// Stored for sending: the intent outbox carries the message from here.
-		batches.value = new Map(batches.value).set(batchId, { ...batch, status: 'sending' });
+		patchBatch(batchId, (b) => ({ ...b, status: 'sending' }));
+		void syncRecord(batchId);
+		if (!captured) return;
 		await dialogs.dispatchMessageIntent(captured.intentId, captured.payload, captured.token, (status) => {
 			if (status === 'synced' || status === 'error' || status === 'awaiting_approval') {
 				batches.value = new Map(batches.value).set(batchId, { ...batch, status });
@@ -373,13 +387,16 @@ export const useTransfersStore = defineStore('transfers', () => {
 		updatedAt: Date.now(),
 	});
 
+	// A message not stored for sending yet: still uploading, being stored, or
+	// not stored when that was tried.
+	const UNSENT = new Set(['open', 'capturing', 'unsent']);
+
 	/**
-	 * Brings the batch's record in line with the queue: kept while a file of its
-	 * open message is still uploading, removed (and the batch let go) once none
-	 * is, or the message is given up. With every file landed there is nothing to
-	 * resume: the message goes from this tab or not at all. A batch dropped from
-	 * this tab keeps its record. One batch's writes run in order, each from the
-	 * state at its turn.
+	 * Brings the batch's record in line with the queue: kept until its message
+	 * is stored for sending, with a file still uploading or every file landed,
+	 * and removed (and the batch let go) once it is stored or given up. A batch
+	 * dropped from this tab keeps its record. One batch's writes run in order,
+	 * each from the state at its turn.
 	 */
 	const writeRecord = (batchId) => {
 		const { kept, owner: who } = batches.value.get(batchId) ?? {};
@@ -388,7 +405,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 			const batch = batches.value.get(batchId);
 			if (!batch) return;
 			const record = recordOf(batchId, batch);
-			if (batch.status === 'open' && record.files.length) {
+			if (UNSENT.has(batch.status) && (record.files.length || record.parts.length)) {
 				await savePendingBatch(who, record);
 				return;
 			}
@@ -434,6 +451,8 @@ export const useTransfersStore = defineStore('transfers', () => {
 				owner: who, kept: true, peerHash: record.peerHash, caption: record.caption, status: 'open', parts: record.parts,
 			});
 			items.value = [...items.value, ...record.files.map((f) => restoredRow(record, f))];
+			// Every file had landed: only the message is left to store.
+			if (!record.files.length) void sendBatch(record.batchId);
 		}
 	};
 

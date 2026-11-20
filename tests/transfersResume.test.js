@@ -13,6 +13,19 @@ let sentMessages;
 
 const { _setPendingUploadsStoreForTests, pendingBatches } = await import('@/lib/data/pendingUploads');
 const { uploadDigest } = await import('@/lib/data/uploadReuse');
+const { _setIntentStorageForTests, enqueueIntent, intentsOf, resolveIntent } = await import('@/lib/data/intents');
+
+const memoryStore = () => {
+	const map = new Map();
+	return {
+		map,
+		async get(key) { return map.get(key) ?? null; },
+		async set(key, value) { map.set(key, value); },
+		async delete(key) { map.delete(key); },
+		async keys() { return [...map.keys()]; },
+		async clear() { map.clear(); },
+	};
+};
 
 const uploadAttachment = vi.fn((meta, opts) => new Promise((resolve, reject) => {
 	// What the device would know if the page went now: read once the upload has begun.
@@ -23,7 +36,13 @@ const uploadAttachment = vi.fn((meta, opts) => new Promise((resolve, reject) => 
 	}
 	opts.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
 }));
-const captureMessageIntent = vi.fn(async (peerHash, parts) => ({ intentId: 'intent_x', payload: { peerHash, parts } }));
+// As the real capture: the message is durable in the intent store once this resolves.
+const captureMessageIntent = vi.fn(async (peerHash, parts, messageId = `dmsg_${crypto.randomUUID()}`) => {
+	const payload = { kind: 'message', relation: 'dialog_messages', peerHash, messageId, ownerHash: OWNER, parts };
+	const intentId = await enqueueIntent(payload, OWNER, 'dialog_messages');
+	if (!intentId) throw new Error('This action could not be stored for sending.');
+	return { intentId, payload };
+});
 const dispatchMessageIntent = vi.fn((intentId, payload, token, onStatus) => {
 	sentMessages.push(payload);
 	onStatus?.('synced');
@@ -38,25 +57,32 @@ const { useTransfersStore } = await import('@/store/transfers.store');
 
 let records;
 let failWrites;
+let failDeletes;
 const tabs = [];
 beforeEach(() => {
 	records = new Map();
 	failWrites = false;
+	failDeletes = false;
 	_setPendingUploadsStoreForTests({
 		async get(key) { return records.get(key) ?? null; },
 		async set(key, value) {
 			if (failWrites) throw new DOMException('the origin is out of space', 'QuotaExceededError');
 			records.set(key, value);
 		},
-		async delete(key) { records.delete(key); },
+		async delete(key) {
+			if (failDeletes) throw new DOMException('the page went', 'AbortError');
+			records.delete(key);
+		},
 		async keys() { return [...records.keys()]; },
 		async clear() { records.clear(); },
 	}, () => crypto.subtle.importKey('raw', new Uint8Array(32).fill(7), 'AES-GCM', false, ['encrypt', 'decrypt']));
+	_setIntentStorageForTests(memoryStore());
 	vi.stubGlobal('navigator', { locks: makeFakeLockManager() });
 	uploads.clear();
 	sentMessages = [];
 	uploadAttachment.mockClear();
 	captureMessageIntent.mockClear();
+	dispatchMessageIntent.mockClear();
 });
 afterEach(async () => {
 	// A tab left open would go on writing into the next test's storage.
@@ -224,12 +250,63 @@ describe('the transfer queue across a reload', () => {
 		expect(sentMessages).toEqual([]);
 	});
 
-	it('ends the record when the message cannot be stored for sending', async () => {
+	it('keeps the message that could not be stored for sending, and the next sign-in sends it once', async () => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		captureMessageIntent.mockRejectedValueOnce(new Error('the intent store is full'));
-		await composing([fileOf('a.bin', 'first file')]);
+		const tab = await composing([fileOf('a.bin', 'first file')], 'caption');
 		finish('a.bin');
 		await vi.waitFor(() => expect(captureMessageIntent).toHaveBeenCalledTimes(1));
+		await settle();
+		expect(sentMessages).toEqual([]);
+		const [kept] = await pendingBatches(OWNER);
+		expect(kept).toMatchObject({ caption: 'caption', files: [], parts: [{ order: 0, part: expect.objectContaining({ name: 'a.bin' }) }] });
+		await closeTab(tab);
+
+		const next = await openTab();
+		await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
+		expect(sentMessages[0].parts.map((p) => p.name ?? p.text)).toEqual(['a.bin', 'caption']);
+		expect(captureMessageIntent.mock.calls[1][2]).toBe(captureMessageIntent.mock.calls[0][2]);
 		await vi.waitFor(() => expect(records.size).toBe(0));
+		expect(next.items).toEqual([]);
+		errorSpy.mockRestore();
+	});
+
+	it('sends a message whose last file landed just before the page went', async () => {
+		captureMessageIntent.mockImplementationOnce(() => new Promise(() => {})); // the page goes while it is stored
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		finish('a.bin');
+		await vi.waitFor(() => expect(captureMessageIntent).toHaveBeenCalledTimes(1));
+		await closeTab(tab);
+
+		await openTab();
+		await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
+		expect(sentMessages[0].parts.map((p) => p.name)).toEqual(['a.bin']);
+		await vi.waitFor(() => expect(records.size).toBe(0));
+	});
+
+	it.each([
+		['still waiting to go', async () => {}],
+		['sent already', async (intentId) => { await resolveIntent(intentId, { outcome: 'accepted' }); }],
+	])('does not store a message twice when the page went after storing it, %s', async (_, meanwhile) => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		failDeletes = true; // the page goes before the record does
+		finish('a.bin');
+		await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
+		await settle();
+		expect(records.size).toBe(1);
+		await closeTab(tab);
+		failDeletes = false;
+		const { intentId, payload } = await captureMessageIntent.mock.results[0].value;
+		await meanwhile(intentId);
+
+		await openTab();
+		await vi.waitFor(() => expect(records.size).toBe(0));
+		expect(captureMessageIntent).toHaveBeenCalledTimes(1);
+		const { entries } = await intentsOf(OWNER, { includeResolved: true });
+		expect(entries.map((e) => e.id)).toEqual([intentId]);
+		expect(payload.messageId).toMatch(/^dmsg_/);
+		warnSpy.mockRestore();
 	});
 
 	it('shows only the signed-in account\'s uploads, and keeps the other\'s record for it', async () => {

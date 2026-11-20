@@ -2,7 +2,8 @@
 // record per composed message: its peer and caption, the parts already
 // uploaded, and per file still uploading the file_id and enc_secret, written
 // before the file's first chunk PUT. After a reload the queue shows those files
-// paused, and the same file picked again resumes where the device stopped.
+// paused, and the same file picked again resumes where the device stopped; a
+// record whose files had all landed has its message stored for sending.
 // The record holds keys that open content, so it is sealed with the account's
 // local key (docs/invariants.md §1).
 
@@ -80,8 +81,8 @@ const isPendingFile = (f: PendingFile): boolean =>
 const isPendingBatch = (b: PendingBatch): boolean =>
 	typeof b?.batchId === 'string' && typeof b.peerHash === 'string' && typeof b.caption === 'string'
 	&& typeof b.updatedAt === 'number' && Array.isArray(b.parts) && Array.isArray(b.files)
-	// A record is kept only while a file is still uploading (transfers.store.js).
-	&& b.files.length > 0 && b.files.every(isPendingFile);
+	// A record is kept only while its message has something to send (transfers.store.js).
+	&& (b.files.length > 0 || b.parts.length > 0) && b.files.every(isPendingFile);
 
 export const savePendingBatch = (owner: string, { updatedAt, ...content }: PendingBatch): Promise<void> =>
 	store.sealed(owner, enveloped(updatedAt)).set(store.keyOf(owner, content.batchId), JSON.stringify(content));

@@ -144,11 +144,18 @@ export interface ResolvedIntentMarker {
 	ref?: string | null;
 	resolvedAt: number;
 	purpose?: string;
+	/** The message the intent carried, so hasMessageIntent still finds it. */
+	messageId?: string;
 }
 
 const purposeOf = (intent: unknown): string | undefined => {
 	const purpose = (intent as { purpose?: unknown } | null)?.purpose;
 	return typeof purpose === 'string' && purpose ? purpose : undefined;
+};
+
+const messageIdOf = (intent: unknown): string | undefined => {
+	const messageId = (intent as { messageId?: unknown } | null)?.messageId;
+	return typeof messageId === 'string' && messageId ? messageId : undefined;
 };
 
 const isResolvedMarker = (intent: unknown): intent is ResolvedIntentMarker =>
@@ -247,6 +254,7 @@ export async function resolveIntent(id: string, outcome: ResolvedIntentOutcome):
 		intent: {
 			resolved: true, outcome: outcome.outcome, ref: outcome.ref ?? null, resolvedAt: Date.now(),
 			...(purposeOf(existing.intent) ? { purpose: purposeOf(existing.intent) } : {}),
+			...(messageIdOf(existing.intent) ? { messageId: messageIdOf(existing.intent) } : {}),
 		},
 	};
 	try {
@@ -302,6 +310,19 @@ export async function intentsOf(userHash: string, opts: { includeResolved?: bool
 		if (opts.includeResolved || !isResolvedMarker(entry.intent)) entries.push(entry);
 	}
 	return { entries: entries.sort((a, b) => compareIntentIds(a.id, b.id)), issues };
+}
+
+/**
+ * Whether the account ever stored this dialog message for sending, pending or
+ * resolved. Throws when an entry that may be the account's does not read: the
+ * answer is then unknown.
+ */
+export async function hasMessageIntent(userHash: string, messageId: string): Promise<boolean> {
+	const { entries, issues } = await intentsOf(userHash, { includeResolved: true });
+	if (entries.some((e) => e.relation === 'dialog_messages' && messageIdOf(e.intent) === messageId)) return true;
+	const unread = issues.find((i) => i.kind === 'unavailable' && i.owner !== 'other');
+	if (unread) throw new Error(`[intents] whether message ${messageId} was stored is unknown, an intent did not read: ${unread.error}`);
+	return false;
 }
 
 export async function _clearIntentsForTests(): Promise<void> {

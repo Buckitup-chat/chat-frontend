@@ -72,12 +72,18 @@ describe('pending uploads', () => {
 		expect([...records.keys()]).toEqual([`${other}|batch_new`]);
 	});
 
-	it('drops a malformed record, one with no file left to upload, and one whose chunks were cut at another size', async () => {
+	it('drops a malformed record, one with nothing left to send, and one whose chunks were cut at another size', async () => {
 		await savePendingBatch(owner, batch({ batchId: 'batch_empty', files: [] }));
 		await savePendingBatch(owner, batch({ batchId: 'batch_size', files: [{ ...batch().files[0], chunkSize: 1024 }] }));
 		await savePendingBatch(owner, { ...batch({ batchId: 'batch_bad' }), files: [{ order: 0 }] } as unknown as PendingBatch);
 		expect(await pendingBatches(owner)).toEqual([]);
 		expect(records.size).toBe(0);
+	});
+
+	it('keeps a record whose files all landed, until its message is stored for sending', async () => {
+		const landed = batch({ files: [], parts: [{ order: 0, part: { kind: 'file', name: 'contract.pdf' } }] });
+		await savePendingBatch(owner, landed);
+		expect(await pendingBatches(owner)).toEqual([landed]);
 	});
 
 	it('skips a record that does not open, and keeps it', async () => {
