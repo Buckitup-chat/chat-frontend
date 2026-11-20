@@ -19,6 +19,9 @@ export const refuseOpens = (): void => {
 	refusing = true;
 };
 
+/** For the openers that do not go through openDatabase (the chunk cache). */
+export const opensRefused = (): boolean => refusing;
+
 export const _allowOpensForTests = (): void => {
 	refusing = false;
 };

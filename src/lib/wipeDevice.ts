@@ -102,13 +102,22 @@ const tellWorker = (worker: WipeEnv['serviceWorker']) => read(() => worker?.cont
  * plays. Throws where localStorage is unavailable: nothing would run the wipe.
  */
 export const requestWipe = (env: WipeEnv = browserEnv()) => {
-	const { localStorage: local, sessionStorage: session } = env;
+	const { localStorage: local } = env;
 	if (!local) throw new Error('This browser does not let the app keep a note across a reload, so it cannot wipe itself.');
 	local.setItem(FLAG, '1');
+	read(() => env.channel?.postMessage(WIPE));
+	goForWipe(env);
+};
+
+/**
+ * What a tab that will reload into the wipe does first, the one that asked
+ * and those told to go: it opens no database the wipe deletes, marks itself
+ * to finish the wipe without asking, and tells the service worker.
+ */
+const goForWipe = ({ sessionStorage: session, serviceWorker }: WipeEnv) => {
 	refuseOpens();
 	read(() => session?.setItem(FLAG, '1'));
-	read(() => env.channel?.postMessage(WIPE));
-	tellWorker(env.serviceWorker);
+	tellWorker(serviceWorker);
 };
 
 /**
@@ -118,14 +127,12 @@ export const requestWipe = (env: WipeEnv = browserEnv()) => {
  * finishes the wipe the person asked for without asking again.
  */
 export function leaveOnWipe(endSession: () => Promise<unknown>, env: WipeEnv = browserEnv(), reload = () => location.reload()): void {
-	const { sessionStorage: session, channel, serviceWorker, waitMs = LEAVE_WAIT_MS } = env;
+	const { channel, waitMs = LEAVE_WAIT_MS } = env;
 	let leaving = false;
 	channel?.addEventListener('message', (event) => {
 		if (leaving || event.data?.type !== WIPE.type) return;
 		leaving = true;
-		refuseOpens();
-		read(() => session?.setItem(FLAG, '1'));
-		tellWorker(serviceWorker);
+		goForWipe(env);
 		void withBudget(Promise.resolve().then(endSession), waitMs, 'end session')
 			.catch((e) => console.error('[wipe] the session did not end cleanly', e))
 			.finally(reload);

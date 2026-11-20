@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { sourceFiles } from './helpers/sourceFiles';
 import { wipeDevice, finishPendingWipe, requestWipe, wipePending, leaveOnWipe, APP_DATABASES, type WipeEnv } from '@/lib/wipeDevice';
 import { openDatabase, _allowOpensForTests } from '@/lib/data/openDatabase';
+import { putCachedChunk } from '@/lib/data/chunkCache';
 
 const open = (factory: IDBFactory, name: string, version?: number) =>
 	new Promise<IDBDatabase>((resolve, reject) => {
@@ -58,6 +59,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 	vi.restoreAllMocks();
+	vi.unstubAllGlobals();
 	_allowOpensForTests();
 });
 
@@ -301,8 +303,12 @@ describe('the wipe on the next load', () => {
 	});
 
 	it('opens no database once asked for: an open would create one the wipe deletes', async () => {
+		vi.stubGlobal('indexedDB', factory);
 		requestWipe({ localStorage: local, sessionStorage: memoryStorage() });
 		expect(await opening()).toMatch(/being wiped/);
+		// The chunk cache opens its database by hand, and goes on without it.
+		await putCachedChunk('f_' + '1'.repeat(32), 0, new Uint8Array(4), 'fd_' + '0'.repeat(128));
+		expect(await names(factory)).toEqual([]);
 	});
 
 	it('leaves a request another tab makes while this one starts', async () => {
