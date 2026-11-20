@@ -1440,11 +1440,6 @@ export async function quarantinedEntries(userHash: string): Promise<OutboxEntry[
 	return (await entriesOf(userHash)).filter((e) => e.status === 'quarantined');
 }
 
-/** The entries still in the queue: waiting to be sent, or refused and kept for the user's Retry or Discard. */
-export async function unsettledEntries(userHash: string): Promise<OutboxEntry[]> {
-	return (await entriesOf(userHash)).filter((e) => e.status !== 'accepted' && e.status !== 'discarded');
-}
-
 /**
  * Back into the replay path — the caller believes the state this write failed
  * against has changed. History (attempts, last verdict) stays on the entry.
@@ -1773,14 +1768,19 @@ export async function heldStateOf(id: string, userHash: string): Promise<HeldSta
 	return block ? { kind: 'held', reason: block.reason, message: block.message } : { kind: 'clear' };
 }
 
-export async function pendingCardWrites(userHash: string): Promise<OutboxEntry[]> {
+/**
+ * The writes of `cardHash`'s card still in `userHash`'s queue: waiting to be
+ * sent, or refused and kept for the user's Retry or Discard. `cardHash` is
+ * the account's own by default, or an identity derived from it.
+ */
+export async function pendingCardWrites(userHash: string, cardHash = userHash): Promise<OutboxEntry[]> {
 	const scan = await scanOutbox(userHash);
 	if (scan.unavailable.size || scan.missing.size || ownedCorrupt(scan, userHash).length) {
 		throw new Error('pendingCardWrites: a record of this account cannot be read — refusing to assume it holds no card write');
 	}
 	// A card whose owner cannot be read counts as the account's: the answer
 	// stays on the safe side.
-	return scan.entries.filter((e) => e.relation === 'user_cards' && (cardOf(e) ?? userHash) === userHash
+	return scan.entries.filter((e) => e.relation === 'user_cards' && (cardOf(e) ?? userHash) === cardHash
 		&& e.status !== 'accepted' && e.status !== 'discarded');
 }
 

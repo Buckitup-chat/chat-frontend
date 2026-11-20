@@ -393,7 +393,11 @@ async function requireOwnerOrCard(cardHash: string): Promise<void> {
 	throw new IngestError('the device has no owner yet: a derived card waits for one', { permanent: false });
 }
 
-/** Whether the server holds a card of `userHash` now. A read that fails tells nothing, and counts as no. */
+/**
+ * Whether the server holds a row of `userHash`'s card now, deleted or not: any
+ * row means the insert only meets it. A read that fails tells nothing, and
+ * counts as no.
+ */
 async function serverHoldsCard(userHash: string): Promise<boolean> {
 	try {
 		const rows = await readShapeOnce<{ user_hash?: unknown }>('user_cards', `user_hash='${userHash}'`);
