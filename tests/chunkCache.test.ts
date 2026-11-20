@@ -1,11 +1,11 @@
 // The persistent chunk cache stores CIPHERTEXT only — what the device already
 // holds — so a reload reassembles attachments from disk with zero new secrets
 // on the client.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
 import {
-	getCachedChunk, putCachedChunk, pinChunk, unpinFile, unpinAllOf, pinnedBytesOf, soleKeptBytesOf,
+	getCachedChunk, putCachedChunk, pinChunk, pinCachedChunks, unpinFile, unpinAllOf, pinnedBytesOf, soleKeptBytesOf, cachedBytes, clearChunkCache,
 	__resetChunkCacheForTests, __setChunkBudgetForTests,
 } from '@/lib/data/chunkCache';
 import { failWritesWithQuota } from './helpers/idbQuota';
@@ -171,10 +171,88 @@ describe('kept chunks', () => {
 	it('closes for another tab\'s upgrade instead of blocking it', async () => {
 		await putCachedChunk('f_a', 0, KB(1), H);
 		const upgraded = await new Promise<IDBDatabase>((resolve, reject) => {
-			const req = indexedDB.open('buckitup-chunks', 3);
+			const req = indexedDB.open('buckitup-chunks', 4);
 			req.onsuccess = () => resolve(req.result);
 			req.onblocked = () => reject(new Error('blocked'));
 		});
 		upgraded.close();
+	});
+});
+
+describe('what a write rewrites', () => {
+	beforeEach(() => {
+		globalThis.indexedDB = new IDBFactory();
+		__resetChunkCacheForTests();
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	/** The keys in one store of the chunk database, read over a connection of its own. */
+	const keysIn = (store: string) => new Promise<IDBValidKey[]>((resolve, reject) => {
+		const open = indexedDB.open('buckitup-chunks');
+		open.onsuccess = () => {
+			try {
+				const req = open.result.transaction(store).objectStore(store).getAllKeys();
+				req.onsuccess = () => {
+					open.result.close();
+					resolve(req.result);
+				};
+				req.onerror = () => reject(req.error);
+			} catch (e) {
+				open.result.close();
+				reject(e);
+			}
+		};
+		open.onerror = () => reject(open.error);
+	});
+
+	it('a pin, an unpin and a read write the chunk\'s metadata, never its bytes', async () => {
+		await putCachedChunk('f_m', 0, KB(1), H);
+		const put = vi.spyOn(IDBObjectStore.prototype, 'put');
+		const update = vi.spyOn(IDBCursor.prototype, 'update');
+		await pinChunk('f_m', 0, H, ALICE, KB(1));
+		expect(await pinCachedChunks('f_m', [H], BOB)).toEqual(new Set([0]));
+		await unpinFile('f_m', ALICE);
+		await unpinAllOf(BOB);
+		await getCachedChunk('f_m', 0, H);
+		await tick();
+		const written = [...put.mock.calls, ...update.mock.calls].map(([value]) => value);
+		expect(written).toHaveLength(5);
+		for (const value of written) expect(value).not.toHaveProperty('bytes');
+	});
+
+	/** Two cached chunks, the older read with `touch`, then a third that leaves room for two: which went? */
+	const readThenEvict = async (touch?: boolean) => {
+		__setChunkBudgetForTests(2 * 1024);
+		await putCachedChunk('f_read', 0, KB(1), H);
+		await tick();
+		await putCachedChunk('f_other', 0, KB(2), H);
+		await tick();
+		const tx = vi.spyOn(IDBDatabase.prototype, 'transaction');
+		await getCachedChunk('f_read', 0, H, touch === undefined ? undefined : { touch });
+		await tick();
+		const writes = tx.mock.calls.filter(([, mode]) => mode === 'readwrite').length;
+		tx.mockRestore();
+		await putCachedChunk('f_new', 0, KB(3), H);
+		return { writes, read: await present('f_read'), other: await present('f_other') };
+	};
+
+	it('a read moves an unpinned chunk back in the eviction order', async () => {
+		expect(await readThenEvict()).toEqual({ writes: 1, read: true, other: false });
+	});
+
+	it('a read told not to touch writes nothing and leaves the order as it was', async () => {
+		expect(await readThenEvict(false)).toEqual({ writes: 0, read: false, other: true });
+	});
+
+	it('eviction takes a chunk\'s bytes with its metadata', async () => {
+		await putCachedChunk('f_a', 0, KB(1), H);
+		await pinChunk('f_k', 0, H, ALICE, KB(2));
+		await putCachedChunk('f_b', 0, KB(3), H);
+		await clearChunkCache();
+		expect(await cachedBytes()).toBe(0);
+		expect(await keysIn('chunks')).toEqual(['f_k:0']);
+		expect(await keysIn('meta')).toEqual(['f_k:0']);
 	});
 });

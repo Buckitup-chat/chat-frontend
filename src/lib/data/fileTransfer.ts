@@ -27,7 +27,7 @@ import {
 import { sendMutationsAndAwaitShape } from './ingest';
 import { getCachedChunk, pinCachedChunks, pinChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 import { bearerFor, openSession } from './readSession';
-import { assertChunkBytes, isRefusedFile, readChunkRows, readVerifiedFile } from './fileIntegrity';
+import { assertChunkBytes, FileVerificationError, isRefusedFile, readChunkRows, readVerifiedFile } from './fileIntegrity';
 import type { SignPkeyResolver } from './rowVerification';
 
 declare const ELECTRIC_API_URL: string; // the chunk endpoints below are not shapes
@@ -264,14 +264,21 @@ export const readLiveFile = async (fileId: string, uploaderHash: string, opts: {
 /**
  * Chunk `i` as the uploader signed it: from disk when this device holds it,
  * from the network otherwise. Bytes fetched are held to `expected` before
- * anything else sees them.
+ * anything else sees them. `touch: false` reads from disk without moving the
+ * chunk in the eviction order, for a caller that pins it next.
  */
-const readChunk = async (fileId: string, i: number, expected: string, signal?: AbortSignal): Promise<{ encrypted: Uint8Array; fromCache: boolean }> => {
+const readChunk = async (
+	fileId: string,
+	i: number,
+	expected: string,
+	opts: { signal?: AbortSignal; touch?: boolean } = {},
+): Promise<{ encrypted: Uint8Array; fromCache: boolean }> => {
+	const { signal } = opts;
 	// Disk before network: chunks are immutable, so a cached one is
 	// exactly the one the device would serve — a reload or a lost uplink
 	// reassembles from here. The cache answers only for the signed hash; a
 	// copy stored under another is fetched again and overwritten.
-	const cached = await getCachedChunk(fileId, i, expected);
+	const cached = await getCachedChunk(fileId, i, expected, { touch: opts.touch });
 	if (cached) return { encrypted: cached, fromCache: true };
 	const fetchChunk = () => {
 		const auth = bearerFor('file_chunk');
@@ -289,6 +296,19 @@ const readChunk = async (fileId: string, i: number, expected: string, signal?: A
 	const encrypted = new Uint8Array(await r.arrayBuffer());
 	assertChunkBytes(fileId, i, expected, encrypted);
 	return { encrypted, fromCache: false };
+};
+
+/**
+ * Chunk `i` decrypted under the file's secret. Its bytes already hold to the
+ * hash the uploader signed, so bytes that do not open refuse the file:
+ * another attempt gets the same bytes and the same answer.
+ */
+const openChunk = async (fileId: string, i: number, secret: Uint8Array, encrypted: Uint8Array): Promise<Uint8Array> => {
+	try {
+		return await decryptChunk(secret, encrypted);
+	} catch {
+		throw new FileVerificationError(fileId, 'invalid', "it does not decrypt under the file's secret", i);
+	}
 };
 
 export interface DownloadProgress {
@@ -327,8 +347,8 @@ export const downloadFile = async (opts: {
 	for (let i = 0; i < total; i++) {
 		signal?.throwIfAborted();
 		const expected = await hashes.expected(i);
-		const { encrypted, fromCache } = await readChunk(fileId, i, expected, signal);
-		const plain = await decryptChunk(secret, encrypted);
+		const { encrypted, fromCache } = await readChunk(fileId, i, expected, { signal });
+		const plain = await openChunk(fileId, i, secret, encrypted);
 		// Cached only once it is the signed chunk and decrypts: a bad fetch
 		// must not poison future loads.
 		if (!fromCache) void putCachedChunk(fileId, i, encrypted, expected);
@@ -386,8 +406,9 @@ export const pinFileChunks = async (opts: {
 		dataHashes.push(await hashes.expected(i));
 	}
 	if (!total) return dataHashes;
-	const last = await readChunk(fileId, total - 1, dataHashes[total - 1], signal);
-	await decryptChunk(secret, last.encrypted);
+	// Read without the LRU touch, here and below: pinning the chunk writes its metadata anyway.
+	const last = await readChunk(fileId, total - 1, dataHashes[total - 1], { signal, touch: false });
+	await openChunk(fileId, total - 1, secret, last.encrypted);
 	const held = await pinCachedChunks(fileId, dataHashes, owner);
 	let done = held.size;
 	if (done) onProgress?.({ fileId, done, total });
@@ -396,8 +417,8 @@ export const pinFileChunks = async (opts: {
 		signal?.throwIfAborted();
 		let encrypted = last.encrypted;
 		if (i < total - 1) {
-			encrypted = (await readChunk(fileId, i, dataHashes[i], signal)).encrypted;
-			await decryptChunk(secret, encrypted);
+			encrypted = (await readChunk(fileId, i, dataHashes[i], { signal, touch: false })).encrypted;
+			await openChunk(fileId, i, secret, encrypted);
 		}
 		await pinChunk(fileId, i, dataHashes[i], owner, encrypted);
 		onProgress?.({ fileId, done: ++done, total });
