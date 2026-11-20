@@ -138,6 +138,8 @@ app's own stores never block it: they open their databases through
 `openDatabase` (`src/lib/data/openDatabase.ts`), which closes a connection on
 `versionchange` and opens it again on the next use.
 
+- The service worker is told to forget the key and decrypted chunks of every
+  video it plays: reloading the pages does not stop it.
 - A connection in another tab of the app blocks a delete the same way. The app
   then does not start, since its first open of that database would wait behind
   the queued delete: it asks for the other tabs to be closed and tries again on

@@ -9,6 +9,9 @@ import { withBudget } from '@/lib/withBudget';
 /** The request, kept until the wipe is done: whichever tab of the app loads next finishes it. */
 const FLAG = 'buckitup:wipe';
 
+/** What the service worker is told. */
+const WIPE = { type: 'wipe' } as const;
+
 /**
  * How long a delete may stay silent. A delete queued behind another pending
  * request on the same database gets no event at all until that one ends.
@@ -47,6 +50,8 @@ export type WipeEnv = {
 	/** Marks the tab that asked, which finishes the wipe without asking again. */
 	sessionStorage?: Storage;
 	locks?: Pick<LockManager, 'request'>;
+	/** The service worker that plays videos holds their keys in memory. */
+	serviceWorker?: Pick<ServiceWorkerContainer, 'controller'>;
 	waitMs?: number;
 };
 
@@ -65,13 +70,24 @@ const browserEnv = (): WipeEnv => ({
 	localStorage: read(() => globalThis.localStorage),
 	sessionStorage: read(() => globalThis.sessionStorage),
 	locks: read(() => globalThis.navigator?.locks),
+	serviceWorker: read(() => globalThis.navigator?.serviceWorker),
 });
 
-/** Asks for a wipe on the next load. Throws where localStorage is unavailable: nothing would run it. */
-export const requestWipe = ({ localStorage: local, sessionStorage: session } = browserEnv()) => {
+// The worker keeps each playing video's key and decrypted chunks until it is
+// stopped, and reloading the pages does not stop it.
+const tellWorker = (worker: WipeEnv['serviceWorker']) => read(() => worker?.controller?.postMessage(WIPE));
+
+/**
+ * Asks for a wipe on the next load, and tells the service worker to forget the
+ * videos it plays. Throws where localStorage is unavailable: nothing would run
+ * the wipe.
+ */
+export const requestWipe = (env: WipeEnv = browserEnv()) => {
+	const { localStorage: local, sessionStorage: session } = env;
 	if (!local) throw new Error('This browser does not let the app keep a note across a reload, so it cannot wipe itself.');
 	local.setItem(FLAG, '1');
 	read(() => session?.setItem(FLAG, '1'));
+	tellWorker(env.serviceWorker);
 };
 
 export const wipePending = (local = browserEnv().localStorage) => read(() => local?.getItem(FLAG)) === '1';

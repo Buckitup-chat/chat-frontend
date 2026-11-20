@@ -55,6 +55,9 @@ self.addEventListener('message', (event) => {
 		});
 	} else if (msg.type === 'unregister') {
 		sessions.delete(msg.sessionId);
+	} else if (msg.type === 'wipe') {
+		// "Wipe all": the pages reload, but this worker and its memory outlive them.
+		sessions.clear();
 	} else if (msg.type === 'chunk-hash' && msg.sessionId) {
 		const s = sessions.get(msg.sessionId);
 		if (s) {
