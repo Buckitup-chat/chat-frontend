@@ -195,6 +195,14 @@ describe('keeping a file', () => {
 		expect(await pinnedBytesOf(ALICE)).toBe(0);
 	});
 
+	it('says a kept copy that no longer opens could not be verified', async () => {
+		const f = await publishFile(fid(21), ['kept']);
+		serve(server, f);
+		const entry = await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
+		await putCachedChunk(f.fileId, 0, f.bytes[0].map((b) => b ^ 1), entry.chunkHashes[0]);
+		await expect(openKeptFile(ALICE, entry.fileKey)).rejects.toMatchObject({ name: 'FileVerificationError', kind: 'invalid', chunkIndex: 0 });
+	});
+
 	it('seals the index under the account\'s key: no secret, file id or name readable on disk', async () => {
 		const f = await publishFile(fid(2), ['secret contents']);
 		serve(server, f);

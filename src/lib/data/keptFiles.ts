@@ -45,8 +45,6 @@ export interface KeptFile {
 /** By fileKey. */
 export type KeptIndex = Record<string, KeptFile>;
 
-type KeepOptions = { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver; peerHash?: string };
-
 /** A file part as decryptMessageRow builds it. */
 export interface KeepablePart {
 	kind?: string;
@@ -188,60 +186,52 @@ export const keepFile = async (
 	owner: string,
 	part: KeepablePart,
 	messageId: string,
-	opts: KeepOptions = {},
+	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver; peerHash?: string } = {},
 ): Promise<KeptFile> => {
 	let stray = false;
 	try {
-		return await underFileLock(owner, part.fileId, () => keepUnderLock(owner, part, messageId, opts, () => { stray = true; }));
+		return await underFileLock(owner, part.fileId, async () => {
+			const key = fileKey(part);
+			const index = await readIndex(owner);
+			if (index[key]) return index[key];
+			// Chunks are stored by file id; another sender's file under the same id
+			// would share them, and releasing one would release the other.
+			if (fileIdsOf(index).has(part.fileId)) {
+				throw new Error('Another file with the same id is already kept on this device.');
+			}
+			try {
+				const { peerHash, ...transfer } = opts;
+				const chunkHashes = await pinFileChunks({
+					fileId: part.fileId, uploaderHash: part.uploaderHash, encSecretB64: part.encSecretB64, owner, ...transfer,
+				});
+				const entry: KeptFile = {
+					fileKey: key,
+					fileId: part.fileId,
+					uploaderHash: part.uploaderHash,
+					encSecretB64: part.encSecretB64,
+					kind: part.kind ?? 'file',
+					name: part.name ?? '',
+					size: part.size ?? 0,
+					mimeType: part.mimeType ?? '',
+					createdAt: part.createdAt ?? 0,
+					messageId,
+					chunkHashes,
+					...(peerHash ? { peerHash } : {}),
+				};
+				await underIndexLock(owner, async () => writeIndex(owner, { ...(await readIndex(owner)), [key]: entry }));
+				return entry;
+			} catch (e) {
+				// Under the file lock, with no entry for this file id: every pin `owner` holds on it is this keep's.
+				await unpinFile(part.fileId, owner).catch((err) => {
+					console.warn('[keptFiles] could not release the pins of a failed keep', err);
+					stray = true;
+				});
+				throw e;
+			}
+		});
 	} finally {
 		// Once the file lock is let go: a sweep passes over a file whose lock is taken.
 		if (stray) sweepStrayPinsSoon(owner);
-	}
-};
-
-const keepUnderLock = async (
-	owner: string,
-	part: KeepablePart,
-	messageId: string,
-	opts: KeepOptions,
-	leftStray: () => void,
-): Promise<KeptFile> => {
-	const key = fileKey(part);
-	const index = await readIndex(owner);
-	if (index[key]) return index[key];
-	// Chunks are stored by file id; another sender's file under the same id
-	// would share them, and releasing one would release the other.
-	if (fileIdsOf(index).has(part.fileId)) {
-		throw new Error('Another file with the same id is already kept on this device.');
-	}
-	try {
-		const { peerHash, ...transfer } = opts;
-		const chunkHashes = await pinFileChunks({
-			fileId: part.fileId, uploaderHash: part.uploaderHash, encSecretB64: part.encSecretB64, owner, ...transfer,
-		});
-		const entry: KeptFile = {
-			fileKey: key,
-			fileId: part.fileId,
-			uploaderHash: part.uploaderHash,
-			encSecretB64: part.encSecretB64,
-			kind: part.kind ?? 'file',
-			name: part.name ?? '',
-			size: part.size ?? 0,
-			mimeType: part.mimeType ?? '',
-			createdAt: part.createdAt ?? 0,
-			messageId,
-			chunkHashes,
-			...(peerHash ? { peerHash } : {}),
-		};
-		await underIndexLock(owner, async () => writeIndex(owner, { ...(await readIndex(owner)), [key]: entry }));
-		return entry;
-	} catch (e) {
-		// Under the file lock, with no entry for this file id: every pin `owner` holds on it is this keep's.
-		await unpinFile(part.fileId, owner).catch((err) => {
-			console.warn('[keptFiles] could not release the pins of a failed keep', err);
-			leftStray();
-		});
-		throw e;
 	}
 };
 

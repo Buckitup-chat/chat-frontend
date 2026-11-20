@@ -447,7 +447,7 @@ export const readKeptChunks = async (opts: {
 		signal?.throwIfAborted();
 		const encrypted = await getCachedChunk(fileId, i, dataHashes[i]);
 		if (!encrypted) throw new Error(`chunk ${i} of the kept copy of ${fileId} is not on this device`);
-		parts.push(await decryptChunk(secret, encrypted));
+		parts.push(await openChunk(fileId, i, secret, encrypted));
 		onProgress?.({ fileId, done: i + 1, total });
 	}
 	return concatBytes(...parts);
