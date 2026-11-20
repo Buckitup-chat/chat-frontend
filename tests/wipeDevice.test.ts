@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sourceFiles } from './helpers/sourceFiles';
 import { wipeDevice, finishPendingWipe, requestWipe, wipePending, leaveOnWipe, APP_DATABASES, type WipeEnv } from '@/lib/wipeDevice';
+import { openDatabase, _allowOpensForTests } from '@/lib/data/openDatabase';
 
 const open = (factory: IDBFactory, name: string, version?: number) =>
 	new Promise<IDBDatabase>((resolve, reject) => {
@@ -55,7 +56,13 @@ beforeEach(() => {
 	vi.spyOn(console, 'warn').mockImplementation(() => {});
 	vi.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+	vi.restoreAllMocks();
+	_allowOpensForTests();
+});
+
+/** What openDatabase answers now, in this page. */
+const opening = () => openDatabase('dialog-synced-cache', 1, () => {}).then(() => 'opened', (e: Error) => e.message);
 
 describe('wiping the device', () => {
 	// Promise.all over the IDBRequests resolved at once: they are not promises.
@@ -145,7 +152,7 @@ describe('wiping the device', () => {
 		const opened = new Set<string>();
 		for (const file of sourceFiles(join(process.cwd(), 'src'))) {
 			const text = readFileSync(file, 'utf8');
-			const opens = text.matchAll(/(?:\bopenDatabase|\bindexedDB\.open|new IndexedDbStore)\(\s*(?:'([^']+)'|([A-Z_]+)\b)/g);
+			const opens = text.matchAll(/(?:\bopenDatabase|\bindexedDB\.open|new IndexedDbStore|\baccountSealedStore)\(\s*(?:'([^']+)'|([A-Z_]+)\b)/g);
 			for (const [, literal, constant] of opens) {
 				const name = literal ?? new RegExp(`const ${constant} = '([^']+)'`).exec(text)?.[1];
 				expect(name, `${file}: ${constant}`).toBeTruthy();
@@ -293,6 +300,17 @@ describe('the wipe on the next load', () => {
 		expect(await names(factory)).toEqual(['keyval-store']);
 	});
 
+	it('opens no database once asked for: an open would create one the wipe deletes', async () => {
+		requestWipe({ localStorage: local, sessionStorage: memoryStorage() });
+		expect(await opening()).toMatch(/being wiped/);
+	});
+
+	it('leaves a request another tab makes while this one starts', async () => {
+		const request = vi.spyOn(local, 'removeItem');
+		await finishPendingWipe(prompt, env({ sessionStorage: memoryStorage() }), reload);
+		expect(request).not.toHaveBeenCalled();
+	});
+
 	it('refuses to be asked for where nothing would run it', () => {
 		vi.stubGlobal('localStorage', undefined);
 		expect(() => requestWipe()).toThrow(/cannot wipe itself/);
@@ -337,6 +355,15 @@ describe('the other tabs', () => {
 		expect(prompt).not.toHaveBeenCalled();
 		expect(await names(factory)).toEqual([]);
 		expect(wipePending(local)).toBe(false);
+	});
+
+	it('open no database once told to go', async () => {
+		const answers: string[] = [];
+		const reload = vi.fn();
+		leaveOnWipe(async () => { answers.push(await opening()); }, env({ sessionStorage: memoryStorage(), channel: tabChannel() }), reload);
+		tabChannel().postMessage({ type: 'wipe' });
+		await vi.waitFor(() => expect(reload).toHaveBeenCalled());
+		expect(answers[0]).toMatch(/being wiped/);
 	});
 
 	it('go even when the session does not end', async () => {

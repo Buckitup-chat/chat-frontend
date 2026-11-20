@@ -28,6 +28,11 @@ import { finishPendingWipe, leaveOnWipe } from './lib/wipeDevice';
 // The browser offers installation once, early; keep the offer for the menu.
 listenForInstallPrompt();
 
+// "Wipe all" asked for in another tab: this one ends its session and reloads
+// into the wipe. Heard from the start: a tab still booting holds the vault open too.
+let endSession = async () => {};
+leaveOnWipe(() => endSession());
+
 // "Wipe all", asked for on an earlier load, runs before anything opens a database.
 const WIPE_PROMPTS = {
 	unfinished: {
@@ -100,8 +105,7 @@ app.config.globalProperties.$user = userStore();
 const $userPQ = userPQStore();
 app.config.globalProperties.$userPQ = $userPQ;
 
-// "Wipe all" asked for in another tab: this one ends its session and reloads into the wipe.
-leaveOnWipe(() => $userPQ.endSession());
+endSession = () => $userPQ.endSession();
 
 app.config.globalProperties.$loader = useLoader();
 

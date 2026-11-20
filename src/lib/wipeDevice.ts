@@ -6,6 +6,7 @@
 // (docs/persistence-encryption.md, "Wiping the device").
 
 import { withBudget } from '@/lib/withBudget';
+import { refuseOpens } from '@/lib/data/openDatabase';
 
 /**
  * The request, kept until the wipe is done: whichever tab of the app loads next
@@ -104,6 +105,7 @@ export const requestWipe = (env: WipeEnv = browserEnv()) => {
 	const { localStorage: local, sessionStorage: session } = env;
 	if (!local) throw new Error('This browser does not let the app keep a note across a reload, so it cannot wipe itself.');
 	local.setItem(FLAG, '1');
+	refuseOpens();
 	read(() => session?.setItem(FLAG, '1'));
 	read(() => env.channel?.postMessage(WIPE));
 	tellWorker(env.serviceWorker);
@@ -121,6 +123,7 @@ export function leaveOnWipe(endSession: () => Promise<unknown>, env: WipeEnv = b
 	channel?.addEventListener('message', (event) => {
 		if (leaving || event.data?.type !== WIPE.type) return;
 		leaving = true;
+		refuseOpens();
 		read(() => session?.setItem(FLAG, '1'));
 		tellWorker(serviceWorker);
 		void withBudget(Promise.resolve().then(endSession), waitMs, 'end session')
@@ -225,19 +228,22 @@ export type WipePrompt = (kind: 'unfinished' | 'blocked' | 'failed') => Promise<
  */
 export async function finishPendingWipe(prompt: WipePrompt, env: WipeEnv = browserEnv(), reload = () => location.reload()): Promise<void> {
 	const { localStorage: local, sessionStorage: session, locks } = env;
-	// This tab's mark goes too when another tab finished the wipe: a later one must not run here unasked.
+	// This tab's mark goes when no wipe is pending (another tab finished it):
+	// a later one must not run here unasked. The request stays: another tab
+	// may have just made it.
+	const forgetMark = () => read(() => session?.removeItem(FLAG));
 	const forget = () => {
 		read(() => local?.removeItem(FLAG));
-		read(() => session?.removeItem(FLAG));
+		forgetMark();
 	};
 	if (!wipePending(local)) {
-		forget();
+		forgetMark();
 		return;
 	}
 	const run = async (): Promise<'start' | 'reload'> => {
 		// Another tab finished it, or let it go, while this one waited.
 		if (!wipePending(local)) {
-			forget();
+			forgetMark();
 			return 'start';
 		}
 		if (read(() => session?.getItem(FLAG)) !== '1' && !(await prompt('unfinished'))) {

@@ -10,7 +10,21 @@ type Upgrade = (db: IDBDatabase) => void;
 // A connection belongs to the factory that opened it.
 const kept = new WeakMap<IDBFactory, Map<string, Promise<IDBDatabase>>>();
 
+// Once this page asks for a wipe, or is told to go for one, an open would
+// create again a database the wipe deletes; the page reloads soon after.
+let refusing = false;
+
+/** Every later open in this page rejects. */
+export const refuseOpens = (): void => {
+	refusing = true;
+};
+
+export const _allowOpensForTests = (): void => {
+	refusing = false;
+};
+
 export function openDatabase(name: string, version: number, upgrade: Upgrade): Promise<IDBDatabase> {
+	if (refusing) return Promise.reject(new Error(`IndexedDB: ${name} is not opened, this device is being wiped`));
 	let factory: IDBFactory;
 	try {
 		factory = indexedDB;
