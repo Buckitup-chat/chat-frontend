@@ -1,8 +1,6 @@
 # Task: subaccounts in the client — personas, adding accounts, switching
 
-**Status:** decisions of 2026-11-24 applied. Open: whether all server
-instances sync with each other (affects only accounts from other servers, see
-§ Accounts from other servers).
+**Status:** decisions of 2026-11-24 applied.
 **Sources:** `chat` `main`: `docs/pq/reqs/pq_subaccounts.proposed.md` (this task
 is its client side; the decisions below amend it), `pq_notes_to_self.proposed.md`
 (derived identities, already in the client).
@@ -145,11 +143,7 @@ Content-Security-Policy need `connect-src` open for `wss:`.
 
 ### Accounts from other servers
 
-The client talks to its build's server only. An account whose `server` is
-another one works here once its data reaches this server by server-to-server
-sync, which the backend provides. Until then it is listed with its server and
-shows what this server has. (Open: whether every instance, partners' included,
-syncs with ours.)
+Servers sync with each other only within one service or organisation; a partner's instance does not sync with ours. The client talks to its build's server only, so an added account whose `server` is outside this organisation is kept in the keyring with its server and comes back with the master's backups, but cannot be activated here: its data never reaches this server. Activating it needs a client that talks to several servers (subaccounts phase 3, a separate task). The switcher lists it with its server and says so.
 
 ## Activating an identity
 
