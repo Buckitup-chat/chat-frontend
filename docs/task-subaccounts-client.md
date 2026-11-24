@@ -210,7 +210,13 @@ offering the guardians of the old one; nothing depends on it.
 ## UI
 
 No design yet; the minimum until there is one:
-- the active identity is always visible in the account sidebar;
+- the active identity is always visible in the account sidebar; after a reload
+  the app says plainly that it is back in the master;
+- leaving an identity with unsent writes warns and marks it "waiting to send"
+  in the switcher (counted when leaving: its outbox is sealed with its keys);
+- while a non-master identity is active, Backup Center shows, in place of
+  passkey recovery, that it is set up in the master and this identity comes
+  back with it;
 - the switcher: the set, damaged entries listed but not activatable;
 - "New persona" and "Add account" (file, device link, from this device);
 - per identity: export (added accounts), detach (added) or hide (persona),
