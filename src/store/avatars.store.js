@@ -346,12 +346,28 @@ export const useAvatarsStore = defineStore('avatars', () => {
 		return null;
 	};
 
+	const recordWaits = new Set();
+	const isUnreadableRecord = (result) => result.state === 'pending' && result.reason === 'mapping' && result.detail === 'unreadable';
+	const retryWhenRecordReadable = (owner) => {
+		if (recordWaits.has(owner)) return;
+		const recovered = em().whenAccountRecordRecovers();
+		if (!recovered) return;
+		recordWaits.add(owner);
+		void recovered.then(() => {
+			recordWaits.delete(owner);
+			if ($userPQ.currentUserHash === owner) void shareGallery();
+		});
+	};
+
 	const publishOwnGallery = async (owner, record) => {
 		const sharedRecord = await sharedRecordOf(owner, record);
 		if (!sharedRecord) return { state: 'refused', reason: 'the gallery cannot be shared' };
 		const result = await em().publishSharedGalleryRecord(sharedRecord);
 		if (result.state === 'published' && $userPQ.currentUserHash === owner) shared.value = { owner, mapping: result.mapping };
-		else if (result.state !== 'published') console.warn('[avatars] the shared gallery was not published:', result.state, result.reason ?? '');
+		else if (result.state !== 'published') {
+			if (isUnreadableRecord(result)) retryWhenRecordReadable(owner);
+			console.warn('[avatars] the shared gallery was not published:', result.state, result.reason ?? '');
+		}
 		return result;
 	};
 
@@ -374,6 +390,7 @@ export const useAvatarsStore = defineStore('avatars', () => {
 					await convertInlinePhotos(owner, result.avatarIds);
 					continue;
 				}
+				if (isUnreadableRecord(result)) retryWhenRecordReadable(owner);
 				console.warn('[avatars] the shared gallery is not ready:', result.state, result.reason ?? result.detail ?? '');
 				return null;
 			}

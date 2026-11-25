@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mount, flushPromises } from '@vue/test-utils';
+import { mount, flushPromises, type VueWrapper } from '@vue/test-utils';
 import { defineComponent, h } from 'vue';
 import { verifyRow } from '@buckitup/pq-client/rows';
 import * as harness from './helpers/twoClients';
@@ -72,6 +72,7 @@ const vouches = {
 	unavailable: null as ((row: VouchTokenRow) => boolean) | null,
 	shapeLag: 0,
 	shapeDown: false,
+	frozen: null as Map<string, VouchTokenRow> | null,
 };
 const keyOf = (r: VouchKey) => `${r.kind}|${r.issuer_hash}|${r.subject_hash}`;
 const vouchOf = (kind: string, issuer: string, subject: string) => vouches.rows.get(keyOf({ kind, issuer_hash: issuer, subject_hash: subject }));
@@ -144,7 +145,7 @@ const vouchShape = (url: URL) => {
 	const equals = [...where.matchAll(/(\w+)\s*=\s*'([^']*)'/g)].map(([, col, val]) => [col, val] as const);
 	const lagging = vouches.shapeLag > 0;
 	if (lagging) vouches.shapeLag--;
-	const rows = lagging ? [] : [...vouches.rows.values()].filter((r) =>
+	const rows = lagging ? [] : [...(vouches.frozen ?? vouches.rows).values()].filter((r) =>
 		equals.every(([col, val]) => String((r as Record<string, unknown>)[col]) === val));
 	return Response.json([...rows.map((r) => ({
 		headers: { operation: 'insert', relation: ['public', 'vouch_tokens'] },
@@ -161,8 +162,8 @@ type Account = { user_hash: string; sign_pkey: string };
 let deviceIdentity: () => Response | Promise<Response>;
 let deviceIdentityRequests = 0;
 const accountOf = (c: Client): Account => ({ user_hash: c.hash, sign_pkey: cardOf(c.hash).sign_pkey as string });
-const identityFor = (admin: Account | null, syncBot?: Account) => () =>
-	Response.json({ device_id: DEVICE_ID, admin, sync_bot: syncBot ?? null });
+const identityFor = (admin: Account | null, syncBot?: Account, deviceId = DEVICE_ID) => () =>
+	Response.json({ device_id: deviceId, admin, sync_bot: syncBot ?? null });
 const stranger = (seed: number): Account => {
 	const id = makeTestIdentity(seed);
 	return { user_hash: id.userHash, sign_pkey: id.signPkeyB64 };
@@ -264,6 +265,7 @@ beforeEach(() => {
 	vouches.unavailable = null;
 	vouches.shapeLag = 0;
 	vouches.shapeDown = false;
+	vouches.frozen = null;
 	gatedBy = null;
 	maxDepth = 7;
 	net.mode = 'online';
@@ -1072,4 +1074,311 @@ describe('contact changes from an account whose own writes still wait for approv
 		await vi.waitFor(() => expect(contacts()[Bob.hash]).toBeDefined(), { timeout: 10_000 });
 		expect(vouches.posts.filter((p) => p.row.subject_hash === Bob.hash)).toEqual([]);
 	}, 200_000);
+});
+
+describe('storage access toggle on the contact page', () => {
+	const OTHER_DEVICE = 'Other_test_node';
+	const contactOf = (peer: Client) => (Owner.app.store.contactsMap as Record<string, Record<string, unknown> | undefined>)[peer.hash];
+	const flags = () => [READ, WRITE].map((kind) => vouchOf(kind, Owner.hash, Bob.hash)?.deleted_flag);
+	const grantPosts = (from = 0) => vouches.posts.slice(from).filter((p) => p.row.deleted_flag === false);
+
+	type Page = { wrapper: VueWrapper; fire: ReturnType<typeof vi.fn> };
+	let page: Page | null = null;
+	afterEach(async () => {
+		page?.wrapper.unmount();
+		page = null;
+		await Owner.app?.store?.logout().catch(() => {});
+	});
+
+	const openContactPage = async (peer: Client, answers: boolean[] = []): Promise<Page> => {
+		page?.wrapper.unmount();
+		const fire = vi.fn(async () => ({ isConfirmed: answers.shift() ?? false }));
+		const ContactPage = (await import('@/views/contacts/Page_Contact.vue')).default;
+		const wrapper = mount(ContactPage, {
+			global: {
+				provide: {
+					$swal: { fire },
+					$route: { params: { address: peer.hash } },
+					$router: { push: vi.fn(), go: vi.fn() },
+					$swalModal: { value: { open: async () => true } },
+					$mitt: { emit: vi.fn() },
+				},
+				directives: { tooltip: {} },
+				mocks: { $filters: { txHashShort: (hash: string) => hash.slice(0, 10) } },
+				stubs: { Account_Info: true },
+			},
+		});
+		await flushPromises();
+		page = { wrapper, fire };
+		return page;
+	};
+	const status = (p: Page) => p.wrapper.find('[data-test="storage-access-status"]').text();
+	const notice = (p: Page) => p.wrapper.find('[data-test="storage-access-notice"]');
+	const toggle = (p: Page) => p.wrapper.find('[data-test="storage-access-toggle"]');
+	const switchTo = async (p: Page, on: boolean) => {
+		await toggle(p).setValue(on);
+		await flushPromises();
+	};
+	const expectStatus = (p: Page, text: string, timeout = 15_000) =>
+		vi.waitFor(() => expect(status(p)).toBe(`Status: ${text}`), { timeout });
+
+	const ownerWithConfirmedBob = async () => {
+		await register(Bob);
+		await register(Owner);
+		deviceIdentity = identityFor(accountOf(Owner));
+		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		await vi.waitFor(() => expect(flags()).toEqual([false, false]), { timeout: 10_000 });
+		return { ...contactOf(Bob) };
+	};
+
+	it('OFF tombstones both scopes, confirmed through the shape, and ON restores them; the contact stays as it was', async () => {
+		const contact = await ownerWithConfirmedBob();
+		const granted = [READ, WRITE].map((kind) => ({ ...vouchOf(kind, Owner.hash, Bob.hash)! }));
+		const p = await openContactPage(Bob, [true]);
+		await expectStatus(p, 'Granted');
+		expect((toggle(p).element as HTMLInputElement).checked).toBe(true);
+
+		await switchTo(p, false);
+		expect(p.fire).toHaveBeenCalledTimes(1);
+		await expectStatus(p, 'Revoked');
+		expect(flags()).toEqual([true, true]);
+		for (const [i, kind] of [READ, WRITE].entries()) {
+			const row = vouchOf(kind, Owner.hash, Bob.hash)!;
+			expect(signedByIssuer(row)).toBe(true);
+			expect(row.owner_timestamp).toBeGreaterThan(granted[i].owner_timestamp);
+		}
+		expect(gateAllows(Owner.hash, Bob.hash, 'read') || gateAllows(Owner.hash, Bob.hash, 'write')).toBe(false);
+		expect(contactOf(Bob)).toEqual(contact);
+
+		await switchTo(p, true);
+		expect(p.fire).toHaveBeenCalledTimes(1);
+		await expectStatus(p, 'Granted');
+		expect(flags()).toEqual([false, false]);
+		expect(gateAllows(Owner.hash, Bob.hash, 'read') && gateAllows(Owner.hash, Bob.hash, 'write')).toBe(true);
+		expect(contactOf(Bob)).toEqual(contact);
+		expect(vouches.rows.size).toBe(2);
+	}, 120_000);
+
+	it('cancelling the revoke confirmation writes nothing', async () => {
+		await ownerWithConfirmedBob();
+		const p = await openContactPage(Bob, [false]);
+		await expectStatus(p, 'Granted');
+		const before = vouches.posts.length;
+
+		await switchTo(p, false);
+		expect(p.fire).toHaveBeenCalledTimes(1);
+		await settle();
+		expect(vouches.posts.length).toBe(before);
+		expect(flags()).toEqual([false, false]);
+		expect(status(p)).toBe('Status: Granted');
+		expect((toggle(p).element as HTMLInputElement).checked).toBe(true);
+		const { intentsOf } = await import('@/lib/data/intents');
+		expect((await intentsOf(Owner.hash)).entries.filter((e) => (e.intent as { kind?: string }).kind === 'contact-access')).toEqual([]);
+	}, 120_000);
+
+	it('a revoke the server accepted stays pending until the shape serves the verified tombstones', async () => {
+		await ownerWithConfirmedBob();
+		const p = await openContactPage(Bob, [true]);
+		await expectStatus(p, 'Granted');
+
+		vouches.frozen = new Map(vouches.rows);
+		await switchTo(p, false);
+		await vi.waitFor(() => expect(flags()).toEqual([true, true]), { timeout: 10_000 });
+		await settle();
+		expect(status(p)).toBe('Status: Granted · Revoking…');
+		expect((toggle(p).element as HTMLInputElement).disabled).toBe(true);
+
+		vouches.frozen = null;
+		await expectStatus(p, 'Revoked', 30_000);
+		expect((toggle(p).element as HTMLInputElement).disabled).toBe(false);
+	}, 120_000);
+
+	it('a revoke that meets a failing ingest stays pending across a reload and finishes once the server is back', async () => {
+		await ownerWithConfirmedBob();
+		let down = true;
+		vouches.unavailable = () => down;
+		let p = await openContactPage(Bob, [true]);
+		await expectStatus(p, 'Granted');
+
+		await switchTo(p, false);
+		await expectStatus(p, 'Granted · Revoking…');
+		expect(flags()).toEqual([false, false]);
+
+		p.wrapper.unmount();
+		page = null;
+		await startApp(Owner);
+		await signIn(Owner);
+		p = await openContactPage(Bob);
+		await expectStatus(p, 'Granted · Revoking…');
+
+		down = false;
+		await expectStatus(p, 'Revoked', 45_000);
+		expect(flags()).toEqual([true, true]);
+	}, 120_000);
+
+	it('one scope confirmed and the other still failing is shown as partial, never as revoked', async () => {
+		await ownerWithConfirmedBob();
+		let writeDown = true;
+		vouches.unavailable = (row) => row.kind === WRITE && writeDown;
+		const p = await openContactPage(Bob, [true]);
+		await expectStatus(p, 'Granted');
+
+		await switchTo(p, false);
+		await vi.waitFor(() => expect(flags()).toEqual([true, false]), { timeout: 10_000 });
+		await expectStatus(p, 'Partial: write only · Revoking…');
+		await settle(6_000);
+		expect(status(p)).toBe('Status: Partial: write only · Revoking…');
+
+		writeDown = false;
+		await expectStatus(p, 'Revoked', 45_000);
+	}, 120_000);
+
+	it('a row whose signature does not verify is not shown as a state, and the switch waits', async () => {
+		await ownerWithConfirmedBob();
+		const read = vouchOf(READ, Owner.hash, Bob.hash)!;
+		vouches.rows.set(keyOf(read), { ...read, deleted_flag: true });
+		const p = await openContactPage(Bob);
+		await expectStatus(p, 'Unknown');
+		expect((toggle(p).element as HTMLInputElement).disabled).toBe(true);
+		expect(notice(p).text()).toContain('could not be verified');
+	}, 120_000);
+
+	it('another issuer\'s grants to the same contact are left as they were', async () => {
+		await ownerWithConfirmedBob();
+		const carol = makeTestIdentity(11);
+		server.table('user_cards').set(carol.userHash, carol.card as never);
+		for (const kind of [READ, WRITE]) {
+			const row = signRow(carol, { kind, issuer_hash: carol.userHash, subject_hash: Bob.hash, owner_timestamp: 1_700_000_000, deleted_flag: false }) as VouchTokenRow;
+			vouches.rows.set(keyOf(row), row);
+		}
+		const carols = () => [READ, WRITE].map((kind) => vouchOf(kind, carol.userHash, Bob.hash));
+		const before = carols().map((row) => ({ ...row! }));
+		const p = await openContactPage(Bob, [true]);
+		await expectStatus(p, 'Granted');
+
+		await switchTo(p, false);
+		await expectStatus(p, 'Revoked');
+		expect(flags()).toEqual([true, true]);
+		expect(carols()).toEqual(before);
+		expect(vouches.posts.every((post) => post.row.issuer_hash === Owner.hash)).toBe(true);
+	}, 120_000);
+
+	it('a request made for one device is not applied when the backend answers as another', async () => {
+		await ownerWithConfirmedBob();
+		const p = await openContactPage(Bob, [true]);
+		await expectStatus(p, 'Granted');
+		await switchTo(p, false);
+		await expectStatus(p, 'Revoked');
+		const before = vouches.posts.length;
+
+		vouches.shapeDown = true;
+		await switchTo(p, true);
+		await vi.waitFor(() => expect(status(p)).toContain('Granting…'), { timeout: 10_000 });
+		deviceIdentity = identityFor(accountOf(Owner), undefined, OTHER_DEVICE);
+		vouches.shapeDown = false;
+		await vi.waitFor(async () => {
+			const { intentsOf } = await import('@/lib/data/intents');
+			const open = (await intentsOf(Owner.hash)).entries.filter((e) => (e.intent as { kind?: string }).kind === 'contact-access');
+			expect(open).toEqual([]);
+		}, { timeout: 45_000 });
+		await settle();
+		expect(vouches.posts.slice(before)).toEqual([]);
+		expect([...vouches.rows.values()].some((row) => row.kind.includes(OTHER_DEVICE))).toBe(false);
+		expect(flags()).toEqual([true, true]);
+	}, 120_000);
+
+	it('an account switch while a revoke waits signs nothing for the next account, and the owner\'s return finishes it', async () => {
+		await ownerWithConfirmedBob();
+		let down = true;
+		let attempts = 0;
+		vouches.unavailable = () => { attempts++; return down; };
+		const p = await openContactPage(Bob, [true]);
+		await expectStatus(p, 'Granted');
+		await switchTo(p, false);
+		await vi.waitFor(() => expect(attempts).toBeGreaterThan(0), { timeout: 10_000 });
+		p.wrapper.unmount();
+		page = null;
+
+		const { store } = Owner.app;
+		await store.logout();
+		await store.registerNewUser({ name: 'Second', lock: 'legacy' } as never);
+		const second = store.currentUserHash;
+		const before = vouches.posts.length;
+		down = false;
+		await settle(8_000);
+		expect(vouches.posts.slice(before)).toEqual([]);
+		expect(flags()).toEqual([false, false]);
+
+		await store.logout();
+		await store.login(Owner.hash);
+		await vi.waitFor(() => expect(flags()).toEqual([true, true]), { timeout: 30_000 });
+		expect(vouches.posts.every((post) => post.row.issuer_hash === Owner.hash && post.row.issuer_hash !== second)).toBe(true);
+	}, 120_000);
+
+	it('an account that holds no access on the device is told it cannot grant, and nothing is sent', async () => {
+		await register(Bob);
+		await register(Owner);
+		deviceIdentity = identityFor(stranger(9), accountOf(Owner));
+		await Owner.app.store.confirmContact(Bob.hash, cardOf(Bob.hash) as never, cardOf(Bob.hash).contact_pkey, { name: 'Bob' });
+		const p = await openContactPage(Bob);
+		await expectStatus(p, 'Not granted');
+		expect((toggle(p).element as HTMLInputElement).disabled).toBe(true);
+		expect(notice(p).text()).toContain('cannot grant any');
+
+		await switchTo(p, true);
+		await settle();
+		expect(vouches.posts).toEqual([]);
+		expect(status(p)).toBe('Status: Not granted');
+	}, 120_000);
+
+	it('an explicit revoke survives edits, hiding, reopening, a new sign-in and a repeated QR confirmation', async () => {
+		await ownerWithConfirmedBob();
+		let p = await openContactPage(Bob, [true]);
+		await expectStatus(p, 'Granted');
+		await switchTo(p, false);
+		await expectStatus(p, 'Revoked');
+		const revoked = [READ, WRITE].map((kind) => ({ ...vouchOf(kind, Owner.hash, Bob.hash)! }));
+		const from = vouches.posts.length;
+
+		const { store } = Owner.app;
+		await store.saveContact(Bob.hash, { ...contactOf(Bob), name: 'Bob, renamed', notes: 'met at the station' });
+		await store.saveContact(Bob.hash, { ...contactOf(Bob), hidden: true });
+		await store.saveContact(Bob.hash, { ...contactOf(Bob), hidden: false });
+		p = await openContactPage(Bob);
+		await expectStatus(p, 'Revoked');
+
+		p.wrapper.unmount();
+		page = null;
+		await startApp(Owner);
+		await signIn(Owner);
+		const bobCard = cardOf(Bob.hash) as never;
+		await Owner.app.store.confirmContact(Bob.hash, bobCard, cardOf(Bob.hash).contact_pkey);
+		await vi.waitFor(() => expect(contactOf(Bob)?.name).toBe('Bob, renamed'), { timeout: 10_000 });
+		await Owner.app.store.confirmContact(Bob.hash, bobCard, cardOf(Bob.hash).contact_pkey);
+		await settle();
+
+		expect(grantPosts(from)).toEqual([]);
+		expect([READ, WRITE].map((kind) => vouchOf(kind, Owner.hash, Bob.hash))).toEqual(revoked);
+		expect(contactOf(Bob)).toMatchObject({ name: 'Bob, renamed', notes: 'met at the station', hidden: false, confirmed: true });
+		p = await openContactPage(Bob);
+		await expectStatus(p, 'Revoked');
+	}, 120_000);
+
+	it('a first QR confirmation grants and shows it; a contact added by id gets no grant and shows none', async () => {
+		await register(Bob);
+		await register(Owner);
+		deviceIdentity = identityFor(accountOf(Owner));
+		const carol = stranger(13).user_hash;
+
+		await Owner.app.store.saveContact(carol, { name: 'Added by id', contact_pkey: 'pkC' });
+		let p = await openContactPage({ hash: carol } as Client);
+		await expectStatus(p, 'Not granted');
+		await settle();
+		expect(vouches.posts).toEqual([]);
+
+		await confirmByQr(Bob);
+		await vi.waitFor(() => expect(flags()).toEqual([false, false]), { timeout: 10_000 });
+		p = await openContactPage(Bob);
+		await expectStatus(p, 'Granted');
+	}, 120_000);
 });

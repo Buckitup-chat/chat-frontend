@@ -26,6 +26,7 @@ let slotUnreadable;
 let sharedRow;
 let publishing;
 let initialAnswer;
+let recordRecovery;
 let published;
 let slotOffline;
 let acceptAtOnce;
@@ -70,6 +71,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 				published.push(record);
 				return { state: 'published', mapping: MAPPING };
 			},
+			whenAccountRecordRecovers: () => recordRecovery?.promise ?? null,
 			publishInitialSharedGallery: async () => {
 				if (initialAnswer) return initialAnswer;
 				const converted = legacyToSharedGallery(serverSlot);
@@ -174,6 +176,7 @@ beforeEach(() => {
 	sharedRow = null;
 	publishing = 'published';
 	initialAnswer = null;
+	recordRecovery = null;
 	published = [];
 	peerRows = new Map();
 	peerRowReads = [];
@@ -311,6 +314,23 @@ describe('the grant on sign-in and in new dialogs', () => {
 		await settle();
 		expect(dialogs.probes).toBe(0);
 		expect(dialogs.sent).toEqual([]);
+	});
+
+	it('an account record that cannot be read yet holds the grant until its shape is live again, then sends it without a reconnect', async () => {
+		initialAnswer = { state: 'pending', reason: 'mapping', detail: 'unreadable' };
+		let recover;
+		recordRecovery = { promise: new Promise((r) => { recover = r; }) };
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		useAvatarsStore();
+		await settle();
+		await settle();
+		expect(dialogs.sent).toEqual([]);
+
+		initialAnswer = null;
+		recordRecovery = null;
+		recover();
+		await vi.waitFor(() => expect(kindsSentTo(WRITTEN)).toEqual(['avatar_gallery_access']));
+		warn.mockRestore();
 	});
 
 	it('a delivery running when the account signs out sends nothing', async () => {
