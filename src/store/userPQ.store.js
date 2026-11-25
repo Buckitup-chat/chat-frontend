@@ -5,7 +5,7 @@ import { getUserCardsCollection } from '@/lib/data/collections';
 import { preloadWithRetry } from '@/lib/data/attach';
 import { onUserCardsStreamError, whenUserCardsLive, userCardsWithCache, verifiedCards } from '@/lib/data/userCardsLink';
 import { mergeContactEdit } from '@/lib/data/storageIntent';
-import { contactKeyVouch } from '@buckitup/pq-client/verifyCard';
+import { initialAccessDecision, verifyContactConfirmation } from '@buckitup/pq-client/contactAccess';
 import { PrfUnsupportedError, forgetUnusablePasskey } from '@buckitup/pq-client/vaultLock';
 import { assertBackupConsistent } from '@/lib/backupContents';
 
@@ -435,9 +435,10 @@ export const userPQStore = defineStore('userPQ', () => {
     session.editsOut.push(edit);
     const stillCurrent = () => currentUserHash.value === account && contactsSession === session;
     let next;
+    let prior;
     let status = 'synced';
     try {
-      if (onDevice) ({ contacts: next, status } = await em.value.saveContacts(edits));
+      if (onDevice) ({ contacts: next, status, prior } = await em.value.saveContacts(edits));
       else next = await em.value.patchContacts(edits);
     } catch (e) {
       session.editsOut.splice(session.editsOut.indexOf(edit), 1);
@@ -451,12 +452,12 @@ export const userPQStore = defineStore('userPQ', () => {
     if (stillCurrent() && generation === contactsEdits) {
       contactsMap.value = Object.fromEntries(next.map((c) => [c.user_hash, c]));
     }
-    return status;
+    return { status, prior };
   };
 
   const saveContact = async (userHash, contactData) => {
     if (!em.value || !currentUserHash.value) return false;
-    const status = await writeContacts({ [userHash]: { ...storedFields(contactData), user_hash: userHash } }, { onDevice: true });
+    const { status } = await writeContacts({ [userHash]: { ...storedFields(contactData), user_hash: userHash } }, { onDevice: true });
     return { status };
   };
 
@@ -480,7 +481,7 @@ export const userPQStore = defineStore('userPQ', () => {
    */
   const confirmContact = async (userHash, card, contactPkey, fields = {}) => {
     if (!em.value || !currentUserHash.value) return false;
-    const vouch = typeof contactPkey === 'string' ? contactKeyVouch(card, userHash, contactPkey) : { ok: false, why: 'another-key' };
+    const vouch = typeof contactPkey === 'string' ? verifyContactConfirmation(card, userHash, contactPkey) : { ok: false, why: 'another-key' };
     if (!vouch.ok) {
       throw new Error(vouch.why === 'deleted'
         ? 'This contact cannot be confirmed: their account is deleted'
@@ -488,7 +489,7 @@ export const userPQStore = defineStore('userPQ', () => {
     }
     const account = currentUserHash.value;
     const { contact_pkey: _ignored, ...kept } = storedFields(fields);
-    const status = await writeContacts({
+    const { status, prior } = await writeContacts({
       [userHash]: {
         ...kept,
         user_hash: userHash,
@@ -497,8 +498,15 @@ export const userPQStore = defineStore('userPQ', () => {
         confirmedAt: Math.floor(Date.now() / 1000),
       },
     }, { onDevice: true });
-    await setDeviceAccess(account, userHash, true);
+    const decision = initialAccessDecision({ confirmation: vouch, prior, subjectHash: userHash, contactPkey });
+    if (decision.grant) await setDeviceAccess(account, userHash, true);
+    else if (decision.reason === 'unknown-prior') console.warn('[contacts] the contact\'s stored state before this confirmation is unknown; no device access is granted');
     return { status };
+  };
+
+  const setContactStorageAccess = async (issuerHash, userHash, granted, deviceId) => {
+    if (!em.value || !issuerHash || !deviceId || currentUserHash.value !== issuerHash) return 'skipped';
+    return em.value.setContactAccess(issuerHash, userHash, granted, deviceId);
   };
 
   const setDeviceAccess = async (account, userHash, granted) => {
@@ -512,7 +520,7 @@ export const userPQStore = defineStore('userPQ', () => {
   const deleteContact = async (userHash) => {
     if (!em.value || !currentUserHash.value) return false;
     const account = currentUserHash.value;
-    const status = await writeContacts({ [userHash]: null }, { onDevice: true });
+    const { status } = await writeContacts({ [userHash]: null }, { onDevice: true });
     await setDeviceAccess(account, userHash, false);
     return { status };
   };
@@ -618,6 +626,7 @@ export const userPQStore = defineStore('userPQ', () => {
     contactsMap,
     saveContact,
     confirmContact,
+    setContactStorageAccess,
     cacheContactAvatar,
     setOwnAvatarImage,
     deleteContact,

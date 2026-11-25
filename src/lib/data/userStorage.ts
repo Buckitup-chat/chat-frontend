@@ -26,7 +26,7 @@
 //      session-local Promise chain — the ordering survives reload and holds
 //      across tabs (§6).
 import { kvGet, kvSet } from './localStore';
-import { getServerState, entityKeyFor } from './userStorageBase';
+import { getServerState, getHeldServerRow, entityKeyFor } from './userStorageBase';
 import { getAccepted } from './acceptedSnapshot';
 import { enqueueIntent, updateIntent, intentsOf } from './intents';
 import { materializeSignEnqueueStorageIntent } from './intentRecovery';
@@ -99,10 +99,17 @@ const tsOf = (row?: UserStorageRow | null): number => Number(row?.owner_timestam
  */
 export async function getStorageRow(userHash: string, uuid: string): Promise<UserStorageRow | null> {
 	const [local, server] = await Promise.all([getLocalEntry(userHash, uuid), getServerState(userHash, uuid)]);
-	const verified = server.state === 'found'
-		&& (await verifyReplicatedRow('user_storage', server.row as unknown as Record<string, unknown>, getVerifiedSignPkey)).status === 'verified';
+	return freshestReadable(local?.row, server.state === 'found' ? server.row : null);
+}
 
-	const candidates = [local?.row, verified ? server.row : undefined].filter((r): r is UserStorageRow => !!r);
+export async function getKnownStorageRow(userHash: string, uuid: string): Promise<UserStorageRow | null> {
+	return freshestReadable((await getLocalEntry(userHash, uuid))?.row, getHeldServerRow(userHash, uuid));
+}
+
+async function freshestReadable(local: UserStorageRow | undefined, replicated: UserStorageRow | null): Promise<UserStorageRow | null> {
+	const verified = !!replicated
+		&& (await verifyReplicatedRow('user_storage', replicated as unknown as Record<string, unknown>, getVerifiedSignPkey)).status === 'verified';
+	const candidates = [local, verified ? replicated : undefined].filter((r): r is UserStorageRow => !!r);
 	if (candidates.length === 0) return null;
 	const freshest = candidates.reduce((a, b) => (tsOf(b) > tsOf(a) ? b : a));
 	return freshest.deleted_flag ? null : freshest;
