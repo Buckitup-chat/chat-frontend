@@ -26,7 +26,8 @@ import {
 } from '@/lib/data/outbox';
 import { recoverIntents, signAndDispatchIntent } from '@/lib/data/intentRecovery';
 import { requestContactAccess, applyContactAccessIntent } from '@/lib/data/contactVouches';
-import { getStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch, upsertStorageJsonPatch, upsertStorageRow } from '@/lib/data/userStorage';
+import { classifySlotPrior, contactsPriorOf } from '@buckitup/pq-client/contactAccess';
+import { getStorageRow, getKnownStorageRow, putStorageRow, putStorageJsonPatch, saveStorageJsonPatch, upsertStorageJsonPatch, upsertStorageRow } from '@/lib/data/userStorage';
 import { getLiveServerState, entityKeyFor } from '@/lib/data/userStorageBase';
 import { getAccepted } from '@/lib/data/acceptedSnapshot';
 import { verifyReplicatedRow } from '@/lib/data/rowVerification';
@@ -40,7 +41,8 @@ import { publishVault, assertVaultReadableAnonymously } from '@/lib/recovery/vau
 import { PASSKEY_RECOVERY_SLOT, recoverySalt, renewPasskeyRecoveryAtLogin } from '@/lib/recovery/passkeyRecovery';
 import { assertBackupConsistent } from '@/lib/backupContents';
 import { newMetaSeed } from '@/lib/recovery/guardianInvite';
-import { resetUserStorageCollection } from '@/lib/data/collections';
+import { getUserStorageCollection, resetUserStorageCollection } from '@/lib/data/collections';
+import { isLiveNow, whenLive } from '@/lib/data/shapeLink';
 import { clearReadCache } from '@/lib/data/readCache';
 import { clearDialogCache } from '@/lib/data/dialogCache';
 import { forgetAccountAvatars } from '@/lib/avatars/localStore';
@@ -1565,9 +1567,13 @@ export class EncryptionManagerPQ extends EventTarget {
    * between the two leaves an unreferenced row rather than a map pointing at
    * nothing.
    */
-  async #ensureSlot(name, writeRow, { writeMap } = {}) {
+  async #ensureSlot(name, writeRow, { writeMap, onMint } = {}) {
     const { uuid, orphaned } = await this.#slots().ensureSlotUuid(name, {
-      mint: randomSlotUuid,
+      mint: () => {
+        const minted = randomSlotUuid();
+        onMint?.(minted);
+        return minted;
+      },
       writeRow,
       writeMap,
       recallPendingMint: () => kvGet(this.#pendingSlotMintKey(name)),
@@ -1851,8 +1857,9 @@ export class EncryptionManagerPQ extends EventTarget {
   // mergeJsonPatch): its fields merge into the stored contact, null deletes it.
 
   async saveContacts(edits) {
-    const { value, status } = await this.saveSlotJson('contacts', { contacts: edits });
-    return { contacts: Object.values(value?.contacts ?? {}), status };
+    const { value, status, prior: slotPrior } = await this.saveSlotJson('contacts', { contacts: edits });
+    const prior = contactsPriorOf(slotPrior);
+    return { contacts: Object.values(value?.contacts ?? {}), status, prior };
   }
 
   /** Applies `edits` to the contacts the server holds; resolves to the accepted list. */
@@ -1865,9 +1872,9 @@ export class EncryptionManagerPQ extends EventTarget {
     return Object.values((await this.loadSlotJson('contacts'))?.contacts ?? {});
   }
 
-  async setContactAccess(issuerHash, subjectHash, granted) {
+  async setContactAccess(issuerHash, subjectHash, granted, deviceId) {
     if (!issuerHash || this.#currentUserHash !== issuerHash || !this.#signSkey) return 'skipped';
-    return this.#afterContactAccess(issuerHash, await requestContactAccess(subjectHash, granted, this.#contactAccessSession(issuerHash)));
+    return this.#afterContactAccess(issuerHash, await requestContactAccess(subjectHash, granted, this.#contactAccessSession(issuerHash), deviceId));
   }
 
   #contactAccessRetry = null;
@@ -1949,16 +1956,19 @@ export class EncryptionManagerPQ extends EventTarget {
     };
     const mapped = await this.#slotUuid(name);
     let slotUuid = null;
+    let prior = { state: 'unknown' };
+    const minted = new Set();
     await this.#ensureSlot(name, async (uuid) => {
       sameAccount();
       const base = await this.#readJsonAt(uuid, `The ${name} slot`, { strict: true });
+      prior = classifySlotPrior({ base, createdByThisWrite: minted.has(uuid) });
       await save(uuid, patch, !mapped && base === null);
       slotUuid = uuid;
-    }, { writeMap: (mapPatch) => save(this.#rootSlotUuid(), mapPatch) });
+    }, { writeMap: (mapPatch) => save(this.#rootSlotUuid(), mapPatch), onMint: (uuid) => minted.add(uuid) });
     if (this.#currentUserHash !== userHash) throw new Error('The account changed while this write was out');
     const value = await this.#readJsonAt(slotUuid, `The ${name} slot`, { strict: true });
     const status = ['awaiting-approval', 'awaiting-recovery', 'queued'].find((s) => statuses.includes(s)) ?? 'synced';
-    return { value, status };
+    return { value, status, prior };
   }
 
   async patchSlotJson(name, patch) {
@@ -1990,7 +2000,17 @@ export class EncryptionManagerPQ extends EventTarget {
       readLive: async () => {
         const live = await this.#readLiveJson(userHash, uuid, assertCurrent);
         if (live.state === 'undecryptable') throw new Error('The account record on the server cannot be read; nothing was written', { cause: live.error });
-        return live.state === 'found' ? live : { state: 'unknown' };
+        return live.state === 'found' || live.state === 'absent' ? live : { state: 'unknown' };
+      },
+      readKnown: async () => {
+        const row = await getKnownStorageRow(userHash, uuid);
+        assertCurrent();
+        if (!row?.value_b64) return { state: 'unknown' };
+        try {
+          return { state: 'found', record: await this.#decryptJson(row.value_b64) };
+        } catch (e) {
+          throw new Error('The account record on this device cannot be read; nothing was written', { cause: e });
+        }
       },
       writePatch: async (jsonPatch) => {
         const write = await upsertStorageJsonPatch({ userHash, uuid, jsonPatch, signSkey });
@@ -1999,6 +2019,13 @@ export class EncryptionManagerPQ extends EventTarget {
         return sync.status;
       },
     }, initial);
+  }
+
+  whenAccountRecordRecovers() {
+    const userHash = this.#currentUserHash;
+    if (!userHash) return null;
+    const storage = getUserStorageCollection(userHash);
+    return isLiveNow(storage) ? null : whenLive(storage);
   }
 
   async publishInitialSharedGallery() {

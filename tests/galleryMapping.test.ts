@@ -21,16 +21,24 @@ const makeDevice = (account: Account) => {
 		current: true,
 		pending: null as Root | null,
 		writes: [] as Root[],
+		known: null as Root | null,
 	};
 	const deliver = async (): Promise<RootWriteStatus> => {
 		const signed = stripPatchDirectives(mergeJsonPatch(server.root, state.pending!));
 		state.pending = null;
 		if (state.holdLanding) await state.holdLanding;
 		server.root = signed;
+		state.known = signed;
 		return 'synced';
 	};
 	const access: MappingRootAccess = {
-		readLive: async () => (state.liveReadable && server.root ? { state: 'found', record: server.root } : { state: 'unknown' }),
+		readLive: async () => {
+			if (!state.liveReadable) return { state: 'unknown' };
+			if (!server.root) return { state: 'absent' };
+			state.known = server.root;
+			return { state: 'found', record: server.root };
+		},
+		readKnown: async () => (state.known ? { state: 'found', record: state.known } : { state: 'unknown' }),
 		writePatch: async (patch) => {
 			state.writes.push(patch);
 			state.pending = state.pending ? mergeJsonPatch(state.pending, patch) : patch;
@@ -99,13 +107,32 @@ describe('simultaneous writers of one account', () => {
 });
 
 describe('what is not known is not returned', () => {
-	it('a malformed mapping in the root is refused, and nothing is written', async () => {
+	it('a malformed mapping in the root is refused, never replaced', async () => {
 		const account = makeAccount(1);
 		const malformed = { galleryUuid: 'nope', galleryKeyB64: 'x', generation: 0 };
 		account.server.root = { [SHARED_GALLERY_FIELD]: malformed };
 		const device = makeDevice(account);
 		await expect(device.obtain()).rejects.toThrow(GalleryMappingError);
 		expect(device.state.writes).toEqual([]);
+		device.state.liveReadable = false;
+		await expect(device.obtain()).rejects.toThrow(GalleryMappingError);
+		expect(account.server.root![SHARED_GALLERY_FIELD]).toEqual(malformed);
+	});
+
+	it('a mapping this device has not seen is neither replaced nor returned while the live root cannot be read, and is adopted once it can', async () => {
+		const account = makeAccount(1);
+		account.server.root = { name: 'Alice', [SHARED_GALLERY_FIELD]: other };
+		const device = makeDevice(account);
+		device.state.liveReadable = false;
+		expect(await device.obtain()).toEqual({ state: 'pending', reason: 'unreadable' });
+		expect(device.state.writes).toEqual([]);
+		expect(device.state.pending).toBeNull();
+		expect(mappingOn(account)).toEqual(other);
+
+		device.state.liveReadable = true;
+		expect(await device.obtain()).toEqual(ready(other));
+		expect(device.state.writes).toEqual([]);
+		expect(mappingOn(account)).toEqual(other);
 	});
 });
 

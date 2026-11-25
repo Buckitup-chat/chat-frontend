@@ -23,7 +23,7 @@ let initialCalls = 0;
 
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => user }));
 vi.mock('@/store/dialogs.store', () => ({ useDialogsStore: () => dialogs }));
-vi.mock('@/lib/data/outboundDialogs', () => ({ peersWeWrote: async () => [PEER] }));
+vi.mock('@/lib/data/outboundDialogs', () => ({ peersWeWrote: async () => ({ peers: [PEER], waiting: false }) }));
 vi.mock('@/libs/EncryptionManagerPQ', () => ({
 	EncryptionManagerPQ: {
 		getInstance: () => ({

@@ -45,6 +45,8 @@
 						<i class="_icon_plus bg-white"></i>
 					</button>
 				</div>
+
+				<ContactStorageAccess v-if="isContact" :user-hash="contact.user_hash" />
 			</div>
 		</template>
 	</FullContentBlock>
@@ -80,6 +82,7 @@ import { userPQStore } from '@/store/userPQ.store';
 import { onMounted, inject, computed } from 'vue';
 import Account_Info from '@/components/Account_Info.vue';
 import FullContentBlock from '@/components/FullContentBlock.vue';
+import ContactStorageAccess from '@/components/ContactStorageAccess.vue';
 import { useAvatarsStore } from '@/store/avatars.store';
 import { usePeerGalleryRefresh } from '@/composables/usePeerGallery';
 
