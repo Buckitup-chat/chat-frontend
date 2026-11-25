@@ -105,7 +105,7 @@ account:
 - Every entry is checked before it is written and when it is read: `user_hash`
   matches `sign_pkey`, the signing key signs for it (`assertBackupConsistent`),
   the KEM key decapsulates a test encapsulation to `crypt_pkey`. A failing
-  entry is listed as damaged and never activated.
+  entry is listed as damaged, with "Add again", and never activated.
 - Secret keys are read from the slot only to activate the account and wiped
   when it stops being active.
 - **Entries are removed only by the person** ("Detach", after offering an
@@ -143,7 +143,18 @@ Content-Security-Policy need `connect-src` open for `wss:`.
 
 ### Accounts from other servers
 
-Servers sync with each other only within one service or organisation; a partner's instance does not sync with ours. The client talks to its build's server only, so an added account whose `server` is outside this organisation is kept in the keyring with its server and comes back with the master's backups, but cannot be activated here: its data never reaches this server. Activating it needs a client that talks to several servers (subaccounts phase 3, a separate task). The switcher lists it with its server and says so.
+Servers sync with each other only within one service or organisation; a
+partner's instance does not sync with ours, and the client talks to its
+build's server only. An account whose `server` is another organisation's
+is activated here like any other: an identity is not tied to a server, and
+its card is published here on first use (through the server's access rules,
+as for anyone new). Its data from its own server is not here.
+
+The client shows where the account is: whenever the active identity's
+`server` differs from the app's server, the active-identity display and
+the switcher row say "from <its server> · on <this server>". Nothing more
+is explained. Reading its own server from this app is subaccounts phase 3,
+a separate task.
 
 ## Activating an identity
 
@@ -217,7 +228,9 @@ No design yet; the minimum until there is one:
 - while a non-master identity is active, Backup Center shows, in place of
   passkey recovery, that it is set up in the master and this identity comes
   back with it;
-- the switcher: the set, damaged entries listed but not activatable;
+- the switcher: the set; damaged entries listed with "Add again", not
+  activatable; an account from another server shows "from <its server> ·
+  on <this server>";
 - "New persona" and "Add account" (file, device link, from this device);
 - per identity: export (added accounts), detach (added) or hide (persona),
   rename; "Make master on this device" (added accounts).
@@ -251,5 +264,7 @@ No design yet; the minimum until there is one:
       account; a code without a server behaves as before.
 - [ ] An account added on device 1 appears on device 2 whose master is a
       different account of the set.
+- [ ] An account from another organisation's server opens here and is shown
+      as "from <its server> · on <this server>".
 - [ ] Switching the master on one device changes nothing on the others;
       restoring the old master from its backup brings back the whole set.
