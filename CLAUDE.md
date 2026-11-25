@@ -93,7 +93,8 @@ Facts reviewers cannot infer from the code:
 
 - Tests: `npm test` runs the frontend integration and component suite. SDK
   tests and releases live in `Buckitup-chat/pq-library`. The frontend consumes
-  an exact npm registry dependency; never restore an alias to SDK sources.
+  an exact npm registry dependency. Never restore a source alias or manual
+  SDK workspace link.
 - Compare a branch against the current `origin/main` (`git fetch origin`
   first): compute the merge-base with it and check the commit count against
   what the author claimed.

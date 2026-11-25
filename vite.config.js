@@ -12,6 +12,9 @@ import path from 'path';
 import wasm from 'vite-plugin-wasm';
 import { VitePWA } from 'vite-plugin-pwa';
 import { fileURLToPath, URL } from 'node:url';
+import { createRequire } from 'node:module';
+
+const pqClientPackage = createRequire(import.meta.url)('@buckitup/pq-client/package.json');
 
 const DOMAIN = process.env.DOMAIN
 const isLocalhost = DOMAIN?.startsWith('localhost')
@@ -127,6 +130,7 @@ export default defineConfig(({ command, mode }) => {
 
 				// 'stream/promises': require.resolve('./src/polyfills/stream-promises.js'),
 			},
+			dedupe: Object.keys(pqClientPackage.dependencies),
 		},
 		optimizeDeps: {
 			esbuildOptions: {

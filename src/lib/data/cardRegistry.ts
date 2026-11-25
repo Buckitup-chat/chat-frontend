@@ -56,3 +56,18 @@ export const resetCardRegistry = () => {
 	verified.clear();
 	rejected.clear();
 };
+
+/** Calls `listener` once, on the next change to the replicated user_cards; the result cancels it. */
+export const onNextCardsChange = (listener: () => void): (() => void) => {
+	let done = false;
+	const sub = getUserCardsCollection().subscribeChanges(() => {
+		if (done) return;
+		done = true;
+		sub.unsubscribe();
+		listener();
+	});
+	return () => {
+		done = true;
+		sub.unsubscribe();
+	};
+};
