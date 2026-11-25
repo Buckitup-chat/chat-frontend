@@ -4,6 +4,8 @@ import sodium from 'libsodium-wrappers';
 import { _setAcceptedSnapshotStorageForTests } from '@/lib/data/acceptedSnapshot';
 import { _setIntentStorageForTests } from '@/lib/data/intents';
 import { _setStorageForTests as setOutboxStorage } from '@/lib/data/outbox';
+import { _setPendingUploadsStoreForTests, savePendingBatch } from '@/lib/data/pendingUploads';
+import { CHUNK_SIZE } from '@buckitup/pq-client/fileCrypto';
 import { assertPrf, lockRecordFor, lockSaltOf, lockSeedFromPrf } from '@buckitup/pq-client/vaultLock';
 import { prfAuthenticator } from './helpers/prfAuthenticator';
 
@@ -1149,5 +1151,31 @@ describe('passkey recovery, end to end', () => {
 		const gone = await recoverWithPasskey({ credentials: navigator.credentials, rpId: 'localhost', fetchVault }).catch((e) => e);
 		expect(gone).toBeInstanceOf(PasskeyRecoveryError);
 		expect(gone.reason).toBe('absent');
+	});
+});
+
+describe.each(['deleteUserVault', 'destroyUserVault'])('%s, and the account\'s unfinished uploads', (method) => {
+	let pending;
+	beforeEach(() => {
+		pending = memoryStore();
+		_setPendingUploadsStoreForTests(pending, () =>
+			crypto.subtle.importKey('raw', new Uint8Array(32).fill(7), 'AES-GCM', false, ['encrypt', 'decrypt']));
+	});
+	const record = (batchId) => ({
+		batchId, peerHash: 'u_peer', caption: '', parts: [], updatedAt: Date.now(),
+		files: [{
+			order: 0, name: 'a.bin', size: 1, mimeType: 'application/octet-stream', createdAt: 1,
+			fileId: 'f_' + 'a'.repeat(32), encSecretB64: 'c2VjcmV0', chunkSize: CHUNK_SIZE, chunkCount: 1,
+		}],
+	});
+
+	it('takes them with the account, and leaves another account\'s', async () => {
+		const alice = await newAccount('Alice');
+		const bob = await newAccount('Bob');
+		await savePendingBatch(alice.card.user_hash, record('batch_a'));
+		await savePendingBatch(bob.card.user_hash, record('batch_b'));
+		const em = freshManager();
+		await (method === 'deleteUserVault' ? em.deleteUserVault(alice.card.user_hash) : em.destroyUserVault({ userHash: alice.card.user_hash }));
+		expect(await pending.keys()).toEqual([`${bob.card.user_hash}|batch_b`]);
 	});
 });

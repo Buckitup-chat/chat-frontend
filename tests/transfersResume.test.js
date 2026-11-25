@@ -13,6 +13,18 @@ let sentMessages;
 
 const { _setPendingUploadsStoreForTests, pendingBatches } = await import('@/lib/data/pendingUploads');
 const { uploadDigest } = await import('@/lib/data/uploadReuse');
+const { _setIntentStorageForTests, enqueueIntent, intentsOf, resolveIntent } = await import('@/lib/data/intents');
+
+const memoryStore = () => {
+	const map = new Map();
+	return {
+		async get(key) { return map.get(key) ?? null; },
+		async set(key, value) { map.set(key, value); },
+		async delete(key) { map.delete(key); },
+		async keys() { return [...map.keys()]; },
+		async clear() { map.clear(); },
+	};
+};
 
 const uploadAttachment = vi.fn((meta, opts) => new Promise((resolve, reject) => {
 	// What the device would know if the page went now: read once the upload has begun.
@@ -23,7 +35,16 @@ const uploadAttachment = vi.fn((meta, opts) => new Promise((resolve, reject) => 
 	}
 	opts.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
 }));
-const captureMessageIntent = vi.fn(async (peerHash, parts) => ({ intentId: 'intent_x', payload: { peerHash, parts } }));
+// The account signed in to the manager, as uploadAttachment and captureMessageIntent read it.
+const manager = { currentUserHash: OWNER };
+// As the real capture: stored as the manager's account, durable in the intent store once this resolves.
+const captureMessageIntent = vi.fn(async (peerHash, parts, messageId = `dmsg_${crypto.randomUUID()}`) => {
+	const ownerHash = manager.currentUserHash;
+	const payload = { kind: 'message', relation: 'dialog_messages', peerHash, messageId, ownerHash, parts };
+	const intentId = await enqueueIntent(payload, ownerHash, 'dialog_messages');
+	if (!intentId) throw new Error('This action could not be stored for sending.');
+	return { intentId, payload };
+});
 const dispatchMessageIntent = vi.fn((intentId, payload, token, onStatus) => {
 	sentMessages.push(payload);
 	onStatus?.('synced');
@@ -33,30 +54,42 @@ const dispatchMessageIntent = vi.fn((intentId, payload, token, onStatus) => {
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({ uploadAttachment, captureMessageIntent, dispatchMessageIntent }),
 }));
+vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => manager }));
 
 const { useTransfersStore } = await import('@/store/transfers.store');
 
 let records;
 let failWrites;
+let failDeletes;
+let saves;
 const tabs = [];
 beforeEach(() => {
 	records = new Map();
 	failWrites = false;
+	failDeletes = false;
+	saves = 0;
+	manager.currentUserHash = OWNER;
 	_setPendingUploadsStoreForTests({
 		async get(key) { return records.get(key) ?? null; },
 		async set(key, value) {
 			if (failWrites) throw new DOMException('the origin is out of space', 'QuotaExceededError');
 			records.set(key, value);
+			saves += 1;
 		},
-		async delete(key) { records.delete(key); },
+		async delete(key) {
+			if (failDeletes) throw new DOMException('the page went', 'AbortError');
+			records.delete(key);
+		},
 		async keys() { return [...records.keys()]; },
 		async clear() { records.clear(); },
 	}, () => crypto.subtle.importKey('raw', new Uint8Array(32).fill(7), 'AES-GCM', false, ['encrypt', 'decrypt']));
+	_setIntentStorageForTests(memoryStore());
 	vi.stubGlobal('navigator', { locks: makeFakeLockManager() });
 	uploads.clear();
 	sentMessages = [];
 	uploadAttachment.mockClear();
 	captureMessageIntent.mockClear();
+	dispatchMessageIntent.mockClear();
 });
 afterEach(async () => {
 	// A tab left open would go on writing into the next test's storage.
@@ -160,6 +193,40 @@ describe('the transfer queue across a reload', () => {
 		expect(navigator.locks.held(lock)).toBe(false);
 	});
 
+	it('reads and hashes a file picked again once, for the check and the upload both', async () => {
+		await closeTab(await composing([fileOf('a.bin', 'first file')]));
+		const tab = await openTab();
+		uploadAttachment.mockClear();
+		const file = fileOf('a.bin', 'first file');
+		const reads = vi.spyOn(file, 'arrayBuffer');
+		const hashes = vi.spyOn(crypto.subtle, 'digest');
+		try {
+			expect(await tab.repick(tab.items[0].id, file)).toBe(true);
+			await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(1));
+			expect(new TextDecoder().decode(uploadAttachment.mock.calls[0][0].bytes)).toBe('first file');
+			expect(reads).toHaveBeenCalledTimes(1);
+			expect(hashes.mock.calls.filter(([algorithm]) => algorithm === 'SHA-256')).toHaveLength(1);
+		} finally {
+			hashes.mockRestore();
+		}
+	});
+
+	it('does not hold a file picked again while another uploads: its own upload reads it', async () => {
+		await closeTab(await composing([fileOf('a.bin', 'first file')]));
+		const tab = await openTab();
+		await tab.enqueueBatch('u_peer', [fileOf('x.bin', 'uploading')], '');
+		await vi.waitFor(() => expect(uploads.has('x.bin')).toBe(true));
+		const file = fileOf('a.bin', 'first file');
+		const reads = vi.spyOn(file, 'arrayBuffer');
+		expect(await tab.repick(rowOf(tab, 'a.bin').id, file)).toBe(true);
+		expect(reads).toHaveBeenCalledTimes(1);
+		uploads.delete('a.bin');
+		finish('x.bin');
+		await vi.waitFor(() => expect(uploads.has('a.bin')).toBe(true));
+		expect(new TextDecoder().decode(uploads.get('a.bin').meta.bytes)).toBe('first file');
+		expect(reads).toHaveBeenCalledTimes(2);
+	});
+
 	it('refuses another file, and sends nothing', async () => {
 		await closeTab(await composing([fileOf('a.bin', 'first file')])); // 10 bytes
 		const tab = await openTab();
@@ -224,12 +291,63 @@ describe('the transfer queue across a reload', () => {
 		expect(sentMessages).toEqual([]);
 	});
 
-	it('ends the record when the message cannot be stored for sending', async () => {
+	it('keeps the message that could not be stored for sending, and the next sign-in sends it once', async () => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		captureMessageIntent.mockRejectedValueOnce(new Error('the intent store is full'));
-		await composing([fileOf('a.bin', 'first file')]);
+		const tab = await composing([fileOf('a.bin', 'first file')], 'caption');
 		finish('a.bin');
 		await vi.waitFor(() => expect(captureMessageIntent).toHaveBeenCalledTimes(1));
+		await settle();
+		expect(sentMessages).toEqual([]);
+		const [kept] = await pendingBatches(OWNER);
+		expect(kept).toMatchObject({ caption: 'caption', files: [], parts: [{ order: 0, part: expect.objectContaining({ name: 'a.bin' }) }] });
+		await closeTab(tab);
+
+		const next = await openTab();
+		await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
+		expect(sentMessages[0].parts.map((p) => p.name ?? p.text)).toEqual(['a.bin', 'caption']);
+		expect(captureMessageIntent.mock.calls[1][2]).toBe(captureMessageIntent.mock.calls[0][2]);
 		await vi.waitFor(() => expect(records.size).toBe(0));
+		expect(next.items).toEqual([]);
+		errorSpy.mockRestore();
+	});
+
+	it('sends a message whose last file landed just before the page went', async () => {
+		captureMessageIntent.mockImplementationOnce(() => new Promise(() => {})); // the page goes while it is stored
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		finish('a.bin');
+		await vi.waitFor(() => expect(captureMessageIntent).toHaveBeenCalledTimes(1));
+		await closeTab(tab);
+
+		await openTab();
+		await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
+		expect(sentMessages[0].parts.map((p) => p.name)).toEqual(['a.bin']);
+		await vi.waitFor(() => expect(records.size).toBe(0));
+	});
+
+	it.each([
+		['still waiting to go', async () => {}],
+		['sent already', async (intentId) => { await resolveIntent(intentId, { outcome: 'accepted' }); }],
+	])('does not store a message twice when the page went after storing it, %s', async (_, meanwhile) => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		failDeletes = true; // the page goes before the record does
+		finish('a.bin');
+		await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
+		await settle();
+		expect(records.size).toBe(1);
+		await closeTab(tab);
+		failDeletes = false;
+		const { intentId, payload } = await captureMessageIntent.mock.results[0].value;
+		await meanwhile(intentId);
+
+		await openTab();
+		await vi.waitFor(() => expect(records.size).toBe(0));
+		expect(captureMessageIntent).toHaveBeenCalledTimes(1);
+		const { entries } = await intentsOf(OWNER, { includeResolved: true });
+		expect(entries.map((e) => e.id)).toEqual([intentId]);
+		expect(payload.messageId).toMatch(/^dmsg_/);
+		warnSpy.mockRestore();
 	});
 
 	it('shows only the signed-in account\'s uploads, and keeps the other\'s record for it', async () => {
@@ -242,6 +360,39 @@ describe('the transfer queue across a reload', () => {
 		expect(tab.items).toEqual([expect.objectContaining({ name: 'a.bin', status: 'paused', blob: null })]);
 	});
 
+	// A sign-in with no sign-out first: the manager acts as the next account
+	// before the queue is told (App.vue watches currentUser, set after it).
+	describe('while the manager is signed in to another account, before the queue hears of it', () => {
+		it('stores no message of this account\'s batch as that account, and keeps it for this one', async () => {
+			const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const tab = await composing([fileOf('a.bin', 'first file')], 'caption');
+			manager.currentUserHash = 'u_other';
+			finish('a.bin');
+			await vi.waitFor(() => expect(errorSpy).toHaveBeenCalled());
+			await settle();
+			expect(captureMessageIntent).not.toHaveBeenCalled();
+			expect(sentMessages).toEqual([]);
+			await tab.signedIn('u_other');
+			await settle();
+
+			manager.currentUserHash = OWNER;
+			await tab.signedIn(OWNER);
+			await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
+			expect(sentMessages[0]).toMatchObject({ ownerHash: OWNER, parts: [{ name: 'a.bin' }, { kind: 'text', text: 'caption' }] });
+			errorSpy.mockRestore();
+		});
+
+		it('uploads no file of this account\'s batch as that account', async () => {
+			const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const tab = await composing([fileOf('a.bin', 'first file'), fileOf('b.bin', 'second')]);
+			manager.currentUserHash = 'u_other';
+			finish('a.bin');
+			await vi.waitFor(() => expect(rowOf(tab, 'b.bin').status).toBe('error'));
+			expect(uploadAttachment).toHaveBeenCalledTimes(1);
+			errorSpy.mockRestore();
+		});
+	});
+
 	it('does not bring back a message another tab is still sending', async () => {
 		const sending = await composing([fileOf('a.bin', 'first file')]);
 		await settle();
@@ -250,5 +401,44 @@ describe('the transfer queue across a reload', () => {
 		await closeTab(sending);
 		const later = await openTab();
 		expect(later.items.map((it) => it.name)).toEqual(['a.bin']);
+	});
+
+	describe('a file sending for long', () => {
+		const MINUTE = 60 * 1000;
+		const HOUR = 60 * MINUTE;
+		let now;
+		beforeEach(() => {
+			now = Date.now();
+			vi.spyOn(Date, 'now').mockImplementation(() => now);
+		});
+		afterEach(() => vi.mocked(Date.now).mockRestore());
+
+		it('keeps its record 48 hours from its last chunk, not from its start', async () => {
+			const tab = await composing([fileOf('a.bin', 'first file')]);
+			const { opts } = uploads.get('a.bin');
+			for (let hour = 1; hour <= 47; hour++) {
+				now += HOUR;
+				opts.onProgress({ done: 0, total: 1 }); // a chunk landed
+			}
+			await settle();
+			now += 2 * HOUR; // 49 hours since it started, 2 since its last chunk
+			await closeTab(tab);
+
+			const next = await openTab();
+			expect(next.items.map((it) => it.name)).toEqual(['a.bin']);
+		});
+
+		it('saves the record again at most every 10 minutes while chunks land', async () => {
+			await composing([fileOf('a.bin', 'first file')]);
+			const { opts } = uploads.get('a.bin');
+			await settle();
+			const before = saves;
+			for (let minute = 1; minute <= 30; minute++) {
+				now += MINUTE;
+				opts.onProgress({ done: 0, total: 1 });
+			}
+			await settle();
+			expect(saves - before).toBe(3);
+		});
 	});
 });

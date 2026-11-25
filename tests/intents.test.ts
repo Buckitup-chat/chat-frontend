@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DecryptFailedError } from '@/lib/data/secureStore';
 import {
-	enqueueIntent, getIntent, updateIntent, resolveIntent, intentsOf,
+	enqueueIntent, getIntent, updateIntent, resolveIntent, intentsOf, hasMessageIntent,
 	_setIntentStorageForTests, _clearIntentsForTests,
 } from '@/lib/data/intents';
 
@@ -235,5 +235,35 @@ describe('durability failure (ADR §11: fail visibly, never look queued)', () =>
 	it('returns null (never throws) for an empty userHash — nothing to own the intent', async () => {
 		const id = await enqueueIntent({ text: 'x' }, '', 'dialog_messages');
 		expect(id).toBeNull();
+	});
+});
+
+describe('hasMessageIntent', () => {
+	it('finds a message stored for sending, pending or resolved, and only as a message of this account', async () => {
+		await enqueueIntent({ kind: 'reaction', messageId: 'dmsg_reacted' }, A, 'dialog_reactions');
+		await enqueueIntent({ kind: 'message', messageId: 'dmsg_other' }, B, 'dialog_messages');
+		const sent = await enqueueIntent({ kind: 'message', messageId: 'dmsg_sent' }, A, 'dialog_messages');
+		await enqueueIntent({ kind: 'message', messageId: 'dmsg_pending' }, A, 'dialog_messages');
+		await resolveIntent(sent!, { outcome: 'accepted' });
+
+		expect(await hasMessageIntent(A, 'dmsg_pending')).toBe(true);
+		expect(await hasMessageIntent(A, 'dmsg_sent')).toBe(true);
+		expect(await hasMessageIntent(A, 'dmsg_reacted')).toBe(false);
+		expect(await hasMessageIntent(A, 'dmsg_other')).toBe(false);
+	});
+
+	it('does not answer while an intent that may be this account\'s does not read', async () => {
+		const realGet = storage.get.bind(storage);
+		_setIntentStorageForTests({
+			...storage,
+			async get(k) {
+				if (k === 'unreadable-key') throw new Error('disk read error');
+				return realGet(k);
+			},
+			async keys() {
+				return [...(await storage.keys()), 'unreadable-key'];
+			},
+		});
+		await expect(hasMessageIntent(A, 'dmsg_x')).rejects.toThrow(/unknown/);
 	});
 });
