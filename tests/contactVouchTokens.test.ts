@@ -8,7 +8,24 @@ import * as harness from './helpers/twoClients';
 import { makeTestIdentity, signRow } from './helpers/signedFixtures';
 import type { ApplyResult, Client, Relation, Row, ServerPost } from './helpers/twoClients';
 
-const { server, net, register, startApp, signIn, stopAll, newClient } = harness;
+const { server, net, signIn, stopAll, newClient } = harness;
+
+// These clients share a document. End the previous session before replacing
+// its modules and IndexedDB, so its listeners and retries cannot reach the
+// next simulated page. The contact scenarios do not retain a dialog cache.
+let activeClient: Client | null = null;
+const prepareClient = async (client: Client) => {
+	await activeClient?.app?.store?.logout();
+	activeClient = client;
+};
+const startApp = async (client: Client) => {
+	await prepareClient(client);
+	return harness.startApp(client);
+};
+const register = async (client: Client) => {
+	await prepareClient(client);
+	return harness.register(client);
+};
 
 vi.mock('@lo-fi/local-vault', async () => (await import('./helpers/twoClients')).vaultModule);
 vi.mock('@lo-fi/local-vault/adapter/idb', () => ({}));
@@ -277,7 +294,14 @@ beforeEach(() => {
 		value: { enumerateDevices: async () => [{ kind: 'videoinput' }] },
 	});
 });
-afterEach(() => stopAll());
+afterEach(async () => {
+	try {
+		await activeClient?.app?.store?.logout();
+	} finally {
+		activeClient = null;
+		stopAll();
+	}
+});
 
 describe('the fake backend honours the vouch_tokens contract', () => {
 	it('takes a signed insert, applies an update named by its key, refuses a bad signature, and serves rows as Electric does', async () => {
@@ -1087,7 +1111,6 @@ describe('storage access toggle on the contact page', () => {
 	afterEach(async () => {
 		page?.wrapper.unmount();
 		page = null;
-		await Owner.app?.store?.logout().catch(() => {});
 	});
 
 	const openContactPage = async (peer: Client, answers: boolean[] = []): Promise<Page> => {
@@ -1203,6 +1226,13 @@ describe('storage access toggle on the contact page', () => {
 		await switchTo(p, false);
 		await expectStatus(p, 'Granted · Revoking…');
 		expect(flags()).toEqual([false, false]);
+		// The submitting UI precedes durable enqueue. Reload only once this
+		// request is stored, so the test exercises recovery of a saved intent.
+		const { intentsOf } = await import('@/lib/data/intents');
+		await vi.waitFor(async () => expect((await intentsOf(Owner.hash)).entries.some((e) => {
+			const intent = e.intent as { kind?: string; subjectHash?: string; granted?: boolean };
+			return intent.kind === 'contact-access' && intent.subjectHash === Bob.hash && intent.granted === false;
+		})).toBe(true), { timeout: 10_000 });
 
 		p.wrapper.unmount();
 		page = null;
