@@ -54,6 +54,18 @@ describe('transfer panel', () => {
 		expect(caps[3]).toMatch(/Interrupted/);
 	});
 
+	it('shows the speed in the chat\'s size format: bytes under a kilobyte, the next unit at a unit\'s edge', () => {
+		store.items = [
+			row({ id: 'a', status: 'active', done: 1, speed: 500 }),
+			row({ id: 'b', status: 'active', done: 1, speed: 1048575 }),
+			row({ id: 'c', status: 'active', done: 1, speed: 250 * 1024 }),
+		];
+		const caps = render().findAll('.transfer-caption').map((c) => c.text());
+		expect(caps[0]).toMatch(/ · 500 B\/s$/);
+		expect(caps[1]).toMatch(/ · 1\.0 MB\/s$/);
+		expect(caps[2]).toMatch(/ · 250 KB\/s$/);
+	});
+
 	it('cuts the list off with an "N more" line instead of growing', () => {
 		store.items = Array.from({ length: 6 }, (_, i) => row({ id: `r${i}` }));
 		const w = render();
