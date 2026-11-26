@@ -67,22 +67,29 @@ count, and the SHA-256 of its bytes. The digest and the key are written before
 the file's first chunk is sent; a file whose record cannot be written does not
 start, and one whose bytes changed since its upload began stops instead of
 resuming. The record holds file keys, so it is sealed with the account's key
-through `secureStore`.
+through `secureStore`; only the time it was last written is kept beside the
+seal, in the clear.
 
 - At sign-in the queue brings the account's records back, and each unfinished
   file shows paused. The browser keeps no file across a reload, so the person
   picks it again. A file of the same size and digest resumes, and only the
   chunks the device lacks are sent. Any other file is refused. A file that sent
   nothing yet has no digest, and its size and name are checked instead.
-- The record goes once its last file lands or is cancelled. The message is then
-  sent from the tab that has it, or not at all: a record with nothing left to
-  upload could only send it a second time.
-- A record not written for 48 hours is dropped at the next sign-in. The server
-  drops an uncommitted upload's chunks 48 hours after the last one arrives
-  (pq_files §8), and the record is written as each file starts and as the
-  message changes, so a single file sending for longer than that loses its
-  record early. A file whose chunks the server already dropped is sent again in
-  full.
+- The record goes once the message is stored for sending (the intent outbox
+  carries it from there) or nothing is left to send. A message whose files all
+  landed but which could not be stored, or whose page went first, stays in the
+  record, and the next sign-in stores it. Its `message_id` comes from the
+  batch, and a message already in the intent store, pending or resolved, is not
+  stored again: a record left by a page that went right after storing the
+  message does not send it twice.
+- A record not written for 48 hours is dropped at the next sign-in of any
+  account on this device, so the records of an account that never signs in
+  here again do not outlive their use. The server drops an uncommitted upload's
+  chunks 48 hours after the last one arrives (pq_files §8). The record is
+  written as each file starts, as the message changes, and again every 10
+  minutes while chunks arrive, so it expires at most 10 minutes before the
+  server drops the chunks. A file whose chunks the server already dropped is
+  sent again in full.
 - One tab drives a message (a Web Lock per batch). Another tab of the same
   account does not bring back a message that a live tab is still sending, and
   a message whose lock this tab could not take is sent without a record.
@@ -133,12 +140,26 @@ File System and localStorage (`src/lib/wipeDevice.ts`). It ends the session
 and reloads, and the removal runs at the start of the next load, before
 anything opens a database: the page that asked holds connections it cannot
 close (idb-keyval keeps its connection to `keyval-store` and ignores
-`versionchange`), and each would block a delete until the page goes.
+`versionchange`), and each would block a delete until the page goes. The
+app's own stores never block it: they open their databases through
+`openDatabase` (`src/lib/data/openDatabase.ts`), which closes a connection on
+`versionchange` and opens it again on the next use.
 
-- A connection in another tab of the app blocks a delete the same way. The app
-  then does not start, since its first open of that database would wait behind
-  the queued delete: it asks for the other tabs to be closed and tries again on
-  reload. A delete that stays silent for three seconds counts as blocked too.
+- The other tabs of the app are told on a BroadcastChannel: each ends its
+  session and reloads, which closes the connections it cannot close otherwise,
+  and on its next load finishes the wipe without asking again.
+- The service worker is told to forget the key and decrypted chunks of every
+  video it plays: reloading the pages does not stop it.
+- A delete waits up to three seconds for the connections to its database to
+  close, as they do when the tab holding them unloads. A delete still waiting
+  after that, held open by a tab that was not told (an older build, a browser
+  without BroadcastChannel) or queued behind another request, counts as
+  blocked. The app then does not start, since its first open of that database
+  would wait behind the queued delete: it asks for the other tabs to be closed
+  and tries again on reload.
+- Where the browser cannot list its databases (`indexedDB.databases()` is
+  missing in Firefox before 126), the app's databases are removed by name
+  (`APP_DATABASES`).
 - When the browser refuses a removal, the person can try again or open the app
   with what is left.
 - The request stays in localStorage until the wipe is done, so a tab of the

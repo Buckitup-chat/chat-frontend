@@ -23,10 +23,15 @@ import * as $enigma from './libs/enigma';
 import { EncryptionManager } from './libs/EncryptionManager';
 import { EncryptionManagerPQ } from './libs/EncryptionManagerPQ';
 import { repairVaultStore } from './lib/vaultStore';
-import { finishPendingWipe } from './lib/wipeDevice';
+import { finishPendingWipe, leaveOnWipe } from './lib/wipeDevice';
 
 // The browser offers installation once, early; keep the offer for the menu.
 listenForInstallPrompt();
+
+// "Wipe all" asked for in another tab: this one ends its session and reloads
+// into the wipe. Heard from the start: a tab still booting holds the vault open too.
+let endSession = async () => {};
+leaveOnWipe(() => endSession());
 
 // "Wipe all", asked for on an earlier load, runs before anything opens a database.
 const WIPE_PROMPTS = {
@@ -99,6 +104,8 @@ app.config.globalProperties.$user = userStore();
 // Create single instance for PQ store
 const $userPQ = userPQStore();
 app.config.globalProperties.$userPQ = $userPQ;
+
+endSession = () => $userPQ.endSession();
 
 app.config.globalProperties.$loader = useLoader();
 

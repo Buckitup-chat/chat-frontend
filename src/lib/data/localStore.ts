@@ -8,23 +8,12 @@
 // even with the value sealed. Records written before encryption are migrated
 // on first read, one key at a time — see kvGet.
 import { createSecureStore, type StringStore } from './secureStore';
+import { openDatabase } from './openDatabase';
 
 const DB_NAME = 'buckitup-local-store';
 const STORE = 'kv';
 
-let dbPromise: Promise<IDBDatabase> | null = null;
-
-const openDb = (): Promise<IDBDatabase> => {
-	if (!dbPromise) {
-		dbPromise = new Promise((resolve, reject) => {
-			const req = indexedDB.open(DB_NAME, 1);
-			req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-			req.onsuccess = () => resolve(req.result);
-			req.onerror = () => reject(req.error);
-		});
-	}
-	return dbPromise;
-};
+const openDb = () => openDatabase(DB_NAME, 1, (db) => db.createObjectStore(STORE));
 
 const tx = async (mode: IDBTransactionMode) => (await openDb()).transaction(STORE, mode).objectStore(STORE);
 

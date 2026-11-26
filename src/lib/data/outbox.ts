@@ -27,6 +27,7 @@
 // is not the goal (metadata access control starts at the backend).
 import { WebLocksLeader } from '@tanstack/offline-transactions';
 import { IndexedDbStore } from './indexedDbStore';
+import { openDatabase } from './openDatabase';
 import { IngestError } from './ingest';
 import { ownerOf, shapeOfTable } from './writeContracts';
 import { VaultLockedError, AccountMismatchError } from './keyCustody';
@@ -294,21 +295,9 @@ export interface AtomicLeaseStore {
 
 const LEASE_DB_NAME = 'buckitup-outbox-leader-lease';
 const LEASE_STORE_NAME = 'lease';
-let leaseDbPromise: Promise<IDBDatabase> | null = null;
-
-function openLeaseDb(): Promise<IDBDatabase> {
-	if (!leaseDbPromise) {
-		leaseDbPromise = new Promise((resolve, reject) => {
-			const req = indexedDB.open(LEASE_DB_NAME, 1);
-			req.onupgradeneeded = () => {
-				if (!req.result.objectStoreNames.contains(LEASE_STORE_NAME)) req.result.createObjectStore(LEASE_STORE_NAME);
-			};
-			req.onsuccess = () => resolve(req.result);
-			req.onerror = () => reject(req.error);
-		});
-	}
-	return leaseDbPromise;
-}
+const openLeaseDb = () => openDatabase(LEASE_DB_NAME, 1, (db) => {
+	if (!db.objectStoreNames.contains(LEASE_STORE_NAME)) db.createObjectStore(LEASE_STORE_NAME);
+});
 
 const indexedDbLeaseStore: AtomicLeaseStore = {
 	claim(userHash, candidate, now) {

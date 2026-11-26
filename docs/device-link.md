@@ -8,7 +8,10 @@ The cryptographic protocol and threat model are maintained in the
 - `Modal_Link_Device.vue` starts the new-device flow, displays the invite and
   waits for the user to compare the codes before importing.
 - `Modal_Link_Approve.vue` is opened explicitly from Account → Add a device.
-  It scans or accepts the code and asks for consent before exporting.
+  It scans or accepts the code and shows the comparison code with its two
+  middle digits left blank; consent to export is typing them from the new
+  device, so it cannot be given without looking at it. A wrong pair sends
+  nothing; the third wrong pair ends the link.
 - `src/lib/deviceLink/room.ts` transports SDK messages over the Phoenix room.
   Socket/channel failure ends the flow visibly; a stale exchange is not resumed.
 - The existing device exports the complete account through `exportBackup`.

@@ -31,24 +31,31 @@ export const initialGalleryMapping = (cryptSkey: Uint8Array): GalleryMapping => 
 	generation: 1,
 });
 
-export type RootRead = { state: 'found'; record: Record<string, unknown> } | { state: 'unknown' };
+export type RootRead = { state: 'found'; record: Record<string, unknown> } | { state: 'absent' } | { state: 'unknown' };
 
 export type RootWriteStatus = 'synced' | 'queued' | 'syncing' | 'awaiting-approval' | 'awaiting-recovery';
 
 export interface MappingRootAccess {
 	readLive(): Promise<RootRead>;
+	readKnown(): Promise<RootRead>;
 	writePatch(patch: Record<string, unknown>): Promise<RootWriteStatus>;
 	assertCurrent(): void;
 }
 
 export type MappingResult =
 	| { state: 'ready'; mapping: GalleryMapping }
-	| { state: 'pending'; reason: Exclude<RootWriteStatus, 'synced'> };
+	| { state: 'pending'; reason: Exclude<RootWriteStatus, 'synced'> | 'unreadable' };
 
 export const obtainGalleryMapping = async (root: MappingRootAccess, initial: GalleryMapping): Promise<MappingResult> => {
 	root.assertCurrent();
 	const live = await root.readLive();
 	root.assertCurrent();
+	if (live.state === 'unknown') {
+		const known = await root.readKnown();
+		root.assertCurrent();
+		const held = known.state === 'found' ? parseGalleryMapping(known.record[SHARED_GALLERY_FIELD]) : null;
+		return held ? { state: 'ready', mapping: held } : { state: 'pending', reason: 'unreadable' };
+	}
 	const existing = live.state === 'found' ? parseGalleryMapping(live.record[SHARED_GALLERY_FIELD]) : null;
 	if (existing) return { state: 'ready', mapping: existing };
 

@@ -412,9 +412,13 @@ starting point; the ownership and paths below describe the current code.
 - The frontend session engine, scanner and QWBP adapter use the installed SDK.
   Camera handling, session cancellation, candidate selection and relay
   credential lifecycle remain in the frontend.
-- The modal and contact store apply the result. `confirmContact` verifies the
-  identity/card/contact-key binding and stores confirmation; the contact policy
-  also issues device-access vouches and retracts them when a contact is deleted.
+- The modal and contact store apply the result. `confirmContact` uses SDK
+  `verifyContactConfirmation` to verify the identity/card/contact-key binding
+  and stores confirmation. SDK `contactAccess` decides the initial grant from
+  the reliable prior and manages explicit grant/revoke. The contact page can
+  revoke or restore its issuer's permissions without removing the contact;
+  repeated confirmation of the same key does not restore revoked access.
+  The app supplies persistence/delivery adapters, scheduling and the UI.
 - Protocol golden vectors and cryptographic tests are in the SDK. Frontend
   candidate-selection, API-proof, camera/session and contact tests remain here.
 
@@ -422,9 +426,9 @@ starting point; the ownership and paths below describe the current code.
 
 | Original plan | Current implementation | Reason |
 | --- | --- | --- |
-| Frontend workspace `packages/pq-client/src/handshake.ts` | Separate `Buckitup-chat/pq-library`, consumed as npm `@buckitup/pq-client@1.0.0` | Reuse the protocol across clients and give the SDK its own release lifecycle. |
+| Frontend workspace `packages/pq-client/src/handshake.ts` | Separate `Buckitup-chat/pq-library`, consumed through installed module entry points; contact-access integration uses `@buckitup/pq-client@1.1.0` | Reuse the protocol across clients and give the SDK its own release lifecycle. |
 | Protocol and integration checks together in frontend `tests/handshake.test.ts` | Protocol checks in `pq-library/tests/handshake.test.ts`; app checks in frontend `tests/handshake.test.ts`, `tests/qrHandshakeEngine.test.js` and `tests/contactVouchTokens.test.ts` | Keep each suite with the code and behavior it owns. |
-| Vouch issuance handled by the separate access-gating task | Integrated through `userPQ.store.js`, `EncryptionManagerPQ.setContactAccess` and `contactVouches.ts` | Connect verified contact identity to the application's device-access policy. |
+| Vouch decisions and execution in the frontend access-gating task | SDK `contactAccess` owns reusable rules; the contact store, EM and `contactVouches.ts` supply state and infrastructure | Share initial grant, explicit revoke/regrant and confirmation behavior across clients; keep camera, UI and persistence in the app. |
 
 The original protocol requirements and acceptance criteria remain the task's
 contract. The repository split changes implementation ownership, not the wire
@@ -432,5 +436,9 @@ protocol or identity binding. This task stays here to retain the agreed UI and
 contact requirements; SDK protocol details are maintained with the library.
 
 Current protocol documentation: [SDK handshake task and contract](https://github.com/Buckitup-chat/pq-library/blob/main/docs/handshake.md).
-For the consumed `1.0.0` dependency, the immutable protocol reference is
+The unchanged PQ2 wire contract is pinned to its `1.0.0` reference,
 [revision 983f30e](https://github.com/Buckitup-chat/pq-library/blob/983f30ef06e1ff9ccd3252e35570c0b13ccda247/docs/handshake.md).
+The additive `1.1.0` contact-access API does not change that wire contract.
+Its installed artifact is pinned by the manifest and lockfile; see
+[SDK integration](../README.md#protocol-sdk) and
+[the contact-access integration task](task-access-gating-client.md).

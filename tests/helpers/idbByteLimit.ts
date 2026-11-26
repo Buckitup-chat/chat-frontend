@@ -1,4 +1,7 @@
-type Rec = { key: string; size: number };
+// A disk with room for `setLimit` bytes of chunk bytes: a write to the store
+// `storeName` past it aborts its transaction with QuotaExceededError, as a
+// full disk does (idbQuota.ts). Chunk metadata is small and not counted.
+type Rec = { key: string; bytes: ArrayBuffer };
 type Put = (this: IDBObjectStore, value: unknown, key?: IDBValidKey) => IDBRequest;
 type Del = (this: IDBObjectStore, key: IDBValidKey | IDBKeyRange) => IDBRequest;
 type CursorUpdate = (this: IDBCursor, value: unknown) => IDBRequest;
@@ -16,10 +19,10 @@ export const limitChunkStore = (storeName = 'chunks') => {
 
 	const write = (tx: IDBTransaction, value: unknown, run: () => IDBRequest): IDBRequest => {
 		const rec = value as Rec;
-		const next = used() - (sizes.get(rec.key) ?? 0) + rec.size;
+		const next = used() - (sizes.get(rec.key) ?? 0) + rec.bytes.byteLength;
 		const request = run();
 		if (next > limitBytes) abortWithQuota(tx);
-		else sizes.set(rec.key, rec.size);
+		else sizes.set(rec.key, rec.bytes.byteLength);
 		return request;
 	};
 

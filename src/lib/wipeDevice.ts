@@ -1,19 +1,55 @@
 // "Wipe all" on the login page removes what the app's origin keeps in this
 // browser: every IndexedDB database, the Origin Private File System and
 // localStorage. It runs at the start of the next load, before anything opens a
-// database, since the page that asks holds connections it cannot close
+// database, since the page that asks holds connections it cannot close; the
+// app's other tabs are told to end their sessions and reload into it
 // (docs/persistence-encryption.md, "Wiping the device").
 
 import { withBudget } from '@/lib/withBudget';
-
-/** The request, kept until the wipe is done: whichever tab of the app loads next finishes it. */
-const FLAG = 'buckitup:wipe';
+import { refuseOpens } from '@/lib/data/openDatabase';
 
 /**
- * How long a delete may stay silent. A delete queued behind another pending
- * request on the same database gets no event at all until that one ends.
+ * The request, kept until the wipe is done: whichever tab of the app loads next
+ * finishes it. Also the name of the lock one tab wipes under, and of the
+ * channel the tabs tell each other on.
+ */
+const FLAG = 'buckitup:wipe';
+
+/** What the other tabs and the service worker are told. */
+const WIPE = { type: 'wipe' } as const;
+
+/**
+ * How long a delete may wait: for a connection in a tab that was told to go to
+ * close as that tab unloads, or behind another pending request on the same
+ * database, which gets the delete no event at all until it ends.
  */
 const DELETE_WAIT_MS = 3000;
+
+/** How long a tab told to go waits for its session to end before it reloads anyway: well inside the delete's wait. */
+const LEAVE_WAIT_MS = 1000;
+
+/**
+ * The app's databases, removed by name where the browser cannot list them
+ * (`indexedDB.databases()` is missing in Firefox before 126). A store that
+ * opens a new database adds its name here; tests/wipeDevice.test.ts checks.
+ */
+export const APP_DATABASES = [
+	'keyval-store', // the vault: idb-keyval's default store
+	'buckitup-local-store',
+	'buckitup-outbox',
+	'buckitup-outbox-leader-lease',
+	'buckitup-intents',
+	'buckitup-accepted-snapshot',
+	'buckitup-own-observed-tails',
+	'buckitup-message-projections',
+	'dialog-synced-cache',
+	'user-synced-cache',
+	'buckitup-chunks',
+	'buckitup-kept-files',
+	'buckitup-pending-uploads',
+	'buckitup-upload-reuse',
+	'buckitup-avatars',
+];
 
 export type WipeOutcome = 'done' | 'blocked' | 'failed';
 
@@ -21,9 +57,14 @@ export type WipeEnv = {
 	indexedDB?: IDBFactory;
 	storage?: Pick<StorageManager, 'getDirectory'>;
 	localStorage?: Storage;
-	/** Marks the tab that asked, which finishes the wipe without asking again. */
+	/** Marks a tab that finishes the wipe without asking again: the one that asked, and those it told to go. */
 	sessionStorage?: Storage;
 	locks?: Pick<LockManager, 'request'>;
+	/** This tab's end of the channel the tabs of the app tell each other about a wipe on. */
+	channel?: Pick<BroadcastChannel, 'postMessage' | 'addEventListener'>;
+	/** The service worker that plays videos holds their keys in memory. */
+	serviceWorker?: Pick<ServiceWorkerContainer, 'controller'>;
+	/** How long a delete waits, or a tab told to go waits for its session to end. */
 	waitMs?: number;
 };
 
@@ -36,20 +77,67 @@ const read = <T>(get: () => T): T | undefined => {
 	}
 };
 
+// One per page: a channel does not hear its own messages, so the tab that asks is not told to go.
+let pageChannel: BroadcastChannel | undefined;
+
 const browserEnv = (): WipeEnv => ({
 	indexedDB: read(() => globalThis.indexedDB),
 	storage: read(() => globalThis.navigator?.storage),
 	localStorage: read(() => globalThis.localStorage),
 	sessionStorage: read(() => globalThis.sessionStorage),
 	locks: read(() => globalThis.navigator?.locks),
+	get channel() {
+		return (pageChannel ??= read(() => new BroadcastChannel(FLAG)));
+	},
+	serviceWorker: read(() => globalThis.navigator?.serviceWorker),
 });
 
-/** Asks for a wipe on the next load. Throws where localStorage is unavailable: nothing would run it. */
-export const requestWipe = ({ localStorage: local, sessionStorage: session } = browserEnv()) => {
+// The worker keeps each playing video's key and decrypted chunks until it is
+// stopped, and reloading the pages does not stop it.
+const tellWorker = (worker: WipeEnv['serviceWorker']) => read(() => worker?.controller?.postMessage(WIPE));
+
+/**
+ * Asks for a wipe on the next load, tells the app's other tabs to end their
+ * sessions and reload into it, and the service worker to forget the videos it
+ * plays. Throws where localStorage is unavailable: nothing would run the wipe.
+ */
+export const requestWipe = (env: WipeEnv = browserEnv()) => {
+	const { localStorage: local } = env;
 	if (!local) throw new Error('This browser does not let the app keep a note across a reload, so it cannot wipe itself.');
 	local.setItem(FLAG, '1');
-	read(() => session?.setItem(FLAG, '1'));
+	read(() => env.channel?.postMessage(WIPE));
+	goForWipe(env);
 };
+
+/**
+ * What a tab that will reload into the wipe does first, the one that asked
+ * and those told to go: it opens no database the wipe deletes, marks itself
+ * to finish the wipe without asking, and tells the service worker.
+ */
+const goForWipe = ({ sessionStorage: session, serviceWorker }: WipeEnv) => {
+	refuseOpens();
+	read(() => session?.setItem(FLAG, '1'));
+	tellWorker(serviceWorker);
+};
+
+/**
+ * Makes this tab go when another tab asks for a wipe. Reloading closes what the
+ * app cannot close while it runs (the vault's connection, the collection
+ * cache's file handle), so the wipe is not blocked by this tab; the tab then
+ * finishes the wipe the person asked for without asking again.
+ */
+export function leaveOnWipe(endSession: () => Promise<unknown>, env: WipeEnv = browserEnv(), reload = () => location.reload()): void {
+	const { channel, waitMs = LEAVE_WAIT_MS } = env;
+	let leaving = false;
+	channel?.addEventListener('message', (event) => {
+		if (leaving || event.data?.type !== WIPE.type) return;
+		leaving = true;
+		goForWipe(env);
+		void withBudget(Promise.resolve().then(endSession), waitMs, 'end session')
+			.catch((e) => console.error('[wipe] the session did not end cleanly', e))
+			.finally(reload);
+	});
+}
 
 export const wipePending = (local = browserEnv().localStorage) => read(() => local?.getItem(FLAG)) === '1';
 
@@ -67,23 +155,25 @@ const step = async (label: string, run: () => WipeOutcome | Promise<WipeOutcome>
 	}
 };
 
-// Settles at success, failure or the first sign of a connection that does not
-// close; the request itself stays queued and finishes once that connection goes.
+// Settles at success or failure. A `blocked` event is not an answer: the
+// request stays queued and finishes once the connection goes, as it does when
+// the tab holding it unloads.
 const deleteDatabase = async (factory: IDBFactory, name: string, waitMs: number): Promise<WipeOutcome> => {
 	const deletion = new Promise<WipeOutcome>((resolve) => {
 		const req = factory.deleteDatabase(name);
 		req.onsuccess = () => resolve('done');
 		req.onerror = () => resolve('failed');
-		req.onblocked = () => resolve('blocked');
 	}).catch((): WipeOutcome => 'failed');
-	// Silent past the limit: still queued, or still running on a large database.
+	// Still waiting past the limit: held open, queued, or still running on a large database.
 	const outcome = await withBudget(deletion, waitMs, 'delete').catch((): WipeOutcome => 'blocked');
 	if (outcome !== 'done') console.warn(`[wipe] ${name}: ${outcome}`);
 	return outcome;
 };
 
 const databases = async (factory: IDBFactory, waitMs: number) => {
-	const names = (await factory.databases()).flatMap((db) => (db.name ? [db.name] : []));
+	const names = typeof factory.databases === 'function'
+		? (await factory.databases()).flatMap((db) => (db.name ? [db.name] : []))
+		: APP_DATABASES;
 	return worst(await Promise.all(names.map((name) => deleteDatabase(factory, name, waitMs))));
 };
 
@@ -145,14 +235,24 @@ export type WipePrompt = (kind: 'unfinished' | 'blocked' | 'failed') => Promise<
  */
 export async function finishPendingWipe(prompt: WipePrompt, env: WipeEnv = browserEnv(), reload = () => location.reload()): Promise<void> {
 	const { localStorage: local, sessionStorage: session, locks } = env;
-	if (!wipePending(local)) return;
+	// This tab's mark goes when no wipe is pending (another tab finished it):
+	// a later one must not run here unasked. The request stays: another tab
+	// may have just made it.
+	const forgetMark = () => read(() => session?.removeItem(FLAG));
 	const forget = () => {
 		read(() => local?.removeItem(FLAG));
-		read(() => session?.removeItem(FLAG));
+		forgetMark();
 	};
+	if (!wipePending(local)) {
+		forgetMark();
+		return;
+	}
 	const run = async (): Promise<'start' | 'reload'> => {
 		// Another tab finished it, or let it go, while this one waited.
-		if (!wipePending(local)) return 'start';
+		if (!wipePending(local)) {
+			forgetMark();
+			return 'start';
+		}
 		if (read(() => session?.getItem(FLAG)) !== '1' && !(await prompt('unfinished'))) {
 			forget();
 			return 'start';

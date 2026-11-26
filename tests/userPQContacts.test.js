@@ -21,7 +21,8 @@ class FakeEM extends EventTarget {
 		return this.list;
 	}
 	async saveContacts(edits) {
-		return { contacts: await this.patchContacts(edits), status: 'synced' };
+		const prior = this.stored === null ? { state: 'new' } : { state: 'readable', contacts: structuredClone(this.stored.contacts ?? {}) };
+		return { contacts: await this.patchContacts(edits), status: 'synced', prior };
 	}
 	fakeLogin(hash) {
 		this.#userHash = hash;
@@ -75,6 +76,63 @@ describe('the contacts slot', () => {
 		expect(fake.stored.contacts[A]).toMatchObject({ confirmed: true, contact_pkey: pkA });
 		expect(fake.stored.contacts[B]).toMatchObject({ contact_pkey: 'pkB' });
 		expect(fake.stored.contacts[B].confirmed).toBeFalsy();
+	});
+
+	it('review: a failed contacts load must not re-grant access on repeated QR confirmation', async () => {
+		fake.stored = { contacts: { [A]: { user_hash: A, name: 'Ann', contact_pkey: pkA, confirmed: true } } };
+		store.contactsMap = {};
+		fake.loadContacts = vi.fn(async () => { throw new Error('contacts temporarily unavailable'); });
+		fake.login = async (hash) => { fake.fakeLogin(hash); return { user_hash: hash }; };
+		// Models a previously revoked grant. Only a new true request would restore it.
+		fake.setContactAccess = vi.fn(async () => 'resolved');
+		await store.login('u_' + '1'.repeat(128));
+		await store.confirmContact(A, annCard, pkA);
+		expect(fake.setContactAccess).not.toHaveBeenCalledWith(expect.any(String), A, true);
+	});
+
+	it('a first confirmation grants access once; a contact added by id is granted nothing', async () => {
+		fake.setContactAccess = vi.fn(async () => 'resolved');
+		await store.saveContact(B, { name: 'Bob', contact_pkey: 'pkB' });
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann' });
+		expect(fake.setContactAccess.mock.calls.map((call) => call.slice(1, 3))).toEqual([[A, true]]);
+	});
+
+	it('a confirmation stored by another tab is not taken for a first one by this tab\'s stale list', async () => {
+		fake.stored = { contacts: { [A]: { user_hash: A, name: 'Ann', contact_pkey: pkA, confirmed: true } } };
+		store.contactsMap = { [A]: { user_hash: A, name: 'Ann', contact_pkey: pkA } };
+		fake.setContactAccess = vi.fn(async () => 'resolved');
+		await store.confirmContact(A, annCard, pkA);
+		expect(fake.setContactAccess).not.toHaveBeenCalled();
+		expect(fake.stored.contacts[A].confirmed).toBe(true);
+	});
+
+	it('a first confirmation whose write is queued on a readable base still grants once', async () => {
+		fake.stored = { contacts: { [B]: { user_hash: B, name: 'Bob', contact_pkey: 'pkB' } } };
+		fake.saveContacts = async (edits) => {
+			const prior = { state: 'readable', contacts: structuredClone(fake.stored.contacts) };
+			return { contacts: await fake.patchContacts(edits), status: 'queued', prior };
+		};
+		fake.setContactAccess = vi.fn(async () => 'resolved');
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann' });
+		expect(fake.setContactAccess.mock.calls.map((call) => call.slice(1, 3))).toEqual([[A, true]]);
+	});
+
+	it('a confirmation whose stored prior state is unknown confirms the contact and grants nothing', async () => {
+		fake.saveContacts = async (edits) => ({ contacts: await fake.patchContacts(edits), status: 'synced' });
+		fake.setContactAccess = vi.fn(async () => 'resolved');
+		await store.confirmContact(A, annCard, pkA, { name: 'Ann' });
+		expect(store.contactsMap[A].confirmed).toBe(true);
+		expect(fake.setContactAccess).not.toHaveBeenCalled();
+	});
+
+	it('review: a contacts write awaiting its unknown base must not automatically restore access', async () => {
+		fake.stored = { contacts: { [A]: { user_hash: A, name: 'Ann', contact_pkey: pkA, confirmed: true } } };
+		store.contactsMap = {};
+		// An existing slot with no readable base must remain explicitly unknown.
+		fake.saveContacts = async (edits) => ({ contacts: await fake.patchContacts(edits), status: 'awaiting-recovery', prior: { state: 'unknown' } });
+		fake.setContactAccess = vi.fn(async () => 'resolved');
+		await store.confirmContact(A, annCard, pkA);
+		expect(fake.setContactAccess).not.toHaveBeenCalled();
 	});
 
 	it('keeps a contact confirmed in person as confirmed, and one added by id as not', async () => {

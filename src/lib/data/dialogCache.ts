@@ -1,4 +1,5 @@
 import { markTouched, isTouched } from './readCache';
+import { openDatabase } from './openDatabase';
 
 const DB_NAME = 'dialog-synced-cache';
 const DB_VERSION = 2;
@@ -24,28 +25,16 @@ const mainKeyOf: Record<DialogCacheTable, (r: Row) => string> = {
 const mainKeyFromCollectionKey = (table: DialogCacheTable, key: string): string =>
 	table === 'dialog_keys' || table === 'dialog_messages_versions' ? key.replace('|', ':') : key;
 
-let dbPromise: Promise<IDBDatabase | null> | null = null;
-
 function openDb(): Promise<IDBDatabase | null> {
-	if (dbPromise) return dbPromise;
-	if (typeof indexedDB === 'undefined') {
-		dbPromise = Promise.resolve(null);
-		return dbPromise;
-	}
-	dbPromise = new Promise((resolve) => {
-		const req = indexedDB.open(DB_NAME, DB_VERSION);
-		req.onupgradeneeded = () => {
-			for (const table of DIALOG_CACHE_TABLES) {
-				if (!req.result.objectStoreNames.contains(table)) req.result.createObjectStore(table, { keyPath: '__key' });
-			}
-		};
-		req.onsuccess = () => resolve(req.result);
-		req.onerror = () => {
-			console.warn('[dialogCache] cannot open IndexedDB:', req.error);
-			resolve(null);
-		};
+	if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+	return openDatabase(DB_NAME, DB_VERSION, (db) => {
+		for (const table of DIALOG_CACHE_TABLES) {
+			if (!db.objectStoreNames.contains(table)) db.createObjectStore(table, { keyPath: '__key' });
+		}
+	}).catch((e) => {
+		console.warn('[dialogCache] cannot open IndexedDB:', e);
+		return null;
 	});
-	return dbPromise;
 }
 
 function run<T>(table: DialogCacheTable, mode: 'readonly' | 'readwrite', fn: (store: IDBObjectStore) => IDBRequest<T> | void): Promise<T | undefined> {
