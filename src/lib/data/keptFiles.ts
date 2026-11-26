@@ -18,7 +18,7 @@
 
 import { IndexedDbStore } from './indexedDbStore';
 import { createSecureStore, type StringStore } from './secureStore';
-import { serialized, withNamedLock } from './serialized';
+import { serialized, tryNamedLock, withNamedLock } from './serialized';
 import { fileKey } from './fileKey';
 import { downloadFile, pinFileChunks, readKeptChunks, type DownloadProgress } from './fileTransfer';
 import { pinnedFileIdsOf, unpinAllOf, unpinFile } from './chunkCache';
@@ -81,8 +81,10 @@ const indexKey = (owner: string) => `${owner}|kept`;
  * its own pins. Taken in that order: file, then index.
  */
 const underIndexLock = <T>(owner: string, fn: () => Promise<T>): Promise<T> => withNamedLock(`buckitup-kept-files:${owner}`, fn);
-const underFileLock = <T>(owner: string, fileId: string, fn: () => Promise<T>): Promise<T> =>
-	withNamedLock(`buckitup-kept-files:${owner}|${fileId}`, fn);
+const fileLockName = (owner: string, fileId: string) => `buckitup-kept-files:${owner}|${fileId}`;
+const underFileLock = <T>(owner: string, fileId: string, fn: () => Promise<T>): Promise<T> => withNamedLock(fileLockName(owner, fileId), fn);
+/** Runs `fn` under the file lock unless it is taken; resolves to whether it ran. */
+const tryFileLock = (owner: string, fileId: string, fn: () => Promise<void>): Promise<boolean> => tryNamedLock(fileLockName(owner, fileId), fn);
 
 /**
  * The open account's index as last read or written by this tab: opening any
@@ -115,22 +117,30 @@ const fileIdsOf = (index: KeptIndex): Set<string> => new Set(Object.values(index
 /**
  * Releases `owner`'s pins on files its index does not list: what an unpin
  * that failed, or a page closed in the middle of a keep, left behind. Each
- * under its file lock, so a keep still pinning its chunks is waited for, not
- * undone. Runs in the background: once per account and page, at its first
- * listing, and after an unpin fails; a sweep that fails runs again at the
+ * under its file lock, with the index read again there. A file whose lock is
+ * taken — a keep still pinning its chunks, a release, another tab's sweep —
+ * is passed over, not waited for, and the sweep resolves false. Runs in the
+ * background: once per account and page, at its first listing, and after an
+ * unpin fails; a sweep that fails or passes a file over runs again at the
  * next listing.
  */
-const sweepStrayPins = async (owner: string): Promise<void> => {
+const sweepStrayPins = async (owner: string): Promise<boolean> => {
 	let listed = fileIdsOf(await currentIndex(owner));
 	const failed: unknown[] = [];
+	let complete = true;
 	for (const fileId of await pinnedFileIdsOf(owner)) {
 		if (listed.has(fileId)) continue;
-		await underFileLock(owner, fileId, async () => {
+		const ran = await tryFileLock(owner, fileId, async () => {
 			listed = fileIdsOf(await readIndex(owner));
 			if (!listed.has(fileId)) await unpinFile(fileId, owner);
-		}).catch((e) => failed.push(e));
+		}).catch((e) => {
+			failed.push(e);
+			return true;
+		});
+		if (!ran) complete = false;
 	}
 	if (failed.length) throw new AggregateError(failed, `${failed.length} files kept their stray pins`);
+	return complete;
 };
 const swept = new Set<string>();
 /** Each account's sweeps run one after another; one still waiting to start covers the calls made meanwhile. */
@@ -143,7 +153,9 @@ const sweepStrayPinsSoon = (owner: string): void => {
 	void serialized(sweeping, owner, () => {
 		waiting.delete(owner);
 		return sweepStrayPins(owner);
-	}).catch((e) => {
+	}).then((complete) => {
+		if (!complete) swept.delete(owner);
+	}, (e) => {
 		swept.delete(owner);
 		console.warn('[keptFiles] stray pins were not released', e);
 	});
@@ -170,50 +182,58 @@ export const listKeptFiles = async (owner: string): Promise<KeptIndex> => {
  * stays pinned for `owner`. A keep or release of the same file id waits
  * until it is done.
  */
-export const keepFile = (
+export const keepFile = async (
 	owner: string,
 	part: KeepablePart,
 	messageId: string,
 	opts: { onProgress?: (p: DownloadProgress) => void; signal?: AbortSignal; resolveSignPkey?: SignPkeyResolver; peerHash?: string } = {},
-): Promise<KeptFile> => underFileLock(owner, part.fileId, async () => {
-	const key = fileKey(part);
-	const index = await readIndex(owner);
-	if (index[key]) return index[key];
-	// Chunks are stored by file id; another sender's file under the same id
-	// would share them, and releasing one would release the other.
-	if (fileIdsOf(index).has(part.fileId)) {
-		throw new Error('Another file with the same id is already kept on this device.');
-	}
+): Promise<KeptFile> => {
+	let stray = false;
 	try {
-		const { peerHash, ...transfer } = opts;
-		const chunkHashes = await pinFileChunks({
-			fileId: part.fileId, uploaderHash: part.uploaderHash, encSecretB64: part.encSecretB64, owner, ...transfer,
+		return await underFileLock(owner, part.fileId, async () => {
+			const key = fileKey(part);
+			const index = await readIndex(owner);
+			if (index[key]) return index[key];
+			// Chunks are stored by file id; another sender's file under the same id
+			// would share them, and releasing one would release the other.
+			if (fileIdsOf(index).has(part.fileId)) {
+				throw new Error('Another file with the same id is already kept on this device.');
+			}
+			try {
+				const { peerHash, ...transfer } = opts;
+				const chunkHashes = await pinFileChunks({
+					fileId: part.fileId, uploaderHash: part.uploaderHash, encSecretB64: part.encSecretB64, owner, ...transfer,
+				});
+				const entry: KeptFile = {
+					fileKey: key,
+					fileId: part.fileId,
+					uploaderHash: part.uploaderHash,
+					encSecretB64: part.encSecretB64,
+					kind: part.kind ?? 'file',
+					name: part.name ?? '',
+					size: part.size ?? 0,
+					mimeType: part.mimeType ?? '',
+					createdAt: part.createdAt ?? 0,
+					messageId,
+					chunkHashes,
+					...(peerHash ? { peerHash } : {}),
+				};
+				await underIndexLock(owner, async () => writeIndex(owner, { ...(await readIndex(owner)), [key]: entry }));
+				return entry;
+			} catch (e) {
+				// Under the file lock, with no entry for this file id: every pin `owner` holds on it is this keep's.
+				await unpinFile(part.fileId, owner).catch((err) => {
+					console.warn('[keptFiles] could not release the pins of a failed keep', err);
+					stray = true;
+				});
+				throw e;
+			}
 		});
-		const entry: KeptFile = {
-			fileKey: key,
-			fileId: part.fileId,
-			uploaderHash: part.uploaderHash,
-			encSecretB64: part.encSecretB64,
-			kind: part.kind ?? 'file',
-			name: part.name ?? '',
-			size: part.size ?? 0,
-			mimeType: part.mimeType ?? '',
-			createdAt: part.createdAt ?? 0,
-			messageId,
-			chunkHashes,
-			...(peerHash ? { peerHash } : {}),
-		};
-		await underIndexLock(owner, async () => writeIndex(owner, { ...(await readIndex(owner)), [key]: entry }));
-		return entry;
-	} catch (e) {
-		// Under the file lock, with no entry for this file id: every pin `owner` holds on it is this keep's.
-		await unpinFile(part.fileId, owner).catch((err) => {
-			console.warn('[keptFiles] could not release the pins of a failed keep', err);
-			sweepStrayPinsSoon(owner);
-		});
-		throw e;
+	} finally {
+		// Once the file lock is let go: a sweep passes over a file whose lock is taken.
+		if (stray) sweepStrayPinsSoon(owner);
 	}
-});
+};
 
 /**
  * `owner` stops keeping the file: its chunks become cache again unless another
@@ -221,8 +241,8 @@ export const keepFile = (
  * longer kept; an unpin that fails leaves pins with no entry for the sweep
  * (sweepStrayPins) to drop, and is not the caller's failure.
  */
-export const releaseKeptFile = (owner: string, key: string): Promise<void> =>
-	underFileLock(owner, key.slice(key.lastIndexOf('/') + 1), async () => {
+export const releaseKeptFile = async (owner: string, key: string): Promise<void> => {
+	const unpinned = await underFileLock(owner, key.slice(key.lastIndexOf('/') + 1), async () => {
 		const removed = await underIndexLock(owner, async () => {
 			const index = await readIndex(owner);
 			const entry = index[key];
@@ -232,13 +252,15 @@ export const releaseKeptFile = (owner: string, key: string): Promise<void> =>
 			}
 			return entry;
 		});
-		if (removed) {
-			await unpinFile(removed.fileId, owner).catch((e) => {
-				console.warn('[keptFiles] the pins of a released file stay until the sweep', e);
-				sweepStrayPinsSoon(owner);
-			});
-		}
+		if (!removed) return true;
+		return unpinFile(removed.fileId, owner).then(() => true, (e) => {
+			console.warn('[keptFiles] the pins of a released file stay until the sweep', e);
+			return false;
+		});
 	});
+	// Once the file lock is let go: a sweep passes over a file whose lock is taken.
+	if (!unpinned) sweepStrayPinsSoon(owner);
+};
 
 /** The kept copy's bytes, decrypted from this device alone; null when `owner` does not keep the file. */
 export const openKeptFile = async (

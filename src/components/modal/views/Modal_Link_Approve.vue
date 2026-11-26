@@ -18,12 +18,24 @@
 		<div v-else-if="stage === 'connecting'" class="text-center text-secondary py-4">Reaching the new device…</div>
 
 		<div v-else-if="stage === 'confirm'" class="text-center">
-			<div class="text-secondary mb-2">Both devices show a code. Continue only if they match.</div>
-			<div class="fw-bold display-5 my-3 font-monospace">{{ session.sas }}</div>
+			<div class="text-secondary mb-2">Both devices show a code. Check it and type the two missing digits from the new device.</div>
+			<div class="fw-bold display-5 my-3 font-monospace" data-test="link-sas">
+				{{ sas.head }}<input
+					type="text"
+					inputmode="numeric"
+					autocomplete="off"
+					class="font-monospace fw-bold text-center mx-1 _sas_input"
+					v-model="typedDigits"
+					@input="digitsError = ''"
+					@keyup.enter="checkDigits"
+					data-test="link-sas-digits"
+				/>{{ sas.tail }}
+			</div>
+			<div v-if="digitsError" class="text-danger small mb-2">{{ digitsError }}</div>
 			<div class="text-secondary small mb-3">
 				This sends the account <strong>{{ accountName }}</strong> — its keys included — to the new device.
 			</div>
-			<button class="btn btn-dark w-100 mb-2" @click="approve">The codes match — send</button>
+			<button class="btn btn-dark w-100 mb-2" @click="checkDigits" :disabled="!digitsReady">The codes match — send</button>
 			<button class="btn btn-outline-danger w-100" @click="reject">They differ</button>
 		</div>
 
@@ -42,6 +54,13 @@
 </template>
 
 <style lang="scss" scoped>
+._sas_input {
+	width: 2.4ch;
+	font-size: inherit;
+	border: 0;
+	border-bottom: 2px solid currentColor;
+	outline: none;
+}
 ._qr_scanner {
 	display: flex;
 	justify-content: center;
@@ -56,14 +75,16 @@
 <script setup>
 // The device that has the account. It reads the invite, encapsulates to the
 // key the relay delivers if — and only if — it hashes to the fingerprint the
-// screen showed, and sends the backup once the person says so here. That tap
-// is consent to send; the check against a planted account happens on the
+// screen showed, and sends the backup once the person has compared the codes and
+// typed the two middle digits, which this screen leaves out, from the new
+// device: consent to send cannot be given without looking at it. The check against a planted account happens on the
 // other screen (docs/device-link.md). This screen is only ever started by
 // the person, from their account page: nothing opens it on their behalf.
 import { ref, computed, inject } from 'vue';
 import QrScanner from 'qr-scanner';
 import { userPQStore } from '@/store/userPQ.store';
 import { useLinkRoom } from '@/composables/useLinkRoom';
+import { splitSas } from '@/lib/deviceLink/sas';
 import {
 	parseInvite, acceptOffer, sealPayload, signCommand, verifyCommand,
 	encodeBytes, decodeBytes, DeviceLinkError,
@@ -71,6 +92,8 @@ import {
 
 const ABORTED = 'The new device stopped the link. Start again on both devices.';
 const DROPPED = 'The connection dropped. Start again on both devices.';
+/** Wrong pairs of digits allowed before the link is abandoned on both devices. */
+const DIGIT_ATTEMPTS = 3;
 /** How long to wait for the new device to announce itself before giving up. */
 const OFFER_TIMEOUT_MS = 90_000;
 
@@ -84,7 +107,12 @@ const videoEl = ref();
 const scanning = ref(false);
 const pasted = ref('');
 const inputError = ref('');
+const typedDigits = ref('');
+const digitsError = ref('');
+let wrongDigits = 0;
 
+const sas = computed(() => session.value && splitSas(session.value.sas));
+const digitsReady = computed(() => /^\d{2}$/.test(typedDigits.value));
 const accountName = computed(() => $userPQ.currentUser?.name || 'this account');
 
 let scanner = null;
@@ -104,6 +132,10 @@ setCleanup(() => {
 	clearTimeout(offerTimer);
 	offerTimer = null;
 	invite = null;
+	// The attempts belong to one session: the next link starts with all of them.
+	wrongDigits = 0;
+	typedDigits.value = '';
+	digitsError.value = '';
 	void stopScan();
 });
 
@@ -164,6 +196,20 @@ const onMessage = (msg) => {
 	}
 };
 
+const checkDigits = () => {
+	if (stage.value !== 'confirm' || !digitsReady.value) return;
+	if (typedDigits.value === splitSas(session.value.sas).middle) {
+		void approve();
+		return;
+	}
+	typedDigits.value = '';
+	if (++wrongDigits >= DIGIT_ATTEMPTS) {
+		abort('The digits did not match the new device. Nothing was sent — start again on both devices.');
+		return;
+	}
+	digitsError.value = 'These are not the middle digits on the new device. Look at its screen and try again.';
+};
+
 const approve = async () => {
 	// Stage first: the buttons leave the DOM, so a second tap has nothing to hit.
 	stage.value = 'sending';
@@ -182,10 +228,12 @@ const approve = async () => {
 	}
 };
 
-const reject = () => {
+const abort = (message) => {
 	send(signCommand(session.value, { kind: 'abort' }));
-	fail('The codes did not match. Nothing was sent — start again on both devices.');
+	fail(message);
 };
+
+const reject = () => abort('The codes did not match. Nothing was sent — start again on both devices.');
 
 const startScan = async () => {
 	try {

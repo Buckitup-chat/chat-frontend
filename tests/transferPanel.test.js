@@ -8,6 +8,7 @@ import { setActivePinia, createPinia } from 'pinia';
 vi.mock('@/store/dialogs.store', () => ({
 	useDialogsStore: () => ({ uploadAttachment: vi.fn(), sendMessage: vi.fn() }),
 }));
+vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => ({ currentUserHash: null }) }));
 
 const { useTransfersStore } = await import('@/store/transfers.store');
 const TransferPanel = (await import('@/components/chat/TransferPanel.vue')).default;
@@ -51,6 +52,18 @@ describe('transfer panel', () => {
 		expect(caps[1]).toMatch(/^Paused · 21%/);
 		expect(caps[2]).toMatch(/^Waiting · 2\.3 MB/);
 		expect(caps[3]).toMatch(/Interrupted/);
+	});
+
+	it('shows the speed in the chat\'s size format: bytes under a kilobyte, the next unit at a unit\'s edge', () => {
+		store.items = [
+			row({ id: 'a', status: 'active', done: 1, speed: 500 }),
+			row({ id: 'b', status: 'active', done: 1, speed: 1048575 }),
+			row({ id: 'c', status: 'active', done: 1, speed: 250 * 1024 }),
+		];
+		const caps = render().findAll('.transfer-caption').map((c) => c.text());
+		expect(caps[0]).toMatch(/ · 500 B\/s$/);
+		expect(caps[1]).toMatch(/ · 1\.0 MB\/s$/);
+		expect(caps[2]).toMatch(/ · 250 KB\/s$/);
 	});
 
 	it('cuts the list off with an "N more" line instead of growing', () => {

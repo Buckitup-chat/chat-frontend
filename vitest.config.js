@@ -1,6 +1,9 @@
 import { defineConfig } from 'vitest/config';
 import vue from '@vitejs/plugin-vue';
 import { fileURLToPath, URL } from 'node:url';
+import { createRequire } from 'node:module';
+
+const pqClientPackage = createRequire(import.meta.url)('@buckitup/pq-client/package.json');
 
 export default defineConfig({
 	// Component tests mount real SFCs, so .vue files must compile here too.
@@ -9,6 +12,7 @@ export default defineConfig({
 		alias: {
 			'@': fileURLToPath(new URL('./src', import.meta.url)),
 		},
+		dedupe: Object.keys(pqClientPackage.dependencies),
 	},
 	define: {
 		// Build-time constants normally injected by vite.config.js

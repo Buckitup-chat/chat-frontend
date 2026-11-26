@@ -54,6 +54,7 @@ vi.mock('@/lib/data/userStorage', () => ({
 		return { uuid, value_b64: valueB64 };
 	},
 	saveStorageJsonPatch: async ({ uuid, jsonPatch, deletedFlag }) => {
+		if (pendingMissingBase) return 'awaiting-recovery';
 		const valueB64 = JSON.stringify(jsonPatch);
 		rows.set(uuid, { valueB64, deletedFlag: !!deletedFlag });
 		upsertCalls.push({ uuid, valueB64, deletedFlag: !!deletedFlag });
@@ -63,6 +64,7 @@ vi.mock('@/lib/data/userStorage', () => ({
 
 const WINNER_UUID = 'uuid-from-the-device-that-won-the-race';
 let resolvedUuid = null;
+let pendingMissingBase = false;
 
 vi.mock('@buckitup/pq-client/slots', () => ({
 	createSlotResolver: () => ({
@@ -72,6 +74,10 @@ vi.mock('@buckitup/pq-client/slots', () => ({
 			throw new Error(`user_storage slot "${name}" is missing from the root record`);
 		},
 		ensureSlotUuid: async (_name, { mint, writeRow }) => {
+			if (pendingMissingBase) {
+				await writeRow(resolvedUuid);
+				return { uuid: resolvedUuid, created: false };
+			}
 			const mine = mint();
 			await writeRow(mine);
 			resolvedUuid = WINNER_UUID;
@@ -115,6 +121,7 @@ describe('slot creation race (§4.7): EncryptionManagerPQ acts on an orphaned sl
 		vaults = new Map();
 		upsertCalls = [];
 		resolvedUuid = null;
+		pendingMissingBase = false;
 		const store = new Map();
 		rawStore = {
 			async get(k) { return store.get(k); },
@@ -144,5 +151,15 @@ describe('slot creation race (§4.7): EncryptionManagerPQ acts on an orphaned sl
 
 		expect(await em.loadContacts()).toEqual([{ user_hash: 'mine' }]);
 		expect(rows.has(WINNER_UUID)).toBe(true);
+	});
+	it('an unreadable existing contacts slot queued for recovery is not a known-empty previous list', async () => {
+		const em = await login();
+		// The root names an existing slot, but this client has no readable row.
+		// This matches saveStorageJsonPatch's documented awaiting-recovery outcome.
+		resolvedUuid = WINNER_UUID;
+		pendingMissingBase = true;
+		const result = await em.saveContacts({ someone: { user_hash: 'someone', confirmed: true } });
+		expect(result.status).toBe('awaiting-recovery');
+		expect(result.prior).toEqual({ state: 'unknown' });
 	});
 });

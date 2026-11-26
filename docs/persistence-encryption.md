@@ -67,22 +67,29 @@ count, and the SHA-256 of its bytes. The digest and the key are written before
 the file's first chunk is sent; a file whose record cannot be written does not
 start, and one whose bytes changed since its upload began stops instead of
 resuming. The record holds file keys, so it is sealed with the account's key
-through `secureStore`.
+through `secureStore`; only the time it was last written is kept beside the
+seal, in the clear.
 
 - At sign-in the queue brings the account's records back, and each unfinished
   file shows paused. The browser keeps no file across a reload, so the person
   picks it again. A file of the same size and digest resumes, and only the
   chunks the device lacks are sent. Any other file is refused. A file that sent
   nothing yet has no digest, and its size and name are checked instead.
-- The record goes once its last file lands or is cancelled. The message is then
-  sent from the tab that has it, or not at all: a record with nothing left to
-  upload could only send it a second time.
-- A record not written for 48 hours is dropped at the next sign-in. The server
-  drops an uncommitted upload's chunks 48 hours after the last one arrives
-  (pq_files §8), and the record is written as each file starts and as the
-  message changes, so a single file sending for longer than that loses its
-  record early. A file whose chunks the server already dropped is sent again in
-  full.
+- The record goes once the message is stored for sending (the intent outbox
+  carries it from there) or nothing is left to send. A message whose files all
+  landed but which could not be stored, or whose page went first, stays in the
+  record, and the next sign-in stores it. Its `message_id` comes from the
+  batch, and a message already in the intent store, pending or resolved, is not
+  stored again: a record left by a page that went right after storing the
+  message does not send it twice.
+- A record not written for 48 hours is dropped at the next sign-in of any
+  account on this device, so the records of an account that never signs in
+  here again do not outlive their use. The server drops an uncommitted upload's
+  chunks 48 hours after the last one arrives (pq_files §8). The record is
+  written as each file starts, as the message changes, and again every 10
+  minutes while chunks arrive, so it expires at most 10 minutes before the
+  server drops the chunks. A file whose chunks the server already dropped is
+  sent again in full.
 - One tab drives a message (a Web Lock per batch). Another tab of the same
   account does not bring back a message that a live tab is still sending, and
   a message whose lock this tab could not take is sent without a record.
