@@ -8,7 +8,7 @@ import { setActivePinia, createPinia } from 'pinia';
 import { makeFakeLockManager } from './helpers/fakeWebLocks';
 
 const OWNER = 'u_owner';
-const uploads = new Map(); // name -> { resolve, opts, meta, onDisk }
+const uploads = new Map(); // name -> { resolve, reject, opts, meta, onDisk }
 let sentMessages;
 
 const { _setPendingUploadsStoreForTests, pendingBatches } = await import('@/lib/data/pendingUploads');
@@ -28,7 +28,7 @@ const memoryStore = () => {
 
 const uploadAttachment = vi.fn((meta, opts) => new Promise((resolve, reject) => {
 	// What the device would know if the page went now: read once the upload has begun.
-	uploads.set(meta.name, { resolve, opts, meta, onDisk: pendingBatches(OWNER) });
+	uploads.set(meta.name, { resolve, reject, opts, meta, onDisk: pendingBatches(OWNER) });
 	if (opts.signal?.aborted) {
 		reject(new DOMException('aborted', 'AbortError'));
 		return;
@@ -57,6 +57,7 @@ vi.mock('@/store/dialogs.store', () => ({
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => manager }));
 
 const { useTransfersStore } = await import('@/store/transfers.store');
+const { FileIdTakenError } = await import('@/lib/data/fileTransfer');
 
 let records;
 let failWrites;
@@ -440,5 +441,38 @@ describe('the transfer queue across a reload', () => {
 			await settle();
 			expect(saves - before).toBe(3);
 		});
+	});
+});
+
+describe('a file_id another uploader holds on the device', () => {
+	it('starts the file over under a fresh pair, recorded before its first chunk', async () => {
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		const first = uploads.get('a.bin');
+		const taken = first.opts.prepared;
+		first.reject(new FileIdTakenError(taken.fileId));
+
+		await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(2));
+		const second = uploads.get('a.bin');
+		expect(second.opts.prepared.fileId).not.toBe(taken.fileId);
+		expect(second.opts.prepared.encSecretB64).not.toBe(taken.encSecretB64);
+		expect(second.opts.resuming).toBe(false);
+		const [record] = await second.onDisk;
+		expect(record.files).toEqual([expect.objectContaining(second.opts.prepared)]);
+		expect(rowOf(tab, 'a.bin').prepared).toBe(second.opts.prepared);
+
+		finish('a.bin');
+		await vi.waitFor(() => expect(sentMessages).toHaveLength(1));
+	});
+
+	it('fails the row when the fresh file_id is refused too', async () => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		uploads.get('a.bin').reject(new FileIdTakenError('f_first'));
+		await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(2));
+		uploads.get('a.bin').reject(new FileIdTakenError('f_second'));
+
+		await vi.waitFor(() => expect(rowOf(tab, 'a.bin').status).toBe('error'));
+		expect(uploadAttachment).toHaveBeenCalledTimes(2);
+		errorSpy.mockRestore();
 	});
 });

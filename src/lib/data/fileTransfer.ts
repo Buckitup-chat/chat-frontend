@@ -72,13 +72,40 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const existingChunks = (fileId: string): Promise<Map<number, Record<string, unknown>>> =>
 	readChunkRows(fileId).catch(() => new Map());
 
+/** Another uploader holds this file_id on the device (pq_files §4): only a fresh pair can upload. */
+export class FileIdTakenError extends Error {
+	constructor(readonly fileId: string) {
+		super(`file ${fileId} belongs to another uploader on this device`);
+		this.name = 'FileIdTakenError';
+	}
+}
+
+/** The device's trust chain does not let this account store files. */
+export class NoWriteRightsError extends Error {
+	constructor() {
+		super('this account has no write rights on this device');
+		this.name = 'NoWriteRightsError';
+	}
+}
+
+const errorOf = async (r: Response): Promise<string> => {
+	const text = await r.text();
+	try {
+		return String(JSON.parse(text).error ?? text);
+	} catch {
+		return text;
+	}
+};
+
+// 'occupied': the device already stores another body at this index (409) and
+// never replaces it — the caller decides from the stored row.
 const putChunk = async (
 	fileId: string,
 	index: number,
 	body: Uint8Array,
 	headers: Record<string, string>,
 	signal?: AbortSignal,
-): Promise<void> => {
+): Promise<'stored' | 'occupied'> => {
 	for (let attempt = 0; ; attempt++) {
 		const r = await fetch(`${ELECTRIC_API_URL}/file_chunk/${fileId}/${index}`, {
 			method: 'PUT',
@@ -86,7 +113,14 @@ const putChunk = async (
 			body: body as unknown as globalThis.BodyInit,
 			signal,
 		});
-		if (r.ok) return;
+		if (r.ok) return 'stored';
+		if (r.status === 409) return 'occupied';
+		if (r.status === 403) {
+			const error = await errorOf(r);
+			if (error === 'not_in_trust_chain') throw new NoWriteRightsError();
+			if (error === 'uploader mismatch') throw new FileIdTakenError(fileId);
+			throw new Error(`chunk ${index} rejected: HTTP 403 ${error.slice(0, 120)}`);
+		}
 		// 429: the drive's single-writer upload lane is busy — the protocol
 		// answer is to wait as told and retry, not to fail the file (§4).
 		if (r.status === 429 && attempt < 8) {
@@ -106,12 +140,10 @@ export const uploadFile = async (opts: {
 	fileId: string;
 	encSecretB64: string;
 	/**
-	 * Set when chunks may already be on the device (retry after a failure).
-	 * Waits for the file_chunks shape to settle before deciding what to skip:
-	 * the shape lags the commit by seconds, and treating a stored chunk as
-	 * absent re-PUTs a different body onto the same index — the server keeps
-	 * the old metadata row (insert on_conflict: nothing) while the bytes get
-	 * replaced, and the manifest can never match both.
+	 * Set when chunks may already be on the device (retry after a failure):
+	 * the stored indexes are read first and not sent again. A stored chunk
+	 * missed by that read is not lost — the device never replaces it and
+	 * answers 409, and the upload then binds the stored row instead.
 	 */
 	resuming?: boolean;
 	onProgress?: (p: UploadProgress) => void;
@@ -157,16 +189,24 @@ export const uploadFile = async (opts: {
 			},
 			signSkey,
 		);
-		// The manifest binds SHA3-512 of the RAW signature bytes per chunk.
-		chunkSignHashes.push(toBase64(sha3_512(fromBase64(signB64))));
-
-		await putChunk(fileId, i, encrypted, {
+		const put = await putChunk(fileId, i, encrypted, {
 			'x-data-hash': dataHash,
 			'x-size': String(encrypted.length),
 			'x-uploader-hash': uploaderHash,
 			'x-owner-timestamp': String(ownerTimestamp),
 			'x-signature': signB64,
 		}, signal);
+		if (put === 'occupied') {
+			// The device kept an earlier body for this index; the manifest must
+			// bind that one, and the cache must not hold the refused bytes.
+			const held = (await existingChunks(fileId)).get(i);
+			if (held?.uploader_hash !== uploaderHash) throw new Error(`chunk ${i} of ${fileId} is held by another upload`);
+			chunkSignHashes.push(toBase64(sha3_512(fromBase64(held.sign_b64 as string))));
+			onProgress?.({ fileId, done: i + 1, total });
+			continue;
+		}
+		// The manifest binds SHA3-512 of the RAW signature bytes per chunk.
+		chunkSignHashes.push(toBase64(sha3_512(fromBase64(signB64))));
 		// Seed the local chunk cache: the sender should never re-download
 		// bytes it just encrypted. Fire-and-forget — caching must not slow
 		// or fail the upload.

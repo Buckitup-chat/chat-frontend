@@ -27,7 +27,7 @@
 
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { prepareUpload } from '@/lib/data/fileTransfer';
+import { FileIdTakenError, prepareUpload } from '@/lib/data/fileTransfer';
 import { CHUNK_SIZE, chunkCountOf } from '@buckitup/pq-client/fileCrypto';
 import { uploadDigest } from '@/lib/data/uploadReuse';
 import { forgetPendingBatch, pendingBatches, savePendingBatch } from '@/lib/data/pendingUploads';
@@ -151,7 +151,7 @@ export const useTransfersStore = defineStore('transfers', () => {
 			patch(id, { digest });
 			await writeRecord(item.batchId);
 			assertActsAsOwner(item.batchId);
-			const part = await dialogs.uploadAttachment({
+			const upload = (prepared, resuming) => dialogs.uploadAttachment({
 				name: item.name,
 				mimeType: item.mimeType,
 				bytes,
@@ -159,10 +159,8 @@ export const useTransfersStore = defineStore('transfers', () => {
 				createdAt: item.createdAt,
 				digest,
 			}, {
-				prepared: item.prepared,
-				// No chunk goes out before a record with the digest is written, so a
-				// row without one (fresh, or restored from such a record) sent nothing.
-				resuming: !!item.digest,
+				prepared,
+				resuming,
 				signal: ctrl.signal,
 				onProgress: (p) => {
 					const now = Date.now();
@@ -179,6 +177,22 @@ export const useTransfersStore = defineStore('transfers', () => {
 				},
 				onAwaitingApproval: (accepted) => { manifestAccepted = accepted; },
 			});
+			let part;
+			try {
+				// No chunk goes out before a record with the digest is written, so a
+				// row without one (fresh, or restored from such a record) sent nothing.
+				part = await upload(item.prepared, !!item.digest);
+			} catch (e) {
+				if (!(e instanceof FileIdTakenError)) throw e;
+				// Another uploader holds this file_id on the device: nothing more
+				// can join it. A fresh pair, recorded before its first chunk, starts
+				// the file over once; a second refusal fails the row.
+				const { v7 } = await import('uuid');
+				patch(id, { prepared: prepareUpload(v7()), done: 0 });
+				await writeRecord(item.batchId);
+				assertActsAsOwner(item.batchId);
+				part = await upload(byId(id).prepared, false);
+			}
 			if (manifestAccepted) {
 				patch(id, { status: 'awaiting_approval', part, speed: 0 });
 				followManifest(id, item.name, manifestAccepted);
