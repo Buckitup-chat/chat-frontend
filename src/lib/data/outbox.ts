@@ -27,6 +27,7 @@
 // is not the goal (metadata access control starts at the backend).
 import { WebLocksLeader } from '@tanstack/offline-transactions';
 import { IndexedDbStore } from './indexedDbStore';
+import { openDatabase } from './openDatabase';
 import { IngestError } from './ingest';
 import { ownerOf, shapeOfTable } from './writeContracts';
 import { VaultLockedError, AccountMismatchError } from './keyCustody';
@@ -294,21 +295,9 @@ export interface AtomicLeaseStore {
 
 const LEASE_DB_NAME = 'buckitup-outbox-leader-lease';
 const LEASE_STORE_NAME = 'lease';
-let leaseDbPromise: Promise<IDBDatabase> | null = null;
-
-function openLeaseDb(): Promise<IDBDatabase> {
-	if (!leaseDbPromise) {
-		leaseDbPromise = new Promise((resolve, reject) => {
-			const req = indexedDB.open(LEASE_DB_NAME, 1);
-			req.onupgradeneeded = () => {
-				if (!req.result.objectStoreNames.contains(LEASE_STORE_NAME)) req.result.createObjectStore(LEASE_STORE_NAME);
-			};
-			req.onsuccess = () => resolve(req.result);
-			req.onerror = () => reject(req.error);
-		});
-	}
-	return leaseDbPromise;
-}
+const openLeaseDb = () => openDatabase(LEASE_DB_NAME, 1, (db) => {
+	if (!db.objectStoreNames.contains(LEASE_STORE_NAME)) db.createObjectStore(LEASE_STORE_NAME);
+});
 
 const indexedDbLeaseStore: AtomicLeaseStore = {
 	claim(userHash, candidate, now) {
@@ -1768,19 +1757,24 @@ export async function heldStateOf(id: string, userHash: string): Promise<HeldSta
 	return block ? { kind: 'held', reason: block.reason, message: block.message } : { kind: 'clear' };
 }
 
-export async function pendingCardWrites(userHash: string): Promise<OutboxEntry[]> {
+/**
+ * The writes of `cardHash`'s card still in `userHash`'s queue: waiting to be
+ * sent, or refused and kept for the user's Retry or Discard. `cardHash` is
+ * the account's own by default, or an identity derived from it.
+ */
+export async function pendingCardWrites(userHash: string, cardHash = userHash): Promise<OutboxEntry[]> {
 	const scan = await scanOutbox(userHash);
 	if (scan.unavailable.size || scan.missing.size || ownedCorrupt(scan, userHash).length) {
 		throw new Error('pendingCardWrites: a record of this account cannot be read — refusing to assume it holds no card write');
 	}
-	// A card whose owner cannot be read counts as the account's: the answer
-	// stays on the safe side.
-	return scan.entries.filter((e) => e.relation === 'user_cards' && (cardOf(e) ?? userHash) === userHash
+	// A card whose owner cannot be read counts as the one asked about: the
+	// answer stays on the safe side.
+	return scan.entries.filter((e) => e.relation === 'user_cards' && (cardOf(e) ?? cardHash) === cardHash
 		&& e.status !== 'accepted' && e.status !== 'discarded');
 }
 
 /** Whose card a user_cards entry writes: an account's queue may hold the cards of identities derived from it too. */
-export function cardOf(entry: OutboxEntry): string | null {
+function cardOf(entry: OutboxEntry): string | null {
 	return entry.relation === 'user_cards' ? ownerOf(entry.mutations) || null : null;
 }
 

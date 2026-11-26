@@ -17,6 +17,7 @@ const {
 } = await import('@/lib/data/keptFiles');
 const { FileDeletedError, downloadFile } = await import('@/lib/data/fileTransfer');
 const { fileKey } = await import('@/lib/data/fileKey');
+const { keepFailureMessage } = await import('@/composables/useKeptFiles');
 
 const ALICE = 'u_' + '1'.repeat(128);
 const BOB = 'u_' + '2'.repeat(128);
@@ -97,6 +98,18 @@ const gatedStore = () => {
 };
 
 const text = (bytes: Uint8Array | null) => (bytes ? new TextDecoder().decode(bytes) : null);
+const sizeOf = (...bytes: Uint8Array[]) => bytes.reduce((n, x) => n + x.length, 0);
+/** Holds the fetch of chunk `index` of `f` until the returned function is called. */
+const holdChunkFetch = (f: PublishedFile, index: number): (() => void) => {
+	let open!: () => void;
+	const gate = new Promise<void>((resolve) => { open = resolve; });
+	const fetchOf = globalThis.fetch;
+	globalThis.fetch = (async (input: string, init?: RequestInit) => {
+		if (String(input).endsWith(`/file_chunk/${f.fileId}/${index}`)) await gate;
+		return fetchOf(input, init);
+	}) as typeof fetch;
+	return open;
+};
 /** Chunks of `f` already on this device, as a download would have left them. */
 const cacheChunks = async (f: PublishedFile, indexes: number[]) => {
 	for (const i of indexes) await putCachedChunk(f.fileId, i, f.bytes[i], f.chunkRows[i].data_hash as string);
@@ -116,16 +129,20 @@ describe('keeping a file', () => {
 		expect(await pinnedBytesOf(ALICE)).toBe(f.bytes.reduce((n, b) => n + b.length, 0));
 	});
 
-	it('pins the chunks already on this device a batch per write, without fetching them', async () => {
+	it('pins the chunks already on this device in one write of their metadata, without fetching them', async () => {
 		const f = await publishFile(fid(10), ['alpha ', 'beta ', 'gamma ', 'delta ', 'epsilon ', 'zeta ', 'eta']);
 		serve(server, f);
 		await cacheChunks(f, [0, 1, 2, 3, 4, 6]);
 		const tx = vi.spyOn(IDBDatabase.prototype, 'transaction');
+		const put = vi.spyOn(IDBObjectStore.prototype, 'put');
 		const progress: number[] = [];
 		await keepFile(ALICE, f.part, messageId, { resolveSignPkey, onProgress: (p) => progress.push(p.done) });
-		// The read of the last chunk touches it; then the six on disk in two batches, the fetched one alone.
-		expect(tx.mock.calls.filter(([, mode]) => mode === 'readwrite')).toHaveLength(4);
+		// The six on disk in one write, the fetched one in another; reading the last chunk writes nothing.
+		expect(tx.mock.calls.filter(([, mode]) => mode === 'readwrite')).toHaveLength(2);
+		// Bytes are written for the fetched chunk alone: a pin rewrites no chunk's bytes.
+		expect(put.mock.contexts.filter((store) => (store as IDBObjectStore).name === 'chunks')).toHaveLength(1);
 		tx.mockRestore();
+		put.mockRestore();
 		expect(server.chunkRequests).toEqual([`${f.fileId}:5`]);
 		expect(progress).toEqual([6, 7]);
 		expect(await pinnedBytesOf(ALICE)).toBe(f.bytes.reduce((n, b) => n + b.length, 0));
@@ -148,18 +165,21 @@ describe('keeping a file', () => {
 		const f = await publishFile(fid(17), ['one ', 'two ', 'three']);
 		const other = await publishFile(fid(18), ['x']);
 		serve(server, f);
-		await expect(keepFile(ALICE, { ...f.part, encSecretB64: other.secretB64 }, messageId, { resolveSignPkey })).rejects.toThrow();
+		const e = await keepFile(ALICE, { ...f.part, encSecretB64: other.secretB64 }, messageId, { resolveSignPkey }).then(() => null, (err) => err);
+		expect(e).toMatchObject({ name: 'FileVerificationError', kind: 'invalid', chunkIndex: 2 });
 		expect(server.chunkRequests).toEqual([`${f.fileId}:2`]);
 		expect(await listKeptFiles(ALICE)).toEqual({});
 		expect(await pinnedBytesOf(ALICE)).toBe(0);
 	});
 
-	it('refuses a file with a chunk the secret does not open', async () => {
+	it('refuses a file with a chunk the secret does not open, and says it could not be verified', async () => {
 		const f = await publishFile(fid(20), ['one ', 'two ', 'three'], [1]);
 		serve(server, f);
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-		await expect(keepFile(ALICE, f.part, messageId, { resolveSignPkey })).rejects.toThrow();
+		const e = await keepFile(ALICE, f.part, messageId, { resolveSignPkey }).then(() => null, (err) => err);
 		warn.mockRestore();
+		expect(e).toMatchObject({ name: 'FileVerificationError', kind: 'invalid', chunkIndex: 1 });
+		expect(keepFailureMessage(e)).toBe('This file could not be verified, so it is not kept.');
 		expect(await listKeptFiles(ALICE)).toEqual({});
 		expect(await pinnedBytesOf(ALICE)).toBe(0);
 	});
@@ -173,6 +193,14 @@ describe('keeping a file', () => {
 		expect(server.chunkRequests).toEqual([]);
 		expect(await listKeptFiles(ALICE)).toEqual({});
 		expect(await pinnedBytesOf(ALICE)).toBe(0);
+	});
+
+	it('says a kept copy that no longer opens could not be verified', async () => {
+		const f = await publishFile(fid(21), ['kept']);
+		serve(server, f);
+		const entry = await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
+		await putCachedChunk(f.fileId, 0, f.bytes[0].map((b) => b ^ 1), entry.chunkHashes[0]);
+		await expect(openKeptFile(ALICE, entry.fileKey)).rejects.toMatchObject({ name: 'FileVerificationError', kind: 'invalid', chunkIndex: 0 });
 	});
 
 	it('seals the index under the account\'s key: no secret, file id or name readable on disk', async () => {
@@ -318,14 +346,7 @@ describe('letting a kept file go', () => {
 		serve(server, b);
 		await listKeptFiles(ALICE);
 		await keepFile(ALICE, a.part, messageId, { resolveSignPkey });
-		let open!: () => void;
-		const gate = new Promise<void>((resolve) => { open = resolve; });
-		const fetchOf = globalThis.fetch;
-		globalThis.fetch = (async (input: string, init?: RequestInit) => {
-			if (String(input).endsWith(`/file_chunk/${b.fileId}/1`)) await gate;
-			return fetchOf(input, init);
-		}) as typeof fetch;
-		const sizeOf = (...bytes: Uint8Array[]) => bytes.reduce((n, x) => n + x.length, 0);
+		const open = holdChunkFetch(b, 1);
 
 		// b's last chunk is read first and pinned last, so b has chunk 0 pinned while chunk 1 waits.
 		const keeping = keepFile(ALICE, b.part, messageId, { resolveSignPkey });
@@ -336,7 +357,7 @@ describe('letting a kept file go', () => {
 		await releaseKeptFile(ALICE, fileKey(a.part));
 		tx.mockRestore();
 		await vi.waitFor(async () => expect(await pinnedBytesOf(ALICE)).toBe(b.bytes[0].length));
-		// Time for the sweep to queue on b's file lock; then the keep finishes, then the sweep's turn on b.
+		// Time for the sweep to reach b, whose lock the keep holds; then the keep finishes.
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		open();
 		await keeping;
@@ -344,6 +365,69 @@ describe('letting a kept file go', () => {
 		warn.mockRestore();
 		expect(Object.keys(await listKeptFiles(ALICE))).toEqual([fileKey(b.part)]);
 		expect(await pinnedBytesOf(ALICE)).toBe(sizeOf(...b.bytes));
+	});
+
+	it('a sweep passes over a file a keep is still pinning, so the sweep after it does not wait for that keep', async () => {
+		const a = await publishFile(fid(28), ['first']);
+		const b = await publishFile(fid(29), ['one ', 'two ', 'three']);
+		serve(server, a);
+		serve(server, b);
+		await keepFile(ALICE, a.part, messageId, { resolveSignPkey });
+		const open = holdChunkFetch(b, 1);
+		const keeping = keepFile(ALICE, b.part, messageId, { resolveSignPkey });
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			await vi.waitFor(async () => expect(await pinnedBytesOf(ALICE)).toBe(sizeOf(a.bytes[0], b.bytes[0])));
+			// The page's first listing sweeps, and finds b pinned but not listed yet.
+			await listKeptFiles(ALICE);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			// a's unpin fails; the sweep it asks for releases a while b's keep is still under way.
+			const tx = failNextTransaction();
+			await releaseKeptFile(ALICE, fileKey(a.part));
+			tx.mockRestore();
+			await vi.waitFor(async () => expect(await pinnedBytesOf(ALICE)).toBe(b.bytes[0].length));
+		} finally {
+			open();
+			await keeping;
+			warn.mockRestore();
+		}
+		expect(Object.keys(await listKeptFiles(ALICE))).toEqual([fileKey(b.part)]);
+		await _settleKeptFilesSweepsForTests();
+		expect(await pinnedBytesOf(ALICE)).toBe(sizeOf(...b.bytes));
+	});
+
+	it('runs an account\'s sweeps one after another, and one waiting to start covers every call made meanwhile', async () => {
+		const disk = gatedStore();
+		_setKeptFilesStoreForTests(disk.store, keyOf);
+		const kept = await Promise.all([30, 31, 32].map((n) => publishFile(fid(n), [`kept ${n}`])));
+		for (const f of kept) {
+			serve(server, f);
+			await keepFile(ALICE, f.part, messageId, { resolveSignPkey });
+		}
+		const stray = await publishFile(fid(33), ['stray']);
+		await pinChunk(stray.fileId, 0, stray.chunkRows[0].data_hash as string, ALICE, stray.bytes[0]);
+		// Each sweep lists the account's pinned files once, from the pins index.
+		const cursors = vi.spyOn(IDBIndex.prototype, 'openKeyCursor');
+		const sweeps = () => cursors.mock.contexts.filter((index) => (index as IDBIndex).name === 'pins').length;
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		// The first listing's sweep holds at its read of the index, under the stray file's lock.
+		const reading = disk.holdGet();
+		await listKeptFiles(ALICE);
+		await reading.at;
+		// Three releases whose unpins fail, each asking for a sweep meanwhile.
+		for (const f of kept) {
+			const tx = failNextTransaction();
+			await releaseKeptFile(ALICE, fileKey(f.part));
+			tx.mockRestore();
+		}
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(sweeps()).toBe(1);
+		reading.open();
+		await vi.waitFor(async () => expect(await pinnedBytesOf(ALICE)).toBe(0));
+		await _settleKeptFilesSweepsForTests();
+		warn.mockRestore();
+		expect(sweeps()).toBe(2);
 	});
 
 	it('an account leaving the device takes its index and pins, without its key', async () => {

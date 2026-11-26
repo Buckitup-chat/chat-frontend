@@ -72,7 +72,8 @@ vi.mock('@/lib/data/collections', () => ({
 	getDialogCollections: () => collections.dialog,
 	withDialogCollections: async (h: string, read: (dialog: typeof collections.dialog) => unknown) => read(collections.dialog),
 }));
-vi.mock('@/lib/data/ingest', () => ({
+vi.mock('@/lib/data/ingest', async (importOriginal) => ({
+	...await importOriginal<typeof import('@/lib/data/ingest')>(),
 	sendMutationsAndAwaitShape: async (mutations: CapturedMutation[]) => {
 		CAPTURE.mutations.push(mutations[0]);
 		if (CAPTURE.gate) await CAPTURE.gate;
@@ -89,7 +90,7 @@ vi.mock('@/libs/EncryptionManagerPQ', () => ({
 
 const PageChat = (await import('@/views/chats/Page_Chat.vue')).default;
 const { useDialogsStore } = await import('@/store/dialogs.store');
-const { deriveSenderMsgKey, wrapSenderMsgKey, encryptContent } = await import('@buckitup/pq-client/dialogs');
+const { deriveSenderMsgKey, wrapSenderMsgKey, encryptContent, newMessageId } = await import('@buckitup/pq-client/dialogs');
 
 const makeIdentity = (seed: number) => {
 	const sign = ml_dsa87.keygen(new Uint8Array(32).fill(seed));
@@ -117,13 +118,15 @@ const waitUntil = async (predicate: () => boolean, timeoutMs = 15_000) => {
 };
 
 let seq = 0;
-const nextMessageId = () => `dmsg_0199proj${(seq++).toString().padStart(4, '0')}`;
+// One millisecond apart, so the ids sort in the order the test creates them.
+const nextMessageId = () => newMessageId(0x0199a1b2c3d4 + seq++);
 
 describe('message projection lifecycle: local → SERVER_ACCEPTED → verified canonical (main-tanstack-proposal-v3.md §445-463, §657-711)', () => {
-	let store: ReturnType<typeof useDialogsStore>, me: ReturnType<typeof makeIdentity>, peer: ReturnType<typeof makeIdentity>, dialogHash: string, senderKey: ReturnType<typeof deriveSenderMsgKey>, admitSpy: MockInstance<ReturnType<typeof useDialogsStore>['admitMessageRow']>;
+	let pinia: ReturnType<typeof createPinia>, store: ReturnType<typeof useDialogsStore>, me: ReturnType<typeof makeIdentity>, peer: ReturnType<typeof makeIdentity>, dialogHash: string, senderKey: ReturnType<typeof deriveSenderMsgKey>, admitSpy: MockInstance<ReturnType<typeof useDialogsStore>['admitMessageRow']>;
 
 	beforeEach(async () => {
-		setActivePinia(createPinia());
+		pinia = createPinia();
+		setActivePinia(pinia);
 		resetCardRegistry();
 		_setStoreForTests(makeMemStringStore());
 		_setIntentStorageForTests(makeMemStringStore());
@@ -174,6 +177,7 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 
 	const mountChat = () => mount(PageChat, {
 		global: {
+			plugins: [pinia],
 			provide: { $swal: { fire: async () => ({}) } },
 			stubs: { Avatar: true, TransferPanel: true, FileStateModal: true, EditHistoryModal: true, CheckpointDiffModal: true },
 		},
@@ -216,12 +220,13 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 			expect(collections.dialog.messages.rows.size).toBe(0);
 
 			const dispatched = CAPTURE.mutations.at(-1)!.modified;
-			const unresolvedParent = { ['dmsg_never_' + 'a'.repeat(8)]: 'dms_' + 'f'.repeat(128) };
+			const unresolvedParent = { [nextMessageId()]: 'dms_' + 'f'.repeat(128) };
 			const waitingRefsB64 = await encryptContent(senderKey, JSON.stringify(unresolvedParent));
 			const waitingFields = { ...dispatched, refs_map_b64: waitingRefsB64 };
 			const waitingRow = { ...waitingFields, sign_b64: signFields(waitingFields, me.sign.secretKey) };
 			waitingRow.sign_hash = deriveSignHash('dms_', waitingRow.sign_b64);
 			deliverShape(waitingRow);
+			expect((await waitForVerdict(waitingRow.sign_hash)).status).toBe('waiting');
 			await new Promise((r) => setTimeout(r, 400));
 			expect(wrapper.text()).toContain('boundary one two three');
 			expect(wrapper.findAll('.message-bubble')).toHaveLength(1);
@@ -239,6 +244,7 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 	});
 
 	it('rolls back to the pre-fix bug on a local revert: an unverified/waiting echo alone would have cleared the projection', async () => {
+		const parentId = nextMessageId();
 		const messageId = nextMessageId();
 		const optId = store.addOptimisticMessageWithId(dialogHash, messageId, 'still just typed', 1_700_000_100 as never);
 		store.updateOptimisticStatus(optId, 'synced');
@@ -247,9 +253,10 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 		try {
 			await waitUntil(() => wrapper.text().includes('still just typed'));
 
-			const missingParent = { ['dmsg_missing_' + 'b'.repeat(8)]: 'dms_' + '1'.repeat(128) };
+			const missingParent = { [parentId]: 'dms_' + '1'.repeat(128) };
 			const row = await signedRow(messageId, 'wrong text from a waiting echo', missingParent);
 			deliverShape(row);
+			expect((await waitForVerdict(row.sign_hash)).status).toBe('waiting');
 			await new Promise((r) => setTimeout(r, 400));
 
 			expect(store.isMessageAdmitted(dialogHash, messageId, row.sign_hash)).toBe(false);
@@ -321,9 +328,13 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 			CAPTURE.gate = new Promise((r) => { releaseAccept = r; });
 			await wrapper.find('input[type="text"]').setValue('newer still-pending message');
 			await wrapper.find('form').trigger('submit');
-			releaseAccept();
 			await waitUntil(() => wrapper.text().includes('newer still-pending message'));
+			expect(wrapper.text()).toContain('older already-verified message');
+			expect(wrapper.findAll('.message-bubble')).toHaveLength(2);
 
+			releaseAccept();
+			// Both messages show accepted, so the send has settled: left running, it would land in the next test.
+			await waitUntil(() => wrapper.findAll('.sync-status.synced').length === 2);
 			expect(wrapper.text()).toContain('older already-verified message');
 			expect(wrapper.text()).toContain('newer still-pending message');
 			expect(wrapper.findAll('.message-bubble')).toHaveLength(2);
@@ -343,7 +354,7 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 		try {
 			await waitUntil(() => wrapper.text().includes('still typed, not deleted yet'));
 
-			const missingParentId = 'dmsg_missing_' + 'c'.repeat(8);
+			const missingParentId = nextMessageId();
 			const parentRow = await signedRow(missingParentId, 'the original message', {}, { owner_timestamp: 1_700_000_050 });
 
 			const unresolvedRef = { [parentRow.message_id]: parentRow.sign_hash };
@@ -382,7 +393,7 @@ describe('message projection lifecycle: local → SERVER_ACCEPTED → verified c
 			await waitUntil(() => wrapper.text().includes('Message deleted'));
 			expect(wrapper.findAll('.message-bubble')).toHaveLength(1);
 
-			const missingParentId = 'dmsg_missing_' + 'd'.repeat(8);
+			const missingParentId = nextMessageId();
 			const parentRow = await signedRow(
 				missingParentId, 'the real original', { [messageId]: revisionA.sign_hash }, { owner_timestamp: 1_700_000_040 }
 			);

@@ -2,12 +2,13 @@
 // record per composed message: its peer and caption, the parts already
 // uploaded, and per file still uploading the file_id and enc_secret, written
 // before the file's first chunk PUT. After a reload the queue shows those files
-// paused, and the same file picked again resumes where the device stopped.
+// paused, and the same file picked again resumes where the device stopped; a
+// record whose files had all landed has its message stored for sending.
 // The record holds keys that open content, so it is sealed with the account's
 // local key (docs/invariants.md §1).
 
-import { IndexedDbStore } from './indexedDbStore';
-import { createSecureStore, type StringStore } from './secureStore';
+import { accountSealedStore } from './accountSealedStore';
+import type { StringStore } from './secureStore';
 import { CHUNK_SIZE } from '@buckitup/pq-client/fileCrypto';
 
 /** The server drops the chunks of an upload left uncommitted for 48 hours (pq_files §8). */
@@ -38,17 +39,37 @@ export interface PendingBatch {
 	updatedAt: number;
 }
 
-let raw: StringStore = new IndexedDbStore('buckitup-pending-uploads');
-let keyFor = async (owner: string): Promise<CryptoKey> =>
-	(await import('./localCrypto')).getLocalStorageKeyFor(owner);
+const store = accountSealedStore('buckitup-pending-uploads');
 
-export const _setPendingUploadsStoreForTests = (store: StringStore, key?: (owner: string) => Promise<CryptoKey>): void => {
-	raw = store;
-	if (key) keyFor = key;
+export const _setPendingUploadsStoreForTests = store.setForTests;
+
+// As stored, a record is its write time in the clear beside the sealed rest.
+// The time is not content; kept outside the seal, it lets any account's
+// sign-in remove the expired records of every account on this device,
+// including one that never signs in here again.
+interface Stored {
+	updatedAt: number;
+	sealed: string;
+}
+
+const storedOf = (value: string | null): Stored | null => {
+	if (value === null) return null;
+	try {
+		const stored = JSON.parse(value) as Stored;
+		return typeof stored?.updatedAt === 'number' && typeof stored.sealed === 'string' ? stored : null;
+	} catch {
+		return null;
+	}
 };
 
-const sealed = (owner: string): StringStore => createSecureStore(raw, { getKey: () => keyFor(owner) });
-const prefix = (owner: string) => `${owner}|`;
+/** The raw store seen through the envelope; what it writes carries `updatedAt`. */
+const enveloped = (updatedAt?: number): StringStore => ({
+	get: async (key) => storedOf(await store.raw.get(key))?.sealed ?? null,
+	set: (key, sealed) => store.raw.set(key, JSON.stringify({ updatedAt, sealed })),
+	delete: (key) => store.raw.delete(key),
+	keys: () => store.raw.keys(),
+	clear: () => store.raw.clear(),
+});
 
 const isPendingFile = (f: PendingFile): boolean =>
 	[f?.fileId, f?.encSecretB64, f?.name, f?.mimeType].every((v) => typeof v === 'string')
@@ -59,41 +80,46 @@ const isPendingFile = (f: PendingFile): boolean =>
 
 const isPendingBatch = (b: PendingBatch): boolean =>
 	typeof b?.batchId === 'string' && typeof b.peerHash === 'string' && typeof b.caption === 'string'
-	&& typeof b.updatedAt === 'number' && Array.isArray(b.parts) && Array.isArray(b.files)
-	// A record is kept only while a file is still uploading (transfers.store.js).
-	&& b.files.length > 0 && b.files.every(isPendingFile);
+	&& Array.isArray(b.parts) && Array.isArray(b.files)
+	// A record is kept only while its message has something to send (transfers.store.js).
+	&& (b.files.length > 0 || b.parts.length > 0) && b.files.every(isPendingFile);
 
-export const savePendingBatch = (owner: string, batch: PendingBatch): Promise<void> =>
-	sealed(owner).set(prefix(owner) + batch.batchId, JSON.stringify(batch));
+export const savePendingBatch = (owner: string, { updatedAt, ...content }: PendingBatch): Promise<void> =>
+	store.sealed(owner, enveloped(updatedAt)).set(store.keyOf(owner, content.batchId), JSON.stringify(content));
 
-export const forgetPendingBatch = (owner: string, batchId: string): Promise<void> => raw.delete(prefix(owner) + batchId);
+export const forgetPendingBatch = (owner: string, batchId: string): Promise<void> => store.raw.delete(store.keyOf(owner, batchId));
 
 /**
- * The owner's records still worth resuming. A malformed record or one past
- * PENDING_UPLOAD_TTL_MS is removed; one that does not open is left alone and
+ * The owner's records still worth resuming. Removes every account's records
+ * past PENDING_UPLOAD_TTL_MS or not in the stored form, with no key, and a
+ * malformed record of the owner; one that does not open is left alone and
  * skipped, like every sealed record (docs/persistence-encryption.md).
  */
 export const pendingBatches = async (owner: string, now = Date.now()): Promise<PendingBatch[]> => {
 	const found: PendingBatch[] = [];
-	for (const key of await raw.keys()) {
-		if (!key.startsWith(prefix(owner))) continue;
-		let stored: string | null;
+	for (const key of await store.raw.keys()) {
+		const stored = storedOf(await store.raw.get(key));
+		if (!stored || now - stored.updatedAt > PENDING_UPLOAD_TTL_MS) {
+			await store.raw.delete(key);
+			continue;
+		}
+		if (!store.isOwners(owner, key)) continue;
+		let content: string | null;
 		try {
-			stored = await sealed(owner).get(key);
+			// The record read above, opened without reading it again.
+			content = await store.sealed(owner, { ...enveloped(), get: async () => stored.sealed }).get(key);
 		} catch (e) {
 			console.warn('[pendingUploads] a record did not open:', e);
 			continue;
 		}
 		let batch: PendingBatch | null = null;
 		try {
-			batch = stored === null ? null : JSON.parse(stored);
+			batch = content === null ? null : { ...JSON.parse(content), updatedAt: stored.updatedAt };
 		} catch { /* malformed: removed below */ }
-		if (batch && isPendingBatch(batch) && now - batch.updatedAt <= PENDING_UPLOAD_TTL_MS) found.push(batch);
-		else await raw.delete(key);
+		if (batch && isPendingBatch(batch)) found.push(batch);
+		else await store.raw.delete(key);
 	}
 	return found;
 };
 
-export const forgetAccountPendingUploads = async (owner: string): Promise<void> => {
-	for (const key of await raw.keys()) if (key.startsWith(prefix(owner))) await raw.delete(key);
-};
+export const forgetAccountPendingUploads = (owner: string): Promise<void> => store.forgetAccount(owner);

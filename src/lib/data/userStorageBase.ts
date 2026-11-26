@@ -30,6 +30,10 @@ export async function getServerState(userHash: string, uuid: string): Promise<Se
 	return { state: 'found', row };
 }
 
+export function getHeldServerRow(userHash: string, uuid: string): UserStorageRow | null {
+	return (getUserStorageCollection(userHash).get(entityKeyFor(userHash, uuid)) as UserStorageRow | undefined) ?? null;
+}
+
 export async function getLiveServerState(userHash: string, uuid: string): Promise<ServerLookup> {
 	const coll = getUserStorageCollection(userHash);
 	const shape = await settled(coll as unknown as Parameters<typeof settled>[0]);

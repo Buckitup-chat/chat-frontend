@@ -220,18 +220,19 @@ and workspace paths describe that plan rather than current setup instructions.
 
 | Rollout area | Current implementation |
 | --- | --- |
-| Protocol module | Installed npm `@buckitup/pq-client@1.0.0`, maintained in `Buckitup-chat/pq-library`; no frontend workspace package or SDK source alias. |
+| Protocol module | Installed `@buckitup/pq-client`, maintained in `Buckitup-chat/pq-library`; the contact-access integration consumes `1.1.0` as documented in the README. No frontend workspace package or SDK source alias. |
 | Application engine and camera | `src/lib/handshake/engine.ts`, `src/components/engines/QRScannerEngine.vue` and `src/lib/handshake/qwbpChannel.ts`. |
 | Candidate selection and patched QWBP | `src/lib/data/handshakeAddresses.ts` and `patches/qwbp+0.1.0.patch`, applied by `patch-package`. |
 | Relay credentials | `src/lib/data/turnCredentials.ts` uses the backend challenge/credentials flow and caches credentials in memory. The static relay override remains available for local development; production builds receive no static override. |
-| Contact confirmation and vouches | `Modal_QrHandshake.vue`, `userPQ.store.js` and `contactVouches.ts` apply the verified identity and the app's device-access policy. |
+| Contact confirmation and vouches | The modal/store save verified confirmation and pass reliable prior state to SDK `contactAccess`. The SDK owns initial grant, explicit revoke/regrant and view state; the app supplies adapters, scheduling and the confirmation UI. The contact stays saved when its permissions are revoked. |
 | Protocol tests | `pq-library/tests/handshake.test.ts` and `pq-library/tests/cardVouchesForContactKey.test.ts`. |
 | App tests | Frontend `tests/handshake.test.ts`, `tests/qrHandshakeEngine.test.js`, `tests/contactVouchTokens.test.ts` and `tests/qwbpSelectCandidates.test.ts`. |
 | Browser check tooling | `scripts/handshake-check/check.mjs`, invoked by `npm run test:handshake`. |
 
 The original first step was to create the protocol inside the frontend.
 The agreed standalone-library decision replaces that step with installing the
-npm release. Protocol implementation and unit tests are maintained with the
+version-pinned package described in [SDK integration](../README.md#protocol-sdk).
+Protocol implementation and unit tests are maintained with the
 SDK; the frontend keeps its integration tests and browser tools. The sandbox
 remains a separate development experiment, including animated QR, rather than
 the production protocol source.

@@ -60,9 +60,9 @@ netlify/        Netlify redirect function for SPA preview hosting
 
 ## Protocol SDK
 
-The application installs [`@buckitup/pq-client@1.0.0`](https://www.npmjs.com/package/@buckitup/pq-client)
-from npm, pinned with registry integrity in `package-lock.json`. The SDK is
-developed and released from [pq-library](https://github.com/Buckitup-chat/pq-library).
+The application installs [`@buckitup/pq-client`](https://www.npmjs.com/package/@buckitup/pq-client)
+at version `1.1.0`, pinned with registry integrity in `package-lock.json`. The SDK
+is developed and released from [pq-library](https://github.com/Buckitup-chat/pq-library).
 A separate SDK checkout is not needed. Install locked dependencies with
 `npm ci --legacy-peer-deps`.
 
@@ -82,8 +82,27 @@ without source aliases or workspace links.
 The SDK owns protocol types, signing, verification, cryptographic derivations,
 transport, read sessions and identity/vault primitives. The frontend owns
 Vue/Pinia state, Electric/TanStack collections, durable intents, outbox, accepted
-snapshots, offline recovery and application policies. App storage writes retain
-that lifecycle rather than using SDK direct writes.
+snapshots, offline recovery and selection of application policies. The reusable
+contact-access policy is implemented in SDK `contactAccess`. App storage writes
+retain their durable lifecycle rather than using SDK direct writes.
+
+A contact's device-storage access follows SDK `contactAccess`: it decides the
+initial grant after a verified QR confirmation, plans and confirms explicit
+grants and revokes, and derives the state the contact page shows.
+`src/lib/data/contactVouches.ts` supplies its adapters — intents, outbox,
+shape reads, row verification and the device identity — and the app keeps the
+switch, the revoke confirmation and its context guard.
+
+The switch changes only this issuer's storage permissions; the contact stays
+saved and QR-confirmed. Repeating confirmation of the same key does not restore
+revoked access. The SDK rejects unknown or malformed prior contact state when
+deciding an initial grant. Its displayed state confirms verified permission
+rows; effective access still depends on the backend's mode and trust chain.
+An owner's direct tombstone blocks alternative paths at its scope, whereas a
+non-owner's revoke may leave another valid path. Already issued read sessions
+in `trust` may remain valid until their five-minute expiry. See
+[the integration task](docs/task-access-gating-client.md) for behavior and
+deployment acceptance requirements.
 
 `sender_msg_key` is derived by SDK `deriveSenderMsgKey` from `sign_skey`,
 `crypt_skey` and the peer's `user_hash`, without `evm_skey`. Before sending,

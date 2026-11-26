@@ -6,6 +6,7 @@
 // starts without one, and stays ownerless until someone's card is ingested
 // over HTTP there.
 import { api } from '@/api/client';
+import { unanswered } from './transport';
 
 const USER_HASH = /^u_[0-9a-f]{128}$/;
 const DEVICE_ID = /^[^.\s]+$/;
@@ -15,18 +16,26 @@ export interface DeviceIdentity {
 	adminHash: string | null;
 }
 
-export async function readDeviceIdentity(): Promise<DeviceIdentity | null> {
+export type DeviceIdentityRead =
+	| { kind: 'identity'; identity: DeviceIdentity }
+	/** No answer at all: a fact about the connection, not about the device. */
+	| { kind: 'no-answer'; error: unknown }
+	/** The server answered, but not with a device identity. */
+	| { kind: 'failed'; error: unknown };
+
+export async function readDeviceIdentity(): Promise<DeviceIdentityRead> {
 	let body: unknown;
 	try {
 		body = await api.getDeviceIdentity();
-	} catch {
-		return null;
+	} catch (error) {
+		return { kind: unanswered(error) ? 'no-answer' : 'failed', error };
 	}
-	return parseDeviceIdentity(body);
+	const identity = parseDeviceIdentity(body);
+	return identity ? { kind: 'identity', identity } : { kind: 'failed', error: new Error('the answer is not a device identity') };
 }
 
 /** The device identity in a /device_identity answer, or null for one that is not. */
-export function parseDeviceIdentity(body: unknown): DeviceIdentity | null {
+function parseDeviceIdentity(body: unknown): DeviceIdentity | null {
 	if (!body || typeof body !== 'object') return null;
 	const { device_id: deviceId, admin } = body as { device_id?: unknown; admin?: { user_hash?: unknown } | null };
 	if (typeof deviceId !== 'string' || !DEVICE_ID.test(deviceId)) return null;

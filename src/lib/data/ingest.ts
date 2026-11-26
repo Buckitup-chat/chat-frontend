@@ -9,13 +9,14 @@
 // conflict as applied only after proving the server row carries our exact
 // signature (see confirm.ts).
 import { api } from '@/api/client';
+import { unanswered } from './transport';
 import { mutationAppliedOnServer, derivedRowAppliedOnServer, type MutationLike } from './confirm';
 import { discoverDependencies, reconcileAccepted } from './coordinator';
 import { OWNER_FIELD, ownerOf } from './writeContracts';
 import { VaultLockedError, AccountMismatchError, resolveSigningKey, type SigningKeySource } from './keyCustody';
 import { derivedSigner, sessionAccount, type DerivedSigner } from './sessionIdentities';
-import { parseDeviceIdentity } from './deviceOwner';
-import { getVerifiedSignPkey } from './cardRegistry';
+import { readDeviceIdentity } from './deviceOwner';
+import { readShapeOnce } from './shapeRead';
 import {
 	enqueue, stopDrainLoop as stopOutboxLoop, awaitEntryOutcome, dependencyBlockFor, wakeAccountSender, releaseNetworkBackoffs,
 	approvalHeldShapes, approvalProbeCandidate, sendApprovalProbe, onApprovalHeldChange, AWAITING_APPROVAL_MESSAGE,
@@ -25,7 +26,7 @@ import {
 import { setWriteProber, syncBlockedWrites } from './accessGate';
 import type { IngestRowResult } from '@buckitup/pq-client/types';
 import {
-	checkResults, classifyRowResult, isNoAnswer, NOT_IN_TRUST_CHAIN, TransportError, validationReasons,
+	checkResults, classifyRowResult, NOT_IN_TRUST_CHAIN, TransportError, validationReasons,
 	type ValidationReason, type WriteRejection,
 } from '@buckitup/pq-client/transport';
 
@@ -116,8 +117,7 @@ export async function sendMutations(mutations: unknown[], signSkey: Uint8Array):
 		if (e instanceof VaultLockedError || e instanceof AccountMismatchError) throw e;
 		// Only a request that got no answer — fetch failed or timed out — is a
 		// fact about connectivity; a server that answered with garbage is not.
-		const network = (e instanceof TransportError && e.network) || isNoAnswer(e);
-		throw new IngestError(`ingest network error: ${e}`, { permanent: false, network });
+		throw new IngestError(`ingest network error: ${e}`, { permanent: false, network: unanswered(e) });
 	}
 
 	// The server reports per-row outcomes in the body even on 4xx.
@@ -361,9 +361,7 @@ const replaySend = (account: string, signingKey: SigningKeySource) => async (mut
 	if (author !== (signer?.userHash ?? account)) {
 		throw new IngestError('outbox: the rows were not written by the account or the identity of it the entry names', { permanent: true });
 	}
-	// A card the server already holds cannot make anyone its owner: the insert
-	// only meets it, and derivedRowAppliedOnServer settles that.
-	if (signer && entry?.relation === 'user_cards' && !(await getVerifiedSignPkey(author))) await requireDeviceOwner();
+	if (signer && entry?.relation === 'user_cards') await requireOwnerOrCard(author);
 	const key = signer ? await signer.signingKey() : await resolveSigningKey(signingKey);
 	try {
 		return await sendMutationsWithRetry(mutations, key, {
@@ -379,23 +377,36 @@ const replaySend = (account: string, signingKey: SigningKeySource) => async (mut
 
 // The backend makes the first card it takes over HTTP the device's owner
 // (OwnerBootstrap): a derived identity's card waits until the device has one,
-// so that no identity derived from an account ends up owning a server.
-// An owner, once there, stays: it is read until it is seen, then no more.
-let deviceOwnerSeen = false;
-async function requireDeviceOwner(): Promise<void> {
-	if (deviceOwnerSeen) return;
-	let body: unknown;
-	try {
-		body = await api.getDeviceIdentity();
-	} catch (e) {
+// so that no identity derived from an account ends up owning a server. A card
+// the server already holds goes at once: the insert only meets it, which makes
+// no one the owner, and derivedRowAppliedOnServer settles that.
+// Both are asked of the server before each attempt, never remembered and never
+// taken from a card cache: a node reset leaves the server with neither, while
+// the tab and its caches stay as they were.
+async function requireOwnerOrCard(cardHash: string): Promise<void> {
+	const device = await readDeviceIdentity();
+	if (device.kind !== 'identity') {
 		// No answer is a fact about the connection; a server's answer is the server's.
-		const network = (e instanceof TransportError && e.network) || isNoAnswer(e);
-		throw new IngestError(`the device's owner could not be read: a derived card waits for it (${e})`, { permanent: false, network });
+		throw new IngestError(`the device's owner could not be read: a derived card waits for it (${device.error})`, { permanent: false, network: device.kind === 'no-answer' });
 	}
-	const device = parseDeviceIdentity(body);
-	if (!device) throw new IngestError('the device identity is unreadable: a derived card waits for it', { permanent: false });
-	if (!device.adminHash) throw new IngestError('the device has no owner yet: a derived card waits for one', { permanent: false });
-	deviceOwnerSeen = true;
+	if (device.identity.adminHash || await serverHoldsCard(cardHash)) return;
+	throw new IngestError('the device has no owner yet: a derived card waits for one', { permanent: false });
+}
+
+/**
+ * Whether the server holds a row of `userHash`'s card now, deleted or not: any
+ * row means the insert only meets it. A read that got no answer is a fact
+ * about the connection, and throws as one; a refused read tells nothing, and
+ * counts as no.
+ */
+async function serverHoldsCard(userHash: string): Promise<boolean> {
+	try {
+		const rows = await readShapeOnce<{ user_hash?: unknown }>('user_cards', `user_hash='${userHash}'`);
+		return rows.some((r) => r.user_hash === userHash);
+	} catch (e) {
+		if (unanswered(e)) throw new IngestError(`whether the server holds the card could not be read: a derived card waits for it (${e})`, { permanent: false, network: true });
+		return false;
+	}
 }
 
 // A derived identity's rows are not the account's own base rows: no accepted

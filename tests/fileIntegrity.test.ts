@@ -192,6 +192,16 @@ describe('chunks out of place', () => {
 		expect(chunkRequests).toEqual([]);
 	});
 
+	it('a chunk the message\'s secret does not open: refused, naming it, and cached nowhere', async () => {
+		const f = await makeFile(['zero', 'one']);
+		server = { manifest: f.manifestRow, chunkRows: f.chunkRows, bytes: f.bytes };
+		const e = await refusal(download(toBase64(generateEncSecret())));
+		expect(e).toMatchObject({ kind: 'invalid', chunkIndex: 0 });
+		expect(e.message).toMatch(/does not decrypt/);
+		expect(chunkRequests).toEqual([0]);
+		expect(cachePuts).toEqual([]);
+	});
+
 	it('a chunk whose row has not arrived: not verifiable yet, not refused', async () => {
 		const f = await makeFile(['zero', 'one']);
 		server = { manifest: f.manifestRow, chunkRows: [f.chunkRows[0]], bytes: f.bytes };
