@@ -1,12 +1,14 @@
 # Task: notes to self in the client
 
 **Sources:** `chat` `main`: `docs/pq/reqs/pq_notes_to_self.proposed.md` (the
-contract; phases 1–3). SDK `@buckitup/pq-client` 1.0.1: `notes` (`accountNotes`,
-note peers, `DERIVED_CARD_NAMES`), `dialogs` (`sender_msg_key` without
-`evm_skey`). **Design:** "Notes and QR" (notes list, new note, rename, delete,
+contract; phases 1–3). SDK `@buckitup/pq-client` 1.1.0
+([versioned contract](https://github.com/Buckitup-chat/pq-library/blob/b723b1042ae14bad84c88743ed9ed40b966c5a83/docs/protocol.md)):
+`notes` (`accountNotes`, note peers), `derivedIdentity` (`DERIVED_CARD_NAMES`),
+`dialogs` (`sender_msg_key` without `evm_skey`).
+**Design:** "Notes and QR" (notes list, new note, rename, delete,
 search, voice note; "Each note is a separate chat with yourself. It syncs to
 your other devices.").
-**Frontend base:** `chat-frontend` `main` at `b687fa6`.
+**Frontend base:** `chat-frontend` `main` at `de48486` (includes #130).
 **After this task:** `docs/task-subaccounts-client.md` reuses its machinery.
 
 ## Where it stands
@@ -14,20 +16,18 @@ your other devices.").
 | Step | State |
 |---|---|
 | PR 1: session identities and per-signer outbox | Merged, #89 |
-| Review follow-ups of PR 1 | Issue #107. Items 2, 4, 5 in PR #130 (open, CI red only on the test main fails too, #125/#126). Items 1 and 3 wait for a decision, below |
+| Review follow-ups of PR 1 | Issue #107. Items 2, 4, 5 merged in #130: fresh owner/server-card checks before replay, quarantined-card queue checks, and distinct device-read failure outcomes. Items 1 and 3 remain open, below |
 | PR 2: notes dialogs in `dialogs.store` | To do |
 | PR 3: the note list | To do |
 | PR 4: UI | To do |
 | PR 5: guarded mode | To do |
 
-Nothing in production calls `ensureDerivedCard` yet: the notes identity has
-never been published by a user. Everything below the merged PR 1 is
-unreachable until PR 4 ships.
+`ensureDerivedCard` has no production call sites yet. Notes dialogs, the
+note list and the UI remain to be wired in PRs 2–4.
 
-## Start: PR #130 and the two open items of #107
+## Before the notes UI: the two open items of #107
 
-1. Review and merge #130 (after #126).
-2. **#107 item 1 — a derived card on a server with no owner.** The card waits
+1. **#107 item 1 — a derived card on a server with no owner.** The card waits
    (retryable) and the account's sync status stays "syncing" for as long as the
    server has no owner. The spec says notes wait and "the client says so".
    Proposed: a hold state like `approvalHeld`, released when an owner appears,
@@ -35,7 +35,7 @@ unreachable until PR 4 ships.
    has an owner". Also settle here: `ensureDerivedCard`'s first check can
    answer `present` from the card cache after a node reset; ask the server
    instead, as #130 does for the owner gate.
-3. **#107 item 3 — an older build replaying a derived write with the account's
+2. **#107 item 3 — an older build replaying a derived write with the account's
    key.** An old tab holding the leader lock ignores `entry.signer` and proves
    a notes row with the account's key: the server refuses it but has seen the
    two together. Proposed: a format version on outbox records that older
@@ -88,7 +88,9 @@ Both must be closed before PR 4 ships.
 ## PR 5: guarded mode (spec phase 3)
 
 - On a notes write held as `not_in_trust_chain`, write the vouch on demand:
-  `setContactAccess(account, notesHash, true)`; then the write resumes.
+  call `setContactAccess(account, notesHash, true)` on the active
+  `EncryptionManagerPQ` instance, which delegates to the SDK's `contactAccess`
+  service; then the write resumes.
 - Approval holds become per signer.
 - An account at the owner's maximum chain depth cannot keep notes on that
   server: say so, never fail silently.

@@ -1,10 +1,12 @@
 # Task: subaccounts in the client — personas, adding accounts, switching
 
-**Status:** decisions of 2026-11-24 applied.
+**Status:** implementation planned; decisions of 2026-11-24 reflected below.
 **Sources:** `chat` `main`: `docs/pq/reqs/pq_subaccounts.proposed.md` (this task
 is its client side; the decisions below amend it), `pq_notes_to_self.proposed.md`
-(derived identities, already in the client).
-SDK `@buckitup/pq-client` 1.0.1. **Frontend base:** `chat-frontend` `main` at `b687fa6`.
+(notes identity derivation and per-signer session support already in the client).
+SDK `@buckitup/pq-client` 1.1.0
+([versioned contract](https://github.com/Buckitup-chat/pq-library/blob/b723b1042ae14bad84c88743ed9ed40b966c5a83/docs/protocol.md)).
+**Frontend base:** `chat-frontend` `main` at `de48486` (includes #130).
 **Before this task:** notes to self (`docs/task-notes-client.md`), which builds
 the derived-identity machinery this task reuses.
 
