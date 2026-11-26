@@ -69,7 +69,10 @@ const send = async (write: ContactAccessWrite, session: ContactAccessSession): P
 };
 
 export const contactAccess = createContactAccess({
-	readDeviceIdentity,
+	readDeviceIdentity: async () => {
+		const device = await readDeviceIdentity();
+		return device.kind === 'identity' ? device.identity : null;
+	},
 	readVouchRows: async ({ issuerHash, subjectHash }) => {
 		const where = issuerHash ? `issuer_hash='${issuerHash}' AND subject_hash='${subjectHash}'` : `subject_hash='${subjectHash}'`;
 		try {

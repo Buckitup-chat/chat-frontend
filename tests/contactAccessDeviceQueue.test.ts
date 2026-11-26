@@ -32,7 +32,7 @@ vi.mock('@/lib/data/outbox', () => ({
 	discardEntry: vi.fn(),
 	SessionFencedError: class extends Error {},
 }));
-vi.mock('@/lib/data/deviceOwner', () => ({ readDeviceIdentity: async () => ({ deviceId: h.deviceId, adminHash: h.issuer }) }));
+vi.mock('@/lib/data/deviceOwner', () => ({ readDeviceIdentity: async () => ({ kind: 'identity', identity: { deviceId: h.deviceId, adminHash: h.issuer } }) }));
 vi.mock('@/lib/data/cardRegistry', () => ({ getVerifiedSignPkey: async () => 'verified-key' }));
 vi.mock('@/lib/data/rowVerification', () => ({ verifyReplicatedRow: async () => ({ status: 'verified' }) }));
 vi.mock('@/lib/data/keyCustody', () => ({ resolveSigningKey: async () => new Uint8Array(32) }));

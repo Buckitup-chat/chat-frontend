@@ -14,14 +14,17 @@ vi.mock('@/lib/data/contactVouches', async () => {
 	const { readDeviceIdentity } = await import('@/lib/data/deviceOwner');
 	return {
 		contactAccess: {
-			snapshot: async (issuerHash: string, subjectHash: string) => ({
-				issuerHash, subjectHash, identity: await readDeviceIdentity(),
-				scopes: { read: 'granted', write: 'granted' }, requests: { pending: null, last: null }, mayGrant: true,
-			}),
+			snapshot: async (issuerHash: string, subjectHash: string) => {
+				const device = await readDeviceIdentity();
+				return {
+					issuerHash, subjectHash, identity: device.kind === 'identity' ? device.identity : null,
+					scopes: { read: 'granted', write: 'granted' }, requests: { pending: null, last: null }, mayGrant: true,
+				};
+			},
 		},
 	};
 });
-vi.mock('@/lib/data/deviceOwner', () => ({ readDeviceIdentity: async () => ({ deviceId: state.deviceId, adminHash: state.user!.currentUserHash }) }));
+vi.mock('@/lib/data/deviceOwner', () => ({ readDeviceIdentity: async () => ({ kind: 'identity', identity: { deviceId: state.deviceId, adminHash: state.user!.currentUserHash } }) }));
 vi.mock('@/lib/data/intents', () => ({
 	onIntentChange: (handler: (userHash: string) => void) => {
 		state.intentListeners.add(handler);
