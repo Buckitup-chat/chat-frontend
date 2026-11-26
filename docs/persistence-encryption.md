@@ -140,12 +140,26 @@ File System and localStorage (`src/lib/wipeDevice.ts`). It ends the session
 and reloads, and the removal runs at the start of the next load, before
 anything opens a database: the page that asked holds connections it cannot
 close (idb-keyval keeps its connection to `keyval-store` and ignores
-`versionchange`), and each would block a delete until the page goes.
+`versionchange`), and each would block a delete until the page goes. The
+app's own stores never block it: they open their databases through
+`openDatabase` (`src/lib/data/openDatabase.ts`), which closes a connection on
+`versionchange` and opens it again on the next use.
 
-- A connection in another tab of the app blocks a delete the same way. The app
-  then does not start, since its first open of that database would wait behind
-  the queued delete: it asks for the other tabs to be closed and tries again on
-  reload. A delete that stays silent for three seconds counts as blocked too.
+- The other tabs of the app are told on a BroadcastChannel: each ends its
+  session and reloads, which closes the connections it cannot close otherwise,
+  and on its next load finishes the wipe without asking again.
+- The service worker is told to forget the key and decrypted chunks of every
+  video it plays: reloading the pages does not stop it.
+- A delete waits up to three seconds for the connections to its database to
+  close, as they do when the tab holding them unloads. A delete still waiting
+  after that, held open by a tab that was not told (an older build, a browser
+  without BroadcastChannel) or queued behind another request, counts as
+  blocked. The app then does not start, since its first open of that database
+  would wait behind the queued delete: it asks for the other tabs to be closed
+  and tries again on reload.
+- Where the browser cannot list its databases (`indexedDB.databases()` is
+  missing in Firefox before 126), the app's databases are removed by name
+  (`APP_DATABASES`).
 - When the browser refuses a removal, the person can try again or open the app
   with what is left.
 - The request stays in localStorage until the wipe is done, so a tab of the

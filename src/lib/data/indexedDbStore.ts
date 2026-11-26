@@ -1,4 +1,5 @@
 import type { StringStore } from './secureStore';
+import { openDatabase } from './openDatabase';
 
 const DB_VERSION = 1;
 const DEFAULT_STORE_NAME = 'transactions';
@@ -16,7 +17,6 @@ export class StorageReadError extends Error {
 export class IndexedDbStore implements StringStore {
 	readonly #dbName: string;
 	readonly #storeName: string;
-	#db: Promise<IDBDatabase> | null = null;
 
 	constructor(dbName: string, storeName = DEFAULT_STORE_NAME) {
 		this.#dbName = dbName;
@@ -65,26 +65,8 @@ export class IndexedDbStore implements StringStore {
 	}
 
 	#open(): Promise<IDBDatabase> {
-		if (this.#db) return this.#db;
-		const opening: Promise<IDBDatabase> = new Promise((resolve, reject) => {
-			const request = indexedDB.open(this.#dbName, DB_VERSION);
-			request.onupgradeneeded = () => {
-				if (!request.result.objectStoreNames.contains(this.#storeName)) request.result.createObjectStore(this.#storeName);
-			};
-			request.onsuccess = () => {
-				const db = request.result;
-				db.onversionchange = () => { db.close(); this.#forget(opening); };
-				db.onclose = () => this.#forget(opening);
-				resolve(db);
-			};
-			request.onerror = () => reject(request.error ?? new Error('IndexedDB open failed'));
+		return openDatabase(this.#dbName, DB_VERSION, (db) => {
+			if (!db.objectStoreNames.contains(this.#storeName)) db.createObjectStore(this.#storeName);
 		});
-		this.#db = opening;
-		opening.catch(() => this.#forget(opening));
-		return opening;
-	}
-
-	#forget(opening: Promise<IDBDatabase>): void {
-		if (this.#db === opening) this.#db = null;
 	}
 }

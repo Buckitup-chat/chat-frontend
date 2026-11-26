@@ -32,6 +32,8 @@
 // visiting a kept chunk; the multi-entry index on `pins` finds one account's
 // chunks.
 
+import { opensRefused } from './openDatabase';
+
 const DB_NAME = 'buckitup-chunks';
 const DB_VERSION = 3;
 /** The chunks' bytes: ChunkBytes. */
@@ -72,7 +74,7 @@ let budgetBytes = BUDGET_BYTES;
 const openDb = (): Promise<IDBDatabase | null> => {
 	if (dbPromise) return dbPromise;
 	const opening: Promise<IDBDatabase | null> = new Promise((resolve) => {
-		if (typeof indexedDB === 'undefined') return resolve(null);
+		if (typeof indexedDB === 'undefined' || opensRefused()) return resolve(null);
 		let blocked = false;
 		try {
 			const req = indexedDB.open(DB_NAME, DB_VERSION);
