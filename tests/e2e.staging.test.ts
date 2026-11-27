@@ -563,7 +563,7 @@ async function runE2E() {
 		// ---- 7. Alice sends a file; Bob downloads it byte-identical ----
 		const fileBytes = new Uint8Array(150_000).map((_, i) => (i * 17 + 3) % 253);
 		const up = await uploadFile({
-			bytes: fileBytes, uploaderHash: alice.userHash, signSkey: alice.sign.secretKey,
+			bytes: fileBytes, uploaderHash: alice.userHash, signSkey: alice.sign.secretKey, signPkey: alice.sign.publicKey,
 			...prepareUpload(uuidv7()),
 		});
 		await sendDialogMessage(alice, dialogHash, aliceKey, [
