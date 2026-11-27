@@ -25,23 +25,24 @@ your other devices.").
 `ensureDerivedCard` has no production call sites yet. Notes dialogs, the
 note list and the UI remain to be wired in PRs 2–4.
 
-## Before the notes UI: the two open items of #107
+## #107 items 1 and 3
 
 1. **#107 item 1 — a derived card on a server with no owner.** The card waits
    (retryable) and the account's sync status stays "syncing" for as long as the
    server has no owner. The spec says notes wait and "the client says so".
-   Proposed: a hold state like `approvalHeld`, released when an owner appears,
-   shown in the notes UI as "Notes are kept on this device until this server
+   Decided (2026-11-27): a hold state like `approvalHeld`, released by itself
+   when an owner appears, shown in the notes UI as "Notes are kept on this device until this server
    has an owner". Also settle here: `ensureDerivedCard`'s first check can
    answer `present` from the card cache after a node reset; ask the server
    instead, as #130 does for the owner gate.
 2. **#107 item 3 — an older build replaying a derived write with the account's
    key.** An old tab holding the leader lock ignores `entry.signer` and proves
    a notes row with the account's key: the server refuses it but has seen the
-   two together. Proposed: a format version on outbox records that older
-   builds refuse.
+   two together. Decided (2026-11-27): left as is. The server is trusted with
+   this link, as with the connection-level link the notes spec accepts; the
+   outbox format does not change for it.
 
-Both must be closed before PR 4 ships.
+Item 1 must be closed before PR 4 ships.
 
 ## PR 2: notes dialogs in `dialogs.store`
 
