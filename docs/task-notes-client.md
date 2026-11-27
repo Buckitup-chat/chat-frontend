@@ -25,7 +25,7 @@ your other devices.").
 `ensureDerivedCard` has no production call sites yet. Notes dialogs, the
 note list and the UI remain to be wired in PRs 2–4.
 
-## Before the notes UI: two items of #107
+## #107 items 1 and 3
 
 1. **#107 item 1 — a derived card on a server with no owner.** The card waits
    (retryable) and the account's sync status stays "syncing" for as long as the
