@@ -38,11 +38,11 @@ note list and the UI remain to be wired in PRs 2–4.
 2. **#107 item 3 — an older build replaying a derived write with the account's
    key.** An old tab holding the leader lock ignores `entry.signer` and proves
    a notes row with the account's key: the server refuses it but has seen the
-   two together. Decided (2026-11-27): outbox records are written in a format
-   older builds cannot read, so a tab still running an older bundle never
-   picks them up.
+   two together. Decided (2026-11-27): left as is. The server is trusted with
+   this link, as with the connection-level link the notes spec accepts; the
+   outbox format does not change for it.
 
-Both must be closed before PR 4 ships.
+Item 1 must be closed before PR 4 ships.
 
 ## PR 2: notes dialogs in `dialogs.store`
 
