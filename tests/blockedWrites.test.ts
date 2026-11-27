@@ -380,7 +380,7 @@ describe('what the gate never refuses keeps going', () => {
 		const { uploadFile, prepareUpload } = await import('@/lib/data/fileTransfer');
 		const { fileId, encSecretB64 } = prepareUpload('0192aaaa-0000-7000-8000-00000000000a');
 
-		const upload = await uploadFile({ bytes: new TextEncoder().encode('hello'), uploaderHash: USER, signSkey: SKEY, fileId, encSecretB64 });
+		const upload = await uploadFile({ bytes: new TextEncoder().encode('hello'), uploaderHash: USER, signSkey: SKEY, signPkey: new Uint8Array(), fileId, encSecretB64 });
 
 		expect(upload.manifestAwaitingApproval).toBeInstanceOf(Promise);
 		const manifest = entries().find((e) => e.relation === 'files');

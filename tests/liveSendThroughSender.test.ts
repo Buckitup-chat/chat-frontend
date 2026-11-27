@@ -403,7 +403,7 @@ describe('the file manifest goes through the same pool', () => {
 		http.auto = 'ok';
 		const { fileId, encSecretB64 } = prepareUpload('0192aaaa-0000-7000-8000-00000000000a');
 
-		await uploadFile({ bytes: new TextEncoder().encode('hello'), uploaderHash: USER, signSkey: SKEY, fileId, encSecretB64 });
+		await uploadFile({ bytes: new TextEncoder().encode('hello'), uploaderHash: USER, signSkey: SKEY, signPkey: new Uint8Array(), fileId, encSecretB64 });
 
 		expect(http.calls.map((c) => c.mutations[0].syncMetadata.relation)).toEqual(['files']);
 	});

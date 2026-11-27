@@ -4,11 +4,7 @@
 // mode (403 "not_in_trust_chain"). The upload binds what the device holds,
 // or stops with an error the caller can act on.
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
-
-vi.mock('@buckitup/pq-client/signature', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('@buckitup/pq-client/signature')>();
-	return { ...actual, signFields: () => 'AAAA' };
-});
+import { generateIdentityKeys, openIdentity } from '@buckitup/pq-client/identity';
 
 // The chunk rows the device holds for a file, as the file_chunks shape answers.
 let storedRows = new Map<number, Record<string, unknown>>();
@@ -36,9 +32,9 @@ vi.mock('@/api/client', () => ({
 	},
 }));
 
-const SKEY = new Uint8Array(32).fill(3);
-const UPLOADER_HASH = 'u_' + 'a'.repeat(128);
-const OTHER_HASH = 'u_' + 'b'.repeat(128);
+const ME = openIdentity(generateIdentityKeys());
+const OTHER = openIdentity(generateIdentityKeys());
+const SKEY = ME.exportKeys().signSkey;
 
 // Index → the device's answer to a PUT of that chunk; unlisted indexes store.
 let answers = new Map<number, () => Response>();
@@ -53,7 +49,8 @@ afterAll(() => {
 });
 
 const { uploadFile, prepareUpload, FileIdTakenError, NoWriteRightsError } = await import('@/lib/data/fileTransfer');
-const { CHUNK_SIZE } = await import('@buckitup/pq-client/fileCrypto');
+const { CHUNK_SIZE, chunkDataHash, encryptChunk } = await import('@buckitup/pq-client/fileCrypto');
+const { signRow } = await import('@buckitup/pq-client/rows');
 const { toBase64, fromBase64 } = await import('@buckitup/pq-client/signature');
 const { sha3_512 } = await import('@noble/hashes/sha3');
 const { _setStorageForTests, _setLeaderForTests } = await import('@/lib/data/outbox');
@@ -89,26 +86,38 @@ beforeEach(() => {
 const json = (status: number, body: Record<string, unknown>) => () => new Response(JSON.stringify(body), { status });
 const twoChunks = () => new Uint8Array(CHUNK_SIZE + 10);
 const upload = (fileId: string, encSecretB64: string) =>
-	uploadFile({ bytes: twoChunks(), uploaderHash: UPLOADER_HASH, signSkey: SKEY, fileId, encSecretB64 });
+	uploadFile({ bytes: twoChunks(), uploaderHash: ME.userHash, signSkey: SKEY, signPkey: ME.signPkey, fileId, encSecretB64 });
+
+const storedFirstChunk = async (fileId: string, encSecretB64: string, signSkey = SKEY) => {
+	const encrypted = await encryptChunk(fromBase64(encSecretB64), twoChunks().subarray(0, CHUNK_SIZE));
+	return signRow('file_chunks', {
+		file_id: fileId,
+		chunk_index: 0,
+		data_hash: chunkDataHash(encrypted),
+		size: encrypted.length,
+		uploader_hash: ME.userHash,
+		owner_timestamp: 1_760_000_000,
+	}, signSkey);
+};
 
 describe('chunk PUT refusals', () => {
 	it('binds the stored chunk when the device answers 409 for an index it holds from this uploader', async () => {
 		const { fileId, encSecretB64 } = prepareUpload('0192bbbb-0000-7000-8000-000000000001');
-		const storedSign = toBase64(new Uint8Array([4, 5, 6]));
-		storedRows = new Map([[0, { chunk_index: 0, uploader_hash: UPLOADER_HASH, sign_b64: storedSign }]]);
+		const stored = await storedFirstChunk(fileId, encSecretB64);
+		storedRows = new Map([[0, stored]]);
 		answers.set(0, json(409, { error: 'chunk exists' }));
 
 		await upload(fileId, encSecretB64);
 
 		expect(putIndexes()).toEqual([0, 1]);
 		const manifest = (ingestCalls[0][0] as { modified: { chunk_sign_hashes: string[] } }).modified;
-		expect(manifest.chunk_sign_hashes[0]).toBe(toBase64(sha3_512(fromBase64(storedSign))));
+		expect(manifest.chunk_sign_hashes[0]).toBe(toBase64(sha3_512(fromBase64(stored.sign_b64))));
 		expect(cached).toEqual([1]);
 	});
 
-	it('fails on 409 when the device holds no row of this uploader at that index', async () => {
+	it('fails on 409 when the row at that index does not verify as this uploader\'s', async () => {
 		const { fileId, encSecretB64 } = prepareUpload('0192bbbb-0000-7000-8000-000000000002');
-		storedRows = new Map([[0, { chunk_index: 0, uploader_hash: OTHER_HASH, sign_b64: 'AAAA' }]]);
+		storedRows = new Map([[0, await storedFirstChunk(fileId, encSecretB64, OTHER.exportKeys().signSkey)]]);
 		answers.set(0, json(409, { error: 'chunk exists' }));
 
 		await expect(upload(fileId, encSecretB64)).rejects.toThrow(/held by another upload/);
@@ -134,4 +143,5 @@ describe('chunk PUT refusals', () => {
 		expect(putIndexes()).toEqual([0]);
 		expect(cached).toEqual([]);
 	});
+
 });

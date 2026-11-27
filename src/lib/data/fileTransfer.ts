@@ -1,29 +1,19 @@
 // File transport over the chunk endpoints (chat docs: reqs/pq_files.md §4–§6).
 //
-// Upload: encrypt each 4 MiB chunk client-side, PUT the raw bytes with the
-// signed metadata in headers — the chunk signature binds the uploader key to
-// the exact bytes and position, which is why this endpoint needs no
-// challenge. When every chunk is on the device, commit the signed manifest
-// through the normal ingest path; the server verifies each stored chunk
-// against chunk_sign_hashes before accepting it.
+// Upload: @buckitup/pq-client/fileUpload encrypts each 4 MiB chunk, PUTs the
+// raw bytes with the signed metadata in headers and signs the manifest. When
+// every chunk is on the device, commit the signed manifest through the normal
+// ingest path; the server verifies each stored chunk against
+// chunk_sign_hashes before accepting it.
 //
 // Resume is client-driven (§4.1): re-read which chunk indexes the device
 // already holds through the file_chunks shape and re-PUT only the gaps.
 // Progress is reported in chunks, not guessed percentages (§2.1).
 
 import { toBase64, fromBase64 } from '@buckitup/pq-client/signature';
-import { rowMutation, signRow } from '@buckitup/pq-client/rows';
-import { sha3_512 } from '@noble/hashes/sha3';
 import { concatBytes } from '@noble/hashes/utils';
-import {
-	CHUNK_SIZE,
-	chunkCountOf,
-	chunkDataHash,
-	decryptChunk,
-	encryptChunk,
-	generateEncSecret,
-	newFileId,
-} from '@buckitup/pq-client/fileCrypto';
+import { decryptChunk, generateEncSecret, newFileId } from '@buckitup/pq-client/fileCrypto';
+import { uploadFileChunks } from '@buckitup/pq-client/fileUpload';
 import { sendMutationsAndAwaitShape } from './ingest';
 import { getCachedChunk, pinCachedChunks, pinChunk, putCachedChunk, requestPersistentStorage } from './chunkCache';
 import { bearerFor, openSession } from './readSession';
@@ -62,80 +52,13 @@ export const prepareUpload = (uuidV7: string) => ({
 	encSecretB64: toBase64(generateEncSecret()),
 });
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** Chunk rows the device already verified and stored for this file, by index.
- * Resume needs the stored sign_b64, not just presence: a re-encrypted chunk
- * gets a fresh nonce and therefore a different hash — the manifest must bind
- * the bytes that are actually on the device. */
-// An unreachable shape reads as an empty map; the PUTs below are idempotent anyway.
-const existingChunks = (fileId: string): Promise<Map<number, Record<string, unknown>>> =>
-	readChunkRows(fileId).catch(() => new Map());
-
-/** Another uploader holds this file_id on the device (pq_files §4): only a fresh pair can upload. */
-export class FileIdTakenError extends Error {
-	constructor(readonly fileId: string) {
-		super(`file ${fileId} belongs to another uploader on this device`);
-		this.name = 'FileIdTakenError';
-	}
-}
-
-/** The device's trust chain does not let this account store files. */
-export class NoWriteRightsError extends Error {
-	constructor() {
-		super('this account has no write rights on this device');
-		this.name = 'NoWriteRightsError';
-	}
-}
-
-const errorOf = async (r: Response): Promise<string> => {
-	const text = await r.text();
-	try {
-		return String(JSON.parse(text).error ?? text);
-	} catch {
-		return text;
-	}
-};
-
-// 'occupied': the device already stores another body at this index (409) and
-// never replaces it — the caller decides from the stored row.
-const putChunk = async (
-	fileId: string,
-	index: number,
-	body: Uint8Array,
-	headers: Record<string, string>,
-	signal?: AbortSignal,
-): Promise<'stored' | 'occupied'> => {
-	for (let attempt = 0; ; attempt++) {
-		const r = await fetch(`${ELECTRIC_API_URL}/file_chunk/${fileId}/${index}`, {
-			method: 'PUT',
-			headers: { 'Content-Type': 'application/octet-stream', ...headers },
-			body: body as unknown as globalThis.BodyInit,
-			signal,
-		});
-		if (r.ok) return 'stored';
-		if (r.status === 409) return 'occupied';
-		if (r.status === 403) {
-			const error = await errorOf(r);
-			if (error === 'not_in_trust_chain') throw new NoWriteRightsError();
-			if (error === 'uploader mismatch') throw new FileIdTakenError(fileId);
-			throw new Error(`chunk ${index} rejected: HTTP 403 ${error.slice(0, 120)}`);
-		}
-		// 429: the drive's single-writer upload lane is busy — the protocol
-		// answer is to wait as told and retry, not to fail the file (§4).
-		if (r.status === 429 && attempt < 8) {
-			const after = Number(r.headers.get('Retry-After') || 1);
-			await sleep(Math.min(after, 10) * 1000);
-			continue;
-		}
-		throw new Error(`chunk ${index} rejected: HTTP ${r.status} ${(await r.text()).slice(0, 120)}`);
-	}
-};
+export { FileIdTakenError, NoWriteRightsError } from '@buckitup/pq-client/fileUpload';
 
 export const uploadFile = async (opts: {
 	bytes: Uint8Array;
 	uploaderHash: string;
 	signSkey: Uint8Array;
+	signPkey: string | Uint8Array;
 	/** From prepareUpload(); the same pair resumes an interrupted upload. */
 	fileId: string;
 	encSecretB64: string;
@@ -149,95 +72,39 @@ export const uploadFile = async (opts: {
 	onProgress?: (p: UploadProgress) => void;
 	signal?: AbortSignal;
 }): Promise<UploadResult> => {
-	const { bytes, uploaderHash, signSkey, fileId, onProgress, signal } = opts;
-	const encSecret = fromBase64(opts.encSecretB64);
-	const total = chunkCountOf(bytes.length);
-	const ownerTimestamp = Math.floor(Date.now() / 1000);
-	const chunkSignHashes: string[] = [];
-
-	// A fresh-where snapshot (see existingChunks) reflects the device's actual
-	// state, so one read suffices for both the fresh and the resume path.
-	const already = opts.resuming ? await existingChunks(fileId) : new Map<number, Record<string, unknown>>();
-
-	for (let i = 0; i < total; i++) {
-		signal?.throwIfAborted();
-
-		const stored = already.get(i);
-		if (stored) {
-			// The device already holds these bytes; the manifest must bind
-			// their stored signature — re-encrypting would change the hash.
-			chunkSignHashes.push(toBase64(sha3_512(fromBase64(stored.sign_b64 as string))));
-			onProgress?.({ fileId, done: i + 1, total });
-			continue;
-		}
-
-		const plain = bytes.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, bytes.length));
-		const encrypted = await encryptChunk(encSecret, plain);
-		const dataHash = chunkDataHash(encrypted);
-
-		// The signed payload is the chunk's manifest row (pq_files §1.2);
-		// canonicalPayload sorts the fields, so order here is cosmetic.
-		const { sign_b64: signB64 } = signRow(
-			'file_chunks',
-			{
-				chunk_index: i,
-				data_hash: dataHash,
-				file_id: fileId,
-				owner_timestamp: ownerTimestamp,
-				size: encrypted.length,
-				uploader_hash: uploaderHash,
-			},
-			signSkey,
-		);
-		const put = await putChunk(fileId, i, encrypted, {
-			'x-data-hash': dataHash,
-			'x-size': String(encrypted.length),
-			'x-uploader-hash': uploaderHash,
-			'x-owner-timestamp': String(ownerTimestamp),
-			'x-signature': signB64,
-		}, signal);
-		if (put === 'occupied') {
-			// The device kept an earlier body for this index; the manifest must
-			// bind that one, and the cache must not hold the refused bytes.
-			const held = (await existingChunks(fileId)).get(i);
-			if (held?.uploader_hash !== uploaderHash) throw new Error(`chunk ${i} of ${fileId} is held by another upload`);
-			chunkSignHashes.push(toBase64(sha3_512(fromBase64(held.sign_b64 as string))));
-			onProgress?.({ fileId, done: i + 1, total });
-			continue;
-		}
-		// The manifest binds SHA3-512 of the RAW signature bytes per chunk.
-		chunkSignHashes.push(toBase64(sha3_512(fromBase64(signB64))));
-		// Seed the local chunk cache: the sender should never re-download
-		// bytes it just encrypted. Fire-and-forget — caching must not slow
-		// or fail the upload.
-		void putCachedChunk(fileId, i, encrypted, dataHash);
-		onProgress?.({ fileId, done: i + 1, total });
-	}
+	const { fileId, signSkey, signal } = opts;
+	const { manifest, ...result } = await uploadFileChunks({
+		...opts,
+		apiUrl: ELECTRIC_API_URL,
+		readChunkRows,
+		onChunkStored: putCachedChunk,
+	});
+	signal?.throwIfAborted();
 
 	// Manifest commit: the trust anchor other devices use to accept chunks.
-	const manifestFields = {
-		chunk_count: total,
-		chunk_sign_hashes: chunkSignHashes,
-		chunk_size: CHUNK_SIZE,
-		deleted_flag: false,
-		file_id: fileId,
-		owner_timestamp: ownerTimestamp,
-		total_size: bytes.length,
-		uploader_hash: uploaderHash,
-	};
-	const manifestHandle = await sendMutationsAndAwaitShape(
-		[rowMutation('files', signRow('files', manifestFields, signSkey))],
-		signSkey,
-	);
-	const manifestAccepted = manifestHandle.acceptance.then((outcome) => {
-		if (outcome.kind === 'accepted') return;
-		const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
-		throw new Error(`File manifest for ${fileId} was not accepted: ${reason}`);
+	const committed = (async (): Promise<UploadResult> => {
+		const manifestHandle = await sendMutationsAndAwaitShape([manifest], signSkey);
+		signal?.throwIfAborted();
+		const manifestAccepted = manifestHandle.acceptance.then((outcome) => {
+			if (outcome.kind === 'accepted') return;
+			const reason = outcome.kind === 'rejected' ? outcome.error : 'discarded before delivery';
+			throw new Error(`File manifest for ${fileId} was not accepted: ${reason}`);
+		});
+		if (manifestHandle.held?.reason === 'awaiting_approval') return { ...result, manifestAwaitingApproval: manifestAccepted };
+		await manifestAccepted;
+		signal?.throwIfAborted();
+		return result;
+	})();
+	if (!signal) return committed;
+	return new Promise<UploadResult>((resolve, reject) => {
+		const onAbort = () => {
+			signal.removeEventListener('abort', onAbort);
+			reject(signal.reason);
+		};
+		signal.addEventListener('abort', onAbort, { once: true });
+		committed.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+		if (signal.aborted) onAbort();
 	});
-	const result = { fileId, encSecretB64: opts.encSecretB64, size: bytes.length, chunkCount: total };
-	if (manifestHandle.held?.reason === 'awaiting_approval') return { ...result, manifestAwaitingApproval: manifestAccepted };
-	await manifestAccepted;
-	return result;
 };
 
 export interface FileAvailability {

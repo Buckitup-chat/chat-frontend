@@ -57,7 +57,7 @@ vi.mock('@/store/dialogs.store', () => ({
 vi.mock('@/store/userPQ.store', () => ({ userPQStore: () => manager }));
 
 const { useTransfersStore } = await import('@/store/transfers.store');
-const { FileIdTakenError } = await import('@/lib/data/fileTransfer');
+const { FileIdTakenError, NoWriteRightsError } = await import('@/lib/data/fileTransfer');
 
 let records;
 let failWrites;
@@ -474,5 +474,77 @@ describe('a file_id another uploader holds on the device', () => {
 		await vi.waitFor(() => expect(rowOf(tab, 'a.bin').status).toBe('error'));
 		expect(uploadAttachment).toHaveBeenCalledTimes(2);
 		errorSpy.mockRestore();
+	});
+
+	it('sends nothing under the fresh pair when its record cannot be written', async () => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		const taken = uploads.get('a.bin').opts.prepared;
+		failWrites = true;
+		uploads.get('a.bin').reject(new FileIdTakenError(taken.fileId));
+
+		await vi.waitFor(() => expect(rowOf(tab, 'a.bin').status).toBe('error'));
+		expect(uploadAttachment).toHaveBeenCalledTimes(1);
+		const [record] = await pendingBatches(OWNER);
+		expect(record.files[0].fileId).toBe(taken.fileId);
+		errorSpy.mockRestore();
+	});
+
+	it('sends nothing under the fresh pair once the row is cancelled', async () => {
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		const row = rowOf(tab, 'a.bin');
+		uploads.get('a.bin').reject(new FileIdTakenError(row.prepared.fileId));
+		tab.cancel(row.id);
+
+		await vi.waitFor(() => expect(rowOf(tab, 'a.bin')).toBeUndefined());
+		await settle();
+		expect(uploadAttachment).toHaveBeenCalledTimes(1);
+	});
+
+	it('sends nothing under the fresh pair once another account signs in', async () => {
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		uploads.get('a.bin').reject(new FileIdTakenError(rowOf(tab, 'a.bin').prepared.fileId));
+		manager.currentUserHash = 'u_other';
+		await tab.signedIn('u_other');
+
+		await settle();
+		expect(uploadAttachment).toHaveBeenCalledTimes(1);
+		expect(tab.items).toEqual([]);
+	});
+});
+
+describe('an account without write rights on the device', () => {
+	it('fails the row without starting it over under a fresh pair', async () => {
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const tab = await composing([fileOf('a.bin', 'first file')]);
+		const pair = uploads.get('a.bin').opts.prepared;
+		uploads.get('a.bin').reject(new NoWriteRightsError());
+
+		await vi.waitFor(() => expect(rowOf(tab, 'a.bin').status).toBe('error'));
+		expect(rowOf(tab, 'a.bin').prepared).toBe(pair);
+		await settle();
+		expect(uploadAttachment).toHaveBeenCalledTimes(1);
+		expect(rowOf(tab, 'a.bin').status).not.toBe('awaiting_approval');
+		errorSpy.mockRestore();
+	});
+});
+
+describe('cancellation after the upload has left the SDK', () => {
+	it.each([false, true])('does not send a late attachment after Cancel (awaiting approval=%s)', async (awaitingApproval) => {
+		uploadAttachment.mockImplementationOnce((meta, opts) => new Promise((resolve) => {
+			uploads.set(meta.name, { resolve, opts, meta, onDisk: pendingBatches(OWNER) });
+		}));
+		const tab = await composing([fileOf('cancel.bin', 'cancelled file')]);
+		const active = uploads.get('cancel.bin');
+		const row = rowOf(tab, 'cancel.bin');
+		await tab.cancel(row.id);
+		expect(active.opts.signal.aborted).toBe(true);
+		if (awaitingApproval) active.opts.onAwaitingApproval(Promise.resolve());
+		active.resolve({ kind: 'file', name: 'cancel.bin', fileId: active.opts.prepared.fileId });
+		await settle();
+		await settle();
+		expect(captureMessageIntent).not.toHaveBeenCalled();
+		expect(sentMessages).toHaveLength(0);
+		expect(rowOf(tab, 'cancel.bin')).toBeUndefined();
 	});
 });

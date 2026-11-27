@@ -61,7 +61,7 @@ netlify/        Netlify redirect function for SPA preview hosting
 ## Protocol SDK
 
 The application installs [`@buckitup/pq-client`](https://www.npmjs.com/package/@buckitup/pq-client)
-at version `1.1.0`, pinned with registry integrity in `package-lock.json`. The SDK
+at version `1.3.1`, pinned with registry integrity in `package-lock.json`. The SDK
 is developed and released from [pq-library](https://github.com/Buckitup-chat/pq-library).
 A separate SDK checkout is not needed. Install locked dependencies with
 `npm ci --legacy-peer-deps`.
@@ -103,6 +103,22 @@ non-owner's revoke may leave another valid path. Already issued read sessions
 in `trust` may remain valid until their five-minute expiry. See
 [the integration task](docs/task-access-gating-client.md) for behavior and
 deployment acceptance requirements.
+
+File uploads use SDK `fileUpload`: it encrypts, signs and PUTs the chunks,
+reads the device's refusals, binds a stored chunk only after its row verifies,
+and returns the signed manifest
+([SDK file upload](https://github.com/Buckitup-chat/pq-library/blob/4aaefe1423e1e50aabacc89853abcc11550a82db/docs/file-upload.md)).
+`src/lib/data/fileTransfer.ts` supplies the server base, the `file_chunks` shape
+read and the chunk cache, and commits the manifest through the outbox, so the
+upload waits for its acceptance or reports it awaiting approval. The transfer
+queue (`src/store/transfers.store.js`) mints each file's `file_id` and
+`enc_secret` and keeps them in its sealed record before the first chunk. When
+the device answers that another uploader holds the `file_id`, the queue starts
+the file over once under a new pair, recorded before its first chunk; a second
+refusal fails the row. An account without write rights on the device fails the
+row without a retry. Cancellation stops waiting for the upload and prevents its
+attachment from being added to the message. A manifest already stored in the
+outbox continues through its durable delivery lifecycle.
 
 `sender_msg_key` is derived by SDK `deriveSenderMsgKey` from `sign_skey`,
 `crypt_skey` and the peer's `user_hash`, without `evm_skey`. Before sending,

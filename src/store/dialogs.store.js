@@ -1008,6 +1008,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
         const { name, mimeType, bytes, createdAt, blob } = fileMeta;
         const uploaderHash = $userPQ.currentUserHash;
         const signSkey = await getSignSkeyBytes();
+        const { sign_pkey: signPkey } = await EncryptionManagerPQ.getInstance().exportVaultKeys();
 
         // The transfer queue hashes the bytes already, to name them in its record.
         const digest = fileMeta.digest ?? await uploadDigest(bytes);
@@ -1029,7 +1030,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             onProgress?.({ fileId: up.fileId, done: total, total });
         } else {
             up = await uploadFile({
-                bytes, uploaderHash, signSkey, ...prepared, resuming, onProgress, signal,
+                bytes, uploaderHash, signSkey, signPkey, ...prepared, resuming, onProgress, signal,
             });
             const save = () => rememberUpload(uploaderHash, digest, up).catch((e) =>
                 console.warn('[dialogs] uploaded file reference not saved for reuse:', e));
@@ -1037,6 +1038,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             else await save();
         }
 
+        signal?.throwIfAborted();
         const common = {
             name,
             size: bytes.length,
@@ -1056,6 +1058,7 @@ export const useDialogsStore = defineStore('dialogs', () => {
             if (onAwaitingApproval) onAwaitingApproval(up.manifestAwaitingApproval);
             else await up.manifestAwaitingApproval;
         }
+        signal?.throwIfAborted();
         return part;
     };
 

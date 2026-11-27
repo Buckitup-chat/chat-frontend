@@ -190,9 +190,11 @@ export const useTransfersStore = defineStore('transfers', () => {
 				const { v7 } = await import('uuid');
 				patch(id, { prepared: prepareUpload(v7()), done: 0 });
 				await writeRecord(item.batchId);
+				ctrl.signal.throwIfAborted();
 				assertActsAsOwner(item.batchId);
 				part = await upload(byId(id).prepared, false);
 			}
+			ctrl.signal.throwIfAborted();
 			if (manifestAccepted) {
 				patch(id, { status: 'awaiting_approval', part, speed: 0 });
 				followManifest(id, item.name, manifestAccepted);
