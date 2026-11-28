@@ -2,7 +2,7 @@
 
 **Status:** implementation planned; decisions of 2026-11-24 reflected below.
 **Sources:** `chat` `main`: `docs/pq/reqs/pq_subaccounts.proposed.md` (this task
-is its client side; the decisions below amend it), `pq_notes_to_self.proposed.md`
+is its client side), `pq_notes_to_self.proposed.md`
 (notes identity derivation and per-signer session support already in the client).
 SDK `@buckitup/pq-client` 1.1.0
 ([versioned contract](https://github.com/Buckitup-chat/pq-library/blob/b723b1042ae14bad84c88743ed9ed40b966c5a83/docs/protocol.md)).
@@ -101,7 +101,7 @@ account:
 - **`keys`** is what a backup of the account carries: `sign_skey`,
   `crypt_skey`, `contact_skey`, `evm_skey`, `meta_seed`. With all of them the
   account keeps its guardian role, can manage its own community backup, and
-  can be exported again whole. (The chat spec lists four keys; amended.)
+  can be exported again whole.
 - **`server`**: the account's own server. Device link sends it; for a file the
   client asks, defaulting to the app's server.
 - Every entry is checked before it is written and when it is read: `user_hash`
